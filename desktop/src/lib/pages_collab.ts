@@ -47,9 +47,8 @@ import {
   removeAwarenessStates,
 } from "y-protocols/awareness";
 import { roomAuthHeaders, roomTokenParam } from "./roomAuth";
+import { cloudOrigins } from "./cloudOrigin";
 
-const CLOUD_ORIGIN = "https://auravcs.com";
-const CLOUD_WS_ORIGIN = "wss://auravcs.com";
 const PUSH_DEBOUNCE_MS = 60;
 // Presence frames (cursor moves) coalesce over this window so dragging a
 // selection emits one frame per ~80ms instead of one per pointer event.
@@ -458,7 +457,10 @@ export class PagesProvider {
   private async bootstrap(): Promise<void> {
     const { roomId, pageId } = this;
     if (!roomId || !pageId) return;
-    const base = `${CLOUD_ORIGIN}/api/v1/room/${encodeURIComponent(roomId)}/pages/${encodeURIComponent(pageId)}`;
+    // Whichever cloud this app is talking to — a literal here left a staging
+    // run reading and writing page ops on production.
+    const { http: cloudOrigin } = await cloudOrigins();
+    const base = `${cloudOrigin}/api/v1/room/${encodeURIComponent(roomId)}/pages/${encodeURIComponent(pageId)}`;
     // Attach the cloud bearer so these room reads pass membership checks once
     // AURA_ROOMS_REQUIRE_AUTH is on; empty headers when signed out (legacy).
     const authHeaders = await roomAuthHeaders();
@@ -500,7 +502,9 @@ export class PagesProvider {
     // enforces membership; empty when signed out (legacy anonymous path).
     const tok = await roomTokenParam();
     if (this.destroyed) return;
-    const url = `${CLOUD_WS_ORIGIN}/api/v1/room/${encodeURIComponent(roomId)}/ws${
+    const { ws: cloudWsOrigin } = await cloudOrigins();
+    if (this.destroyed) return;
+    const url = `${cloudWsOrigin}/api/v1/room/${encodeURIComponent(roomId)}/ws${
       tok ? `?${tok}` : ""
     }`;
     let socket: WebSocket;
@@ -606,7 +610,8 @@ export class PagesProvider {
   private async catchUp(): Promise<void> {
     const { roomId, pageId } = this;
     if (!roomId || !pageId) return;
-    const url = `${CLOUD_ORIGIN}/api/v1/room/${encodeURIComponent(roomId)}/pages/${encodeURIComponent(pageId)}/ops?since=${this.serverCursor}&limit=5000`;
+    const { http: cloudOrigin } = await cloudOrigins();
+    const url = `${cloudOrigin}/api/v1/room/${encodeURIComponent(roomId)}/pages/${encodeURIComponent(pageId)}/ops?since=${this.serverCursor}&limit=5000`;
     const res = await fetch(url, { headers: await roomAuthHeaders() });
     if (!res.ok) return;
     const json = (await res.json()) as {
@@ -741,7 +746,8 @@ export class PagesProvider {
       this.pendingUpdates.unshift(merged);
       return;
     }
-    const url = `${CLOUD_ORIGIN}/api/v1/room/${encodeURIComponent(roomId)}/pages/${encodeURIComponent(pageId)}/op`;
+    const { http: cloudOrigin } = await cloudOrigins();
+    const url = `${cloudOrigin}/api/v1/room/${encodeURIComponent(roomId)}/pages/${encodeURIComponent(pageId)}/op`;
     this.inflight = true;
     try {
       const res = await fetch(url, {
@@ -795,6 +801,24 @@ export class PagesProvider {
  *  12-stop palette Notionless uses (cursor-color-1..12). Hashing the
  *  handle keeps the same person showing up in the same colour every
  *  time anyone opens a page they've touched. */
+/** Drop a page's locally-persisted CRDT state.
+ *
+ *  The Y.Doc is the editor's source of truth in collab mode, so a page whose
+ *  markdown changed on disk under us — an MCP write, a teammate's edit, a pull
+ *  — cannot be shown by re-seeding: the doc would just win again on the next
+ *  keystroke and put the old body back (AURA-268). Forgetting the cached state
+ *  and remounting gives the seed-once path an empty fragment and the new
+ *  markdown to hydrate it from.
+ *
+ *  Only ever called from an explicit "load their version" choice: it discards
+ *  local CRDT history for the page, which is exactly what the reader asked for
+ *  and never something to do behind their back. */
+export function forgetPersistedDoc(persistKey: string): void {
+  lsRemoveRaw(YDOC_LS_PREFIX + persistKey);
+  const keys = readYdocLru().filter((k) => k !== persistKey);
+  lsSetRaw(YDOC_LRU_KEY, JSON.stringify(keys));
+}
+
 export function hashHandleToColor(handle: string): string {
   const palette = [
     "#ef4444", "#f97316", "#f59e0b", "#eab308",

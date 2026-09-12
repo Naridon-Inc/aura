@@ -7,6 +7,19 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+/// Cloud base URL for live-sync transports. `AURA_CLOUD_URL` beats the
+/// stored config — the precedence `runner.rs` and `push_credential.rs`
+/// already use — so a staging stack or a test can point every transport at
+/// its own server without rewriting the user's real config. (WRK-03: this
+/// is also what makes the failure paths honestly testable.)
+pub fn cloud_base_url(configured: Option<String>) -> String {
+    std::env::var("AURA_CLOUD_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or(configured)
+        .unwrap_or_else(|| "https://auravcs.com".to_string())
+}
+
 /// Build a reqwest client that respects the accept_self_signed config for mothership TLS.
 fn build_cloud_client() -> reqwest::blocking::Client {
     let config = ConfigManager::load();
@@ -126,12 +139,9 @@ impl ProbeCache {
 /// report "offline" — never configured is not the same as unreachable.
 fn mothership_target() -> Option<(String, String)> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())?;
-    match config.cloud_url {
-        Some(u) if !u.is_empty() => Some((u, token)),
-        _ => None,
-    }
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())?;
+    let url = crate::cloud_endpoint::origin(config.cloud_url.as_deref())?;
+    Some((url, token))
 }
 
 /// Manages the daemon-to-cloud sync loop.
@@ -154,11 +164,9 @@ impl LiveSyncWorker {
     /// Try to create a sync worker. Returns None if no cloud token is configured.
     pub fn new(running: Arc<AtomicBool>) -> Option<Self> {
         let config = ConfigManager::load();
-        let token = config.cloud_api_token
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())?;
+        let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())?;
 
-        let cloud_url = config.cloud_url
-            .unwrap_or_else(|| "https://auravcs.com".to_string())
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com")
             .trim_end_matches('/')
             .to_string();
 
@@ -527,16 +535,58 @@ impl LiveSyncWorker {
     }
 }
 
-/// Fetch unresolved impact alerts as JSON from Aura Cloud.
-/// Used by MCP tools and `aura live impacts --json`.
-pub fn fetch_impacts_json() -> Result<serde_json::Value, String> {
+/// Tell the cloud this agent session is still alive.
+///
+/// The console decides "is anyone still in there" from a session's last
+/// activity, and for a terminal session the only activity the cloud ever saw
+/// was a logged intent — which exists only when a file changes. An agent
+/// reads, greps, builds and drives a browser for half an hour without
+/// changing a file, and the row it left behind was closed as finished
+/// underneath it. This is the missing signal, and it is deliberately the
+/// cheapest call in the client: one small POST, no retry, no outbox.
+///
+/// Failure is silent and non-fatal by design. This is called from an agent's
+/// tool-use hook, which means it runs hundreds of times a session on the
+/// user's critical path; a beat that printed a warning when the laptop was
+/// offline would be a reason to switch the hook off, and a missed beat costs
+/// nothing that the next one does not fix.
+pub fn beat_session(session_id: &str, agent: &str) -> Result<(), String> {
     let config = ConfigManager::load();
     let token = config.cloud_api_token
         .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
         .ok_or_else(|| "No cloud token configured".to_string())?;
-
     let cloud_url = config.cloud_url
         .unwrap_or_else(|| "https://auravcs.com".to_string());
+
+    let payload = json!({
+        "repo_full_name": repo_name(),
+        "session_id": session_id,
+        "agent": agent,
+        "branch": current_branch(),
+    });
+
+    let resp = build_cloud_client()
+        .post(format!("{}/api/v1/live/sessions/beat", cloud_url.trim_end_matches('/')))
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&payload)
+        .send()
+        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("Cloud returned {}", resp.status()))
+    }
+}
+
+/// Fetch unresolved impact alerts as JSON from Aura Cloud.
+/// Used by MCP tools and `aura live impacts --json`.
+pub fn fetch_impacts_json() -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load();
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
+        .ok_or_else(|| "No cloud token configured".to_string())?;
+
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let repo = repo_name();
     let url = format!("{}/api/v1/live/impacts?repo={}",
         cloud_url.trim_end_matches('/'), repo);
@@ -556,15 +606,58 @@ pub fn fetch_impacts_json() -> Result<serde_json::Value, String> {
         .map_err(|e| format!("Invalid JSON response: {}", e))
 }
 
+/// Mark one impact alert handled.
+///
+/// The endpoint has existed since impacts did; until now the only caller was
+/// the MCP tool, so the answer to "I have dealt with this" was to install an
+/// MCP server. It scopes the update to the alert's own recipient, so this
+/// cannot clear somebody else's warning.
+pub fn resolve_impact(alert_id: &str) -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load();
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
+        .ok_or_else(|| "No cloud token configured".to_string())?;
+
+    let cloud_url =
+        crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
+    let url = format!(
+        "{}/api/v1/live/impacts/resolve",
+        cloud_url.trim_end_matches('/')
+    );
+
+    let client = build_cloud_client();
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&json!({ "alert_id": alert_id }))
+        .send()
+        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        // The UPDATE is scoped to the alert's recipient and does not look at
+        // `resolved`, so clearing the same alert twice answers 200 both
+        // times. A 404 is therefore never "already handled": the row is not
+        // there at all, or it is addressed to somebody else. Neither is a
+        // reason to retry.
+        return Err(format!(
+            "no impact `{}` addressed to you — nothing was changed",
+            alert_id
+        ));
+    }
+    if !resp.status().is_success() {
+        return Err(format!("Cloud returned {}", resp.status()));
+    }
+
+    resp.json::<serde_json::Value>()
+        .map_err(|e| format!("Invalid JSON response: {}", e))
+}
+
 /// Send a team message via Aura Cloud.
 pub fn send_team_message(message: &str, to: Option<&str>) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
 
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let url = format!("{}/api/v1/live/messages",
         cloud_url.trim_end_matches('/'));
 
@@ -599,12 +692,10 @@ pub fn send_team_message(message: &str, to: Option<&str>) -> Result<serde_json::
 /// Fetch recent team messages from Aura Cloud.
 pub fn fetch_team_messages(limit: usize) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
 
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let repo = repo_name();
     let url = format!("{}/api/v1/live/messages?repo={}&limit={}",
         cloud_url.trim_end_matches('/'), repo, limit);
@@ -624,8 +715,47 @@ pub fn fetch_team_messages(limit: usize) -> Result<serde_json::Value, String> {
         .map_err(|e| format!("Invalid JSON response: {}", e))
 }
 
+/// Write the pushed bodies to this repo's local function history.
+///
+/// Never fails outward and never reports: this is a side record taken on the
+/// way to the network, and a repo whose `.aura` cannot be written must still
+/// be able to push.
+fn record_locally(history: &crate::function_history::FunctionHistory, functions: &[SyncFunctionPayload]) {
+    if functions.is_empty() {
+        return;
+    }
+    let by = git_user();
+    let at = crate::function_history::now_ms();
+    let entries: Vec<crate::function_history::Entry> = functions
+        .iter()
+        // A sealed body is ciphertext this process may not be able to read
+        // back, and an empty one is not a state worth restoring to.
+        .filter(|f| !f.body.trim().is_empty())
+        .map(|f| crate::function_history::Entry {
+            file_path: f.file_path.clone(),
+            function_name: f.function_name.clone(),
+            function_kind: f.function_kind.clone(),
+            content_hash: f.content_hash.clone(),
+            body: f.body.clone(),
+            recorded_at: at,
+            recorded_by: by.clone(),
+        })
+        .collect();
+    history.record(&entries);
+}
+
 /// Push function bodies to Aura Cloud for sync.
 pub fn push_function_bodies(functions: &[SyncFunctionPayload]) -> Result<serde_json::Value, String> {
+    // Keep a copy on the way past. These bodies are the only per-function
+    // record Aura ever computes, and until this line they were extracted,
+    // sent to the mothership and forgotten — so a rewind had nothing to
+    // restore from but whole-file snapshots and git. Recording happens BEFORE
+    // every gate below on purpose: writing a body next to the file it came
+    // from sends nothing anywhere, so the privacy policy has no opinion about
+    // it, and a repo with no cloud token still builds a history it can be
+    // rewound from.
+    record_locally(&crate::function_history::FunctionHistory::open(), functions);
+
     // AURA-15: function bodies are un-pushed CODE — only the `diffs` privacy
     // level may ship them off the box. Pull stays ungated (inbound leaks
     // nothing); only the outbound direction is policy-checked.
@@ -638,12 +768,10 @@ pub fn push_function_bodies(functions: &[SyncFunctionPayload]) -> Result<serde_j
     }
 
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
 
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let url = format!("{}/api/v1/live/sync/push",
         cloud_url.trim_end_matches('/'));
 
@@ -658,6 +786,14 @@ pub fn push_function_bodies(functions: &[SyncFunctionPayload]) -> Result<serde_j
         if out.parent_hash.is_none() {
             let key = parent_hash_key(&f.file_path, &f.function_name);
             out.parent_hash = parent_cache.get(&key).cloned();
+        }
+        // WRK-03: every push carries its idempotency key, so the exact
+        // payload parked in the outbox on failure re-identifies itself on
+        // every retry instead of minting duplicates.
+        if out.external_id.is_none() {
+            out.external_id = Some(sync_external_id(
+                &repo, &branch, &f.file_path, &f.function_name, &f.content_hash,
+            ));
         }
         // W6: if the user has unlocked an org content key, seal the body
         // and clear the plaintext before it leaves the machine. Server
@@ -683,23 +819,54 @@ pub fn push_function_bodies(functions: &[SyncFunctionPayload]) -> Result<serde_j
         "build_status": build.status,
         "build_checks": build.checks,
         "force_red": force_red,
+        // CAP-02: the push names the exact repo/checkout it came from via
+        // the canonical scope manifest, instead of the server inferring it
+        // from the repo string alone.
+        "scope": crate::scope::scope_value(std::path::Path::new("."), "live-sync", None),
     });
 
     let client = build_cloud_client();
 
-    let resp = client.post(&url)
+    // WRK-03: a transport failure (unreachable, 5xx) parks the exact payload
+    // in the outbox before erroring, so the un-pushed code is recoverable and
+    // the retry — daemon drain or `aura outbox --flush` — dedupes by
+    // external_id instead of duplicating. Deliberate rejections (CONFLICT =
+    // red build, other 4xx = poison) are NOT queued: retrying them verbatim
+    // can never succeed.
+    let resp = match client.post(&url)
         .header("Authorization", format!("Bearer {}", token))
         .json(&payload)
         .send()
-        .map_err(|e| format!("Cloud unreachable: {}", e))?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(match queue_failed_push(&payload) {
+                Some(pending) => format!(
+                    "Cloud unreachable: {} — push queued to outbox ({} pending; the daemon retries it, or run `aura outbox --flush`)",
+                    e, pending
+                ),
+                None => format!("Cloud unreachable: {} — and queueing to the outbox failed; this push is NOT saved", e),
+            });
+        }
+    };
 
     if resp.status() == reqwest::StatusCode::CONFLICT {
         return Err(
             "build verification red — push blocked. Fix failing checks or set AURA_FORCE_RED=1 to push anyway.".into(),
         );
     }
-    if !resp.status().is_success() {
-        return Err(format!("Cloud returned {}", resp.status()));
+    let status = resp.status();
+    if !status.is_success() {
+        if status.is_server_error() {
+            return Err(match queue_failed_push(&payload) {
+                Some(pending) => format!(
+                    "Cloud returned {} — push queued to outbox ({} pending; the daemon retries it, or run `aura outbox --flush`)",
+                    status, pending
+                ),
+                None => format!("Cloud returned {} — and queueing to the outbox failed; this push is NOT saved", status),
+            });
+        }
+        return Err(format!("Cloud returned {}", status));
     }
 
     resp.json::<serde_json::Value>()
@@ -715,12 +882,10 @@ pub fn pull_function_bodies() -> Result<serde_json::Value, String> {
 /// as a broken build. Default false so `aura pull` keeps your tree green.
 pub fn pull_function_bodies_opts(allow_red: bool) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
 
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let repo = repo_name();
     let branch = current_branch();
     let url = format!("{}/api/v1/live/sync/pull?repo={}&branch={}&allow_red={}",
@@ -791,12 +956,10 @@ pub fn fetch_sync_status_cached() -> Result<serde_json::Value, String> {
 
 fn fetch_sync_status_within(timeout: Duration) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
 
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let repo = repo_name();
     let branch = current_branch();
     let url = format!("{}/api/v1/live/sync/status?repo={}&branch={}",
@@ -886,6 +1049,74 @@ pub struct SyncFunctionPayload {
     /// can detect stale-parent conflicts on `sync_push`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_hash: Option<String>,
+    /// WRK-03: deterministic idempotency key derived from
+    /// (repo, branch, file_path, function_name, content_hash). The same
+    /// logical push always carries the same id, so a retry — an outbox
+    /// drain, a double-fired hook, a re-run command — is recognizable as
+    /// a duplicate instead of minting a second row. Hydrated in
+    /// `push_function_bodies` when the caller leaves it None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+}
+
+/// WRK-03: the idempotency key for one function push. Identity comes from
+/// WHAT is pushed and from WHERE, never from when — so N transmissions of
+/// the same body from the same place all carry the same id. Mirrors the
+/// usage meter's external_id model (`usage_push.rs`), the one bridge whose
+/// retries were already safe.
+pub fn sync_external_id(
+    repo: &str,
+    branch: &str,
+    file_path: &str,
+    function_name: &str,
+    content_hash: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    // NUL separators: no concatenation of fields can collide with another
+    // field split ("a"+"bc" vs "ab"+"c").
+    for part in [repo, branch, file_path, function_name, content_hash] {
+        h.update(part.as_bytes());
+        h.update([0u8]);
+    }
+    let digest = hex::encode(h.finalize());
+    format!("fnsync:{}", &digest[..32])
+}
+
+/// The set of external_ids inside a sync/push payload — the payload's
+/// identity for dedupe purposes.
+fn payload_external_ids(payload: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    payload["functions"]
+        .as_array()
+        .map(|fns| {
+            fns.iter()
+                .filter_map(|f| f["external_id"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// WRK-03: park a failed sync push in the file-backed outbox so un-pushed
+/// code survives the outage (the daemon drains it, or `aura outbox --flush`
+/// does). Dedupes by the payload's set of external_ids: N failed attempts
+/// at the same push leave ONE queued entry, not N. Returns the number of
+/// sync_push entries pending after queueing, or None when the enqueue
+/// itself failed — in that case nothing durable exists and callers must
+/// not claim otherwise.
+pub fn queue_failed_push(payload: &serde_json::Value) -> Option<usize> {
+    let ids = payload_external_ids(payload);
+    let parked = crate::outbox::drain(Some(crate::outbox::OutboxKind::SyncPush));
+    if !ids.is_empty()
+        && parked
+            .iter()
+            .any(|e| payload_external_ids(&e.entry.body) == ids)
+    {
+        return Some(parked.len());
+    }
+    match crate::outbox::enqueue(crate::outbox::OutboxKind::SyncPush, payload.clone()) {
+        Ok(_) => Some(parked.len() + 1),
+        Err(_) => None,
+    }
 }
 
 /// Extract the usable function body from a pulled record: prefer ciphertext if
@@ -1065,6 +1296,51 @@ enum SpliceResult {
     Conflict(String),
 }
 
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The base declaration keywords we recognise. Visibility/qualifier words
+/// (`pub`, `async`, `export`, `default`) always sit in front of one of these,
+/// so matching the base keyword as a whole word covers `pub fn`, `async fn`,
+/// `export const`, `export default function`, etc. without enumerating them.
+const DEF_KEYWORDS: &[&str] = &[
+    "fn", "function", "def", "class", "struct", "impl", "enum", "const", "let",
+];
+
+/// Does `trimmed` declare a symbol named exactly `name`?
+///
+/// This is a whole-token match, not a substring test: for `<kw> <name>` to
+/// count, the keyword must sit on an identifier boundary on its left and the
+/// name must be a whole token on its right. That distinction is the whole
+/// point — `contains("fn handle")` is true of `fn handle_request(...)`, so the
+/// old substring check would splice a pulled `handle` into its prefix sibling,
+/// deleting an unrelated function and duplicating the target. Requiring the
+/// character after the name to be a non-identifier char (`(`, `<`, `:`, `{`,
+/// whitespace, or end-of-line) keeps `handle` from ever matching
+/// `handle_request`, and the left boundary keeps `fn` from matching a `myfn`
+/// suffix or the word inside a string/comment tail.
+fn defines_symbol(trimmed: &str, name: &str) -> bool {
+    if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with('#') {
+        return false;
+    }
+    for kw in DEF_KEYWORDS {
+        let needle = format!("{} {}", kw, name);
+        let mut search_start = 0;
+        while let Some(rel) = trimmed[search_start..].find(&needle) {
+            let p = search_start + rel;
+            let end = p + needle.len();
+            let left_ok = trimmed[..p].chars().next_back().map_or(true, |c| !is_ident_char(c));
+            let right_ok = trimmed[end..].chars().next().map_or(true, |c| !is_ident_char(c));
+            if left_ok && right_ok {
+                return true;
+            }
+            search_start = p + 1;
+        }
+    }
+    false
+}
+
 /// Find a function/class/struct by name in the file content and replace its body.
 /// Uses simple brace-matching for languages with braces (Rust, JS, TS, Go, Java, etc.)
 /// Public wrapper for splice_function — returns Ok(new_content) or Err(reason).
@@ -1080,33 +1356,12 @@ fn splice_function(file_content: &str, function_name: &str, new_body: &str) -> S
     // Strategy: Find the function signature line, then match braces to find the end
     let lines: Vec<&str> = file_content.lines().collect();
 
-    // Look for function definition patterns
+    // Look for the definition line whose declared symbol is exactly
+    // `function_name` — a whole-token match, so a pulled `handle` lands on
+    // `fn handle`, never on the earlier `fn handle_request`.
     let mut start_line = None;
     for (i, line) in lines.iter().enumerate() {
-        // Match common function definition patterns
-        let trimmed = line.trim();
-        if (trimmed.contains(&format!("fn {}", function_name))
-            || trimmed.contains(&format!("function {}", function_name))
-            || trimmed.contains(&format!("def {}", function_name))
-            || trimmed.contains(&format!("class {}", function_name))
-            || trimmed.contains(&format!("struct {}", function_name))
-            || trimmed.contains(&format!("impl {}", function_name))
-            || trimmed.contains(&format!("pub fn {}", function_name))
-            || trimmed.contains(&format!("pub struct {}", function_name))
-            || trimmed.contains(&format!("pub enum {}", function_name))
-            || trimmed.contains(&format!("enum {}", function_name))
-            || trimmed.contains(&format!("async fn {}", function_name))
-            || trimmed.contains(&format!("pub async fn {}", function_name))
-            || trimmed.contains(&format!("const {}", function_name))
-            || trimmed.contains(&format!("pub const {}", function_name))
-            || trimmed.contains(&format!("let {}", function_name))
-            || trimmed.contains(&format!("export function {}", function_name))
-            || trimmed.contains(&format!("export const {}", function_name))
-            || trimmed.contains(&format!("export default function {}", function_name)))
-            && !trimmed.starts_with("//")
-            && !trimmed.starts_with("*")
-            && !trimmed.starts_with("#")
-        {
+        if defines_symbol(line.trim(), function_name) {
             start_line = Some(i);
             break;
         }
@@ -1206,25 +1461,12 @@ fn splice_function(file_content: &str, function_name: &str, new_body: &str) -> S
 pub fn extract_function_body(source: &str, function_name: &str) -> Option<String> {
     let lines: Vec<&str> = source.lines().collect();
 
-    // Find the start line
+    // Find the start line — same whole-token match the splice side uses, so
+    // the push payload for `handle` carries `handle`'s body and not the text
+    // of a prefix sibling like `handle_request`.
     let mut start_line = None;
     for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if (trimmed.contains(&format!("fn {}", function_name))
-            || trimmed.contains(&format!("function {}", function_name))
-            || trimmed.contains(&format!("def {}", function_name))
-            || trimmed.contains(&format!("class {}", function_name))
-            || trimmed.contains(&format!("struct {}", function_name))
-            || trimmed.contains(&format!("impl {}", function_name))
-            || trimmed.contains(&format!("enum {}", function_name))
-            || trimmed.contains(&format!("const {}", function_name))
-            || trimmed.contains(&format!("export function {}", function_name))
-            || trimmed.contains(&format!("export const {}", function_name))
-            || trimmed.contains(&format!("export default function {}", function_name)))
-            && !trimmed.starts_with("//")
-            && !trimmed.starts_with("*")
-            && !trimmed.starts_with("#")
-        {
+        if defines_symbol(line.trim(), function_name) {
             start_line = Some(i);
             break;
         }
@@ -1390,11 +1632,9 @@ fn print_mothership_line(status: MothershipStatus) -> bool {
 
 pub fn create_remote_zone(patterns: &[String], mode: &str, label: Option<&str>) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let url = format!("{}/api/v1/live/zones", cloud_url.trim_end_matches('/'));
 
     let mut body = json!({
@@ -1437,11 +1677,9 @@ fn decode_cloud_json(resp: reqwest::blocking::Response) -> Result<serde_json::Va
 
 pub fn fetch_remote_zones() -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let url = format!("{}/api/v1/live/zones?repo={}", cloud_url.trim_end_matches('/'), repo_name());
 
     let client = build_cloud_client();
@@ -1454,11 +1692,9 @@ pub fn fetch_remote_zones() -> Result<serde_json::Value, String> {
 
 pub fn check_remote_zone(file_path: &str) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let url = format!("{}/api/v1/live/zones/check?repo={}&file_path={}",
         cloud_url.trim_end_matches('/'), repo_name(), file_path);
 
@@ -1472,11 +1708,9 @@ pub fn check_remote_zone(file_path: &str) -> Result<serde_json::Value, String> {
 
 pub fn delete_remote_zone(zone_id: &str) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let url = format!("{}/api/v1/live/zones/{}", cloud_url.trim_end_matches('/'), zone_id);
 
     let client = build_cloud_client();
@@ -1491,11 +1725,9 @@ pub fn delete_remote_zone(zone_id: &str) -> Result<serde_json::Value, String> {
 
 pub fn store_team_knowledge(question: &str, answer: &str, category: Option<&str>, tags: &[String], source: &str) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let url = format!("{}/api/v1/live/knowledge", cloud_url.trim_end_matches('/'));
 
     let body = json!({
@@ -1519,11 +1751,9 @@ pub fn store_team_knowledge(question: &str, answer: &str, category: Option<&str>
 
 pub fn query_team_knowledge(search: Option<&str>, category: Option<&str>, limit: usize) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
 
     let mut url = format!("{}/api/v1/live/knowledge?repo={}&limit={}",
         cloud_url.trim_end_matches('/'), repo_name(), limit);
@@ -1541,11 +1771,9 @@ pub fn query_team_knowledge(search: Option<&str>, category: Option<&str>, limit:
 
 pub fn upvote_team_knowledge(id: &str) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let url = format!("{}/api/v1/live/knowledge/{}/upvote", cloud_url.trim_end_matches('/'), id);
 
     let client = build_cloud_client();
@@ -1562,11 +1790,9 @@ pub fn upvote_team_knowledge(id: &str) -> Result<serde_json::Value, String> {
 /// Pull all function bodies from a different branch for merge.
 pub fn pull_branch_for_merge(source_branch: &str) -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let url = format!("{}/api/v1/live/merge?repo={}&source_branch={}",
         cloud_url.trim_end_matches('/'), repo_name(), source_branch);
 
@@ -1654,11 +1880,9 @@ pub fn push_scaffolds(scaffolds: &[ScaffoldPushPayload]) -> Result<serde_json::V
     if scaffolds.is_empty() { return Ok(json!({"pushed": 0})); }
 
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let url = format!("{}/api/v1/live/scaffolds/push", cloud_url.trim_end_matches('/'));
 
     let payload = json!({
@@ -1679,11 +1903,9 @@ pub fn push_scaffolds(scaffolds: &[ScaffoldPushPayload]) -> Result<serde_json::V
 
 pub fn pull_scaffolds_from_team() -> Result<serde_json::Value, String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
     let url = format!("{}/api/v1/live/scaffolds/pull?repo={}&branch={}",
         cloud_url.trim_end_matches('/'), repo_name(), current_branch());
 
@@ -1704,12 +1926,10 @@ pub fn repo_name_from_cwd() -> String {
 /// Check if cloud sync is configured and print status.
 pub fn print_sync_status() {
     let config = ConfigManager::load();
-    let has_token = config.cloud_api_token.is_some()
-        || std::env::var("AURA_CLOUD_TOKEN").is_ok();
+    let has_token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref()).is_some();
 
     if has_token {
-        let url = config.cloud_url
-            .unwrap_or_else(|| "https://auravcs.com".to_string());
+        let url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         println!("  {} Cloud sync: {} ({})", "☁".cyan(), "enabled".green(), url.dimmed());
     } else {
         println!("  {} Cloud sync: {} (set token with {})",
@@ -1726,19 +1946,124 @@ pub fn print_sync_status() {
 /// auto-generated summary shape. Used by `sync_events` to ensure dashboard
 /// Intent Log rows render human-written narrative instead of AST diffs.
 #[cfg(test)]
+mod sync_idempotency_tests {
+    use super::{payload_external_ids, queue_failed_push, sync_external_id};
+
+    /// Run `f` with the process cwd inside `dir` — `queue_failed_push` and
+    /// the outbox resolve `.aura` off the cwd, so this test can't avoid it.
+    ///
+    /// The cwd is process-global, so this holds the one shared lock for the
+    /// duration — without it, a test in another module runs its git/store
+    /// calls from this tempdir, and fails once the tempdir is reaped.
+    /// `CwdGuard` restores the directory even if `f` panics.
+    fn run_in<P: AsRef<std::path::Path>, F: FnOnce()>(dir: P, f: F) {
+        let _lk = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd = crate::worktree::testing::CwdGuard::enter();
+        std::env::set_current_dir(dir.as_ref()).unwrap();
+        f();
+    }
+
+    #[test]
+    fn external_id_is_deterministic() {
+        let a = sync_external_id("org/repo", "main", "src/lib.rs", "parse", "abc123");
+        let b = sync_external_id("org/repo", "main", "src/lib.rs", "parse", "abc123");
+        assert_eq!(a, b);
+        assert!(a.starts_with("fnsync:"));
+        assert_eq!(a.len(), "fnsync:".len() + 32);
+    }
+
+    #[test]
+    fn external_id_separates_every_field() {
+        let base = sync_external_id("org/repo", "main", "src/lib.rs", "parse", "abc123");
+        // A different value in ANY field is a different push identity.
+        for other in [
+            sync_external_id("org/repo2", "main", "src/lib.rs", "parse", "abc123"),
+            sync_external_id("org/repo", "dev", "src/lib.rs", "parse", "abc123"),
+            sync_external_id("org/repo", "main", "src/main.rs", "parse", "abc123"),
+            sync_external_id("org/repo", "main", "src/lib.rs", "render", "abc123"),
+            sync_external_id("org/repo", "main", "src/lib.rs", "parse", "def456"),
+            // Field-boundary shift must not collide (the NUL separators).
+            sync_external_id("org/repo", "mainsrc", "/lib.rs", "parse", "abc123"),
+        ] {
+            assert_ne!(base, other);
+        }
+    }
+
+    #[test]
+    fn queue_failed_push_dedupes_identical_payloads() {
+        let tmp = super::intent_tests::setup_tempdir();
+        run_in(&tmp, || {
+            let payload = serde_json::json!({
+                "repo_full_name": "org/repo",
+                "branch": "main",
+                "functions": [
+                    { "function_name": "parse", "external_id": "fnsync:aaaa" },
+                    { "function_name": "render", "external_id": "fnsync:bbbb" },
+                ],
+            });
+
+            // Three failed attempts at the same push → ONE parked entry.
+            assert_eq!(queue_failed_push(&payload), Some(1));
+            assert_eq!(queue_failed_push(&payload), Some(1));
+            assert_eq!(queue_failed_push(&payload), Some(1));
+            assert_eq!(
+                crate::outbox::drain(Some(crate::outbox::OutboxKind::SyncPush)).len(),
+                1
+            );
+
+            // A different push identity queues alongside it.
+            let other = serde_json::json!({
+                "repo_full_name": "org/repo",
+                "branch": "main",
+                "functions": [
+                    { "function_name": "parse", "external_id": "fnsync:cccc" },
+                ],
+            });
+            assert_eq!(queue_failed_push(&other), Some(2));
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn payload_ids_read_the_functions_array() {
+        let payload = serde_json::json!({
+            "functions": [
+                { "external_id": "fnsync:b" },
+                { "external_id": "fnsync:a" },
+                { "no_id_here": true },
+            ],
+        });
+        let ids = payload_external_ids(&payload);
+        assert_eq!(
+            ids.into_iter().collect::<Vec<_>>(),
+            vec!["fnsync:a".to_string(), "fnsync:b".to_string()]
+        );
+        assert!(payload_external_ids(&serde_json::json!({})).is_empty());
+    }
+}
+
+#[cfg(test)]
 mod intent_tests {
-    use super::read_latest_intent_prose;
+    use super::read_latest_intent_prose_in;
     use std::io::Write;
 
-    fn setup_tempdir() -> std::path::PathBuf {
+    // The reader takes its root explicitly, so these tests never touch the
+    // process cwd — the old chdir-under-lock dance still raced any test
+    // that chdirs without the lock, and the verdict flipped with
+    // scheduling whenever the real repo had a fresh intent log.
+    pub(super) fn setup_tempdir() -> std::path::PathBuf {
+        // A per-process counter, not a clock: two parallel tests calling
+        // this inside one clock tick got the SAME nanos value, shared a
+        // dir, and the first `remove_dir_all` yanked the other's log
+        // mid-test (seen as a None verdict in the full audit matrix).
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tmp = std::env::temp_dir().join(format!(
             "aura-intent-prose-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
+        // A stale dir from a crashed prior run must not leak entries in.
+        let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join(".aura")).unwrap();
         tmp
     }
@@ -1781,10 +2106,8 @@ mod intent_tests {
         .unwrap();
         drop(f);
 
-        run_in(&tmp, || {
-            let got = read_latest_intent_prose(30 * 60);
-            assert_eq!(got.as_deref(), Some("Rewired auth middleware"));
-        });
+        let got = read_latest_intent_prose_in(&tmp, 30 * 60);
+        assert_eq!(got.as_deref(), Some("Rewired auth middleware"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1800,25 +2123,30 @@ mod intent_tests {
         .unwrap();
         drop(f);
 
-        run_in(&tmp, || {
-            assert!(read_latest_intent_prose(60).is_none());
-        });
+        assert!(read_latest_intent_prose_in(&tmp, 60).is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn returns_none_when_log_missing() {
         let tmp = setup_tempdir();
-        run_in(&tmp, || {
-            assert!(read_latest_intent_prose(3600).is_none());
-        });
+        assert!(read_latest_intent_prose_in(&tmp, 3600).is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 
 pub fn read_latest_intent_prose(max_age_secs: u64) -> Option<String> {
+    read_latest_intent_prose_in(std::path::Path::new("."), max_age_secs)
+}
+
+/// Root-explicit form. The cwd-based wrapper above serves the production
+/// call site (which runs from the repo root); tests pass their tempdir
+/// directly, so the verdict never depends on the process-global cwd — a
+/// test elsewhere chdir-ing without the shared lock used to make these
+/// reads land in the real repo and flip with scheduling.
+pub fn read_latest_intent_prose_in(root: &std::path::Path, max_age_secs: u64) -> Option<String> {
     use std::io::{BufRead, BufReader};
-    let path = ".aura/intent_log.jsonl";
+    let path = root.join(".aura/intent_log.jsonl");
     let file = std::fs::File::open(path).ok()?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1939,5 +2267,152 @@ mod probe_cache_tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{ this is not json").unwrap();
         assert!(value(c.get("mothership|x", PROBE_TTL_MS, PROBE_MISS_TTL_MS)).is_none());
+    }
+}
+
+/// A pull splices one named node back into a file. Naming it by a bare
+/// substring made `handle` land on `handle_request` — the sibling was
+/// destroyed and a duplicate definition emitted. Whole-token matching is the
+/// fix; these pin it.
+#[cfg(test)]
+mod splice_tests {
+    use super::{defines_symbol, extract_function_body, splice_function_public};
+
+    #[test]
+    fn defines_symbol_requires_a_whole_token() {
+        // Exact name → match; prefix sibling → no match.
+        assert!(defines_symbol("fn handle() {", "handle"));
+        assert!(!defines_symbol("fn handle_request(req: Req) {", "handle"));
+        // Qualifiers in front are covered via the base keyword.
+        assert!(defines_symbol("pub fn handle(x: u8) {", "handle"));
+        assert!(defines_symbol("pub async fn handle() {", "handle"));
+        assert!(defines_symbol("export default function handle() {", "handle"));
+        assert!(defines_symbol("export const handle = () => {", "handle"));
+        // Left boundary: `fn` here is only the tail of `myfn`, so the
+        // `fn handle` substring must not count; and a mention inside a
+        // string/comment tail must not count either.
+        assert!(!defines_symbol("xxfn handle() {", "handle"));
+        assert!(!defines_symbol("// fn handle is deprecated", "handle"));
+        assert!(!defines_symbol("let s = \"return fn handler\";", "handle"));
+        // Generic/associated syntax after the name is still a boundary.
+        assert!(defines_symbol("fn handle<T>(t: T) {", "handle"));
+        assert!(defines_symbol("struct Handle {", "Handle"));
+        assert!(!defines_symbol("struct HandleInner {", "Handle"));
+    }
+
+    #[test]
+    fn splice_targets_the_named_function_not_a_prefix_sibling() {
+        // handle_request is defined BEFORE handle. A pull for `handle` must
+        // land on `fn handle`, leaving handle_request intact and not emitting
+        // a duplicate definition.
+        let src = "fn handle_request(req: Req) {\n    log(req);\n}\n\nfn handle() {\n    old();\n}\n";
+        let out = splice_function_public(src, "handle", "fn handle() {\n    fresh();\n}").unwrap();
+        assert!(out.contains("fn handle_request"), "prefix sibling was destroyed:\n{out}");
+        assert!(out.contains("log(req)"), "sibling body was lost:\n{out}");
+        assert!(out.contains("fresh()"), "target body was not spliced in:\n{out}");
+        assert!(!out.contains("old()"), "stale target body survived:\n{out}");
+        assert_eq!(out.matches("fn handle(").count(), 1, "duplicate definition emitted:\n{out}");
+    }
+
+    #[test]
+    fn splice_still_replaces_the_exact_target() {
+        let src = "fn a() {\n    one();\n}\n\nfn b() {\n    two();\n}\n";
+        let out = splice_function_public(src, "b", "fn b() {\n    changed();\n}").unwrap();
+        assert!(out.contains("fn a()") && out.contains("one()"), "unrelated fn changed:\n{out}");
+        assert!(out.contains("changed()") && !out.contains("two()"), "target not replaced:\n{out}");
+    }
+
+    #[test]
+    fn splice_reports_not_found_for_a_missing_symbol() {
+        let src = "fn only_this() {\n    ok();\n}\n";
+        assert!(splice_function_public(src, "handle", "fn handle() {}").is_err());
+    }
+
+    #[test]
+    fn extract_returns_the_named_function_not_a_prefix_sibling() {
+        let src = "fn handle_request() {\n    log();\n}\n\nfn handle() {\n    old();\n}\n";
+        let body = extract_function_body(src, "handle").expect("handle body");
+        assert!(body.contains("old()"), "extracted the wrong node: {body}");
+        assert!(!body.contains("log()"), "leaked the prefix sibling's body: {body}");
+    }
+}
+
+#[cfg(test)]
+mod local_record_tests {
+    use super::{record_locally, SyncFunctionPayload};
+    use crate::function_history::FunctionHistory;
+
+    fn payload(name: &str, body: &str, hash: &str) -> SyncFunctionPayload {
+        SyncFunctionPayload {
+            file_path: "src/auth.rs".into(),
+            function_name: name.into(),
+            function_kind: "function".into(),
+            content_hash: hash.into(),
+            body: body.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn every_pushed_body_is_kept_where_a_rewind_can_find_it() {
+        let d = tempfile::tempdir().unwrap();
+        let h = FunctionHistory::at(d.path());
+        record_locally(
+            &h,
+            &[
+                payload("verify", "fn verify() { old() }", "h1"),
+                payload("sign", "fn sign() { old() }", "h2"),
+            ],
+        );
+
+        let verify = h.differing("src/auth.rs", "verify", None);
+        assert_eq!(verify.len(), 1);
+        assert_eq!(verify[0].body, "fn verify() { old() }");
+        assert_eq!(verify[0].content_hash, "h1");
+        assert_eq!(h.differing("src/auth.rs", "sign", None).len(), 1);
+    }
+
+    #[test]
+    fn a_body_that_was_sealed_or_is_empty_is_not_a_state_worth_keeping() {
+        let d = tempfile::tempdir().unwrap();
+        let h = FunctionHistory::at(d.path());
+        // W6 seals the body into ciphertext and clears `body`. There is
+        // nothing left there to restore a function to.
+        let mut sealed = payload("verify", "", "h1");
+        sealed.body_ciphertext_b64 = Some("Zm9v".into());
+        record_locally(&h, &[sealed, payload("blank", "   \n ", "h2")]);
+
+        assert!(h.differing("src/auth.rs", "verify", None).is_empty());
+        assert!(h.differing("src/auth.rs", "blank", None).is_empty());
+    }
+
+    #[test]
+    fn nothing_to_push_records_nothing_and_does_not_create_a_directory() {
+        let d = tempfile::tempdir().unwrap();
+        let inner = d.path().join("history");
+        record_locally(&FunctionHistory::at(&inner), &[]);
+        assert!(!inner.exists());
+    }
+
+    /// The whole point of recording here is that it happens whether or not
+    /// the push is allowed to go anywhere. A privacy policy that refuses to
+    /// ship code off the box has no opinion about a file written next to the
+    /// code it came from, and a repo with no cloud token still deserves a
+    /// history it can be rewound from. If either gate ever moves above the
+    /// record, this is the test that says so.
+    #[test]
+    fn the_record_is_taken_before_every_gate_that_can_refuse_the_push() {
+        let src = include_str!("live_sync.rs");
+        let start = src
+            .find("pub fn push_function_bodies(")
+            .expect("push_function_bodies is still here");
+        let body = &src[start..];
+
+        let record = body.find("record_locally(").expect("the push still records locally");
+        let privacy = body.find("allows_code_sync()").expect("the privacy gate is still here");
+        let token = body.find("No cloud token configured").expect("the token check is still here");
+
+        assert!(record < privacy, "the privacy gate must not decide whether a rewind has a history");
+        assert!(record < token, "a repo with no cloud token still records its own function history");
     }
 }

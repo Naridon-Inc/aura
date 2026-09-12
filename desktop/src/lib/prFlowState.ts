@@ -13,6 +13,8 @@
 // starts grounded instead of re-discovering repo state turn by turn.
 
 import { api } from "./api";
+import { machineIdForRoot } from "./activeMachine";
+import { gitBranches, gitStatusV2 } from "./place/workApi";
 
 /** Every stage an agent-driven PR can be in, in rough protocol order. */
 export type PrFlowStage =
@@ -194,10 +196,16 @@ export function buildPrContextMarkdown(ctx: PrContext): string {
  * sinking the whole prompt build.
  */
 export async function collectPrContext(repoRoot: string): Promise<PrContext> {
+  // Branches and status are read where the checkout stands (a machine, when
+  // the workspace is on one). Recent commits have no machine twin yet, and a
+  // local `git log` of the laptop's copy would describe the wrong checkout —
+  // so on a machine that section is simply empty (AURA-1307).
   const [branches, status, commits] = await Promise.all([
-    api.gitBranches(repoRoot).catch(() => []),
-    api.gitStatusV2(repoRoot).catch(() => []),
-    api.gitRecentCommits(repoRoot, MAX_COMMITS).catch(() => []),
+    gitBranches(repoRoot).catch(() => []),
+    gitStatusV2(repoRoot).catch(() => []),
+    machineIdForRoot(repoRoot)
+      ? Promise.resolve([])
+      : api.gitRecentCommits(repoRoot, MAX_COMMITS).catch(() => []),
   ]);
 
   const current = branches.find((b) => b.is_current)?.name ?? null;

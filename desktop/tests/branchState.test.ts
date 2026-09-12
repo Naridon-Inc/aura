@@ -578,7 +578,20 @@ describe("the producer has somewhere to fail", () => {
     // `.parse().ok().unwrap_or(0)` made an unreadable count into the number
     // that means "in step with the remote".
     expect(b).not.toContain("unwrap_or(0)");
-    expect(b).toContain("ok_or_else");
+    // The counting itself lives in git_parse now, shared with the twin that
+    // asks a machine the same question (AURA-1306) — so the guard follows the
+    // parser there rather than reading the caller for a line it no longer
+    // holds. The rule is the same: a line it can't read is an error.
+    expect(b).toContain("parse_left_right_count");
+    const parsers = stripComments(
+      await Bun.file(`${SRC}/../src-tauri/src/git_parse/stats.rs`).text(),
+    );
+    const i = parsers.indexOf("pub fn parse_left_right_count");
+    expect(i).toBeGreaterThan(-1);
+    const j = parsers.indexOf("\n}\n", i);
+    const parser = parsers.slice(i, j === -1 ? undefined : j);
+    expect(parser).not.toContain("unwrap_or(0)");
+    expect(parser).toContain("ok_or_else");
   });
 
   test("a failed rev-list doesn't resolve to in-sync", async () => {

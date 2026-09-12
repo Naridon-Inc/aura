@@ -39,6 +39,7 @@ import {
   PhoneOff,
 } from "lucide-react";
 import { api, AURA_CLI_INSTALL_COMMAND, type AuraCliCheck } from "../lib/api";
+import { useDocumentVisibility } from "../lib/useDocumentVisibility";
 import { BranchSwitcherModal } from "./git/BranchSwitcherModal";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
 import { MENU_PANEL } from "./ui/menuSurface";
@@ -608,6 +609,7 @@ function Item({
 // is fetched lazily each time the popover opens so it's always fresh.
 function BranchSwitcher({ repoRoot, dirty }: { repoRoot: string; dirty: boolean }) {
   const [branch, setBranch] = useState<string | null>(null);
+  const visible = useDocumentVisibility();
   // The caret opens the rich Cmd-K branch switcher (the same modal the Git view
   // header uses). The chip itself still polls the current branch so the footer
   // label + dirty pill stay honest when the branch changes elsewhere.
@@ -616,6 +618,10 @@ function BranchSwitcher({ repoRoot, dirty }: { repoRoot: string; dirty: boolean 
   // Poll the current branch — cheap, and keeps the chip honest when the
   // branch changes outside the switcher (terminal checkout, agent, etc.). A
   // post-checkout signal also refreshes it immediately.
+  //
+  // The interval is dropped while the window is hidden: nobody is reading a
+  // footer they can't see, and the `aura:git-changed` listener below stays
+  // wired regardless, so an in-app checkout is still reflected at once.
   useEffect(() => {
     if (!repoRoot) {
       setBranch(null);
@@ -625,20 +631,26 @@ function BranchSwitcher({ repoRoot, dirty }: { repoRoot: string; dirty: boolean 
     const poll = async () => {
       try {
         const b = (await api.gitBranch(repoRoot)).trim();
+        // setState on an identical string is a no-op in React, so an
+        // unchanged branch costs nothing — no equality wrapper needed.
         if (!cancelled) setBranch(b || null);
       } catch {
-        if (!cancelled) setBranch(null);
+        // Keep the branch we last read. `git branch` failing for a moment
+        // (index.lock during a commit) isn't the user leaving their branch,
+        // and flashing "—" in the footer reads like something broke.
       }
     };
     void poll();
-    const id = window.setInterval(poll, 5000);
     window.addEventListener("aura:git-changed", poll);
+    // Commits and checkouts refresh instantly via `aura:git-changed`; the
+    // interval only catches edits made outside the app, so it can breathe.
+    const id = visible ? window.setInterval(poll, 10000) : null;
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      if (id !== null) window.clearInterval(id);
       window.removeEventListener("aura:git-changed", poll);
     };
-  }, [repoRoot]);
+  }, [repoRoot, visible]);
 
   // Subscribed so renaming the workspace you're standing in repaints this chip
   // straight away — `humanizeCopyTitle` resolves a typed name through the

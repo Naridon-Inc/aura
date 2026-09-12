@@ -17,6 +17,17 @@ export function composerKey(prefix: string, sessionId?: string | null): string {
   return `${prefix}${sessionId ?? "__global"}`;
 }
 
+// AURA-1296 — the tab strip shows a pencil on a tab whose composer holds a
+// draft. For that it needs the prefixes the two composers use (they used to be
+// private consts inside each) and a signal when a draft changes, since
+// `storage` events only fire in OTHER windows.
+/** Prefix the Aura chat composer files its drafts under. */
+export const MANAGER_DRAFT_PREFIX = "aura.manager.draft:";
+/** Prefix the CLI agent chat composer files its drafts under. */
+export const AGENT_DRAFT_PREFIX = "aura.agentchat.draft:";
+/** Window event fired after every draft write; `detail` is the storage key. */
+export const DRAFT_CHANGED_EVENT = "aura:draft-changed";
+
 export function readDraft(key: string): string {
   try {
     return localStorage.getItem(key) ?? "";
@@ -33,6 +44,12 @@ export function writeDraft(key: string, value: string): void {
     else localStorage.setItem(key, value);
   } catch {
     /* storage disabled */
+  }
+  // AURA-1296 — tell the tab strip in this window.
+  try {
+    window.dispatchEvent(new CustomEvent(DRAFT_CHANGED_EVENT, { detail: key }));
+  } catch {
+    /* no window (tests) */
   }
 }
 

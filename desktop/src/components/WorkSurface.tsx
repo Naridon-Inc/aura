@@ -23,6 +23,9 @@ import type { TraceKey } from "./trace/traceDestinations";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { startWindowDrag } from "./TopBar";
 import { AgentTabMark, ManagerTabStatus } from "./TabStatus";
+// AURA-1296 — draft pencil on chat/agent tabs.
+import { DraftMark } from "./TabStatus";
+import { AGENT_DRAFT_PREFIX, MANAGER_DRAFT_PREFIX, composerKey } from "./composer/composerDrafts";
 import { TabMoreButton, tabContextItems } from "./TabMenu";
 import { useTabStripScroll } from "./tabStripScroll";
 import { MonacoEditor as Editor } from "./MonacoEditor";
@@ -32,6 +35,8 @@ import { EditorInlineComposer } from "./editor/EditorInlineComposer";
 import { MarkdownView } from "./MarkdownView";
 import { SegmentedControl } from "./ui/segmented";
 import { AsciiSpinner } from "./ui/ascii-spinner";
+// AURA-1298
+import { ImageLightbox } from "./media/ImageLightbox";
 import { FileInsightStrip } from "./FileInsightStrip";
 import { AgentSurface, buildAgentTabMenuItems, type AgentTabMenuItem } from "./agent/AgentSurface";
 import {
@@ -223,6 +228,8 @@ export function WorkSurface({
   const activePlanTab =
     store.planTabs.find((t) => t.id === store.activePlanId) ?? null;
   const [cursorLine, setCursorLine] = useState(1);
+  // The no-layout chrome band's "+" launcher (see chromeBand below).
+  const [bandAddOpen, setBandAddOpen] = useState(false);
   const presenceMarkers = useTeammatePresence(
     repoRoot,
     active?.status === "ok" ? active.path : null,
@@ -367,10 +374,11 @@ export function WorkSurface({
   // so a tab always has a tree to live in and PerPaneTabStrip always draws it.
   //
   // This row is still the top edge of the window, so it keeps the shell's
-  // chrome at either end and moves the window from the empty middle. It draws
-  // no launcher: the surface underneath it — WorkSurfaceEmpty, or the
-  // dashboard — is the launcher, and a second one 32px above would be the
-  // two-doors-onto-one-thing problem again.
+  // chrome at either end and moves the window from the empty middle. It keeps
+  // the same "+" every real tab strip carries: this row appears exactly when
+  // every tab is gone, and a bar with no tabs and no way to open one read as
+  // broken — users reported being stranded with no way to start a terminal or
+  // an agent. One glyph, same launcher, same spot it lives on a full strip.
   const chromeBand = (surfaceActions?: ReactNode) => (
     <div className="flex items-stretch flex-shrink-0">
       {chromeLeading}
@@ -380,6 +388,22 @@ export function WorkSurface({
         data-tauri-drag-region
         onMouseDown={startWindowDrag}
       />
+      <div className="relative flex items-stretch flex-shrink-0 bg-bg-chrome border-b border-line-soft">
+        <button
+          type="button"
+          onClick={() => setBandAddOpen((v) => !v)}
+          title="Open a tab — terminal, agent, files…"
+          className="px-2 h-full text-sm text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors border-l border-line-soft"
+        >
+          +
+        </button>
+        {bandAddOpen && (
+          <PaneAddPopover
+            currentRepoRoot={repoRoot}
+            onClose={() => setBandAddOpen(false)}
+          />
+        )}
+      </div>
       {surfaceActions}
       {chromeTrailing}
     </div>
@@ -1950,7 +1974,8 @@ function ImagePreview({ path, name }: { path: string; name: string }) {
   }
   return (
     <div className="h-full w-full overflow-auto bg-bg-content p-4 flex items-center justify-center">
-      <img
+      {/* AURA-1298 — click opens full size; right-click copies or saves. */}
+      <ImageLightbox
         src={src}
         alt={name}
         className="max-w-full max-h-full object-contain rounded"
@@ -1981,7 +2006,8 @@ function FilePreviewOrPlaceholder({ file }: { file: PreviewFile }) {
   if (kind === "image") {
     return (
       <div className="h-full w-full overflow-auto flex items-center justify-center bg-bg-content p-6">
-        <img
+        {/* AURA-1298 — click opens full size; right-click copies or saves. */}
+        <ImageLightbox
           src={src}
           alt={file.name}
           className="max-w-full max-h-full object-contain rounded-md shadow-lg"
@@ -2721,6 +2747,13 @@ function PerPaneTabStrip({
               </span>
               {ref.kind === "manager" && (
                 <ManagerTabStatus sessionId={ref.id} />
+              )}
+              {/* AURA-1296 — a pencil on a tab whose message box holds a draft. */}
+              {ref.kind === "manager" && (
+                <DraftMark draftKey={composerKey(MANAGER_DRAFT_PREFIX, ref.id)} />
+              )}
+              {ref.kind === "agent" && (
+                <DraftMark draftKey={composerKey(AGENT_DRAFT_PREFIX, ref.id)} />
               )}
               {/* Every action this tab has, on a control you can see. The
                   right-click menu below carries the same list, but every tab

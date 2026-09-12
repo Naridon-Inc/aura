@@ -11,14 +11,9 @@
 // trimmed, and the original returned rather than "" when there is nothing
 // left to take.
 
-/** The last segment of a path — "src/lib/api.ts" → "api.ts". Handles both
- *  separators and a trailing one. */
-export function basename(p: string): string {
-  const trimmed = (p ?? "").replace(/[/\\]+$/, "");
-  if (!trimmed) return "";
-  const parts = trimmed.split(/[/\\]+/);
-  return parts[parts.length - 1] || trimmed;
-}
+// basename moved to aura-shared/paths so the shared IntentProse can resolve
+// file tokens with the same care; this stays its local address.
+export { basename } from "@shared/paths";
 
 /** A path cut down to its last few segments and marked as cut —
  *  "/Users/mo/code/aura" → "…/code/aura". Returned untouched when it is

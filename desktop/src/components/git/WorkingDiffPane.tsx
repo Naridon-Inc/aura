@@ -13,7 +13,8 @@ import { ArrowUpRight, FileText } from "lucide-react";
 import { api } from "../../lib/api";
 import { Button } from "../ui/button";
 import { UnifiedDiff } from "../diff/UnifiedDiff";
-import { SplitDiff, materializeSides } from "../diff/SplitDiff";
+import { SplitDiff } from "../diff/SplitDiff";
+import { materializeSides } from "../../lib/diffSides";
 import { Churn } from "../diff/Churn";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import {

@@ -27,6 +27,7 @@ import {
   type GoalRecord,
   type GoalRun,
 } from "../../lib/goalStore";
+import { AcceptanceChecklist } from "./AcceptanceChecklist";
 import { ProofBreakdown } from "./ProofBreakdown";
 import { computeFeatureSignals } from "../../lib/featureSignals";
 import { useFeatureDrift } from "../../lib/useFeatureDrift";
@@ -35,6 +36,8 @@ import { FeatureHistory } from "./FeatureHistory";
 import { FeatureRoles } from "./FeatureRoles";
 import { relativeAge } from "../../lib/relativeTime";
 import { VERDICT } from "../../lib/goalVerdict";
+import { stalenessOf, type UnderReview } from "../../lib/evidence";
+import { shortRevision } from "../../lib/sessionEvidence";
 
 export function GoalProbe({
   repoRoot,
@@ -44,6 +47,7 @@ export function GoalProbe({
   agentId,
   currentRunKey,
   atCommit,
+  underReview,
   autoExplain = false,
   onRemove,
   onEdit,
@@ -62,6 +66,15 @@ export function GoalProbe({
    *  Makes a session's goals prove against the code that session produced, even
    *  when it lives on a branch that isn't checked out (else a false 0%). */
   atCommit?: string;
+  /** The version this surface is reviewing, when it is reviewing one. A session
+   *  Summary is looking at one particular run's code and passes it; the Goals
+   *  workbench is looking at the goal in general and passes nothing.
+   *
+   *  Given it, the card checks whether its latest verdict was actually measured
+   *  against that code. It usually wasn't: `rollup` reports the newest run on
+   *  the goal whatever version it ran on, so a check another session recorded
+   *  an hour ago read here as "checked 1h ago" about code it never saw. */
+  underReview?: UnderReview;
   /** Lead with the proof: fill in the per-check breakdown on mount (read-only),
    *  so a "Reached 4/4" card opens already showing its individual checks. Used
    *  on the session Summary; off elsewhere (breakdown appears on Verify). */
@@ -80,6 +93,16 @@ export function GoalProbe({
 
   const r = rollup(goal);
   const tone = VERDICT[r.verdict];
+  // Which code the verdict above was actually measured against, and whether
+  // that is the code being reviewed here. `rollup` takes the newest run on the
+  // goal regardless of version, so this is the only thing standing between a
+  // verdict and the wrong revision.
+  const measured = goal.runs[0] ?? null;
+  const measuredAt = (measured?.commit ?? "").trim() || null;
+  const staleness =
+    underReview && measured
+      ? stalenessOf({ revision: measuredAt, at: measured.at }, underReview)
+      : { stale: false, reason: "" };
   // Plain-words "why it's not there yet" + whether the agent oversold it. Pass
   // the live outcome so a "built but not wired" state doesn't misread as unbuilt.
   const reason = reachedSummary(goal, outcome);
@@ -172,6 +195,27 @@ export function GoalProbe({
             {r.at != null ? (
               <span className="text-xs text-text-5">· checked {relativeAge(r.at)}</span>
             ) : null}
+            {measuredAt ? (
+              <span
+                className="font-mono text-2xs text-text-5"
+                title="The version of the code this verdict was measured against"
+              >
+                {shortRevision(measuredAt)}
+              </span>
+            ) : null}
+            {staleness.stale ? (
+              <span
+                className="shrink-0 rounded px-1.5 py-px text-2xs"
+                title={staleness.reason}
+                style={{
+                  color: "var(--color-amber)",
+                  background: "color-mix(in oklab, var(--color-amber) 12%, transparent)",
+                  border: "0.5px solid color-mix(in oklab, var(--color-amber) 32%, transparent)",
+                }}
+              >
+                Out of date
+              </span>
+            ) : null}
             <div className="ml-auto flex items-center gap-1">
               <Button
                 type="button"
@@ -208,6 +252,17 @@ export function GoalProbe({
             </div>
           </div>
           <p className="mt-1 text-base leading-snug text-text-1">{goal.text}</p>
+          {/* The verdict above describes the code it ran on, and that is not
+              always the code on screen. Said in full rather than left to the
+              chip, because "checked 1h ago" is the sentence people believe. */}
+          {staleness.stale ? (
+            <p
+              className="mt-1.5 text-sm leading-snug"
+              style={{ color: "var(--color-amber)" }}
+            >
+              {staleness.reason} Check it again to know where this stands.
+            </p>
+          ) : null}
           {/* Why it's not there yet, and whether the agent called it done when
               the code says otherwise — both in plain words, real signals only. */}
           <ClaimBand reason={reason} claim={claim} />
@@ -228,25 +283,13 @@ export function GoalProbe({
           run-derived "What's missing" below: this is the intent of the check,
           that is the current result of running it. */}
       {goal.acceptance && goal.acceptance.length > 0 ? (
-        <div className="border-t border-line-soft px-3.5 py-2.5">
-          <div className="section-label mb-1.5">
-            How we&apos;ll check this
-          </div>
-          <ul className="flex flex-col gap-1">
-            {goal.acceptance.map((c, i) => (
-              <li
-                key={i}
-                className="flex items-start gap-2 text-sm text-text-2"
-              >
-                <span
-                  aria-hidden
-                  className="mt-[3px] h-[10px] w-[10px] shrink-0 rounded-[2px] border-[1.5px] border-text-4"
-                />
-                <span className="min-w-0">{c}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
+        <AcceptanceChecklist
+          repoRoot={repoRoot}
+          runKey={runKey ?? "adhoc"}
+          lines={goal.acceptance}
+          revision={atCommit ?? null}
+          underReview={underReview}
+        />
       ) : null}
 
       {/* The proof, broken open — how it was checked, what's in place, what's

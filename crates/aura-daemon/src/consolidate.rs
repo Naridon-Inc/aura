@@ -58,11 +58,12 @@ pub fn candidate_workspaces(state: &ServerState) -> Vec<PathBuf> {
     out
 }
 
-/// One consolidation pass: run `aura memory consolidate` in every
-/// candidate workspace. Blocking process spawns are pushed onto the
-/// blocking pool so the (current-thread) daemon runtime keeps serving
-/// connections. Every failure mode logs and moves on — the next tick
-/// retries.
+/// One maintenance pass: run `aura memory consolidate` and then
+/// `aura memory reflect` (W5 — promote episodic patterns to semantic
+/// memory while nobody is watching) in every candidate workspace.
+/// Blocking process spawns are pushed onto the blocking pool so the
+/// (current-thread) daemon runtime keeps serving connections. Every
+/// failure mode logs and moves on — the next tick retries.
 pub async fn run_pass(state: &Arc<ServerState>) {
     let workspaces = candidate_workspaces(state);
     if workspaces.is_empty() {
@@ -70,41 +71,44 @@ pub async fn run_pass(state: &Arc<ServerState>) {
         return;
     }
     for ws in workspaces {
-        let cwd = ws.clone();
-        let spawned = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("aura")
-                .args(["memory", "consolidate"])
-                .current_dir(&cwd)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output()
-        })
-        .await;
+        for verb in ["consolidate", "reflect"] {
+            let cwd = ws.clone();
+            let spawned = tokio::task::spawn_blocking(move || {
+                std::process::Command::new("aura")
+                    .args(["memory", verb])
+                    .current_dir(&cwd)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .output()
+            })
+            .await;
 
-        match spawned {
-            Ok(Ok(output)) if output.status.success() => {
-                info!(workspace = %ws.display(), "memory consolidation pass complete");
-            }
-            Ok(Ok(output)) => {
-                // CLI ran but failed (e.g. corrupted store) — log, retry
-                // next cycle. Keyless skips exit 0 and never land here.
-                debug!(
-                    workspace = %ws.display(),
-                    status = ?output.status.code(),
-                    stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                    "memory consolidation run failed; will retry next cycle"
-                );
-            }
-            Ok(Err(e)) => {
-                debug!(
-                    workspace = %ws.display(),
-                    error = %e,
-                    "aura CLI unavailable — skipping memory consolidation this cycle"
-                );
-            }
-            Err(e) => {
-                warn!(error = %e, "memory consolidation task join failed");
+            match spawned {
+                Ok(Ok(output)) if output.status.success() => {
+                    info!(workspace = %ws.display(), verb, "memory maintenance pass complete");
+                }
+                Ok(Ok(output)) => {
+                    // CLI ran but failed (e.g. corrupted store) — log, retry
+                    // next cycle. Keyless skips exit 0 and never land here.
+                    debug!(
+                        workspace = %ws.display(),
+                        verb,
+                        status = ?output.status.code(),
+                        stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                        "memory maintenance run failed; will retry next cycle"
+                    );
+                }
+                Ok(Err(e)) => {
+                    debug!(
+                        workspace = %ws.display(),
+                        error = %e,
+                        "aura CLI unavailable — skipping memory maintenance this cycle"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "memory maintenance task join failed");
+                }
             }
         }
     }

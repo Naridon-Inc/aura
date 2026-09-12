@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  api,
   type ClaudeSession,
   type IntentRow,
   type ManagerSummary,
@@ -22,7 +23,7 @@ import { fetchSessions } from "../../lib/sessionsCache";
 import { fetchIntentRows } from "../../lib/intentCache";
 import { History } from "lucide-react";
 import { relativeAgeFromDelta } from "../../lib/relativeTime";
-import { intentTypeChip } from "../../lib/intentTypeLabels";
+import { intentTypeChip } from "@shared/intentTypeLabels";
 import * as Icons from "../Icons";
 import { AgentBadge } from "../agent/AgentBadge";
 import { Button } from "../ui/button";
@@ -168,15 +169,90 @@ function LockIcon() {
   );
 }
 
+function BranchIcon() {
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="6" cy="4" r="2" />
+      <circle cx="6" cy="20" r="2" />
+      <circle cx="18" cy="7" r="2" />
+      <path d="M6 6v12" />
+      <path d="M18 9c0 4-6 3-6 7" />
+    </svg>
+  );
+}
+
+/** Where a session happened. The intent log is per-checkout and each row is
+ *  stamped at write time with the branch + checkout folder it was written in,
+ *  so this is a fact about the run, not a guess from where we read it.
+ *
+ *  A row recovered from another branch's *committed* copy carries no stamp —
+ *  an append-only ledger propagates across merges, so the ref we found it on
+ *  says nothing about where the work was done. Those stay unlabelled rather
+ *  than wear a branch that would misdirect. */
+function sessionOrigin(row: IntentRow): { label: string; title: string } | null {
+  const branch = row.branch?.trim();
+  const checkout = row.worktree?.trim();
+  if (!branch && !checkout) return null;
+  const label = branch || checkout || "";
+  const where = checkout ? ` in the ${checkout} folder` : "";
+  return {
+    label,
+    title: branch
+      ? `Worked on the ${branch} branch${where}`
+      : `Worked on in the ${checkout} folder`,
+  };
+}
+
+/** The branch chip. Dim for work on the branch you're standing on, brighter
+ *  for work that happened somewhere else — that's the whole point of showing
+ *  it, so you can tell at a glance which rows are from another line of work. */
+function BranchChip({
+  label,
+  title,
+  elsewhere,
+}: {
+  label: string;
+  title: string;
+  elsewhere: boolean;
+}) {
+  return (
+    <span
+      className={
+        elsewhere
+          ? "inline-flex max-w-[10rem] items-center gap-1 rounded border border-accent/30 bg-accent/10 px-1.5 py-px text-2xs text-accent"
+          : "inline-flex max-w-[10rem] items-center gap-1 rounded border border-line-soft px-1.5 py-px text-2xs text-text-4"
+      }
+      title={title}
+    >
+      <BranchIcon />
+      <span className="truncate">{label}</span>
+    </span>
+  );
+}
+
 function SessionRow({
   display,
   sessions,
   nowSecs,
+  currentBranch,
   onOpen,
 }: {
   display: SessionDisplayRow;
   sessions: ClaudeSession[];
   nowSecs: number;
+  /** The branch this checkout is standing on, so a row from anywhere else
+   *  can be drawn as such. Null while the read is still out. */
+  currentBranch: string | null;
   onOpen: (row: IntentRow) => void;
 }) {
   const { row, editCount } = display;
@@ -198,6 +274,7 @@ function SessionRow({
   // catch. It reads as an error-class event, so it gets the red marker and a
   // "Blocked" badge in place of the neutral verdict dot / intent-type chip.
   const isBlocked = row.intent_type === "blocked";
+  const origin = sessionOrigin(row);
 
   return (
     <button
@@ -269,6 +346,15 @@ function SessionRow({
                 {editCount} edits
               </span>
             </>
+          ) : null}
+          {origin ? (
+            <BranchChip
+              label={origin.label}
+              title={origin.title}
+              elsewhere={
+                !!row.branch && !!currentBranch && row.branch !== currentBranch
+              }
+            />
           ) : null}
           {isBlocked ? (
             <span className="rounded border border-red px-1.5 py-px text-2xs font-medium text-red">
@@ -345,8 +431,20 @@ type SessionsSnapshot = {
   rows: IntentRow[];
   claudeSessions: ClaudeSession[];
   managerSessions: ManagerSummary[];
+  /** The branch the checkout was on when this was read — what tells a row
+   *  from somewhere else apart from a row from here. */
+  currentBranch: string | null;
   nowSecs: number;
 };
+
+/** Sentinel for "no branch filter". A leading space keeps it out of the space
+ *  of real branch names, which git forbids one in. */
+const ALL_BRANCHES = " all";
+
+/** How far back the feed reaches. The intent log now spans every checkout of
+ *  this repo, so the same window covers a much shorter stretch of wall-clock
+ *  time than it did when it was one branch's worth. */
+const SESSIONS_WINDOW = 250;
 
 // Process-lifetime, per-workspace snapshot cache. The Sessions pane remounts on
 // every Trace open / tab toggle / detail close, and each cold mount re-runs the
@@ -389,6 +487,12 @@ export function SessionsPane({
   const [nowSecs, setNowSecs] = useState(
     () => sessionsCache.get(repoRoot)?.nowSecs ?? Math.floor(Date.now() / 1000),
   );
+  const [currentBranch, setCurrentBranch] = useState<string | null>(
+    () => sessionsCache.get(repoRoot)?.currentBranch ?? null,
+  );
+  // Everything, by default: seeing work from the other branches is the point
+  // of a cross-checkout feed; narrowing is the escape hatch.
+  const [branchFilter, setBranchFilter] = useState<string>(ALL_BRANCHES);
   // Per-day collapse disclosure, keyed by dayKey (true = collapsed). Default
   // is everything expanded (empty map); not persisted.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -408,6 +512,7 @@ export function SessionsPane({
       setRows(cached.rows);
       setClaudeSessions(cached.claudeSessions);
       setManagerSessions(cached.managerSessions);
+      setCurrentBranch(cached.currentBranch);
       setNowSecs(cached.nowSecs);
       setLoading(false);
     } else {
@@ -419,22 +524,25 @@ export function SessionsPane({
       // let their absence fail the list, which the intent log alone can
       // populate. `managerList(repoRoot)` is workspace-scoped so chats from
       // other workspaces don't leak in.
-      const [data, sessions, managers] = await Promise.all([
-        fetchIntentRows(repoRoot, 100),
+      const [data, sessions, managers, branch] = await Promise.all([
+        fetchIntentRows(repoRoot, SESSIONS_WINDOW),
         fetchSessions(repoRoot).catch(() => [] as ClaudeSession[]),
         fetchManagerList(repoRoot).catch(() => [] as ManagerSummary[]),
+        api.gitBranch(repoRoot).catch(() => ""),
       ]);
       if (!aliveRef.current) return;
       const snap: SessionsSnapshot = {
         rows: Array.isArray(data) ? data : [],
         claudeSessions: Array.isArray(sessions) ? sessions : [],
         managerSessions: Array.isArray(managers) ? managers : [],
+        currentBranch: typeof branch === "string" && branch ? branch : null,
         nowSecs: Math.floor(Date.now() / 1000),
       };
       sessionsCache.set(repoRoot, snap);
       setRows(snap.rows);
       setClaudeSessions(snap.claudeSessions);
       setManagerSessions(snap.managerSessions);
+      setCurrentBranch(snap.currentBranch);
       setNowSecs(snap.nowSecs);
     } catch (e) {
       if (!aliveRef.current) return;
@@ -463,8 +571,12 @@ export function SessionsPane({
   // same `ListRow` shape, interleave both by timestamp (newest first), then
   // group by local day.
   const groups = useMemo<DayGroup[]>(() => {
+    const showAll = branchFilter === ALL_BRANCHES;
+    const visible = showAll
+      ? rows
+      : rows.filter((r) => (r.branch ?? "") === branchFilter);
     const intentRows: ListRow[] = collapseAutoStubSessions(
-      [...rows].sort((a, b) => b.timestamp - a.timestamp),
+      [...visible].sort((a, b) => b.timestamp - a.timestamp),
       claudeSessions,
     ).map((display) => ({
       kind: "intent" as const,
@@ -472,12 +584,17 @@ export function SessionsPane({
       timestamp: display.row.timestamp,
       display,
     }));
-    const managerRows: ListRow[] = managerSessions.map((summary) => ({
-      kind: "manager" as const,
-      key: `manager:${summary.id}`,
-      timestamp: managerSessionTimestamp(summary),
-      summary,
-    }));
+    // Native chats live in this checkout only — they belong to whatever branch
+    // it's standing on, so they drop out when you narrow to a different one.
+    const chatsApply = showAll || branchFilter === (currentBranch ?? "");
+    const managerRows: ListRow[] = (chatsApply ? managerSessions : []).map(
+      (summary) => ({
+        kind: "manager" as const,
+        key: `manager:${summary.id}`,
+        timestamp: managerSessionTimestamp(summary),
+        summary,
+      }),
+    );
 
     const all = [...intentRows, ...managerRows].sort(
       (a, b) => b.timestamp - a.timestamp,
@@ -495,7 +612,32 @@ export function SessionsPane({
     }
     // Map preserves insertion order, and we inserted in newest-first order.
     return [...byDay.values()];
-  }, [rows, claudeSessions, managerSessions]);
+  }, [rows, claudeSessions, managerSessions, branchFilter, currentBranch]);
+
+  // Every branch that actually wrote something in this feed, current one
+  // first, then the rest alphabetically. Built from the rows themselves so the
+  // filter only ever offers choices that would return something.
+  const branches = useMemo(() => {
+    const seen = new Set<string>();
+    for (const r of rows) {
+      const b = r.branch?.trim();
+      if (b) seen.add(b);
+    }
+    const rest = [...seen]
+      .filter((b) => b !== currentBranch)
+      .sort((a, b) => a.localeCompare(b));
+    return currentBranch && seen.has(currentBranch)
+      ? [currentBranch, ...rest]
+      : rest;
+  }, [rows, currentBranch]);
+
+  // A filter pinned to a branch that has since fallen out of the window would
+  // silently show an empty list. Fall back to everything.
+  useEffect(() => {
+    if (branchFilter !== ALL_BRANCHES && !branches.includes(branchFilter)) {
+      setBranchFilter(ALL_BRANCHES);
+    }
+  }, [branches, branchFilter]);
 
   // Count the entries the list actually shows (post-collapse), not raw rows —
   // so the header reads "12 sessions", matching what's on screen.
@@ -526,18 +668,39 @@ export function SessionsPane({
             </span>
           )}
         </div>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          type="button"
-          onClick={() => void load()}
-          disabled={loading}
-          className="text-text-3 hover:text-text-1"
-          title="Refresh sessions"
-          aria-label="Refresh sessions"
-        >
-          <RefreshIcon />
-        </Button>
+        <div className="flex shrink-0 items-center gap-1">
+          {/* Only worth showing once there's more than one branch to choose
+              between — on a single-branch repo it's pure noise. */}
+          {branches.length > 1 ? (
+            <select
+              value={branchFilter}
+              onChange={(e) => setBranchFilter(e.target.value)}
+              title="Show work from one branch"
+              aria-label="Filter sessions by branch"
+              className="max-w-[9rem] truncate rounded border border-line-soft bg-transparent px-1.5 py-0.5 text-xs text-text-3 outline-none hover:text-text-1 focus:border-accent"
+            >
+              <option value={ALL_BRANCHES}>All branches</option>
+              {branches.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                  {b === currentBranch ? " (this one)" : ""}
+                </option>
+              ))}
+            </select>
+          ) : null}
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            type="button"
+            onClick={() => void load()}
+            disabled={loading}
+            className="text-text-3 hover:text-text-1"
+            title="Refresh sessions"
+            aria-label="Refresh sessions"
+          >
+            <RefreshIcon />
+          </Button>
+        </div>
       </div>
 
       {/* List */}
@@ -552,11 +715,26 @@ export function SessionsPane({
         ) : loading && total === 0 ? (
           <LoadingState label="Reading your sessions…" />
         ) : total === 0 ? (
-          <EmptyState
-            icon={History}
-            title="No sessions yet"
-            body="Every run you or an agent makes is kept here. What was asked, what changed, and why. Nothing is written down until the first one happens."
-          />
+          branchFilter === ALL_BRANCHES ? (
+            <EmptyState
+              icon={History}
+              title="No sessions yet"
+              body="Every run you or an agent makes is kept here. What was asked, what changed, and why. Nothing is written down until the first one happens."
+            />
+          ) : (
+            // Narrowed to a branch that has nothing in the window. Saying "no
+            // sessions yet" here would be a lie about the project rather than
+            // about the filter, so it says which and offers the way out.
+            <EmptyState
+              icon={History}
+              title={`Nothing on ${branchFilter}`}
+              body="No work has been recorded on that branch inside this window."
+              action={{
+                label: "Show every branch",
+                onClick: () => setBranchFilter(ALL_BRANCHES),
+              }}
+            />
+          )
         ) : (
           groups.map((group) => {
             const isCollapsed = !!collapsed[group.key];
@@ -601,6 +779,7 @@ export function SessionsPane({
                           display={r.display}
                           sessions={claudeSessions}
                           nowSecs={nowSecs}
+                          currentBranch={currentBranch}
                           onOpen={onOpenSession}
                         />
                       ),

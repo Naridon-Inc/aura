@@ -12,6 +12,8 @@ import { GitBranch } from "lucide-react";
 import { api } from "../../../lib/api";
 import { worktreeParentName } from "../../../lib/workspaceLabel";
 import { CloudGlyph } from "../../ui/cloud-glyph";
+import { chatPlace, chatPlaceSentence } from "./chatPlace";
+import { getActiveWorkspaceRoot } from "../../../lib/editorStore";
 
 /** A single suggestion starter: leading glyph, short label, prefill prompt. */
 interface Suggestion {
@@ -182,9 +184,13 @@ const DEFAULT_BRANCHES = new Set(["main", "master"]);
 
 /** Turn a branch name into plain words: drop the leading `work/`, `lane/`, or
  *  `feat/` namespace, then dashes/underscores → spaces. `work/fix-login` reads
- *  as "fix login". Falls back to the raw name if there's nothing to humanize. */
+ *  as "fix login". A lane keeps the agent in its own segment
+ *  (`lane/claude/fix-login`), which is machinery too — the words are the part
+ *  after it. Falls back to the raw name if there's nothing to humanize. */
 function humanizeBranch(branch: string): string {
-  const tail = branch.replace(/^(work|lane|feat|feature|fix|chore)\//, "");
+  const tail = branch
+    .replace(/^lane\/[^/]+\//, "")
+    .replace(/^(work|lane|feat|feature|fix|chore)\//, "");
   const words = tail.replace(/[-_]+/g, " ").trim();
   return words || branch;
 }
@@ -209,18 +215,27 @@ interface ChatContext {
  *  `null` while loading, when there's no repo root, or when we're on the shared
  *  trunk (main/master) — in which case the caller shows the plain welcome with
  *  no context card. */
-function useChatContext(repoRoot?: string): ChatContext | null {
+function useChatContext(repoRoot?: string): {
+  ctx: ChatContext | null;
+  /** Whether the folder answered at all. `null` until we know — an unfinished
+   *  read must not be reported as a folder that has gone. */
+  reachable: boolean | null;
+} {
   const [ctx, setCtx] = React.useState<ChatContext | null>(null);
+  const [reachable, setReachable] = React.useState<boolean | null>(null);
 
   React.useEffect(() => {
     if (!repoRoot) {
       setCtx(null);
+      setReachable(null);
       return;
     }
     let cancelled = false;
+    setReachable(null);
     void (async () => {
       try {
         const branch = (await api.gitBranch(repoRoot)).trim();
+        if (!cancelled) setReachable(true);
         // On the shared trunk there's no "copy" to describe — stay plain.
         if (!branch || DEFAULT_BRANCHES.has(branch)) {
           if (!cancelled) setCtx(null);
@@ -246,7 +261,12 @@ function useChatContext(repoRoot?: string): ChatContext | null {
         }
         if (!cancelled) setCtx({ branch, base });
       } catch {
-        if (!cancelled) setCtx(null);
+        // The folder did not answer: deleted, renamed, or no longer a repo.
+        // A chat bound to it cannot run, which is worth saying out loud.
+        if (!cancelled) {
+          setCtx(null);
+          setReachable(false);
+        }
       }
     })();
     return () => {
@@ -254,7 +274,7 @@ function useChatContext(repoRoot?: string): ChatContext | null {
     };
   }, [repoRoot]);
 
-  return ctx;
+  return { ctx, reachable };
 }
 
 /** The working-copy note, compact: a single quiet line (muted branch icon +
@@ -316,7 +336,17 @@ export function ChatEmptyState({
   // The local working-copy line is read from this laptop's git. On a
   // conversation whose hands are on a box that would be a confident sentence
   // about the wrong checkout, so we don't ask for it at all.
-  const ctx = useChatContext(machineName ? undefined : repoRoot);
+  const { ctx, reachable } = useChatContext(machineName ? undefined : repoRoot);
+
+  // Where this chat's hands are, against where the window is standing. A chat
+  // runs in the project it was started against, which is right and was also
+  // silent: on 2026-08-23 the sidebar said `zagreb` and this surface described
+  // `managua`, a worktree that had already been deleted. Home launches agent
+  // work, so the reader has to be told before they send a prompt.
+  const place = machineName
+    ? ({ kind: "same" } as const)
+    : chatPlace(repoRoot, getActiveWorkspaceRoot(), reachable);
+  const placeLine = chatPlaceSentence(place);
 
   return (
     <div className="flex flex-col items-start gap-3 px-6 pt-10 pb-2 select-none">
@@ -335,11 +365,22 @@ export function ChatEmptyState({
         <div className="mt-0.5">
           <MachineNote machineName={machineName} />
         </div>
-      ) : ctx ? (
+      ) : ctx && place.kind === "same" ? (
         <div className="mt-0.5">
           <ChatContextNote ctx={ctx} projectLabel={projectLabel} repoRoot={repoRoot} />
         </div>
       ) : null}
+      {/* Said instead of the working-copy line, never beside it: two sentences
+          naming two different places is the confusion this is here to end. */}
+      {placeLine && (
+        <div
+          className="mt-0.5 inline-flex items-center gap-1.5 text-sm leading-snug"
+          style={{ color: "var(--color-text-3)" }}
+        >
+          <GitBranch size={12} style={{ color: "var(--color-text-4)" }} aria-hidden />
+          <span>{placeLine}</span>
+        </div>
+      )}
     </div>
   );
 }

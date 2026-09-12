@@ -43,7 +43,7 @@
 // of the six that did. Both come off one table here, so a new agent is added
 // in one place and cannot arrive with a vendor but no product name.
 
-import { titleCaseName } from "./textCase";
+import { titleCaseName } from "@shared/textCase";
 
 type AgentEntry = {
   /** The product a person picked, as its makers spell it. */

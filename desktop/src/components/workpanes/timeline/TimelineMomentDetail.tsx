@@ -17,7 +17,7 @@
 
 import { useEffect, useState } from "react";
 import { AgentBadge } from "../../agent/AgentBadge";
-import { intentTypeChip } from "../../../lib/intentTypeLabels";
+import { intentTypeChip } from "@shared/intentTypeLabels";
 import {
   cumulativeAt,
   momentStamp,
@@ -70,6 +70,7 @@ export function TimelineMomentDetail({
   index,
   nowSecs,
   onOpenSession,
+  onRestoreFile,
 }: {
   model: TimelineModel;
   index: number;
@@ -79,6 +80,10 @@ export function TimelineMomentDetail({
   /** Jump to this moment's full Trace Session detail (transcript, changes,
    *  attestation). Omitted → the affordance is hidden. */
   onOpenSession?: () => void;
+  /** Bring a file back to how it was: opens the Time machine scoped to this
+   *  file, where the snapshot-backed restore lives (confirm-first, reversible).
+   *  Omitted → the per-file affordance is hidden. */
+  onRestoreFile?: (path: string) => void;
 }) {
   const moment = model.moments[index];
 
@@ -256,6 +261,21 @@ export function TimelineMomentDetail({
                         <span className="text-[var(--color-accent)]">+{f.additions}</span>{" "}
                         <span className="text-red-400">−{f.deletions}</span>
                       </span>
+                    )}
+                    {/* W4 — rewind from the scrubber. A removed file has no
+                        current version to travel from, but its snapshots are
+                        exactly what the Time machine holds, so the affordance
+                        stays for every row. The machine owns the confirm and
+                        the actual restore; this only takes you there. */}
+                    {onRestoreFile && (
+                      <button
+                        type="button"
+                        onClick={() => onRestoreFile(f.path)}
+                        title="Open this file in the Time machine to bring back an earlier version"
+                        className="shrink-0 rounded-md border border-line-soft px-2 py-0.5 text-2xs text-text-3 transition-colors hover:border-[color-mix(in_oklab,var(--color-accent)_45%,transparent)] hover:text-text-1"
+                      >
+                        Bring back…
+                      </button>
                     )}
                   </li>
                 );

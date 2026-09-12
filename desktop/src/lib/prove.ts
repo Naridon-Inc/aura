@@ -13,7 +13,7 @@
 // tested. This module is the two bridges and the plain-language wording.
 
 import { api } from "./api";
-import { sentenceCase } from "./textCase";
+import { sentenceCase } from "@shared/textCase";
 import { parseProveOutput, verdictOf } from "./proveReport";
 
 export {

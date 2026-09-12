@@ -9,7 +9,7 @@ import type {
   ReadyViewDto,
   RunRecord,
 } from "../../../lib/api";
-import { sentenceCase } from "../../../lib/textCase";
+import { sentenceCase } from "@shared/textCase";
 import { WORK_STATE } from "../../../lib/workState";
 
 /** Turn a goal slug (`spot-unusual-numbers`) into a human title

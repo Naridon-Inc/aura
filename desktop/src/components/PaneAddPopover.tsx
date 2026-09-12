@@ -13,6 +13,7 @@
 import { useRef } from "react";
 
 import {
+  focusOrAppendRef,
   useEditorStore,
   type WorkPaneRef,
   type WorkSplitLeaf,
@@ -25,7 +26,10 @@ export function PaneAddPopover({
   currentRepoRoot,
   onClose,
 }: {
-  leaf: WorkSplitLeaf;
+  /** The pane the pick lands in. Absent on the no-layout strip — the state
+   *  with no tabs at all — where the pick seeds a fresh layout instead, so
+   *  an empty tab bar is never a dead end. */
+  leaf?: WorkSplitLeaf;
   currentRepoRoot: string;
   onClose: () => void;
 }) {
@@ -47,8 +51,10 @@ export function PaneAddPopover({
       <Launcher
         className="max-h-[460px]"
         currentRepoRoot={currentRepoRoot}
-        present={leaf.tabs}
-        place={(r: WorkPaneRef) => store.addTabToPane(leaf.paneId, r)}
+        present={leaf?.tabs ?? []}
+        place={(r: WorkPaneRef) =>
+          leaf ? store.addTabToPane(leaf.paneId, r) : focusOrAppendRef(r)
+        }
         autoFocus
         onPicked={onClose}
       />

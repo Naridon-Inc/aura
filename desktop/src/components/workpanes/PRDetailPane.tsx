@@ -35,6 +35,7 @@ import {
   type PrFileStat,
 } from "../../lib/api";
 import { fetchPrList } from "../../lib/prsCache";
+import { prCommentPostIssue } from "../../lib/prApi";
 import { humanizeFindingText } from "../../lib/humanizeFinding";
 import {
   noFindingsLine,
@@ -858,7 +859,7 @@ function PrConversation({
     setBusy(true);
     setError(null);
     try {
-      await api.prCommentPostIssue(repoRoot, prNumber, text);
+      await prCommentPostIssue(repoRoot, prNumber, text);
       setBody("");
       onPosted();
     } catch (e) {

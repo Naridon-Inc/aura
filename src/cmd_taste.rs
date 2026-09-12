@@ -630,8 +630,13 @@ fn push(repo_full_name: Option<&str>, all: bool, json: bool) -> Result<(), Box<d
     let (cloud_url, token) = crate::recall_cloud_creds().map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let client = crate::cloud_http_client();
     let url = format!("{}/api/v2/memory", cloud_url.trim_end_matches('/'));
+    // One bundle per repo, replaced in place. The endpoint keys on
+    // entry_id, so a fixed id means pushing the rules again corrects the
+    // team's copy instead of stacking another bundle behind it — which is
+    // what `pull` wants, since it reads a single current answer.
     let req = serde_json::json!({
         "body": body_text,
+        "entry_id": "taste-rules",
         "title": format!("taste-rules:{}", handle),
         "kind": "taste_rules",
         "repo_full_name": handle,
@@ -677,16 +682,23 @@ fn pull(repo_full_name: Option<&str>, dry_run: bool, json: bool) -> Result<(), B
         .cloned()
         .unwrap_or_default();
 
-    // Find the most recent entry tied to this repo.
-    let mut newest: Option<(u64, String)> = None;
+    // Find the most recent entry tied to this repo. Both stamps arrive as
+    // RFC3339 strings, so they are parsed rather than read as numbers — the
+    // earlier `as_u64` read every one of them as zero, which left the choice
+    // between two bundles to whichever the server happened to list last.
+    let stamp = |e: &serde_json::Value, field: &str| -> Option<i64> {
+        e.get(field)
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.timestamp())
+    };
+    let mut newest: Option<(i64, String)> = None;
     for e in &entries {
         let entry_handle = e.get("repo_full_name").and_then(|v| v.as_str()).unwrap_or("");
         if entry_handle != handle {
             continue;
         }
-        let ts = e.get("updated_at").and_then(|v| v.as_u64())
-            .or_else(|| e.get("created_at").and_then(|v| v.as_u64()))
-            .unwrap_or(0);
+        let ts = stamp(e, "updated_at").or_else(|| stamp(e, "created_at")).unwrap_or(0);
         let body_str = e.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if newest.as_ref().map_or(true, |(t, _)| ts >= *t) {
             newest = Some((ts, body_str));

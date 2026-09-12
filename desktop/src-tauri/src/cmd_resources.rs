@@ -25,6 +25,17 @@ pub struct ResourceSnapshot {
     pub aura_memory_mb: u64,
     /// Per-process rows the UI renders as a tree (main app + agents).
     pub processes: Vec<ProcessRow>,
+    /// Bytes still free on the volume the workspace lives on — the one an
+    /// agent's copies, caches and build output land on. Zero when the
+    /// volume could not be asked, which the UI reads as "unknown", never as
+    /// "empty".
+    pub disk_free_bytes: u64,
+    /// That volume's size. Zero when unknown.
+    pub disk_total_bytes: u64,
+    /// The folder Aura keeps every agent's copy of a project in — the one
+    /// that grows unwatched, and the one a "clean up" should open. Empty
+    /// when HOME is unset.
+    pub copies_root: String,
 }
 
 #[derive(Serialize)]
@@ -37,8 +48,24 @@ pub struct ProcessRow {
 
 static SYS: Mutex<Option<System>> = Mutex::new(None);
 
+/// `async` deliberately (UI-01): a non-async Tauri command runs ON the
+/// macOS main thread, and this one walks the entire process table — a
+/// multi-ms scan the popover polls every 2s, i.e. periodic NSWindow
+/// jank at best and, stacked behind a busy runloop, part of a wedge at
+/// worst. As `async` it runs on the runtime's thread pool; the renderer
+/// awaits the same payload it always did.
+///
+/// `root` is the open workspace, whose volume the disk figures describe.
+/// Without one the figures are for wherever Aura keeps its managed copies
+/// (`~/.aura/worktrees`), which is where an agent's writes go.
 #[tauri::command]
-pub fn resource_snapshot() -> Result<ResourceSnapshot, String> {
+pub async fn resource_snapshot(root: Option<String>) -> Result<ResourceSnapshot, String> {
+    let copies_root = crate::worktree::managed_root();
+    let (disk_free_bytes, disk_total_bytes) =
+        disk_figures(root.as_deref(), copies_root.as_deref());
+    let copies_root = copies_root
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut guard = SYS.lock().map_err(|e| e.to_string())?;
     if guard.is_none() {
         let refresh = RefreshKind::new()
@@ -113,5 +140,71 @@ pub fn resource_snapshot() -> Result<ResourceSnapshot, String> {
         app_share_percent: app_share,
         aura_memory_mb: aura_total_kb / 1024 / 1024,
         processes: rows,
+        disk_free_bytes,
+        disk_total_bytes,
+        copies_root,
     })
+}
+
+/// `(free, total)` in bytes for the volume holding `root`, or the managed
+/// copies root, or the home directory — the first that exists. `(0, 0)`
+/// when none can be measured; the renderer treats zero as unknown.
+///
+/// Walks up from the path rather than requiring it to exist: a workspace
+/// whose folder was just moved still sits on some volume, and its parent
+/// answers for it.
+fn disk_figures(root: Option<&str>, copies_root: Option<&std::path::Path>) -> (u64, u64) {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(r) = root.map(str::trim).filter(|r| !r.is_empty()) {
+        candidates.push(std::path::PathBuf::from(r));
+    }
+    if let Some(c) = copies_root {
+        candidates.push(c.to_path_buf());
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(std::path::PathBuf::from(home));
+    }
+    for start in candidates {
+        let mut cursor: Option<&std::path::Path> = Some(start.as_path());
+        while let Some(p) = cursor {
+            if p.exists() {
+                if let Some(figures) = volume_figures(p) {
+                    return figures;
+                }
+                break;
+            }
+            cursor = p.parent();
+        }
+    }
+    (0, 0)
+}
+
+/// Ask the OS about the volume at `path`. `statvfs` rather than a sysinfo
+/// `Disks` walk: the crate is built with only its `system` feature here,
+/// and one syscall on one path is all the question needs.
+#[cfg(unix)]
+fn volume_figures(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c = CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `statvfs` is zeroable plain data, and the pointer we hand the
+    // syscall points at a live local for the duration of the call.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c.as_ptr(), &mut st) };
+    if rc != 0 {
+        return None;
+    }
+    // Fragment size is the unit both counts are in; some filesystems report
+    // 0 for it and mean the block size.
+    let unit = if st.f_frsize > 0 { st.f_frsize } else { st.f_bsize } as u64;
+    // `f_bavail` is what an unprivileged writer gets, which is what an agent
+    // is; `f_bfree` counts the root-reserved slice too and would overstate it.
+    let free = (st.f_bavail as u64).saturating_mul(unit);
+    let total = (st.f_blocks as u64).saturating_mul(unit);
+    Some((free, total))
+}
+
+#[cfg(not(unix))]
+fn volume_figures(_path: &std::path::Path) -> Option<(u64, u64)> {
+    None
 }

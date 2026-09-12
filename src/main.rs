@@ -3,6 +3,9 @@ mod models;
 mod parser;
 mod hook;
 mod enable;
+mod cmd_commands;
+mod cmd_migrate;
+mod agent_integrations;
 mod checkpoint;
 mod watcher;
 mod server;
@@ -11,6 +14,7 @@ mod arbitrator;
 mod task;
 mod aura_loop_run;
 mod loop_accept;
+mod crew_push;
 mod loop_stranded;
 mod loop_worktree;
 mod runner;
@@ -23,10 +27,12 @@ mod work;
 mod worktree_scripts;
 mod repo_settings;
 mod board;
+mod ask_local;
 mod goals;
 mod activity;
 mod stub;
 pub mod config;
+pub mod cloud_endpoint;
 mod ecosystem;
 mod lsp;
 mod gsd;
@@ -37,17 +43,31 @@ mod linear;
 mod exporter;
 mod security;
 mod sync;
+mod repo_slug;
+mod commit_mirror;
+mod redact_paths;
+mod intent_sync;
+mod transcript_sync;
+mod subagents;
+mod cmd_sessions;
 mod session;
+mod sessions_from_intents;
 mod plugin;
 mod plugins;
 mod cmd_plugin_dev;
 mod cmd_plugin_marketplace;
 mod live_events;
+mod live_impacts;
 mod live_sync;
 mod live_conflicts;
 mod agents;
 mod awareness;
 mod worktree;
+// AURA-1295 — agents drive cloud workspaces (CLI + MCP share one client).
+pub mod workspace_api;
+mod mcp_workspace;
+// end AURA-1295
+mod version_contract;
 
 /// Shared serial lock for tests that mutate the process-global current
 /// directory (the CRDT and conflict stores are cwd-relative). Tests in
@@ -55,10 +75,22 @@ mod worktree;
 #[cfg(test)]
 pub(crate) static TEST_CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod sentinel;
+mod edit_reason;
+mod agent_session;
+mod history;
+mod dispatch;
+mod import_history;
+mod dialects_cmd;
+mod recap;
+mod why;
 mod embeddings;
 mod memory;
+mod token_ab;
 mod usage;
+mod trace_symbol;
+mod usage_attrib;
 mod usage_by_dev;
+mod usage_push;
 mod plan_tracker;
 mod host;
 mod host_db;
@@ -79,6 +111,19 @@ mod outbox;
 mod pr_cmd;
 mod resolve;
 mod callgraph;
+mod context_slice;
+mod graph_ops;
+mod graph_store;
+mod edge_delta;
+mod scope;
+mod grants;
+mod authority;
+mod rewind_txn;
+mod rewind_search;
+// What a recovery would do, said before it does it — the preview, the refusal
+// to guess at a name that means two things, and the way back out of a rewind.
+mod rewind_plan;
+mod function_history;
 mod entrypoints;
 mod impact;
 mod change_note;
@@ -91,6 +136,10 @@ mod rekor;
 mod intent_block;
 mod intent_reconcile;
 mod deletion_guard;
+// Whether every file in a commit carries a reason somebody wrote — the gate
+// that asks, rather than letting the hook's "no reason was stated" stub ride
+// through and be discovered later by a reader.
+mod why_gate;
 // Keeps the pre-commit gates from wedging a commit: prompts that never block
 // when nobody can answer, and a time ceiling that works without `timeout(1)`.
 mod hook_guard;
@@ -102,6 +151,7 @@ pub use aura_attestation::team_keys;
 mod block_adapter;
 mod episodic;
 mod recall_narrate;
+mod intent_log;
 mod intent_query;
 mod intent_vs_actual;
 // Staged intent verification — the approved contract recorded BEFORE the agent
@@ -117,6 +167,7 @@ mod cmd_taste;
 // Semantic CI — gathers the GateContext (staged AstNodes, goal/intent/taste
 // facts, the build_verify runner) and drives the aura-ci pipeline engine.
 mod ci;
+mod tool_normalize;
 mod validate_tool;
 mod skill_rank;
 mod skills;
@@ -131,8 +182,40 @@ mod push_credential;
 mod repo_identity;
 mod meta_bundle;
 mod refs_sign;
+mod refs_quorum;
 mod merge_driver;
 mod text;
+mod cmd_access;
+mod safety_snapshot;
+mod intent_alignment;
+
+/// The most recent `aura log-intent` row: its prose and the files it
+/// declared (`--writes`). The commit hook reads this alongside the commit
+/// message, because a reason worth logging is a reason worth reading.
+fn read_latest_logged_intent() -> (Option<String>, Vec<String>) {
+    let log = match std::fs::read_to_string(".aura/intent_log.jsonl") {
+        Ok(l) => l,
+        Err(_) => return (None, Vec::new()),
+    };
+    let last = match log.lines().filter(|l| !l.trim().is_empty()).next_back() {
+        Some(l) => l,
+        None => return (None, Vec::new()),
+    };
+    let entry: serde_json::Value = match serde_json::from_str(last) {
+        Ok(e) => e,
+        Err(_) => return (None, Vec::new()),
+    };
+    let prose = entry["intent"].as_str().map(|s| s.to_string());
+    let writes = entry["writes_paths"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    (prose, writes)
+}
 
 use clap::{Parser, Subcommand};
 use parser::SemanticParser;
@@ -370,14 +453,37 @@ fn check_for_updates() -> Option<String> {
         .build().ok()?;
 
     let res = client.get("https://api.github.com/repos/Naridon-Inc/aura/releases/latest")
-        .send().ok()?;    
+        .send().ok()?;
     let json: serde_json::Value = res.json().ok()?;
     let latest_version = json["tag_name"].as_str()?.trim_start_matches('v').to_string();
-    
-    if latest_version != CURRENT_VERSION {
+
+    // Strictly newer only. `!=` treated any mismatch as an update, so a
+    // yanked/rolled-back release told every up-to-date install to "upgrade"
+    // into a downgrade. An unparseable tag never wins.
+    if version_is_newer(&latest_version, CURRENT_VERSION) {
         Some(latest_version)
     } else {
         None
+    }
+}
+
+/// True when `candidate` is a strictly newer semver triple than `current`.
+/// Hand-rolled (no semver crate in-tree): split on '.', compare numerically,
+/// ignore any pre-release/build suffix on the last component.
+fn version_is_newer(candidate: &str, current: &str) -> bool {
+    fn triple(v: &str) -> Option<[u64; 3]> {
+        let mut out = [0u64; 3];
+        let mut parts = v.split('.');
+        for slot in out.iter_mut() {
+            let part = parts.next()?;
+            let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+            *slot = digits.parse().ok()?;
+        }
+        Some(out)
+    }
+    match (triple(candidate), triple(current)) {
+        (Some(c), Some(cur)) => c > cur,
+        _ => false,
     }
 }
 
@@ -385,8 +491,10 @@ fn run_passive_update_check() {
     let mut config = ConfigManager::load();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     
-    // Check every 24 hours (86400 seconds)
-    if now - config.last_update_check > 86400 {
+    // Check every 24 hours (86400 seconds). Saturating: a last_update_check
+    // stamped by a machine whose clock ran ahead would otherwise underflow
+    // u64 and panic in debug builds.
+    if now.saturating_sub(config.last_update_check) > 86400 {
         config.last_update_check = now;
         let _ = ConfigManager::save(&config);
         
@@ -482,19 +590,36 @@ fn perform_update() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("{} Aura updated successfully to v{}!", "✓".green().bold(), new_version);
 
-            // Refresh integrations (CLAUDE.md, hooks) in current repo
+            // Refresh integrations (CLAUDE.md, hooks) in current repo —
+            // only what this repo's manifest says was installed (REL-04);
+            // an update must not re-install what nobody opted into.
             refresh_integrations();
-            // Install/update status line on every update
-            install_claude_statusline();
+            refresh_owned_integrations();
         }
     } else {
         println!("{} Aura is already up to date (v{}).", "✓".green().bold(), CURRENT_VERSION);
 
         // Still refresh integrations in case the template changed
         refresh_integrations();
-        install_claude_statusline();
+        refresh_owned_integrations();
     }
     Ok(())
+}
+
+/// Re-run installs for the agents this repo's integration manifest records —
+/// idempotent, and a no-op for repos that never opted in. Replaces the old
+/// unconditional `install_claude_statusline()` on every update, which rewrote
+/// `~/.claude/settings.json` for users who never selected Claude Code.
+fn refresh_owned_integrations() {
+    if let Some(ctx) = agent_integrations::InstallCtx::current() {
+        match agent_integrations::refresh_installed(&ctx) {
+            Ok(lines) if !lines.is_empty() => {
+                println!("{} Refreshed agent integrations from the manifest.", "✓".green().bold());
+            }
+            Ok(_) => {}
+            Err(e) => println!("{} Integration refresh failed: {}", "⚠️".yellow(), e),
+        }
+    }
 }
 
 /// Refresh CLAUDE.md and other integration files with the latest Aura block.
@@ -582,11 +707,13 @@ worktrees/
 live/
 .intent_logged
 last_review.json
+integrations.json
 ";
 
     // Write if missing or outdated
     let needs_update = if let Ok(existing) = fs::read_to_string(&gitignore_path) {
-        !existing.contains("orchestrate/")  // old version without orchestrate
+        // old versions without orchestrate or the integrations manifest
+        !existing.contains("orchestrate/") || !existing.contains("integrations.json")
     } else {
         true
     };
@@ -594,6 +721,38 @@ last_review.json
     if needs_update {
         let _ = fs::write(&gitignore_path, desired);
     }
+}
+
+/// Read `--agents` into indices of `agents`.
+///
+/// Case- and space-insensitive, so `--agents claude-code,GeminiCLI` works;
+/// `all` and `none` are the two words that mean what they say. Returns the
+/// first name it could not place, because telling someone four names are wrong
+/// when one is a typo helps nobody.
+fn parse_agent_choice(list: &str, agents: &[&str]) -> Result<Vec<usize>, String> {
+    let norm = |s: &str| s.to_lowercase().replace([' ', '-', '_'], "");
+    let mut out: Vec<usize> = Vec::new();
+    for raw in list.split(',') {
+        let want = norm(raw);
+        if want.is_empty() {
+            continue;
+        }
+        if want == "none" {
+            return Ok(Vec::new());
+        }
+        if want == "all" {
+            return Ok((0..agents.len()).collect());
+        }
+        match agents.iter().position(|a| norm(a) == want) {
+            Some(i) => {
+                if !out.contains(&i) {
+                    out.push(i);
+                }
+            }
+            None => return Err(raw.trim().to_string()),
+        }
+    }
+    Ok(out)
 }
 
 /// Install Aura status line script for Claude Code.
@@ -633,12 +792,21 @@ fn install_claude_statusline() {
         return;
     }
 
-    // Log what we're replacing so users can debug
+    // ~/.claude/settings.json is the user's, global, and shared by every
+    // repository they open. A status line they configured is a choice they
+    // made, and silently replacing it from a per-repo `aura init` is the kind
+    // of thing that makes people distrust a setup command. Say where ours is
+    // and leave theirs alone.
     if !current_cmd.is_empty() {
-        println!("    {} Replacing existing status line: {}", "ℹ".blue(), current_cmd.dimmed());
+        println!("    {} You already have a status line, so Aura left it alone.", "ℹ".blue());
+        println!(
+            "      {} To use Aura's instead, set statusLine.command to {}",
+            "↳".dimmed(),
+            aura_cmd.cyan()
+        );
+        return;
     }
 
-    // Overwrite whatever was there — our script is the status line
     settings["statusLine"] = serde_json::json!({
         "type": "command",
         "command": aura_cmd
@@ -659,6 +827,7 @@ fn install_claude_statusline() {
 
     Aura tracks mathematical logic instead of textual lines, allowing you to mathematically
     verify AI intent, surgically rewind hallucinations, and coordinate massive code generation.",
+    after_help = "COMMANDS ARE ORGANIZED INTO THREE VERBS:\n  Trace    capture, understand, and rewind your code's real history\n  Crew     plan and execute work with agents\n  Control  policy, governance, and access\n\nOnly the everyday commands are shown above. Run `aura commands` for the full\nreference grouped the same way, or `aura <command> --help` for any one.",
     version = CURRENT_VERSION,    styles = clap::builder::Styles::styled()
         .header(clap::builder::styling::AnsiColor::Cyan.on_default().bold())
         .usage(clap::builder::styling::AnsiColor::Cyan.on_default().bold())
@@ -680,6 +849,21 @@ enum Commands {
         /// Force a baseline scan of the entire project (bypasses intent check)
         #[arg(long)]
         force_baseline: bool,
+        /// Which agent integrations to wire up, comma separated — the way to
+        /// answer the wizard's first question without a terminal. Names match
+        /// the wizard's list ("claude code", "gemini cli", …); `all` takes
+        /// every one, `none` takes none. Without it a non-interactive run
+        /// installs no integrations at all, because a script that never saw
+        /// the question has not answered it.
+        #[arg(long, value_name = "LIST")]
+        agents: Option<String>,
+    },
+    /// The full command reference, grouped by Trace · Crew · Control
+    #[command(name = "commands")]
+    CommandsRef {
+        /// Include internal plumbing commands too
+        #[arg(long)]
+        all: bool,
     },
     /// Turn on passive semantic capture — the no-MCP, no-wizard drop-in.
     /// Installs Aura's git hooks so every commit records a semantic
@@ -709,6 +893,19 @@ enum Commands {
         /// Wipe the local AI chat history of this hallucination
         #[arg(long)]
         amnesia: bool,
+        /// Work the whole recovery out and show what would change, without
+        /// writing anything. The one verb whose job is undoing a change you
+        /// did not want should not be the one you have to run blind.
+        #[arg(long)]
+        preview: bool,
+        /// Emit the answer as JSON for another surface to draw. Implies the
+        /// quiet output — a banner in the middle of a machine's input is a bug.
+        #[arg(long)]
+        json: bool,
+        /// Put back what the last rewind of this piece displaced, from the
+        /// safety snapshot that rewind took before it wrote.
+        #[arg(long)]
+        undo: bool,
     },
     /// Generate a dense, token-optimized XML context block to pass to another AI agent
     Handover {
@@ -722,6 +919,10 @@ enum Commands {
         /// memory: anchored turns + last K=24 working turns.
         #[arg(long, value_name = "ID")]
         manager_session: Option<String>,
+        /// Emit the full-fidelity payload (200-turn transcript, uncapped
+        /// manager continuum). Default is the compact semantic profile.
+        #[arg(long)]
+        full: bool,
     },
     /// View current gatekeeper status, semantic checkpoints, and configuration
     Status,
@@ -735,12 +936,128 @@ enum Commands {
     },
     /// Audit the Git history for unsanctioned code pushed without AI intent verification
     Audit,
+    /// One readable document of what the agents did — to send, not to scroll
+    ///
+    /// Pick a window, some repos and a branch, and get the week assembled:
+    /// what changed at the symbol level, the intent each agent declared, the
+    /// prompt the person actually typed, and the goals it proved. `--markdown`
+    /// or `--out FILE` gives the shareable form.
+    Dispatch {
+        /// The window: `1d`, `1w`, `30d`, or `2026-01-01`
+        #[arg(long)]
+        since: Option<String>,
+        /// Comma-separated repository paths; defaults to this one
+        #[arg(long)]
+        repos: Option<String>,
+        /// Branch to read; defaults to the one each repo is on
+        #[arg(long)]
+        branch: Option<String>,
+        /// Emit the whole assembly as JSON
+        #[arg(long)]
+        json: bool,
+        /// Print the shareable markdown instead of the terminal view
+        #[arg(long)]
+        markdown: bool,
+        /// Write the markdown to a file
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// What you did, what the team did, and how that is trending
+    ///
+    /// A recap is read by somebody coming back — after a weekend, a sprint, a
+    /// quarter — so it reports cadence rather than volume: how often work
+    /// comes back to the same file, how long it takes to land, and which
+    /// files you have open that somebody else has changed underneath you.
+    Recap {
+        /// The last day
+        #[arg(long, group = "recap_window")]
+        day: bool,
+        /// The last week (the default)
+        #[arg(long, group = "recap_window")]
+        week: bool,
+        /// The last month
+        #[arg(long, group = "recap_window")]
+        month: bool,
+        /// The last 90 days
+        #[arg(long = "90", group = "recap_window")]
+        ninety: bool,
+        /// Whose work: `you`, `team` or `both`
+        #[arg(long, default_value = "both")]
+        view: String,
+        /// Only work this agent declared a reason for: claude, codex, gemini…
+        #[arg(long)]
+        agent: Option<String>,
+        /// Comma-separated repository paths; defaults to this one
+        #[arg(long)]
+        repos: Option<String>,
+        /// Branch to read; defaults to the one each repo is on
+        #[arg(long)]
+        branch: Option<String>,
+        /// Plain, pipeable output: no colour, no relative time
+        #[arg(long)]
+        static_: bool,
+        /// Emit the whole recap as JSON
+        #[arg(long)]
+        json: bool,
+        /// Print the shareable markdown instead of the terminal view
+        #[arg(long)]
+        markdown: bool,
+        /// Write the markdown to a file
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Which agent CLIs Aura can read history from, and why one is missing
+    ///
+    /// Four are built in. Any other agent is a manifest in `~/.aura/dialects/`
+    /// — a JSON file naming where that CLI keeps its transcripts and how to
+    /// recognise a prompt in them. See docs/AGENT_PLUGINS.md.
+    Dialects {
+        /// Emit the table as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Bring in the agent history that happened before Aura was installed
+    ///
+    /// Reads Claude, Codex, Kimi and OpenCode transcripts for work done in this
+    /// repo and writes what was asked into the intent log, so a fresh install
+    /// shows the team's real history instead of an empty console. Safe to run
+    /// again — it resumes where it stopped.
+    Import {
+        /// Only this agent — a built-in (claude, codex, kimi, opencode) or any
+        /// manifest dialect id. `aura dialects` lists what this machine has.
+        #[arg(long)]
+        dialect: Option<String>,
+        /// Only work since then: `30d`, `2w`, `6h`, or `2026-01-01`
+        #[arg(long)]
+        since: Option<String>,
+        /// Report what would be imported and write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Also send the imported rows to the team's cloud
+        #[arg(long)]
+        push: bool,
+        /// Emit the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Why is this line the way it is? Commit + intent + the prompt someone typed
+    ///
+    /// `aura why src/main.rs:120` walks blame → commit → intent row → the agent
+    /// session, and shows what the person actually asked for alongside what the
+    /// agent said it was doing. A bare path answers for the file's last change.
+    Why {
+        /// `path/to/file.rs:120`, or a bare path for its most recent change
+        target: String,
+        /// Emit the finding as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Explain the intent behind code — trace a function back to the AI conversation that created it
     Explain {
-        /// Function or identifier name to explain
+        /// Function or identifier name, or `path/to/file.rs:120` on its own
         identifier: String,
         /// File path containing the identifier
-        file: String,
+        file: Option<String>,
     },
     /// Spawn or list coding-agent subagents (used by the Aura Manager
     /// CLI brain to fan out via Bash). See `aura subagent --help`.
@@ -791,7 +1108,36 @@ enum Commands {
         todos: Vec<String>,
     },
     /// List and manage agent sessions
-    Sessions,
+    Sessions {
+        /// Delete ended session records older than seven days, and their
+        /// transcripts.
+        ///
+        /// Listing used to do this on its own and report the count, so
+        /// `aura sessions` quietly destroyed ten sessions during a
+        /// read-only audit. The capability is worth keeping; doing it
+        /// without being asked is not.
+        #[arg(long)]
+        prune: bool,
+    },
+    /// Tell the cloud this session is still alive.
+    ///
+    /// A terminal session has no process that heartbeats, so the console
+    /// judged it by its last logged intent — and an agent reads, greps,
+    /// builds and drives a browser for half an hour without changing a
+    /// file. The row went quiet while somebody was still typing into it.
+    /// This is the signal that was missing.
+    ///
+    /// Meant for an agent's tool-use hook, so it reads the hook's JSON
+    /// payload from stdin when no `--session` is given, and it **always
+    /// exits 0** — a hook that can fail is a hook people switch off.
+    Beat {
+        /// Session id. Omit to read it from the hook JSON on stdin.
+        #[arg(long)]
+        session: Option<String>,
+        /// Which agent is running, for a session that has no name yet.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+    },
     /// Resume work. With a branch: switch to it and show its session
     /// context. With no branch: consume a cross-agent carryover that a
     /// previous brain injected into this repo's context file (the Track-A
@@ -850,6 +1196,39 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Canonical scope manifest (AUDIT-CAP-01): show this checkout's
+    /// repository/worktree/session identity, print the schema, or migrate
+    /// legacy event rows.
+    Scope {
+        /// Print the machine-readable JSON schema for the scope envelope
+        /// (the contract desktop/cloud/console validate against).
+        #[arg(long)]
+        schema: bool,
+        /// Stamp legacy (pre-scope) rows in .aura/intent_log.jsonl with the
+        /// scope_version:0 migration marker.
+        #[arg(long)]
+        migrate: bool,
+    },
+    /// Bring instructions from other AI IDEs into the shared AGENTS.md every
+    /// agent reads (.cursorrules, .cursor/rules/, .windsurfrules, .clinerules,
+    /// copilot-instructions, GEMINI.md). Reports by default; `--apply` writes.
+    /// Source files are never modified.
+    Migrate {
+        /// Write the imported instructions into AGENTS.md (default is a
+        /// read-only report of what would change).
+        #[arg(long)]
+        apply: bool,
+        /// Machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Signed, expiring human grants for protected operations (AUDIT-SEC-04):
+    /// delete / hard reset / force-push need a grant a human issues at a
+    /// terminal — a logged intent alone never authorizes them.
+    Grant {
+        #[command(subcommand)]
+        action: GrantAction,
+    },
     /// Launch the Aura desktop shell (aura-shell — Tauri 2 superset of aura-term)
     Ui {
         /// Path to the aura-shell binary. Defaults to discovery via PATH then
@@ -904,6 +1283,13 @@ enum Commands {
     Task {
         #[command(subcommand)]
         sub: TaskSubcommands,
+    },
+    /// Ask the semantic graph: find symbols, trace call chains, explain
+    /// a definition — every answer confidence-scored and citing graph
+    /// evidence (node ids, file:line, graph version)
+    Graph {
+        #[command(subcommand)]
+        sub: graph_ops::GraphSubcommands,
     },
     /// Crew — hand a stack of work to your agents and they do it on their own,
     /// in dependency order. `aura crew ready` is the Beads-grade "what can I
@@ -978,6 +1364,15 @@ enum Commands {
         #[arg(long)]
         all: bool,
     },
+    // AURA-1295
+    /// Cloud workspaces for agents — create one on a repo (with the intent
+    /// that asked for it), prompt it, read replies, sleep or archive it.
+    /// Auth: `AURA_API_KEY`, else the signed-in token. Every verb takes `--json`.
+    Workspace {
+        #[command(subcommand)]
+        sub: workspace_api::cmd::WorkspaceCmd,
+    },
+    // end AURA-1295
     /// Show the repo-local Ed25519 identity (`did:aura:key/...`) that signs your
     /// awareness events so they can't be spoofed by another actor.
     Identity {
@@ -1050,6 +1445,13 @@ enum Commands {
         #[command(subcommand)]
         sub: node::NodeSubcommands,
     },
+    /// Agent access control — issue, list and revoke the org's API keys and
+    /// per-agent scope grants (the console's Access page, from the terminal).
+    /// Admin only; runs with your human cloud token, names the org with --org.
+    Access {
+        #[command(subcommand)]
+        sub: cmd_access::AccessSubcommands,
+    },
     /// Portable signed meaning bundle — pack intent + goals + commit provenance
     /// into one JSON file that imports into any clone, verifiable offline.
     /// export / import.
@@ -1113,9 +1515,22 @@ enum Commands {
     /// (Internal) Start the continuous semantic tracker daemon
     #[command(hide = true)]
     Daemon,
-    /// (Internal) Query the Local Brain to understand why past agents wrote code
-    #[command(hide = true)]
-    Ask { #[arg(default_value = "recent")] query: String },
+    /// Ask this repository why it is the way it is. Answers come from what
+    /// was actually recorded here — the intent log and the checkpoint notes —
+    /// ranked so a record naming the file or symbol you asked about always
+    /// beats one that merely reads like your question.
+    Ask {
+        /// A question, a file path, or a symbol. `recent` shows the newest
+        /// records from both stores.
+        #[arg(default_value = "recent")]
+        query: String,
+        /// Emit the ranked answer as JSON.
+        #[arg(long)]
+        json: bool,
+        /// How many records to show.
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+    },
     /// (Internal) Start the local Web Dashboard
     #[command(hide = true)]
     Dashboard,
@@ -1131,16 +1546,22 @@ enum Commands {
     /// (Internal) Semantic Compaction: Prune implicit history
     #[command(hide = true)]
     Gc,
+    /// (Internal) Token A/B dashboard — p50/p95 measured token/cost deltas by
+    /// task class and repo size from a scripts/token-ab.sh raw JSONL
+    #[command(name = "token-ab", hide = true)]
+    TokenAb {
+        /// Raw runs JSONL produced by `scripts/token-ab.sh run`
+        #[arg(long)]
+        data: String,
+    },
     /// Check for and install updates to the Aura CLI
     Update,
     /// (Internal) Start MCP server
     #[command(hide = true)]
     Mcp,
-    /// (Internal) Take project snapshot
-    #[command(hide = true)]
+    /// Save the whole project — commits and open edits — so you can come back to it
     Snapshot { description: String },
-    /// (Internal) Restore project snapshot
-    #[command(hide = true)]
+    /// Go back to a saved snapshot, keeping whatever you have open right now
     Restore { snapshot_id: String },
     /// (Internal) Take a durable file-level snapshot. Bucket L1 — used
     /// by aura-shell's Manager dispatch path to capture each zone file
@@ -1162,6 +1583,16 @@ enum Commands {
         /// `aura-cli`. Manager dispatch uses `manager-<sid>#<task_id>`.
         #[arg(long, default_value = "aura-cli")]
         agent: String,
+        /// One short line on why these files are being changed.
+        ///
+        /// Claimed by the intent row the post-tool-use hook writes for each of
+        /// them, so an agent driving Aura from a shell records its reasoning
+        /// per file the same way the MCP `aura_snapshot` tool does.
+        #[arg(long)]
+        why: Option<String>,
+        /// Session the reason belongs to, when the caller knows it.
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Trace logic paths to verify if the codebase supports a behavioral goal (experimental)
     #[command(name = "goal-trace", alias = "prove")]
@@ -1258,6 +1689,27 @@ enum Commands {
         /// Canonical intent type, e.g. "BugFix" (optional)
         #[arg(long = "type")]
         intent_type: Option<String>,
+        /// Every repo-relative path this reason is about. Repeat the flag or
+        /// pass a comma-separated list.
+        ///
+        /// `--file` names one file; this names the set, which is what a
+        /// commit-shaped reason actually covers. It is what the console's
+        /// per-file "why did this change" band reads, and what lets one
+        /// sentence written about a change answer for every file that change
+        /// touched instead of for none of them.
+        #[arg(long)]
+        writes: Vec<String>,
+        /// The sub-agent that made the change, when one did.
+        ///
+        /// Claude Code hands a hook `agent_id` only when the tool call came
+        /// from inside a Task-tool worker. Passing it here is what stops a
+        /// worker's edits reading as the parent's: the row still belongs to
+        /// the session, but it says which worker inside it did the work.
+        #[arg(long = "subagent-id")]
+        subagent_id: Option<String>,
+        /// What kind of worker it was — Claude's `agent_type`.
+        #[arg(long = "subagent-type")]
+        subagent_type: Option<String>,
     },
     /// Seal an intent into a signed block WITHOUT writing a JSONL row.
     ///
@@ -1359,6 +1811,12 @@ enum Commands {
     },
     /// Check connection to mothership — latency, TLS status, online peers
     Ping,
+    /// Show payloads parked locally after failed cloud transports; --flush retries them now
+    Outbox {
+        /// Drain the queue against the cloud now; exits non-zero if entries still fail
+        #[arg(long)]
+        flush: bool,
+    },
     /// Connect this CLI to Aura Cloud (browser approval), or to a team mothership (if --code)
     Connect {
         /// Mothership URL (e.g., https://192.168.1.50:7700). Omit for Aura Cloud login.
@@ -1428,6 +1886,10 @@ enum Commands {
         /// Emit the JSON registry to stdout instead of the terminal story
         #[arg(long)]
         json: bool,
+        /// Write the complete atlas.md directory; default caps each section
+        /// and notes what it left out
+        #[arg(long)]
+        full: bool,
     },
     /// Distill the dirty working tree into clean, intent-grouped semantic
     /// commits — WHAT from the AST diff, WHY from .aura/intent_log.jsonl
@@ -1476,6 +1938,16 @@ enum Commands {
         /// the git-shared .aura/usage_by_dev.jsonl aggregate)
         #[arg(long)]
         by_dev: bool,
+        /// Send this machine's model spend to the org's cost meter, so the
+        /// team's per-member totals in the app and console are real. One row
+        /// per finished day per model — no prompts, paths or project names.
+        /// Safe to re-run: the server deduplicates.
+        #[arg(long)]
+        push: bool,
+        /// How many days back `--push` looks (default 14). Only days that have
+        /// already ended are ever sent.
+        #[arg(long)]
+        push_days: Option<u64>,
     },
     /// Internal: record one completed agent turn's token usage into a
     /// repo-local session so the team usage surface lights up without a
@@ -1544,6 +2016,78 @@ enum Commands {
     /// `.aura/intent_log.jsonl` — air-gapped, no cloud roundtrip. Wraps
     /// the same helpers as the `aura_intent_query` MCP tool so the CLI
     /// and MCP outputs agree.
+    /// Push a terminal session's conversation to the cloud console.
+    ///
+    /// The post-tool-use hook already tells the console *what* a session
+    /// changed; this tells it what was *asked*. Claude Code hands its Stop
+    /// hook a `transcript_path`, and this reads the new bytes of that file and
+    /// posts the user/assistant turns to the same `session_messages` endpoint
+    /// the desktop app writes to — so a terminal session and an app session
+    /// read the same way in the console.
+    ///
+    /// Forward-only on first sight: a transcript can be gigabytes, and turning
+    /// sync on must not upload a year of history. `--backfill` reaches into
+    /// the tail once. `AURA_NO_TRANSCRIPT_SYNC=1` turns it off entirely.
+    TranscriptSync {
+        /// The session the turns belong to — the id the agent CLI knows itself
+        /// by, and the `external_id` of the console's session row.
+        #[arg(long)]
+        session: String,
+        /// The JSONL transcript to read.
+        #[arg(long)]
+        transcript: std::path::PathBuf,
+        /// On first sight of this transcript, also send the tail of what is
+        /// already in it instead of only starting from here.
+        #[arg(long)]
+        backfill: bool,
+        /// Report what happened. Off by default because this runs from a hook,
+        /// where anything printed lands in the person's terminal.
+        #[arg(long)]
+        verbose: bool,
+        /// The sub-agent whose transcript this is. Claude Code hands its
+        /// SubagentStop hook an `agent_id`; passing it here files the turns
+        /// under that worker instead of under the session as a whole, and
+        /// keeps its read mark separate from the session's.
+        #[arg(long)]
+        agent_id: Option<String>,
+        /// What kind of worker it was — Claude's `agent_type` (`Explore`,
+        /// `general-purpose`, `fork`, …). Only read when `--agent-id` is given.
+        #[arg(long)]
+        agent_type: Option<String>,
+        /// The three-or-so words its parent wrote when it spawned the worker.
+        /// Only read when `--agent-id` is given.
+        #[arg(long)]
+        description: Option<String>,
+        /// Also sweep every sub-agent transcript beside this session's, each
+        /// attributed from its own sidecar. Catches workers that finished
+        /// before the SubagentStop hook existed, and workers whose stop hook
+        /// never ran.
+        #[arg(long)]
+        subagents: bool,
+    },
+    /// What ran inside a session: every Task-tool worker the agent spawned.
+    ///
+    /// Claude Code keeps a worker's transcript beside the session's, in a
+    /// `<session-id>/subagents/` directory, with a sidecar naming what kind of
+    /// worker it was and what its parent asked it for. Nothing read that until
+    /// now, which is why a worker's edits arrived in the console anonymous —
+    /// filed under the session, with no way to tell which worker did them.
+    Subagents {
+        /// The session the workers belong to. Only used for `--push`.
+        #[arg(long)]
+        session: Option<String>,
+        /// The session's own transcript. Its sub-agent directory is the
+        /// sibling this reads.
+        #[arg(long)]
+        transcript: std::path::PathBuf,
+        /// Print the runs as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+        /// Also tell the cloud about each run, so the console can show the
+        /// chain of command rather than a flat list of edits.
+        #[arg(long)]
+        push: bool,
+    },
     Intents {
         #[command(subcommand)]
         action: IntentsAction,
@@ -1700,6 +2244,40 @@ enum Commands {
 }
 
 /// `aura ci <…>` — Semantic CI subcommands.
+#[derive(Subcommand)]
+enum GrantAction {
+    /// Issue a signed, expiring, one-time grant for a protected operation.
+    /// Human-only: refuses outside an interactive terminal and asks you to
+    /// type the operation back. Signed with this repo's identity key
+    /// (`aura identity` creates one).
+    Issue {
+        /// The protected operation: delete | reset | force-push.
+        #[arg(long)]
+        op: String,
+        /// What to authorize: a repo-relative path for `delete`, or the
+        /// command form for shell ops (e.g. "git reset --hard").
+        #[arg(long)]
+        target: String,
+        /// Minutes until the grant expires (default 15).
+        #[arg(long, default_value_t = 15)]
+        ttl_mins: u64,
+        /// Skip pinning the current content/ref hash. Pinned grants (the
+        /// default) void automatically if the file or HEAD moves.
+        #[arg(long)]
+        no_pin: bool,
+    },
+    /// List pending grants with their validity.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke a pending grant by id (always safe — no confirmation needed).
+    Revoke {
+        /// The grant id (from `aura grant list`).
+        grant_id: String,
+    },
+}
+
 #[derive(Subcommand)]
 enum CiCmd {
     /// Run the pipeline for a trigger and print the verdict. Exits non-zero
@@ -2104,6 +2682,18 @@ enum IntentsAction {
         #[arg(long)]
         json: bool,
     },
+    /// Push the local intent log to Aura Cloud so teammates and the
+    /// console can read the reasoning, not just the diff.
+    ///
+    /// Idempotent: the server dedupes on (agent, text, timestamp), so
+    /// running this twice stores nothing the second time. Use it once
+    /// after signing in to backfill everything logged before now —
+    /// from then on `aura log-intent` pushes each row as it is written.
+    Push {
+        /// Print the machine-readable report instead of prose.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the deterministic typed-intent prose summary that the
     /// handover XML embeds (S2-TIH). Same source-of-truth helper, so
     /// the CLI output is byte-identical to what receiving agents see.
@@ -2185,14 +2775,24 @@ enum MemoryCloudAction {
         #[arg(long)]
         json: bool,
     },
-    /// Insert a project_memory entry org-wide. Wraps POST /api/v2/memory.
-    /// Use when you've learned something durable the team should
-    /// see — design decisions, conventions, gotchas. Repo scope is
-    /// optional and resolves by github_full_name.
+    /// Share a memory entry org-wide. Wraps POST /api/v2/memory.
+    ///
+    /// Prefer `--entry-id`: it sends an entry that already exists in
+    /// `.aura/memory.json` together with its signature and provenance, so
+    /// the team can check who wrote the fact and what it was learned from,
+    /// and pushing the same id again updates that entry rather than adding
+    /// a near-duplicate. `--body` is for a free-text note with no local
+    /// entry; it arrives unsigned. Repo scope is optional and resolves by
+    /// github_full_name.
     Push {
-        /// Required. Memory body (Markdown).
+        /// Id of a local memory entry ('mem-...'), as shown by
+        /// `aura memory search`. Sends it whole, signature included.
+        #[arg(long = "entry-id", conflicts_with = "body")]
+        entry_id: Option<String>,
+        /// Free-text memory body (Markdown), for a note with no local
+        /// entry. Arrives unsigned.
         #[arg(long)]
-        body: String,
+        body: Option<String>,
         /// Optional short title for indexing.
         #[arg(long)]
         title: Option<String>,
@@ -2204,6 +2804,25 @@ enum MemoryCloudAction {
         /// to one repo.
         #[arg(long = "repo-full-name")]
         repo_full_name: Option<String>,
+        /// Print the raw JSON response instead of a status line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take a shared memory entry back. Wraps POST
+    /// /api/v2/memory/<entry-id>/retract.
+    ///
+    /// Your team stops being able to read the fact through Aura, and the
+    /// local entry stops saying it is shared. It cannot reach a copy a
+    /// teammate has already pulled onto their own machine, and it does not
+    /// erase the text from the server's database — the row is kept as a
+    /// tombstone recording that the fact was shared and withdrawn.
+    ///
+    /// You can withdraw what you shared; an organisation admin can withdraw
+    /// anyone's.
+    Retract {
+        /// Id of the local memory entry ('mem-...') to withdraw.
+        #[arg(long = "entry-id")]
+        entry_id: String,
         /// Print the raw JSON response instead of a status line.
         #[arg(long)]
         json: bool,
@@ -2264,6 +2883,12 @@ enum A2aTaskAction {
         /// Bucket K1 — assignee user UUID. Validated cross-org server-side.
         #[arg(long = "assignee")]
         assignee: Option<String>,
+        /// WRK-02 — initial lifecycle state. `planned` (or `draft`) mints a
+        /// visibility row that runners polling `?status=submitted` never
+        /// execute; omit for the server default (`submitted`, the live
+        /// queue). Only planning states are accepted at create time.
+        #[arg(long = "status")]
+        status: Option<String>,
         /// Print the full JSON envelope instead of a status line.
         #[arg(long)]
         json: bool,
@@ -2294,6 +2919,18 @@ enum A2aTaskAction {
         #[arg(long)]
         limit: Option<i64>,
         /// Print raw JSON envelope instead of a human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a task. Wraps DELETE /api/v2/a2a/tasks/{id}.
+    ///
+    /// The way back from a row that should never have been created — a
+    /// terminal state cannot be patched away, so before this existed a task
+    /// filed by mistake was permanent. Yours or, if you administer the org,
+    /// anyone's; a task with children refuses until its leaves are gone.
+    Delete {
+        /// Task id (uuid).
+        id: String,
         #[arg(long)]
         json: bool,
     },
@@ -2983,6 +3620,19 @@ enum LiveSubcommands {
         #[arg(long)]
         json: bool,
     },
+    /// Mark an impact handled, so it stops being counted
+    Resolve {
+        /// The short id `aura live impacts` printed, or the full alert id.
+        /// Omit it with `--all`.
+        alert_id: Option<String>,
+        /// Clear every impact outstanding on this repo — for the case where
+        /// one merge dealt with the lot.
+        #[arg(long)]
+        all: bool,
+        /// Output raw JSON instead of a sentence
+        #[arg(long)]
+        json: bool,
+    },
     /// Function-level code sync — push/pull function bodies across the team
     Sync {
         #[command(subcommand)]
@@ -3017,6 +3667,16 @@ enum SyncSubcommands {
     Status,
     /// Backfill existing local .aura/snapshots/*.json to the cloud dashboard
     Backfill,
+    /// Push this project's code graph so the Console's Trace › Graph can find
+    /// its symbols. Reads the working tree, so it does not wait for a commit.
+    Graph,
+    /// Mirror this branch's commits so the Console's Landed tab can show them.
+    /// Reads git directly, so it works on commits that skipped Aura's hooks.
+    Commits {
+        /// How many commits back from HEAD to send.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3127,6 +3787,15 @@ enum LoopSubcommands {
     Set {
         id: String,
         status: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Offer a planning node (draft/planned) into the executable queue —
+    /// the ONE deliberate transition that arms work for the crew (WRK-02).
+    /// Containers (kind=plan) and acceptance-less plan/wave/task nodes are
+    /// refused at the gate; already-offered nodes are a no-op.
+    Offer {
+        id: String,
         #[arg(long)]
         json: bool,
     },
@@ -3293,6 +3962,26 @@ enum LoopSubcommands {
     /// of starting a disconnected island — each with the tail steps to hang the
     /// new work after. Empty when nothing's grouped under a goal yet.
     AttachTargets {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mirror the local crew graph into the cloud so the console — and any
+    /// teammate not on this branch — can see what the crew is doing.
+    ///
+    /// `crew sync` moves the graph between checkouts over git; this sends it
+    /// to `a2a_tasks`, which is what the web console reads. The local graph
+    /// stays the source of truth: each node keeps a `remote_id` so a second
+    /// push updates the row it made rather than minting another.
+    Push {
+        /// Only this crew's slice (e.g. `place-plane`). Omit for every node.
+        #[arg(long)]
+        crew: Option<String>,
+        /// Print what would go up and send nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Stop after this many nodes, oldest first.
+        #[arg(long)]
+        limit: Option<usize>,
         #[arg(long)]
         json: bool,
     },
@@ -4001,12 +4690,19 @@ enum SymphonySubcommands {
 }
 
 /// Maps file path to tree-sitter language extension. Returns empty string if unsupported.
+///
+/// `.mjs`, `.cjs`, `.mts` and `.cts` are the same two grammars under different
+/// module systems, and leaving them out did not degrade gracefully: an
+/// unsupported extension is skipped entirely, so a repository whose source is
+/// ESM produced an empty graph and every gate built on it — impact, deletion,
+/// prove — answered "nothing depends on this" about a file it had never read.
+/// A wrong answer that looks like a confident one.
 fn detect_lang_ext(path: &str) -> String {
     if path.ends_with(".rs") { "rs" }
     else if path.ends_with(".py") { "py" }
-    else if path.ends_with(".ts") { "ts" }
+    else if path.ends_with(".ts") || path.ends_with(".mts") || path.ends_with(".cts") { "ts" }
     else if path.ends_with(".tsx") { "tsx" }
-    else if path.ends_with(".js") { "js" }
+    else if path.ends_with(".js") || path.ends_with(".mjs") || path.ends_with(".cjs") { "js" }
     else if path.ends_with(".jsx") { "jsx" }
     else if path.ends_with(".go") { "go" }
     else if path.ends_with(".java") { "java" }
@@ -4046,7 +4742,7 @@ fn atty_detect() -> bool {
     std::io::stdout().is_terminal() && std::io::stdin().is_terminal()
 }
 
-fn a11y_label(emoji: &str, text_label: &str) -> String {
+pub(crate) fn a11y_label(emoji: &str, text_label: &str) -> String {
     if is_accessible() {
         format!("[{}]", text_label)
     } else {
@@ -4095,7 +4791,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     setup_crash_reporter();
-    let cli = Cli::parse();
+    // Parse against a *shaped* command: every non-primary subcommand is hidden
+    // from the top-level `--help` listing so a first run shows ~10 commands.
+    // Hidden commands still parse, keep their aliases, and remain in shell
+    // completions and `aura commands` — only the help listing is trimmed.
+    let cli = {
+        use clap::{CommandFactory, FromArgMatches};
+        let shaped = cmd_commands::shape_help(Cli::command());
+        Cli::from_arg_matches(&shaped.get_matches()).unwrap_or_else(|e| e.exit())
+    };
 
     // Set accessible mode environment variable so all output respects it
     if cli.accessible {
@@ -4114,6 +4818,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Log telemetry (non-blocking)
     let cmd_name = match &cli.command {
         Commands::Init { .. } => "init",
+        Commands::Migrate { .. } => "migrate",
         Commands::Enable { .. } => "enable",
         Commands::Disable => "disable",
         Commands::Plan { .. } => "plan",
@@ -4123,8 +4828,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Status => "status",
         Commands::Ci { .. } => "ci",
         Commands::Audit => "audit",
+        Commands::Dispatch { .. } => "dispatch",
+        Commands::Recap { .. } => "recap",
+        Commands::Dialects { .. } => "dialects",
+        Commands::Import { .. } => "import",
+        Commands::Why { .. } => "why",
         Commands::Explain { .. } => "explain",
-        Commands::Sessions => "sessions",
+        Commands::Beat { .. } => "beat",
+        Commands::Sessions { .. } => "sessions",
         Commands::Subagent { .. } => "subagent",
         Commands::AskUser { .. } => "ask-user",
         Commands::ProposePlan { .. } => "propose-plan",
@@ -4153,6 +4864,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Team { .. } => "team",
         Commands::Host { .. } => "host",
         Commands::Ping => "ping",
+        Commands::Outbox { .. } => "outbox",
         Commands::Join { .. } => "join",
         Commands::Connect { .. } => "connect",
         Commands::JoinTeam { .. } => "join-team",
@@ -4172,6 +4884,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::AcpRun { .. } => "acp-run",
         Commands::Ws { .. } => "ws",
         Commands::Recall { .. } => "recall",
+        Commands::TranscriptSync { .. } => "transcript-sync",
+        Commands::Subagents { .. } => "subagents",
         Commands::Intents { .. } => "intents",
         Commands::HandoverCloud { .. } => "handover-cloud",
         Commands::Memory { .. } => "memory",
@@ -4185,6 +4899,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::MergeDriver { .. } => "merge-driver",
         Commands::RepoId { .. } => "repo-id",
         Commands::Node { .. } => "node",
+        Commands::Access { .. } => "access",
+        Commands::CommandsRef { .. } => "commands",
         _ => "internal_command"
     };
     track_event("cli_execution", Some(cmd_name));
@@ -4198,6 +4914,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let tracker = ContinuousTracker::new(parser);
             tracker.watch(".")?;
         }
+        Commands::CommandsRef { all } => {
+            use clap::CommandFactory;
+            cmd_commands::print_commands(&Cli::command(), *all);
+        }
         Commands::Update => {
             perform_update()?;
         }
@@ -4207,7 +4927,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Disable => {
             enable::disable()?;
         }
-        Commands::Init { force_baseline } => {
+        Commands::Init { force_baseline, agents: agent_choice } => {
             println!("{}", r#"
       █████        ███      ███  ███████████         █████      
      ███░░███     ░███     ░███ ░░███░░░░░███       ███░░███     
@@ -4265,69 +4985,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("{:-^80}\n", " INITIALIZATION WIZARD ".bold().blue());
 
-            // 1. Agent Selection
-            // Detect non-interactive terminal — use sensible defaults if no TTY
+            // 1. Agent Selection — consent is explicit or absent (REL-04).
+            // Declining, cancelling the picker, or running headless without
+            // --agents all mean the same thing: install NO agent integration.
+            // The old behavior (cancel → Claude; no TTY → Claude + Gemini)
+            // wrote into $HOME on the strength of nobody's choice.
             let is_tty = atty_detect();
             let agents = &["Claude Code", "VS Code", "Gemini CLI", "Cursor", "Claude Desktop", "Aider", "OpenCode"];
-            let selections = if is_tty {
+            // Wiring an agent up means writing files this repository did not
+            // have and, for Claude Code, touching ~/.claude — so it happens
+            // only where someone actually asked for it. Three ways to ask, and
+            // silence is not one of them: `--agents`, the wizard, or nothing.
+            let selections: Vec<usize> = if let Some(list) = agent_choice.as_deref() {
+                match parse_agent_choice(list, agents) {
+                    Ok(picked) => picked,
+                    Err(unknown) => {
+                        eprintln!(
+                            "{} --agents: don't know {}. Pick from: {}, or `all` / `none`.",
+                            "✗".red(),
+                            unknown.cyan(),
+                            agents.join(", "),
+                        );
+                        return Ok(());
+                    }
+                }
+            } else if is_tty {
+                // A cancelled wizard installs nothing. It used to fall back to
+                // Claude Code, so pressing Ctrl-C — the one gesture that
+                // unambiguously means "not this" — wired up an integration.
                 MultiSelect::with_theme(&ColorfulTheme::default())
                     .with_prompt("Which AI Agents will be working in this repository? (Use space to select MULTIPLE, Enter to confirm)")
                     .items(&agents[..])
                     .interact()
-                    .unwrap_or_else(|_| vec![0]) // Default to Claude Code on error
+                    .unwrap_or_default()
             } else {
-                println!("  {} Non-interactive mode: auto-selecting Claude Code + Gemini CLI", "ℹ".blue());
-                vec![0, 2] // Claude Code + Gemini CLI
+                println!(
+                    "  {} No terminal to ask in, so no agent integrations were installed.",
+                    "ℹ".blue()
+                );
+                println!(
+                    "    {} Name them and re-run: {}",
+                    "↳".dimmed(),
+                    "aura init --agents \"claude code,gemini cli\"".cyan()
+                );
+                Vec::new()
             };
+            if selections.is_empty() {
+                println!("  {} No agents selected — repository tracking only.", "ℹ".blue());
+            }
+
+            // The six-agent matrix routes through the owned-manifest registry
+            // (selected-only, recorded, reversible); the IDE/desktop targets
+            // below keep their legacy arms.
+            let integration_ctx = agent_integrations::InstallCtx::current();
+            let mut matrix: Vec<agent_integrations::Agent> = Vec::new();
+            for &idx in &selections {
+                if let Some(a) = agent_integrations::Agent::parse(agents[idx]) {
+                    matrix.push(a);
+                }
+            }
+            if !matrix.is_empty() {
+                match &integration_ctx {
+                    Some(ctx) => {
+                        if !ctx.aura_bin.verified {
+                            println!(
+                                "  {} Could not verify the aura binary path — machine-local configs will use bare 'aura' (PATH-dependent).",
+                                "⚠️".yellow()
+                            );
+                        }
+                        match agent_integrations::install(ctx, &matrix) {
+                            Ok(lines) => {
+                                for l in lines {
+                                    println!("    {} {}", "✓".green(), l);
+                                }
+                            }
+                            Err(e) => println!("    {} {}", "✗".red(), e),
+                        }
+                    }
+                    None => println!("    {} HOME not set — skipping agent integrations.", "✗".red()),
+                }
+            }
 
             // Automated MCP Injection
             for &idx in &selections {
                 match agents[idx] {
-                    "Claude Code" => {
-                        println!("  {} Auto-configuring Claude Code MCP server...", "⚙️ ".cyan());
-
-                        // Claude Code uses .mcp.json in the project root for MCP servers
-                        let mcp_config_path = std::path::Path::new(".mcp.json");
-                        let mut mcp_config: serde_json::Value = if mcp_config_path.exists() {
-                            fs::read_to_string(mcp_config_path).ok()
-                                .and_then(|s| serde_json::from_str(&s).ok())
-                                .unwrap_or_else(|| serde_json::json!({"mcpServers": {}}))
-                        } else {
-                            serde_json::json!({"mcpServers": {}})
-                        };
-
-                        if mcp_config.get("mcpServers").is_none() {
-                            mcp_config["mcpServers"] = serde_json::json!({});
-                        }
-                        mcp_config["mcpServers"]["aura-vcs"] = serde_json::json!({
-                            "command": "aura",
-                            "args": ["mcp"]
-                        });
-                        if fs::write(mcp_config_path, serde_json::to_string_pretty(&mcp_config).unwrap_or_default()).is_ok() {
-                            println!("    {} Aura MCP server registered in .mcp.json for Claude Code.", "✓".green());
-                        }
-
-                        // Also inject CLAUDE.md with Aura instructions
-                        let claude_md_path = std::path::Path::new("CLAUDE.md");
-                        let aura_block = include_str!("../integrations/claude-md-block.md");
-                        if claude_md_path.exists() {
-                            // Append if not already present
-                            if let Ok(existing) = fs::read_to_string(claude_md_path) {
-                                if !existing.contains("AURA_START") {
-                                    let updated = format!("{}\n\n{}", existing, aura_block);
-                                    let _ = fs::write(claude_md_path, updated);
-                                    println!("    {} Aura instructions appended to CLAUDE.md.", "✓".green());
-                                } else {
-                                    println!("    {} CLAUDE.md already has Aura instructions.", "✓".green());
-                                }
-                            }
-                        } else {
-                            let _ = fs::write(claude_md_path, aura_block);
-                            println!("    {} Created CLAUDE.md with Aura instructions.", "✓".green());
-                        }
-                        // Install Aura status line for Claude Code
-                        install_claude_statusline();
-                    },
                     "VS Code" => {
                         println!("  {} Auto-configuring VS Code MCP server...", "⚙️ ".cyan());
 
@@ -4482,135 +5223,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("  {} Injecting Aura GSD orchestration rules into Cursor...", "🌊".cyan());
                         let cursor_rules_path = std::path::Path::new(".cursorrules");
                         let gsd_rules = include_str!("../integrations/cursor-rules/gsd.mdc");
-                        
-                        let formatted_rules = format!("\n\n{}\n", gsd_rules);
-                        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(cursor_rules_path) {
-                            if file.write_all(formatted_rules.as_bytes()).is_ok() {
-                                println!("    {} Successfully appended GSD protocol to .cursorrules.", "✓".green());
-                            }
-                        }
-                    },
-                    "Gemini CLI" => {
-                        println!("  {} Injecting Aura GSD Wave Runner skill for Gemini CLI...", "🌊".cyan());
-                        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                        let gemini_skills_dir = std::path::Path::new(&home).join(".gemini").join("skills");
-                        
-                        if let Err(e) = fs::create_dir_all(&gemini_skills_dir) {
-                            println!("    {} Failed to create Gemini skills directory: {}", "✗".red(), e);
-                            continue;
-                        }
 
-                        // Write the global skill
-                        let skill_content = include_str!("../integrations/aura-gsd.skill");
-                        if fs::write(gemini_skills_dir.join("aura-gsd.md"), skill_content).is_ok() {
-                            println!("    {} Successfully injected Aura GSD skill into Gemini CLI.", "✓".green());
-                        }
-
-                        // Project-Level Integration (Hooks & Settings)
-                        println!("  {} Scaffolding native Gemini CLI hooks...", "⚙️ ".cyan());
-                        let gemini_project_dir = std::path::Path::new(".gemini");
-                        let hooks_dir = gemini_project_dir.join("hooks");
-                        let _ = fs::create_dir_all(&hooks_dir);
-
-                        // Inject the Intent Capture Hook
-                        let hook_js = include_str!("../assets/gemini-hooks/aura-intent.js");
-                        let _ = fs::write(hooks_dir.join("aura-intent.js"), hook_js);
-
-                        // Register MCP server in GLOBAL ~/.gemini/settings.json
-                        // Gemini CLI reads MCP servers from the global config, not project-level
-                        let global_gemini_settings_path = std::path::Path::new(&home).join(".gemini").join("settings.json");
-                        let mut global_settings: serde_json::Value = if global_gemini_settings_path.exists() {
-                            fs::read_to_string(&global_gemini_settings_path).ok()
-                                .and_then(|s| serde_json::from_str(&s).ok())
-                                .unwrap_or_else(|| serde_json::json!({}))
+                        // Idempotent: a re-run of init must not append a
+                        // second copy of the whole ruleset (REL-04).
+                        let already = fs::read_to_string(cursor_rules_path)
+                            .map(|existing| {
+                                existing.contains(gsd_rules.trim_end())
+                                    || gsd_rules
+                                        .lines()
+                                        .find(|l| !l.trim().is_empty())
+                                        .map(|first| existing.contains(first))
+                                        .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+                        if already {
+                            println!("    {} .cursorrules already carries the GSD protocol.", "✓".green());
                         } else {
-                            serde_json::json!({})
-                        };
-
-                        if global_settings.get("mcpServers").is_none() {
-                            global_settings["mcpServers"] = serde_json::json!({});
-                        }
-                        global_settings["mcpServers"]["aura-vcs"] = serde_json::json!({
-                            "command": "aura",
-                            "args": ["mcp"]
-                        });
-                        let _ = fs::write(&global_gemini_settings_path, serde_json::to_string_pretty(&global_settings).unwrap_or_default());
-                        println!("    {} Aura MCP server registered in ~/.gemini/settings.json (global).", "✓".green());
-
-                        // Project-level .gemini/settings.json — hooks only
-                        let settings_path = gemini_project_dir.join("settings.json");
-                        let mut settings: serde_json::Value = if settings_path.exists() {
-                            fs::read_to_string(&settings_path).ok()
-                                .and_then(|s| serde_json::from_str(&s).ok())
-                                .unwrap_or_else(|| serde_json::json!({}))
-                        } else {
-                            serde_json::json!({})
-                        };
-
-                        // Also add MCP to project-level as fallback
-                        if settings.get("mcpServers").is_none() {
-                            settings["mcpServers"] = serde_json::json!({});
-                        }
-                        settings["mcpServers"]["aura-vcs"] = serde_json::json!({
-                            "command": "aura",
-                            "args": ["mcp"]
-                        });
-
-                        // Inject hooks (preserve existing ones)
-                        if settings.get("hooks").is_none() {
-                            settings["hooks"] = serde_json::json!({});
-                        }
-                        settings["hooks"]["SessionStart"] = serde_json::json!([
-                            {
-                                "matcher": "*",
-                                "hooks": [
-                                    {
-                                        "name": "Aura Status",
-                                        "type": "command",
-                                        "command": "node .gemini/hooks/aura-intent.js"
-                                    }
-                                ]
-                            }
-                        ]);
-                        settings["hooks"]["AfterAgent"] = serde_json::json!([
-                            {
-                                "matcher": "*",
-                                "hooks": [
-                                    {
-                                        "name": "Aura Intent Capture",
-                                        "type": "command",
-                                        "command": "node .gemini/hooks/aura-intent.js"
-                                    }
-                                ]
-                            }
-                        ]);
-
-                        let _ = fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap_or_default());
-                        println!("    {} Project hooks registered in .gemini/settings.json.", "✓".green());
-
-                        // Inject GEMINI.md with Aura instructions
-                        let gemini_md_path = std::path::Path::new("GEMINI.md");
-                        let gemini_block = include_str!("../integrations/gemini-md-block.md");
-                        if gemini_md_path.exists() {
-                            if let Ok(existing) = fs::read_to_string(gemini_md_path) {
-                                if !existing.contains("AURA_START") {
-                                    let updated = format!("{}\n\n{}", existing, gemini_block);
-                                    let _ = fs::write(gemini_md_path, updated);
-                                    println!("    {} Aura instructions appended to GEMINI.md.", "✓".green());
-                                } else {
-                                    println!("    {} GEMINI.md already has Aura instructions.", "✓".green());
+                            let formatted_rules = format!("\n\n{}\n", gsd_rules);
+                            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(cursor_rules_path) {
+                                if file.write_all(formatted_rules.as_bytes()).is_ok() {
+                                    println!("    {} Successfully appended GSD protocol to .cursorrules.", "✓".green());
                                 }
                             }
-                        } else {
-                            let _ = fs::write(gemini_md_path, gemini_block);
-                            println!("    {} Created GEMINI.md with Aura instructions.", "✓".green());
                         }
-
-                        println!("    {} Aura Semantic Engine is now natively powering your Gemini sessions.", "✓".green());
                     },
                     _ => {}
                 }
             }
+            // 1b. Stamp the agent hooks — the same ones the desktop app
+            // stamps, from the same crate.
+            //
+            // Registering the MCP server above tells an agent where Aura's
+            // tools are; it does not make the agent use them. The hooks are
+            // what actually record work: `PreToolUse` and `PostToolUse` see
+            // every edit and log intent whether or not anybody remembered to
+            // call a tool. Without them a repo set up from the terminal looks
+            // idle on the team's console while somebody is actively editing
+            // it — which was the whole complaint, and it happened because this
+            // lived only in the app's PTY-spawn path.
+            let hook_root = repo
+                .workdir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ".".to_string());
+            let wiring = aura_hooks::wire_agents_for_repo(&hook_root);
+            if wiring.claude_hooks {
+                println!("    {} Claude hooks stamped — edits here log intent on their own.", "✓".green());
+            }
+            if wiring.gemini_extension {
+                println!("    {} Gemini extension staged in ~/.gemini/extensions/.", "✓".green());
+            }
+            // The rest are stamped once per machine rather than once per repo,
+            // because that is the only surface those CLIs offer — and it is the
+            // better fit anyway: it covers every repo, including the ones
+            // nobody has opened in the app. Each is skipped where its CLI has
+            // never run, so this list is also a fair report of what is
+            // installed here. cursor is absent on purpose: it reads Claude's
+            // settings file, so the line above is already its stamp.
+            for (stamped, line) in [
+                (wiring.codex_hooks, "Codex hooks stamped in ~/.codex/hooks.json."),
+                (wiring.kimi_hooks, "Kimi hook added to ~/.kimi/config.toml."),
+                (wiring.opencode_plugin, "OpenCode plugin staged in ~/.config/opencode/plugin/."),
+                (wiring.pi_extension, "Pi extension staged in ~/.pi/agent/extensions/."),
+            ] {
+                if stamped {
+                    println!("    {} {}", "✓".green(), line);
+                }
+            }
+            if !wiring.wired() {
+                // Not fatal: the MCP registration above still stands, so the
+                // tools are reachable — an agent just has to be asked.
+                println!("    {} Couldn't stamp the agent hooks here; Aura's tools still work, but edits won't record themselves.", "⚠️".yellow());
+            }
+
 
             // 2. Global AI Provider & API Key Vault
             let mut current_config = ConfigManager::load();
@@ -4660,8 +5344,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
 
-            // Always install/update the status line for Claude Code
-            install_claude_statusline();
+            // REL-04: the status line is part of the Claude Code integration
+            // and installs only when Claude Code was selected above — a repo
+            // init must never rewrite ~/.claude/settings.json uninvited.
 
             if *force_baseline {
                 println!("  {} Establishing Merkle-Graph baseline (Force Mode)...", "🧠".cyan());
@@ -4713,6 +5398,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     intent_vector_model: None,
                     env_fingerprint: capture_env_fingerprint(),
                     file_oids,
+                    scope: repo
+                        .workdir()
+                        .map(|w| w.to_path_buf())
+                        .and_then(|root| scope::scope_value(&root, "Aura Initializer", None)),
                 };
 
                 CheckpointStore::stage_checkpoint(&checkpoint)?;
@@ -5169,7 +5858,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     paths
                 };
 
-                if let Some(recon) = intent_reconcile::reconcile_commit(Path::new(".aura/blocks"), &actual_writes) {
+                // Both gates below ask "what was said about this commit", and
+                // both need the same two answers: the log, and the moment the
+                // last commit landed. Anything said before that moment was
+                // said about the last commit, not this one.
+                let explained_since = repo
+                    .head()
+                    .ok()
+                    .and_then(|h| h.peel_to_commit().ok())
+                    .map(|c| c.time().seconds().max(0) as u64)
+                    .unwrap_or(0);
+                let intent_log_text =
+                    fs::read_to_string(".aura/intent_log.jsonl").unwrap_or_default();
+
+                if let Some(recon) = intent_reconcile::reconcile_commit(
+                    Path::new(".aura/blocks"),
+                    &actual_writes,
+                    &intent_log_text,
+                    explained_since,
+                ) {
                     if recon.diverged() {
                         spinner.finish_and_clear();
                         println!("\n{} Intent Scope Divergence: the change went beyond what was declared.", "🛡️".red().bold());
@@ -5200,6 +5907,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "🛡️ ".green(),
                             recon.actual.len()
                         ));
+                    }
+                }
+
+                // ── UNEXPLAINED WRITES: does every file in this commit have a why? ──
+                // The snapshot hook records an edit whether or not anybody said
+                // why, and when nobody did the row reads "no reason was stated by
+                // the agent". Every reader already refuses to serve that as a
+                // reason — but nothing asked for one, so a file could land silent
+                // behind a commit message and only be found later by a person
+                // reading the log. This is the ask, at the last moment where
+                // answering still costs nothing.
+                //
+                // Only reasons written since HEAD count: an older sentence
+                // answered for an older commit, and letting it answer again is
+                // how one explanation comes to cover a year of edits. Both
+                // `explained_since` and the log text are read above, where the
+                // scope guard needs the same two things.
+                let unexplained =
+                    why_gate::unexplained_writes(&intent_log_text, &actual_writes, explained_since);
+                if !unexplained.is_empty() {
+                    spinner.finish_and_clear();
+                    println!(
+                        "\n{} Unexplained Writes: {} file(s) in this commit carry no stated reason.",
+                        "🛡️".red().bold(),
+                        unexplained.len().to_string().red().bold()
+                    );
+                    println!("  {} Aura logged the edits, but the rows hold its own description of what", "↳".dimmed());
+                    println!("  {} happened — not a word from you about why it happened.", "↳".dimmed());
+                    for (i, f) in unexplained.iter().take(15).enumerate() {
+                        println!("    {} {}. {}", "✗".red(), i + 1, f.yellow());
+                    }
+                    if unexplained.len() > 15 {
+                        println!("    {} ... and {} more", "↳".dimmed(), unexplained.len() - 15);
+                    }
+
+                    // Already carries the paths, so only the sentence is left to
+                    // write. A gate that rejects with a fix teaches the reason;
+                    // one that only says no teaches the escape hatch.
+                    let fix_cmd = why_gate::fix_instruction(&unexplained);
+                    println!("\n  {} {}", "How to Fix:".bold().green(), "State why these changed — run:");
+                    println!("    {} {}", "$".dimmed(), fix_cmd.cyan());
+
+                    if config.strict_gatekeeper_mode {
+                        println!("  {} Write the sentence a reader will want in six months, then commit again.", "↳".dimmed());
+                        println!("\n{} Commit halted — files with no reason on record.", "✗".red().bold());
+                        std::process::exit(1);
+                    } else {
+                        println!("  {} Strict mode is OFF, so this is not enforced. Make it a hard gate with: {}", "💡".blue(), "aura config set strict-mode true".italic());
+                        // Re-arm the spinner so downstream steps still render.
+                        spinner.set_message(format!("{}", "Continuing…".bold()));
+                        spinner.enable_steady_tick(Duration::from_millis(80));
                     }
                 }
             }
@@ -5374,6 +6132,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Capture full Claude Code transcript into session storage
             session::capture_full_transcript();
 
+            // One checkpoint read shared by the edge-delta gate below and the
+            // blast-radius scan further down — get_all_checkpoints deserializes
+            // every shadow checkpoint, far too expensive to pay twice per commit.
+            let latest_checkpoint = CheckpointStore::get_all_checkpoints(&repo)
+                .ok()
+                .and_then(|cps| cps.into_iter().next());
+
             // Intent Verification (Logic Alignment): Prevent "Intent Poisoning"
             // Ensure the AI's text intent actually aligns with the code it modified.
             if !force && agent_id != "Aura Continuous Daemon" && !staged_nodes.is_empty() {
@@ -5461,23 +6226,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                let intent_lower = intent.to_lowercase();
-                let mut aligned = false;
                 let mut identified_nodes = Vec::new();
-
+                let mut changed_files: Vec<String> = Vec::new();
                 for node in &staged_nodes {
                     if let Some(ref ident) = node.identifier {
                         identified_nodes.push(ident.clone());
-                        
-                        // Strict Word Boundary Matching to prevent false positives (e.g. 's' or 'a')
-                        let pattern = format!(r"\b{}\b", regex::escape(&ident.to_lowercase()));
-                        if let Ok(re) = regex::Regex::new(&pattern) {
-                            if re.is_match(&intent_lower) {
-                                aligned = true;
-                            }
+                    }
+                    if let Some(ref f) = node.file_path {
+                        if !changed_files.contains(f) {
+                            changed_files.push(f.clone());
                         }
                     }
                 }
+
+                // The commit message is not the only place the reason lives,
+                // and it is usually the terser one. `aura log-intent` wrote
+                // the considered version, along with the files the author
+                // said it covers — read both before deciding the reason is
+                // unrelated to the change.
+                let (logged_intent, declared_paths) = read_latest_logged_intent();
+                let stated = intent_alignment::Stated {
+                    text: intent.clone(),
+                    logged: logged_intent,
+                    declared_paths,
+                };
+                let alignment = intent_alignment::align(&stated, &identified_nodes, &changed_files);
+                let aligned = alignment.is_aligned();
+                // Gate 4 below hunts for a removed dependency by name in the
+                // reason. It gets the whole reason, for the same cause.
+                let intent_lower = stated.searchable();
 
                 let config = ConfigManager::load();
 
@@ -5489,8 +6266,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("  {} Aura requires all logic changes to be explicitly acknowledged to maintain the Merkle-Graph integrity.", "↳".dimmed());
                         println!("  {} Identified modified nodes: {}", "↳".dimmed(), identified_nodes.join(", ").yellow().bold());
                         
-                        println!("\n  {} {}", "How to Fix:".bold().green(), "Update your commit message to include the EXACT names of the functions or classes listed above.");
-                        println!("  {} Example: {} 'Refactored {}'", "↳".dimmed(), "git commit -m".cyan(), identified_nodes.first().unwrap_or(&"logic".to_string()));
+                        println!("\n  {} {}", "How to Fix:".bold().green(), "Connect the reason to the change — either way works:");
+                        for line in intent_alignment::how_to_connect(&identified_nodes, &changed_files) {
+                            println!("  {} {}", "↳".dimmed(), line);
+                        }
                         if ConfigManager::is_strict_mode_locked(&config) {
                             println!("  {} Strict mode is passcode-locked (human must unlock from terminal).", "💡".blue());
                         } else {
@@ -5520,7 +6299,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 } else {
-                    spinner.println(format!("{} Intent mathematically aligned with AST modifications.", "🛡️ ".green()));
+                    // Say which of the three connections was accepted, so a
+                    // person can tell "it read my reason" from "it found a
+                    // word".
+                    spinner.println(format!(
+                        "{} The reason on record belongs to this change — {}.",
+                        "🛡️ ".green(),
+                        alignment.reason()
+                    ));
+                }
+
+                // Gate 4 — Edge-Delta Verification (GRF-04). Gate 3 only
+                // compares changed node NAMES against the intent, so removing
+                // a call or import from a function that KEEPS its name (e.g.
+                // dropping a check_auth() call inside a retained handler)
+                // passes it untouched. Diff the dependency edges of RETAINED
+                // nodes between the last checkpoint and the staged tree;
+                // removed edges must be named in the intent prose.
+                if let Some(ref latest) = latest_checkpoint {
+                    let delta = edge_delta::diff_edges(&latest.ast_nodes, &staged_nodes);
+                    let unexplained = edge_delta::unexplained_removals(&delta, &intent_lower);
+                    if !unexplained.is_empty() {
+                        let has_sensitive = unexplained.iter().any(|e| e.sensitive);
+                        if has_sensitive && config.strict_gatekeeper_mode {
+                            spinner.finish_and_clear();
+                            println!("{} Edge-Delta Violation: security-relevant dependency removed from retained logic.", "🚨".red().bold());
+                            for e in &unexplained {
+                                println!("  {} {}", "↳".dimmed(), e.evidence().red());
+                            }
+                            println!("  {} {}", "Why:".bold(), "A call or import this function used to make is gone, the function itself survived, and the intent never mentions the removed target — the name-based gate cannot see this class of change.");
+                            println!("  {} If the removal is intended, re-log intent naming the removed target (e.g. {}), then commit again.",
+                                "↳".dimmed(),
+                                format!("\"moved {} into …\"", edge_delta::evidence_ident(&unexplained[0].target)).italic());
+                            std::process::exit(1);
+                        } else if has_sensitive {
+                            println!("{} Edge-Delta Warning: security-relevant dependency removed from retained logic:", "🚨".red().bold());
+                            for e in &unexplained {
+                                println!("  {} {}", "↳".dimmed(), e.evidence().red());
+                            }
+                            println!("  {} The intent never mentions the removed target{}. Strict mode would block this commit.", "↳".dimmed(), if unexplained.len() == 1 { "" } else { "s" });
+                            let should_continue = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
+                                .with_prompt("Continue with commit?")
+                                .default(true)
+                                .interact()
+                                .unwrap_or(true);
+                            if !should_continue {
+                                println!("{} Commit cancelled. Re-log intent naming the removed dependencies.", "✗".red().bold());
+                                std::process::exit(1);
+                            }
+                        } else {
+                            spinner.println(format!("{} Edge-Delta: removed dependency edge{} not mentioned in intent:", "⚠️".yellow().bold(), if unexplained.len() == 1 { "" } else { "s" }));
+                            for e in &unexplained {
+                                spinner.println(format!("  {} {}", "↳".dimmed(), e.evidence().yellow()));
+                            }
+                        }
+                    } else if !delta.removed.is_empty() {
+                        spinner.println(format!("{} Edge-Delta: {} removed edge{} accounted for by intent.", "🛡️ ".green(), delta.removed.len(), if delta.removed.len() == 1 { "" } else { "s" }));
+                    }
                 }
             }
 
@@ -5542,8 +6377,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Proactive Blast Radius Detection
-            if let Some(latest) = previous_checkpoint.as_ref() {
+            // Proactive Blast Radius Detection (reuses the hoisted checkpoint read)
+            if let Some(ref latest) = latest_checkpoint {
                 let mut modified_identifiers = Vec::new();
                 for current_node in &staged_nodes {
                     let mut is_modified = true;
@@ -5595,6 +6430,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             spinner.set_message(format!("{}", "Capturing Environment Fingerprint...".bold()));
             let env_fingerprint = capture_env_fingerprint();
 
+            // CAP-01: the checkpoint event carries its own scope — repo,
+            // checkout, session, its OWN id and its parent's — explicitly.
+            let checkpoint_scope = repo
+                .workdir()
+                .map(|w| w.to_path_buf())
+                .and_then(|root| {
+                    scope::ScopeManifest::capture(&root, &agent_id, None)
+                        .ok()
+                        .filter(|m| m.validate().is_ok())
+                })
+                .map(|m| {
+                    m.with_checkpoint(
+                        Some(id.clone()),
+                        latest_checkpoint.as_ref().map(|c| c.id.clone()),
+                    )
+                })
+                .and_then(|m| serde_json::to_value(&m).ok());
+
             let checkpoint = CheckpointData {
                 id: id.clone(),
                 agent_id,
@@ -5605,6 +6458,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 intent_vector_model,
                 env_fingerprint,
                 file_oids,
+                scope: checkpoint_scope,
             };
 
             CheckpointStore::stage_checkpoint(&checkpoint)?;
@@ -5659,15 +6513,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // ── Semantic CI (additive) ───────────────────────────────────
-            // The inline gates above already enforced blocking with their exact
-            // strict/dev-mode semantics. Run the declared .aura/pipelines
-            // pipeline ALONGSIDE them — reusing the AstNodes we just parsed — so
-            // the commit is now a named Semantic CI run (the pipeline IS the
-            // gate). Additive by design: it records + summarizes, it does NOT
-            // re-block (no double-flagging). Best-effort; never affects commit.
+            // ── Semantic CI ──────────────────────────────────────────────
+            // The inline gates above already enforced no-secrets and taste with
+            // their exact strict/dev-mode semantics, so the pipeline does not
+            // re-block those — one secret must not be flagged twice, and a
+            // decision the user already made at the confirm prompt must not be
+            // overridden here.
+            //
+            // Every OTHER blocking step it can declare — no-stubs,
+            // goal-aligned, intent-match, build, any `run:` shell step — has no
+            // inline enforcer, and this call used to throw its verdict away
+            // wholesale. The effect was that marking a step `blocking` did
+            // nothing at all, while the run it recorded said "1 stopped the
+            // commit". A gate that lies about having gated is worse than no
+            // gate, so those failures now halt the commit for real.
             if let Some(root) = repo.workdir() {
-                let _ = ci::run_pre_commit_additive(&repo, root, &staged_nodes);
+                let runs = ci::run_pre_commit_additive(&repo, root, &staged_nodes);
+                let blockers = ci::unenforced_blockers(&runs);
+                if !blockers.is_empty() && !*force {
+                    spinner.finish_and_clear();
+                    ci::print_unenforced_blockers(&blockers);
+                    std::process::exit(1);
+                }
             }
 
             // ── Awareness: announce committed symbols (M3c) ──────────────
@@ -5871,95 +6738,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .and_then(|r| Ok(r.url().unwrap_or("").to_string()))
                     {
                         if !remote.is_empty() {
-                            std::thread::spawn(move || {
+                            // Not detached. This runs from the post-commit
+                            // hook, and the hook's process exits the moment
+                            // this arm returns — a spawned-and-forgotten
+                            // thread is killed mid-request, which is why the
+                            // cloud never learned about a commit even on the
+                            // rare occasion the hook did fire. Join it, and
+                            // keep it on its own thread so a hung connection
+                            // times out against the client's own deadline
+                            // rather than blocking git forever.
+                            let handle = std::thread::spawn(move || {
                                 crate::sync::GlobalSync::sync_checkpoints(&remote);
+                                // The notes only exist when the pre-commit
+                                // hook ran. Mirror the commits from git too,
+                                // so a commit that skipped Aura entirely still
+                                // reaches the Console's Landed tab.
+                                if let Ok(repo) = git2::Repository::open(".") {
+                                    crate::sync::GlobalSync::sync_commits(&remote, &repo, 100);
+                                }
                                 // Sync session with transcript to cloud
                                 if let Some(payload) = session_payload {
                                     crate::sync::GlobalSync::sync_session(&remote, &payload);
                                 }
                             });
+                            let _ = handle.join();
                         }
                     }
                 }
             }
         }
-        Commands::Ask { query } => {
-            let repo = open_repo()?;
-            
-            println!("\n{} {}\n", "🧠".bold(), "Aura Semantic Brain: Searching Git Context Branch...".bold().magenta());
-
-            let mut results = CheckpointStore::get_all_checkpoints(&repo)?;
-            
-            // Vector Logic Search MVP
-            if query != "recent" {
-                println!("{} Generating embedding for query: \"{}\"\n", "🔍".cyan(), query.italic());
-                
-                let query_embedding = embeddings::embed(&query);
-
-                if let Some((qv, qmodel)) = query_embedding {
-                    // Vectors from different models live in different spaces —
-                    // only compare same-model. Legacy checkpoints carry no
-                    // stamp; cosine_similarity's length guard (→ 0.0 on dim
-                    // mismatch) keeps cross-space noise out for those.
-                    let score = |cp: &CheckpointData| -> f32 {
-                        match (&cp.intent_vector, &cp.intent_vector_model) {
-                            (Some(v), Some(m)) if *m == qmodel => {
-                                embeddings::cosine_similarity(v, &qv)
-                            }
-                            (Some(v), None) => embeddings::cosine_similarity(v, &qv),
-                            _ => 0.0,
-                        }
-                    };
-                    results.sort_by(|a, b| {
-                        // Sort descending by score
-                        score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal)
-                    });
-
-                    // Filter out low relevance using cosine similarity threshold
-                    results.retain(|r| score(r) > 0.3); // Standard threshold
-                } else {
-                    println!("{} Empty query — nothing to search.", "✗".red());
-                    return Ok(());
-                }
-            }
-
-            if results.is_empty() {
-                println!("{} {}", "✗".red().bold(), "No agent context found matching the query.".red());
-                println!("\n  {} {}", "ℹ️ ".blue(), "Why is this empty?".bold());
-                println!("    Aura tracks AI reasoning via `git commit` or the `aura daemon`.");
-                println!("    Since this repository was just initialized, there is no semantic history yet.\n");
-                println!("  {} {}", "🛠️  ".green(), "How to build the graph:".bold());
-                println!("    1. Write some code (or have an AI write it).");
-                println!("    2. Run `git commit -m \"My message\"`.");
-                println!("    3. Aura will automatically intercept the commit and log the logic.\n");
-                println!("  {} To record every keystroke automatically, run `{}` in a separate terminal.", "↳".dimmed(), "aura daemon".cyan());
-            } else {
-                println!("╭─────────────────────────┬─────────────────────────────────────────────────────────────╮");
-                println!("│ {}    │ {}                                 │", "Agent / Orchestrator".cyan().bold(), "Semantic Reasoning (Intent)".green().bold());
-                println!("├─────────────────────────┼─────────────────────────────────────────────────────────────┤");
-
-                for data in results.iter().take(5) { // Show top 5
-                    let agent_padded = format!("{:width$}", data.agent_id, width = 23);
-                    let mut intent_display = data.intent.clone();
-                    if let Some(ref fp) = data.env_fingerprint {
-                        intent_display.push_str(&format!("\n[Env Fingerprint: {}]", &fp[0..12]));
-                    }
-                    let wrapped_intent = textwrap::wrap(&intent_display, 59);
-                    
-                    for (i, line) in wrapped_intent.iter().enumerate() {
-                        if i == 0 {
-                            println!("│ {} │ {} │", agent_padded.bright_blue(), format!("{:width$}", line, width = 59).white());
-                        } else {
-                            println!("│ {} │ {} │", format!("{:width$}", "", width = 23), format!("{:width$}", line, width = 59).dimmed());
-                        }
-                    }
-                    println!("├─────────────────────────┼─────────────────────────────────────────────────────────────┤");
-                }
-                println!("  {} Read {} checkpoints from `aura/checkpoints/v1`\n", "↳".dimmed(), results.len().to_string().dimmed());
-            }
+        Commands::Ask { query, json, limit } => {
+            std::process::exit(ask_local::run(query, *json, *limit));
         }
-        Commands::Handover { agent, manager_session } => {
+        Commands::Handover { agent, manager_session, full } => {
             let repo = open_repo()?;
+            let full = *full;
 
             println!("{} Generating dense XML context payload for {}...", "🔄".cyan(), agent.bold());
 
@@ -5970,11 +6783,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // never had: signed intents, function-level intent on each
             // touched node (with is_stub flagging unfinished work), the
             // working-tree diff, the session digest, project memory and
-            // the transcript tail. Full mode (200 turns) because a
-            // handover paste-block wants maximum fidelity; redaction
+            // the transcript tail. Default is the compact semantic
+            // profile (12-turn tail, capped continuum) so a handover
+            // stays a paste-block, not a dump; `--full` is the explicit
+            // expansion to the 200-turn full-fidelity payload. Redaction
             // runs unconditionally since the payload leaves the box.
+            let mode = if full {
+                continuity::CarryoverMode::Full
+            } else {
+                continuity::CarryoverMode::Semantic
+            };
             let opts = continuity::AssembleOpts::for_mode(
-                continuity::CarryoverMode::Full,
+                mode,
                 Some(agent.clone()),
                 0,
             );
@@ -6003,8 +6823,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .and_then(|c| c.as_array())
                                         .cloned()
                                         .unwrap_or_default();
-                                    const HOT: usize = 24;
-                                    let split = chat.len().saturating_sub(HOT);
+                                    // The continuum is bounded by default —
+                                    // a long-lived manager session can hold
+                                    // hundreds of anchored turns and pasted
+                                    // walls of text, and the default payload
+                                    // must stay a paste-block. `--full` lifts
+                                    // the caps for a max-fidelity handoff.
+                                    let (hot, anchor_cap, turn_trunc) = if full {
+                                        (24usize, usize::MAX, usize::MAX)
+                                    } else {
+                                        (12usize, 40usize, 600usize)
+                                    };
+                                    let split = chat.len().saturating_sub(hot);
                                     let (older, working) = chat.split_at(split);
                                     let anchored: Vec<&serde_json::Value> = older.iter()
                                         .filter(|t| t.get("anchor").map(|a| !a.is_null()).unwrap_or(false))
@@ -6014,9 +6844,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         sid.replace('"', "&quot;")
                                     ));
                                     xml_payload.push_str("  <anchored>\n");
-                                    for t in &anchored {
+                                    for t in anchored.iter().take(anchor_cap) {
                                         let role = t.get("role").and_then(|r| r.as_str()).unwrap_or("user");
                                         let text = t.get("text").and_then(|s| s.as_str()).unwrap_or("");
+                                        let text = continuity::assemble::truncate(text, turn_trunc);
                                         let anchor = t.get("anchor").and_then(|a| a.as_str()).unwrap_or("user_pin");
                                         xml_payload.push_str(&format!(
                                             "    <turn role=\"{}\" anchor=\"{}\">{}</turn>\n",
@@ -6025,10 +6856,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
                                         ));
                                     }
+                                    if anchored.len() > anchor_cap {
+                                        xml_payload.push_str(&format!(
+                                            "    <!-- +{} older anchored turns elided; rerun with --full -->\n",
+                                            anchored.len() - anchor_cap
+                                        ));
+                                    }
                                     xml_payload.push_str("  </anchored>\n  <working>\n");
                                     for t in working {
                                         let role = t.get("role").and_then(|r| r.as_str()).unwrap_or("user");
                                         let text = t.get("text").and_then(|s| s.as_str()).unwrap_or("");
+                                        let text = continuity::assemble::truncate(text, turn_trunc);
                                         xml_payload.push_str(&format!(
                                             "    <turn role=\"{}\">{}</turn>\n",
                                             role,
@@ -6109,30 +6947,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        Commands::Rewind { identifier, file_path, amnesia } => {
-            println!("\n{} {} {}", "⏪".bold(), "Aura Semantic Time Machine: Rewinding".bold().cyan(), identifier.bold().yellow());
+        Commands::Rewind { identifier, file_path, amnesia, preview, json, undo } => {
+            // Machine output has to be parseable from the first byte, so the
+            // banner and every progress line below are for people only.
+            let talking = !*json;
+            if talking {
+                let verb = if *undo {
+                    "Aura Semantic Time Machine: Undoing the recovery of"
+                } else {
+                    "Aura Semantic Time Machine: Rewinding"
+                };
+                println!("\n{} {} {}", "⏪".bold(), verb.bold().cyan(), identifier.bold().yellow());
+            }
 
             let repo = open_repo()?;
             let mut parser = SemanticParser::new()?;
 
+            // Every way this command declines to write, said once. Nothing
+            // was brought back, so the exit code has to say so: the desktop
+            // "Bring this back" button reads the status, and an exit 0 paints
+            // a green success over a file nothing happened to.
+            fn bail(json: bool, reason: &str, message: &str) -> ! {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "ok": false, "reason": reason, "message": message })
+                    );
+                } else {
+                    eprintln!("{}", message);
+                }
+                std::process::exit(1);
+            }
+
             // Determine file extension
             let ext = detect_lang_ext(&file_path);
             if ext.is_empty() {
-                // Honest failure: nothing was brought back, so exit non-zero.
-                // A caller that reports "success" on exit 0 (the desktop
-                // "Bring this back" button) must not paint a false green here.
-                eprintln!("Aura can't bring back this kind of file yet ({}).", file_path);
-                std::process::exit(1);
+                bail(
+                    *json,
+                    "unsupported_language",
+                    &format!("Aura can't bring back this kind of file yet ({}).", file_path),
+                );
             }
             let ext = ext.as_str();
 
             // 1. Parse the current file on disk
             let current_source = match fs::read_to_string(file_path) {
                 Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Couldn't open {} to bring it back: {}", file_path, e);
-                    std::process::exit(1);
-                }
+                Err(e) => bail(
+                    *json,
+                    "unreadable_file",
+                    &format!("Couldn't open {} to bring it back: {}", file_path, e),
+                ),
             };
 
             // A deleted piece has no current range. That used to end the command
@@ -6141,152 +7006,230 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // commit over. Carry the absence through instead: the searches below
             // are what find the old version, and it gets spliced back in rather
             // than replaced.
-            let current_node_info = parser.retrieve_node_source(&current_source, ext, identifier)?;
+            // A name can belong to more than one thing in a file — a struct
+            // and its impl block, two methods on different classes, an
+            // overload pair. The walk used to take whichever node it reached
+            // first and rewrite that one, a guess made silently by the single
+            // command whose whole job is putting the *right* thing back.
+            let found = parser.retrieve_node_matches(&current_source, ext, identifier)?;
+            if found.len() > 1 {
+                let described = rewind_plan::describe_matches(&current_source, &found);
+                let message = rewind_plan::ambiguity_message(identifier, file_path, &described);
+                if *json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "ok": false,
+                            "reason": "ambiguous",
+                            "message": message,
+                            "matches": described
+                                .iter()
+                                .map(|m| serde_json::json!({ "line": m.line, "signature": m.signature }))
+                                .collect::<Vec<_>>(),
+                        })
+                    );
+                    std::process::exit(1);
+                }
+                bail(*json, "ambiguous", &message);
+            }
+
+            let current_node_info = found.into_iter().next();
             let was_deleted = current_node_info.is_none();
             let (current_node_source, current_range) = match current_node_info {
                 Some((src, range)) => (Some(src), Some(range)),
                 None => {
-                    println!("  {} '{}' isn't in {} any more — looking for the version that was saved before it went.", "↳".dimmed(), identifier, file_path);
+                    if talking {
+                        println!("  {} '{}' isn't in {} any more — looking for the version that was saved before it went.", "↳".dimmed(), identifier, file_path);
+                    }
                     (None, None)
                 }
             };
 
-            // 2. Search for previous state — try THREE sources in order:
-            //    a) Durable file snapshots (.aura/snapshots/) — survives even without commits
-            //    b) Full git history (walk ALL commits, not just HEAD~1)
-            //    c) Fall back to HEAD~1 as last resort
+            // 2. Search Aura's own records first and git after them — the
+            //    same order, out of the same code, that the MCP `aura_rewind`
+            //    tool uses. See `rewind_search`.
+            if talking {
+                println!("  {} Looking through Aura's recorded history for this function, durable snapshots, and git...", "↳".dimmed());
+            }
+            let candidates = rewind_search::candidates_here(
+                &mut parser,
+                &repo,
+                file_path,
+                ext,
+                identifier,
+                current_node_source.as_deref(),
+            );
 
-            let mut past_node_source: Option<String> = None;
-            // The whole file the old version came from, kept so a deleted piece
-            // can be placed by its neighbours instead of a stale byte offset.
-            let mut past_file_source: Option<String> = None;
-
-            // Strategy A: Check durable snapshots first
-            println!("  {} Searching durable snapshots...", "↳".dimmed());
-            let snapshots = checkpoint::SnapshotStore::get_snapshots_for_file(file_path);
-            for snap in &snapshots {
-                if let Ok(Some((src, _))) = parser.retrieve_node_source(&snap.content, ext, identifier) {
-                    // Anything found is a real recovery when the piece is gone;
-                    // otherwise it has to actually differ from what's on disk.
-                    if current_node_source.as_deref() != Some(src.as_str()) {
-                        println!("  {} Found in snapshot from {} (trigger: {})",
-                            "✓".green(), snap.timestamp, snap.trigger);
-                        past_node_source = Some(src);
-                        past_file_source = Some(snap.content.clone());
-                        break;
-                    }
+            if candidates.is_empty() {
+                if was_deleted {
+                    bail(*json, "nothing_saved", &format!(
+                        "'{}' is gone from {}, and Aura has no saved copy of it — nothing in its recorded history, no snapshot, and it isn't in the last {} commits either.",
+                        identifier, file_path, rewind_search::GIT_DEPTH
+                    ));
+                } else {
+                    bail(*json, "nothing_saved", &format!(
+                        "There's no earlier saved version of '{}' to bring back — it may have been created here, with no prior version to return to.",
+                        identifier
+                    ));
                 }
             }
 
-            // Strategy B: Walk git history (HEAD + up to 49 ancestors).
-            // Read each commit's tree at the top of the loop so HEAD
-            // itself is searched — the "uncommitted local edit, HEAD
-            // is clean" case (most common AI-hallucination recovery
-            // shape) was being silently skipped because the previous
-            // loop walked to commit.parent(0) before ever reading a
-            // tree.
-            if past_node_source.is_none() {
-                println!("  {} Searching git history (HEAD + up to 49 ancestors)...", "↳".dimmed());
-                let mut commit = match repo.head().and_then(|r| r.peel_to_commit()) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        // Nothing was brought back, so this cannot exit 0 — the
-                        // desktop "Bring this back" button reads the status and
-                        // would otherwise report a recovery that never happened.
-                        eprintln!("There are no commits yet to look through for an earlier version of '{}'.", identifier);
-                        std::process::exit(1);
+            // `--undo` is not "rewind again". A rewind always takes a safety
+            // snapshot before it writes, and that snapshot — and only that
+            // one — holds the version the rewind displaced. Any other
+            // candidate is somebody's work or an older state, and restoring
+            // it would be a second rewind wearing the word "undo".
+            let chosen: &[rewind_search::Candidate] = if *undo {
+                match rewind_plan::undo_candidate(&candidates) {
+                    Some(i) => &candidates[i..=i],
+                    None => bail(*json, "nothing_to_undo", &format!(
+                        "Aura has no record of having brought '{}' back in {}, so there is no recovery to undo. Nothing was changed.",
+                        identifier, file_path
+                    )),
+                }
+            } else {
+                &candidates
+            };
+
+            // Everything a rewind decides and verifies, done without writing.
+            // A preview stops here with it; an apply carries on into the
+            // snapshot and the atomic write. Both go through the same code,
+            // so the preview is a preview of what will actually happen.
+            if *preview {
+                let mut planned: Option<(usize, String)> = None;
+                let mut last_error = String::from("there was nothing to put back");
+                for (i, candidate) in chosen.iter().enumerate() {
+                    match rewind_txn::plan_rewind(
+                        &mut parser,
+                        file_path,
+                        ext,
+                        identifier,
+                        &current_source,
+                        current_range.clone(),
+                        &candidate.node_source,
+                        candidate.file_source.as_deref(),
+                    ) {
+                        Ok(new_source) => {
+                            planned = Some((i, new_source));
+                            break;
+                        }
+                        Err(e) => last_error = e,
                     }
+                }
+                let (i, new_source) = match planned {
+                    Some(p) => p,
+                    None => bail(*json, "no_usable_version", &format!(
+                        "None of the {} saved version(s) of '{}' can be put back. Nothing was written. Last reason: {}",
+                        chosen.len(), identifier, last_error
+                    )),
                 };
 
-                for depth in 0..50 {
-                    let tree = commit.tree()?;
-                    if let Ok(entry) = tree.get_path(Path::new(file_path)) {
-                        let obj = entry.to_object(&repo)?;
-                        if let Some(blob) = obj.as_blob() {
-                            if let Ok(past_source) = std::str::from_utf8(blob.content()) {
-                                if let Ok(Some((src, _))) = parser.retrieve_node_source(past_source, ext, identifier) {
-                                    // Same rule as the snapshot pass: a missing
-                                    // piece makes any hit a recovery.
-                                    if current_node_source.as_deref() != Some(src.as_str()) {
-                                        let label = if depth == 0 {
-                                            "HEAD".to_string()
-                                        } else {
-                                            format!("HEAD~{}", depth)
-                                        };
-                                        println!("  {} Found in commit {} ({})",
-                                            "✓".green(), label, &commit.id().to_string()[..8]);
-                                        past_node_source = Some(src);
-                                        past_file_source = Some(past_source.to_string());
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    match commit.parent(0) {
-                        Ok(p) => commit = p,
-                        Err(_) => break,
-                    }
+                // Read the restored piece back out of the file that would be
+                // written, rather than out of the record it came from: what
+                // lands on disk is what a person should be shown.
+                let restored = parser
+                    .retrieve_node_source(&new_source, ext, identifier)
+                    .ok()
+                    .flatten()
+                    .map(|(src, _)| src)
+                    .unwrap_or_else(|| chosen[i].node_source.clone());
+
+                let plan = rewind_plan::Preview {
+                    identifier: identifier.clone(),
+                    file: file_path.clone(),
+                    deleted: was_deleted,
+                    origin: chosen[i].origin.describe(),
+                    current: current_node_source.clone(),
+                    restored,
+                    candidates_considered: chosen.len(),
+                };
+
+                if *json {
+                    let mut out = plan.to_json();
+                    out["ok"] = serde_json::json!(true);
+                    out["undo"] = serde_json::json!(*undo);
+                    out["applied"] = serde_json::json!(false);
+                    // The desktop asks a person to approve this, and
+                    // "snapshot from 1789045284657 (trigger: pre_rewind)" is
+                    // not a sentence anybody can approve.
+                    out["origin_plain"] = serde_json::json!(chosen[i].origin.in_plain_words());
+                    println!("{}", out);
+                } else {
+                    print!("{}", plan.render());
+                    println!(
+                        "Nothing has been written. Run the same command without --preview to {}.",
+                        if *undo { "undo it" } else { "bring it back" }
+                    );
                 }
+                return Ok(());
             }
 
-            let past_node_source = match past_node_source {
-                Some(s) => s,
-                None => {
-                    // No snapshot and no differing version in git history: there
-                    // is genuinely nothing to restore. Exit non-zero so the
-                    // desktop button reports an honest "couldn't bring it back"
-                    // instead of a fabricated success.
-                    if was_deleted {
-                        eprintln!(
-                            "'{}' is gone from {}, and Aura has no saved copy of it — no snapshot, and it isn't in the last 50 commits either.",
-                            identifier, file_path
-                        );
-                    } else {
-                        eprintln!(
-                            "There's no earlier saved version of '{}' to bring back — it may have been created here, with no prior version to return to.",
-                            identifier
-                        );
+            // 4+5. Transactional surgery: mandatory safety snapshot, verified
+            // splice, atomic tmp+rename apply (CAP-04). A failure at any step
+            // leaves the file exactly as it was — which is what makes trying
+            // the next candidate safe rather than reckless.
+            let outcome = rewind_search::apply_first(chosen, |candidate| {
+                rewind_txn::apply_rewind(
+                    &mut parser,
+                    file_path,
+                    ext,
+                    identifier,
+                    &current_source,
+                    current_range.clone(),
+                    &candidate.node_source,
+                    candidate.file_source.as_deref(),
+                    || checkpoint::SnapshotStore::snapshot_file(file_path, rewind_plan::PRE_REWIND_TRIGGER, "aura-rewind"),
+                )
+            });
+            let (used, applied) = match outcome {
+                Ok((i, a)) => {
+                    if talking {
+                        println!("  {} Found in {}", "✓".green(), chosen[i].origin.describe());
                     }
-                    std::process::exit(1);
+                    (i, a)
                 }
+                // Every candidate refused to splice, so the file on disk is
+                // untouched. This used to print and then return Ok — exit 0
+                // over a recovery that never happened, which the desktop
+                // button read as success and painted green.
+                Err(last_error) => bail(*json, "apply_failed", &format!(
+                    "Rewind aborted: none of the {} saved version(s) of '{}' could be put back — nothing was written. Last reason: {}",
+                    chosen.len(), identifier, last_error
+                )),
             };
 
-            // Snapshot the current state BEFORE we rewind (safety net)
-            if let Err(e) = checkpoint::SnapshotStore::snapshot_file(file_path, "pre_rewind", "aura-rewind") {
-                eprintln!("  {} Warning: Could not snapshot current state: {}", "⚠️".yellow(), e);
-            }
-
-            // 4. Perform the Semantic Surgery — replace the piece if it is still
-            //    there, splice it back beside its old neighbours if it isn't.
-            let new_source = match current_range {
-                Some(range) => {
-                    let mut s = current_source.clone();
-                    s.replace_range(range, &past_node_source);
-                    s
-                }
-                None => {
-                    let past_file = past_file_source.unwrap_or_default();
-                    match parser.splice_node_back(&current_source, &past_file, ext, identifier)? {
-                        Some(s) => s,
-                        None => {
-                            eprintln!("Couldn't work out where '{}' belongs in {}.", identifier, file_path);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-            };
-
-            // 5. Save the file
-            let mut file = OpenOptions::new().write(true).truncate(true).open(file_path)?;
-            file.write_all(new_source.as_bytes())?;
-
-            if was_deleted {
-                println!("{} Put '{}' back where it was, from its last saved version.", "✓".green().bold(), identifier);
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "applied": true,
+                        "undo": *undo,
+                        "identifier": identifier,
+                        "file": file_path,
+                        "deleted": was_deleted,
+                        "origin": chosen[used].origin.describe(),
+                        "origin_plain": chosen[used].origin.in_plain_words(),
+                        "safety_snapshot": applied.safety_snapshot,
+                        "undo_command": ["rewind", identifier, file_path, "--undo"],
+                    })
+                );
             } else {
-                println!("{} Surgically reverted '{}' to its previous logic state.", "✓".green().bold(), identifier);
+                if *undo {
+                    println!("{} Undid the last recovery of '{}' — it is back to what it was before Aura brought it back.", "✓".green().bold(), identifier);
+                } else if was_deleted {
+                    println!("{} Put '{}' back where it was, from its last saved version.", "✓".green().bold(), identifier);
+                } else {
+                    println!("{} Surgically reverted '{}' to its previous logic state.", "✓".green().bold(), identifier);
+                }
+                println!("  {} The rest of {} remains untouched.", "↳".dimmed(), file_path);
+                println!("  {} Safety snapshot: {}", "↳".dimmed(), applied.safety_snapshot);
+                // The safety snapshot has always existed; until now nothing
+                // told anybody how to reach it, so "you can undo this too"
+                // was true of the data and false of the interface.
+                let hint = if *undo { "Changed your mind again? Run the same command to put the recovery back:" } else { "Changed your mind?" };
+                println!("  {} {} {}", "↳".dimmed(), hint, format!("aura rewind {} {} --undo", identifier, file_path).cyan());
             }
-            println!("  {} The rest of {} remains untouched.", "↳".dimmed(), file_path);
 
             // Taste Engine — rewind is the strongest negative signal
             // we capture (weight -3.0 via signal_weight). Apply it to
@@ -6309,19 +7252,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if *amnesia {
-                println!("  {} Executing Amnesia Protocol: Wiping AI hallucination context...", "↳".dimmed().magenta());
+                if talking {
+                    println!("  {} Executing Amnesia Protocol: Wiping AI hallucination context...", "↳".dimmed().magenta());
+                }
                 let override_msg = format!("\n> [SYSTEM: AURA OVERRIDE]\n> The human architect has mathematically reverted the '{}' logic node to a previous safe state via the Semantic Scalpel.\n> You MUST forget your previous implementation attempts for this node. Read the current file state and await new instructions.\n", identifier);
                 
                 // Attempt to inject into Aider
                 if let Ok(mut file) = OpenOptions::new().append(true).open(".aider.chat.history.md") {
                     let _ = file.write_all(override_msg.as_bytes());
-                    println!("    {} Injected System Override into Aider chat history.", "✓".green());
+                    if talking {
+                        println!("    {} Injected System Override into Aider chat history.", "✓".green());
+                    }
                 }
 
                 // Attempt to inject into Gemini CLI session (just create a system note)
                 let _ = fs::create_dir_all(".aura");
                 let _ = fs::write(".aura/amnesia_override.md", &override_msg);
-                println!("    {} System Override generated. AI Agents should read .aura/amnesia_override.md before proceeding.", "✓".green());
+                if talking {
+                    println!("    {} System Override generated. AI Agents should read .aura/amnesia_override.md before proceeding.", "✓".green());
+                }
             }
         }
         Commands::Dashboard => {
@@ -6373,40 +7322,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             McpServer::serve();
         }
         Commands::Snapshot { description } => {
-            println!("{} {} {}", "📸".bold(), "Aura Hybrid Engine: Creating Safety Snapshot...".bold().cyan(), description.italic().dimmed());
+            println!("{} {} {}", "📸".bold(), "Saving a snapshot of the whole project...".bold().cyan(), description.italic().dimmed());
             let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            let branch_name = format!("aura/snapshot/{}", timestamp);
-            
-            use std::process::Command;
-            
-            // Stash current changes to preserve uncommitted work
-            let stash_status = Command::new("git").arg("stash").arg("create").output()?;
-            let stash_hash = String::from_utf8_lossy(&stash_status.stdout).trim().to_string();
-
-            // Create the hidden snapshot branch
-            Command::new("git").args(["branch", &branch_name]).output()?;
-
-            println!("{} Project-wide snapshot created: {}", "✓".green().bold(), branch_name.yellow());
-            if !stash_hash.is_empty() {
-                println!("  {} Uncommitted work preserved in stash hash: {}", "↳".dimmed(), stash_hash.dimmed());
+            let mut git = safety_snapshot::RealGit::here();
+            match safety_snapshot::take(&mut git, &timestamp.to_string()) {
+                Ok(taken) => {
+                    println!("{} Snapshot saved.", "✓".green().bold());
+                    for line in safety_snapshot::taken_lines(&taken) {
+                        println!("  {} {}", "↳".dimmed(), line);
+                    }
+                }
+                Err(e) => println!("{} No snapshot was taken: {}", "✗".red(), e),
             }
-            println!("  {} If the AI hallucinated, run: {} {}", "↳".dimmed(), "aura restore".cyan(), timestamp.to_string().cyan());
         }
         Commands::Restore { snapshot_id } => {
-            let branch_name = format!("aura/snapshot/{}", snapshot_id);
-            println!("{} {} {}", "⏪".bold(), "Aura Hybrid Engine: Sledgehammer Restore to".bold().red(), branch_name.yellow());
-
-            use std::process::Command;
-
-            let status = Command::new("git").args(["reset", "--hard", &branch_name]).output()?;
-            if status.status.success() {
-                println!("{} Project fully restored to safety snapshot.", "✓".green().bold());
-                println!("  {} (Note: Uncommitted work has been nuked)", "↳".dimmed());
-            } else {
-                println!("{} Failed to find snapshot {}.", "✗".red(), snapshot_id);
+            println!("{} {} {}", "⏪".bold(), "Going back to snapshot".bold(), snapshot_id.yellow());
+            // Nanoseconds, not seconds: two restores in the same second
+            // must not overwrite each other's saved working tree.
+            let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            let mut git = safety_snapshot::RealGit::here();
+            match safety_snapshot::restore(&mut git, snapshot_id, &now.to_string()) {
+                Ok(done) => {
+                    println!("{} Project restored.", "✓".green().bold());
+                    for line in safety_snapshot::restored_lines(&done) {
+                        println!("  {} {}", "↳".dimmed(), line);
+                    }
+                }
+                Err(e) => println!("{} {}", "✗".red(), e),
             }
         }
-        Commands::SnapshotFile { paths, trigger, agent } => {
+        Commands::SnapshotFile { paths, trigger, agent, why, session } => {
             // Bucket L1 — durable file-level snapshot. Wraps the same
             // `SnapshotStore::snapshot_file` the MCP tool + watcher
             // already use; this CLI surface lets aura-shell's Manager
@@ -6417,7 +7362,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // zone globs may include not-yet-created files (the subagent's
             // job is to create them); skipping is the intended behaviour.
             let mut had_failure = false;
+            let reason_root = why.as_deref().filter(|w| !w.trim().is_empty()).map(|_| {
+                Repository::discover(".")
+                    .ok()
+                    .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+            });
             for path in paths {
+                // Stated before the existence check: the reason for creating a
+                // file is worth keeping even though there is nothing to
+                // snapshot yet.
+                if let (Some(root), Some(w)) = (reason_root.as_ref(), why.as_deref()) {
+                    edit_reason::record(root, path, w, session.as_deref());
+                }
                 if !std::path::Path::new(path).exists() {
                     println!("skip:{path}");
                     continue;
@@ -6535,6 +7492,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::GenerateStubs => {
             StubEngine::generate_stubs();
         }
+        Commands::TokenAb { data } => {
+            token_ab::run(&data)?;
+        }
         Commands::Gc => {
             println!("{} {}", "🧹".bold(), "Aura Semantic Compaction: Analyzing history...".bold().cyan());
             let repo = open_repo()?;
@@ -6572,6 +7532,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let config = ConfigManager::load();
             println!("  {} {}: {}", "⚙️ ".cyan(), "Gatekeeper Strict Mode".bold(), if config.strict_gatekeeper_mode { "ON (Blocking)".red() } else { "OFF (Warn-Only)".green() });
             println!("  {} {}: {}", "⚡".yellow(), "Dev Mode (Fast Init)".bold(), if config.dev_mode { "Active".green() } else { "Inactive (Enterprise)".dimmed() });
+
+            // "ON (Blocking)" is a fact about a flag. What a person needs from
+            // this screen is what Aura will actually stop, who can lift it, and
+            // whether an authorization is standing right now — and the line
+            // above says none of it. It even reports "Blocking" in a repository
+            // where no hook is installed and nothing is blocked at all.
+            {
+                let repo_root = Repository::discover(".")
+                    .ok()
+                    .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+                if let Some(root) = repo_root {
+                    let posture = authority::read(authority::Inputs {
+                        repo_root: &root,
+                        hooks_dir: &hook::HookInstaller::hooks_dir(),
+                        strict: config.strict_gatekeeper_mode,
+                        locked: ConfigManager::is_strict_mode_locked(&config),
+                        dev_mode: config.dev_mode,
+                        taste_strict: config.taste_strict,
+                    });
+                    println!("\n  {} {}", "🛡️ ".bold(), "What Aura will stop".bold().cyan());
+                    for line in authority::lines(&posture) {
+                        println!("    {} {}", "↳".dimmed(), line);
+                    }
+                }
+            }
 
             match Repository::open(".") {
                 Ok(repo) => {
@@ -6648,7 +7633,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let config_t = ConfigManager::load();
                 let current_repo = live_sync::repo_name_from_cwd();
                 let is_team = config_t.team_repos.contains(&current_repo);
-                let has_cloud = config_t.cloud_url.is_some() && (config_t.cloud_api_token.is_some() || std::env::var("AURA_CLOUD_TOKEN").is_ok());
+                let has_cloud = cloud_endpoint::origin(config_t.cloud_url.as_deref()).is_some()
+                    && cloud_endpoint::token(config_t.cloud_api_token.as_deref()).is_some();
 
                 if has_cloud || is_team {
                     println!("\n  {} {}", "Team".bold(), "Collaboration".bold().cyan());
@@ -6779,11 +7765,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  {} Action Required: Run `aura snapshot \"Pre-Audit\"` to secure the baseline before proceeding.", "↳".dimmed());
             }
         }
+        Commands::Dispatch { since, repos, branch, json, markdown, out } => {
+            std::process::exit(dispatch::cli(
+                since.as_deref(),
+                repos.as_deref(),
+                branch.as_deref(),
+                *json,
+                *markdown,
+                out.as_deref(),
+            ));
+        }
+        Commands::Recap {
+            day,
+            week,
+            month,
+            ninety,
+            view,
+            agent,
+            repos,
+            branch,
+            static_,
+            json,
+            markdown,
+            out,
+        } => {
+            std::process::exit(recap::cli(
+                *day,
+                *week,
+                *month,
+                *ninety,
+                view,
+                agent.as_deref(),
+                repos.as_deref(),
+                branch.as_deref(),
+                *static_,
+                *json,
+                *markdown,
+                out.as_deref(),
+            ));
+        }
+        Commands::Dialects { json } => {
+            std::process::exit(dialects_cmd::cli(*json));
+        }
+        Commands::Import { dialect, since, dry_run, push, json } => {
+            std::process::exit(import_history::cli(
+                dialect.as_deref(),
+                since.as_deref(),
+                *dry_run,
+                *push,
+                *json,
+            ));
+        }
+        Commands::Why { target, json } => {
+            std::process::exit(why::run(&target, *json));
+        }
         Commands::Explain { identifier, file } => {
+            // `explain path/to/file.rs:120` is the same question `why` answers,
+            // and a person who types it should not have to learn which command
+            // they were supposed to use.
+            let Some(file) = file else {
+                std::process::exit(why::run(&identifier, false));
+            };
             println!("\n{} {}\n", "🔍".bold(), "Aura Explain: Tracing code provenance...".bold().cyan());
+            println!("  {}\n", "reading committed history: the commit that wrote this line, and the session behind it".dimmed());
 
-            match session::SessionManager::explain_code(&file, &identifier) {
-                Some((sess, transcript)) => {
+            match session::SessionManager::explain_outcome(&file, &identifier) {
+                session::ExplainOutcome::Traced { session: sess, transcript } => {
                     println!("  {} {}: {}", "Agent".bold(), sess.agent_id.cyan(), sess.session_id.dimmed());
                     if let Some(ref bc) = sess.base_commit {
                         println!("  {} Commit: {}", "↳".dimmed(), bc.yellow());
@@ -6803,11 +7850,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "intent" => "  INTENT".cyan().bold().to_string(),
                                 _ => format!("  {}", entry.role.to_uppercase()),
                             };
-                            let content = if entry.content.len() > 300 {
-                                format!("{}...", &entry.content[..300])
-                            } else {
-                                entry.content.clone()
-                            };
+                            // Char-safe: a byte slice here panics when the
+                            // 300th byte lands inside a multibyte character
+                            // (emoji or CJK in a transcript is routine).
+                            let content = truncate(&entry.content, 300);
                             println!("  {} {}", role_label, content);
                         }
                         if transcript.len() > 20 {
@@ -6815,12 +7861,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                None => {
-                    println!("  {} Could not trace '{}' in '{}'.", "⚠️".yellow(), identifier.cyan(), file.dimmed());
-                    println!("  {} Possible reasons:", "↳".dimmed());
-                    println!("    - The code was written before Aura was initialized");
-                    println!("    - The file is not tracked by git");
-                    println!("    - No checkpoint exists for the commit that introduced this code");
+                other => {
+                    println!("  {} {}", "⚠️".yellow(), other.describe(&file, &identifier));
                     println!("\n  {} Try: {}", "💡".blue(), format!("git log -S \"{}\" --oneline {}", identifier, file).cyan());
                 }
             }
@@ -6858,69 +7900,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             std::process::exit(code);
         }
-        Commands::Sessions => {
-            println!("\n{} {}\n", a11y_label("📋", "SESSIONS"), "Aura Agent Sessions".bold().cyan());
-
-            // Auto-cleanup stale sessions (>7 days old, ended)
-            let cleaned = session::SessionManager::cleanup_stale(7);
-            if cleaned > 0 {
-                println!("  {} Cleaned up {} stale sessions.\n", "🧹".dimmed(), cleaned);
-            }
-
-            let sessions = session::SessionManager::list_sessions();
-            if sessions.is_empty() {
-                println!("  {} No sessions recorded yet.", "↳".dimmed());
-                println!("  {} Sessions are created when AI agents work in this repository.", "↳".dimmed());
-            } else {
-                for sess in sessions.iter().take(20) {
-                    let phase_str = match sess.phase {
-                        session::SessionPhase::Active => "ACTIVE".green().bold().to_string(),
-                        session::SessionPhase::Idle => "IDLE".yellow().to_string(),
-                        session::SessionPhase::Ended => "ENDED".dimmed().to_string(),
-                    };
-                    let branch_str = sess.branch.as_deref().unwrap_or("?");
-                    let model_str = sess.model_name.as_deref().unwrap_or("");
-                    let token_str = if let Some(ref usage) = sess.token_usage {
-                        if usage.total() > 0 {
-                            format!(" | {}k tokens", usage.total() / 1000)
-                        } else {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    };
-
-                    println!("  {} {} [{}] — {} on {} ({} files, {} checkpoints{})",
-                        "●".cyan(),
-                        sess.session_id.bold(),
-                        phase_str,
-                        sess.agent_id.cyan(),
-                        branch_str.yellow(),
-                        sess.files_touched.len(),
-                        sess.checkpoint_count,
-                        token_str.dimmed(),
-                    );
-                    if !model_str.is_empty() {
-                        println!("    {} model: {}", "↳".dimmed(), model_str.dimmed());
-                    }
-                    if let Some(ref prompt) = sess.first_prompt {
-                        let display = if prompt.len() > 80 { &prompt[..80] } else { prompt };
-                        println!("    {} prompt: \"{}\"", "↳".dimmed(), display.italic().dimmed());
-                    }
-                    if let Some(ref summary) = sess.summary {
-                        println!("    {} {}", "↳".dimmed(), summary.outcome.dimmed());
-                    }
-                    if !sess.subagents.is_empty() {
-                        println!("    {} subagents: {}", "↳".dimmed(),
-                            sess.subagents.iter()
-                                .map(|s| format!("{}({})", s.agent_type, if s.ended_at.is_some() { "done" } else { "running" }))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                                .dimmed()
-                        );
-                    }
+        Commands::Beat { session, agent } => {
+            // Hooks run on the user's critical path, hundreds of times a
+            // session. Every branch below ends the same way — quietly, exit 0
+            // — because the alternative is an agent whose every edit prints a
+            // warning about the cloud being unreachable.
+            let session_id = session.clone().or_else(|| {
+                // The Claude Code hook payload arrives on stdin and carries
+                // the session id the transcript is filed under, which is
+                // exactly the id the cloud already knows this session by.
+                let mut buf = String::new();
+                use std::io::Read;
+                if std::io::stdin().read_to_string(&mut buf).is_err() {
+                    return None;
                 }
+                serde_json::from_str::<serde_json::Value>(&buf)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("session_id")
+                            .and_then(|s| s.as_str())
+                            .map(str::to_string)
+                    })
+            });
+            if let Some(id) = session_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                let _ = live_sync::beat_session(id, agent);
             }
+        }
+
+        Commands::Sessions { prune } => {
+            cmd_sessions::run(*prune);
         }
         Commands::Resume { branch: Some(branch), .. } => {
             println!("\n{} {}\n", "🔄".bold(), format!("Resuming work on branch: {}", branch).bold().cyan());
@@ -7161,20 +8169,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 issues_found += 1;
             }
 
+            // 4b. Binary census: which aura answers, which auras exist,
+            // which aura the hook invokes — and whether they agree.
+            {
+                let bins = doctor::probe_binaries();
+                println!(
+                    "  {} Running: {} ({})",
+                    "ℹ".blue(),
+                    bins.running.path.dimmed(),
+                    bins.running.version.bold()
+                );
+                for b in &bins.on_path {
+                    println!("    {} on PATH: {} ({})", "●".dimmed(), b.path, b.version);
+                }
+                match &bins.hook_invokes {
+                    Some(h) if h.version == "unknown" => {
+                        println!(
+                            "  {} pre-commit hook invokes {} which did not run — commits are NOT semantically guarded. Run {} to rewire.",
+                            "⚠".yellow().bold(),
+                            h.path.bold(),
+                            "aura init".cyan()
+                        );
+                        issues_found += 1;
+                    }
+                    Some(h) => {
+                        println!("  {} pre-commit hook invokes {} ({})", "ℹ".blue(), h.path, h.version);
+                    }
+                    None => {}
+                }
+                if bins.version_skew {
+                    println!(
+                        "  {} Version skew: the binaries above disagree. The hook may guard with an older engine than the one you run. Reinstall the outdated copies or rewire hooks with {}.",
+                        "⚠".yellow().bold(),
+                        "aura init".cyan()
+                    );
+                    issues_found += 1;
+                }
+            }
+
             // 5. Check shadow branch health
             let repo = open_repo()?;
             let shadow_ok = repo.find_reference("refs/heads/aura/checkpoints").is_ok();
             if shadow_ok {
-                let shadow_cps = CheckpointStore::get_shadow_checkpoints(&repo).unwrap_or_default();
-                println!("  {} Shadow branch healthy ({} checkpoints archived).", "✓".green().bold(), shadow_cps.len());
+                let shadow_cps = CheckpointStore::count_shadow_checkpoints(&repo).unwrap_or(0);
+                println!("  {} Shadow branch healthy ({} checkpoints archived).", "✓".green().bold(), shadow_cps);
             } else {
                 println!("  {} Shadow branch not yet created (will be created on first commit).", "ℹ".blue());
             }
 
-            // 6. Stale session cleanup
-            let cleaned = session::SessionManager::cleanup_stale(7);
-            if cleaned > 0 {
-                println!("  {} Cleaned {} stale sessions (>7 days old).", "🧹".green(), cleaned);
+            // 6. Stale sessions — counted, never removed. A diagnostic has
+            // to be safe to run, and this one deleted session records and
+            // their transcripts without asking, in the same pass where it
+            // stops to confirm before force-ending a stuck session.
+            let stale = session::SessionManager::stale_sessions(session::STALE_SESSION_DAYS).len();
+            if stale > 0 {
+                println!(
+                    "  {} {} ended session(s) older than {} days on disk — {}",
+                    "🧹".yellow(),
+                    stale,
+                    session::STALE_SESSION_DAYS,
+                    "aura sessions --prune".cyan()
+                );
             }
 
             // 7. Cost summary for active session
@@ -7788,7 +8843,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             use dialoguer::{Select, Confirm};
             
             let options = vec![
-                format!("Gatekeeper Strict Mode (Currently: {})", if config.strict_gatekeeper_mode { "ON (Blocking)".red() } else { "OFF (Warn-Only)".green() }),
+                // Locked is the difference between a setting and a guarantee:
+                // an unlocked ON is one keystroke — or one agent — away from
+                // OFF. The menu offered the same words for both, and then
+                // refused to change it further down with no warning here.
+                format!("Gatekeeper Strict Mode (Currently: {})", if !config.strict_gatekeeper_mode { "OFF (Warn-Only)".green() } else if ConfigManager::is_strict_mode_locked(&config) { "ON (Blocking, passcode-locked)".red() } else { "ON (Blocking, not locked)".yellow() }),
                 format!("Embeddings Engine (Currently: {})", if config.use_local_embeddings { "Local (Offline)".green() } else { "Cloud (API)".blue() }),
                 format!("Development Mode (Fast Init) (Currently: {})", if config.dev_mode { "ON".green() } else { "OFF (Enterprise)".blue() }),
                 format!("Anonymous Telemetry (Currently: {})", if config.telemetry_enabled { "ON".green() } else { "OFF (Opt-Out)".blue() }),
@@ -7990,6 +9049,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Task { sub } => {
             handle_task_command(sub)?;
         }
+        Commands::Graph { sub } => {
+            graph_ops::handle_graph_command(sub)?;
+        }
         Commands::Loop { sub } => {
             handle_loop_command(sub)?;
         }
@@ -8059,7 +9121,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 awareness::cmd::run_privacy(level.as_deref(), *json);
             }
             Some(RadarSubcommands::Sync { json, quiet }) => {
-                awareness::cmd::run_sync(*json, *quiet);
+                let code = awareness::cmd::run_sync(*json, *quiet);
+                if code != 0 {
+                    std::process::exit(code);
+                }
             }
         },
         Commands::Worktrees {
@@ -8103,6 +9168,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 worktree::cmd::run_mine(agent.as_deref(), *limit, *json);
             }
         },
+        // AURA-1295
+        Commands::Workspace { sub } => {
+            let code = workspace_api::cmd::run(sub);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        // end AURA-1295
         Commands::Identity { json } => {
             awareness::identity::run_show(*json);
         }
@@ -8165,6 +9238,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Node { sub } => {
             node::run(sub)?;
+        }
+        Commands::Access { sub } => {
+            cmd_access::run(sub)?;
         }
         Commands::Bundle { sub } => {
             meta_bundle::run(sub)?;
@@ -8494,12 +9570,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Fetch team presence from cloud
                     let config = config::ConfigManager::load();
-                    let token = config.cloud_api_token
-                        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok());
+                    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref());
 
                     if let Some(token) = token {
-                        let cloud_url = config.cloud_url
-                            .unwrap_or_else(|| "https://api.auravcs.com".to_string());
+                        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://api.auravcs.com");
                         let url = format!("{}/api/v1/live/presence?repo={}",
                             cloud_url.trim_end_matches('/'), repo);
 
@@ -8565,113 +9639,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 LiveSubcommands::Impacts { json } => {
-                    if *json {
-                        match live_sync::fetch_impacts_json() {
-                            Ok(data) => {
+                    match live_sync::fetch_impacts_json() {
+                        Ok(data) => {
+                            if *json {
                                 println!("{}", serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".to_string()));
-                            }
-                            Err(e) => {
-                                let err = serde_json::json!({"error": e});
-                                println!("{}", serde_json::to_string_pretty(&err).unwrap_or_else(|_| "{}".to_string()));
+                            } else {
+                                live_impacts::render(&data, &live_events::current_branch());
                             }
                         }
-                        return Ok(());
+                        Err(e) => {
+                            if *json {
+                                println!("{}", serde_json::json!({"error": e}));
+                            } else {
+                                println!("  {} {}", "⚠️".yellow(), e);
+                                println!("  {} Run: {}", "↳".dimmed(), "aura config set cloud-token <your-token>".cyan());
+                            }
+                        }
                     }
-
-                    use colored::Colorize;
-                    println!("{}", "⚠️  Aura Live — Cross-Branch Impacts".bold());
-                    println!();
-
-                    let branch = live_events::current_branch();
-                    let repo = live_events::repo_name();
-
-                    let config = config::ConfigManager::load();
-                    let token = config.cloud_api_token
-                        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok());
-
-                    if let Some(token) = token {
-                        let cloud_url = config.cloud_url
-                            .unwrap_or_else(|| "https://api.auravcs.com".to_string());
-                        let url = format!("{}/api/v1/live/impacts?repo={}",
-                            cloud_url.trim_end_matches('/'), repo);
-
-                        println!("  {} Checking impacts on branch {}...", "↳".dimmed(), branch.cyan());
-                        println!();
-
-                        let mut cbuilder = reqwest::blocking::Client::builder()
-                            .timeout(std::time::Duration::from_secs(5));
-                        if config.accept_self_signed {
-                            cbuilder = cbuilder.danger_accept_invalid_certs(true);
-                        }
-                        let client = cbuilder.build()
-                            .unwrap_or_else(|_| reqwest::blocking::Client::new());
-
-                        match client.get(&url)
-                            .header("Authorization", format!("Bearer {}", token))
-                            .send()
-                        {
-                            Ok(resp) if resp.status().is_success() => {
-                                if let Ok(data) = resp.json::<serde_json::Value>() {
-                                    let alerts = data["alerts"].as_array();
-                                    let total = data["total"].as_u64().unwrap_or(0);
-
-                                    if total == 0 {
-                                        println!("  {} No impacts detected on your branch.", "✓".green().bold());
-                                        println!("  {} Your dependencies are safe across all active branches.", "↳".dimmed());
-                                    } else {
-                                        println!("  {} {} impact{} detected!", "⚠️".yellow().bold(),
-                                            total.to_string().red().bold(),
-                                            if total == 1 { "" } else { "s" });
-                                        println!();
-
-                                        if let Some(alerts) = alerts {
-                                            for alert in alerts {
-                                                let src_user = alert["source_user"].as_str().unwrap_or("?");
-                                                let src_branch = alert["source_branch"].as_str().unwrap_or("?");
-                                                let src_fn = alert["source_function"].as_str().unwrap_or("?");
-                                                let impact_type = alert["impact_type"].as_str().unwrap_or("modified");
-                                                let affected = alert["affected_functions"].as_array();
-
-                                                let type_label = match impact_type {
-                                                    "deleted" => "DELETED".red().bold().to_string(),
-                                                    "modified" => "MODIFIED".yellow().bold().to_string(),
-                                                    _ => impact_type.to_uppercase(),
-                                                };
-
-                                                println!("  {} {} {} {} on {}",
-                                                    "│".dimmed(), type_label,
-                                                    src_fn.cyan().bold(),
-                                                    format!("by {}", src_user).dimmed(),
-                                                    src_branch.green());
-
-                                                if let Some(fns) = affected {
-                                                    for f in fns {
-                                                        let name = f["name"].as_str().unwrap_or("?");
-                                                        let dep = f["depends_on"].as_str().unwrap_or("?");
-                                                        println!("  {}   {} your {} depends on {}",
-                                                            "│".dimmed(), "→".yellow(),
-                                                            name.cyan(), dep.yellow());
-                                                    }
-                                                }
-                                                println!("  {}", "│".dimmed());
-                                            }
-                                        }
-
-                                        println!("  {} Review these changes before merging to avoid runtime conflicts.", "💡".blue());
-                                    }
-                                }
-                            }
-                            Ok(resp) => {
-                                println!("  {} Cloud returned {}", "⚠️".yellow(), resp.status());
-                            }
-                            Err(e) => {
-                                println!("  {} Cloud unreachable: {}", "⚠️".yellow(), e);
-                            }
-                        }
-                    } else {
-                        println!("  {} Connect to Aura Cloud to enable cross-branch impact detection.", "⚠️".yellow());
-                        println!("  {} Run: {}", "↳".dimmed(), "aura config set cloud-token <your-token>".cyan());
-                    }
+                }
+                LiveSubcommands::Resolve { alert_id, all, json } => {
+                    live_impacts::resolve(alert_id.as_deref(), *all, *json);
                 }
                 LiveSubcommands::Check { file } => {
                     // Ultra-fast local marker check — no network calls
@@ -8829,7 +9816,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "✓".green().bold(), pushed);
                                 }
                                 Err(e) => {
+                                    // WRK-03: a failed push is a failed command.
+                                    // The message says whether the payload was
+                                    // parked in the outbox for retry.
                                     println!("  {} Push failed: {}", "✗".red(), e);
+                                    std::process::exit(1);
                                 }
                             }
                         }
@@ -8897,6 +9888,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 Err(e) => {
                                     println!("  {} Pull failed: {}", "✗".red(), e);
+                                    std::process::exit(1);
                                 }
                             }
                         }
@@ -8928,9 +9920,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         println!("  {} Run {} to apply teammate changes",
                                             "💡".blue(), "aura live sync pull".cyan());
                                     }
+
+                                    // WRK-03: pushes parked locally after failed
+                                    // transports are part of sync status too.
+                                    let queued = outbox::len();
+                                    if queued > 0 {
+                                        println!("  {} queued in local outbox: {} — run {} to retry",
+                                            "•".dimmed(),
+                                            queued.to_string().yellow().bold(),
+                                            "aura outbox --flush".cyan());
+                                    }
                                 }
                                 Err(e) => {
-                                    println!("  {} Could not fetch sync status: {}", "⚠".yellow(), e);
+                                    println!("  {} Could not fetch sync status: {}", "✗".red(), e);
+                                    std::process::exit(1);
                                 }
                             }
                         }
@@ -8941,6 +9944,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .and_then(|r| r.find_remote("origin").ok().and_then(|rem| rem.url().map(String::from)));
                             let n = crate::sync::GlobalSync::backfill_snapshots(repo_full.as_deref());
                             println!("  {} Pushed {} snapshot{} to cloud",
+                                "✓".green().bold(),
+                                n.to_string().cyan(),
+                                if n == 1 { "" } else { "s" });
+                        }
+                        SyncSubcommands::Graph => {
+                            use colored::Colorize;
+                            println!("{}", "🧠 Aura Sync — Code Graph".bold());
+                            // `discover`, not `open`: this one walks the whole
+                            // checkout, and asking for it from `src/` or a
+                            // crate subdirectory is the normal thing to do.
+                            let repo = git2::Repository::discover(".")
+                                .map_err(|e| format!("not a git repository: {}", e))?;
+                            // The graph is read from the checkout, so the push
+                            // has to run against the tree the caller is in —
+                            // a worktree's own files, not the main checkout's.
+                            let root = repo
+                                .workdir()
+                                .ok_or("a bare repository has no working tree to scan")?
+                                .to_path_buf();
+                            let remote = repo
+                                .find_remote("origin")
+                                .ok()
+                                .and_then(|rem| rem.url().map(String::from))
+                                .unwrap_or_else(|| crate::repo_slug::of_cwd());
+                            let n = crate::sync::GlobalSync::sync_graph_worktree(&remote, &root);
+                            println!("  {} {} node{} now searchable in Trace › Graph",
+                                "✓".green().bold(),
+                                n.to_string().cyan(),
+                                if n == 1 { "" } else { "s" });
+                        }
+                        SyncSubcommands::Commits { limit } => {
+                            use colored::Colorize;
+                            println!("{}", "🌿 Aura Sync — Commits".bold());
+                            // `discover`, not `open`: asking for this from a
+                            // crate subdirectory is the normal thing to do.
+                            let repo = git2::Repository::discover(".")
+                                .map_err(|e| format!("not a git repository: {}", e))?;
+                            let remote = repo
+                                .find_remote("origin")
+                                .ok()
+                                .and_then(|rem| rem.url().map(String::from))
+                                .unwrap_or_else(|| crate::repo_slug::of_cwd());
+                            let n = crate::sync::GlobalSync::sync_commits(&remote, &repo, *limit);
+                            println!("  {} {} commit{} now visible in the Console",
                                 "✓".green().bold(),
                                 n.to_string().cyan(),
                                 if n == 1 { "" } else { "s" });
@@ -8998,12 +10045,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Ok(r) if r.status() == 409 => {
                             println!("{} Username '{}' already exists on this server", "✗".red().bold(), username);
+                            std::process::exit(1);
                         }
                         Ok(r) => {
                             println!("{} Registration failed ({})", "✗".red().bold(), r.status());
+                            std::process::exit(1);
                         }
                         Err(e) => {
                             println!("{} Could not connect to {}: {}", "✗".red().bold(), url, e);
+                            std::process::exit(1);
                         }
                     }
                 }
@@ -9050,12 +10100,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Ok(r) if r.status() == 401 => {
                             println!("{} Invalid username or password", "✗".red().bold());
+                            std::process::exit(1);
                         }
                         Ok(r) => {
                             println!("{} Login failed ({})", "✗".red().bold(), r.status());
+                            std::process::exit(1);
                         }
                         Err(e) => {
                             println!("{} Could not connect to {}: {}", "✗".red().bold(), url, e);
+                            std::process::exit(1);
                         }
                     }
                 }
@@ -9100,9 +10153,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Ok(r) => {
                             println!("{} Failed to register repo ({})", "✗".red().bold(), r.status());
+                            std::process::exit(1);
                         }
                         Err(e) => {
                             println!("{} Could not connect: {}", "✗".red().bold(), e);
+                            std::process::exit(1);
                         }
                     }
                 }
@@ -9125,6 +10180,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("{} Server is online", "✓".green().bold());
                             println!("  {} URL: {}", "•".dimmed(), cloud_url.cyan());
 
+                            // Same reading as `aura ping`. Both commands claim
+                            // to say whether the server is healthy, and a
+                            // server three releases behind is a thing one of
+                            // them should not be able to call fine in silence.
+                            if let Some(sv) = client
+                                .get(format!("{}{}", cloud_url, version_contract::CARD_PATH))
+                                .send()
+                                .ok()
+                                .and_then(|r| r.json::<serde_json::Value>().ok())
+                                .as_ref()
+                                .and_then(version_contract::card_version)
+                            {
+                                match version_contract::drift_note(env!("CARGO_PKG_VERSION"), &sv) {
+                                    Some(note) => println!(
+                                        "  {} Build: {} {}",
+                                        "•".dimmed(),
+                                        sv.yellow().bold(),
+                                        format!("({note})").dimmed()
+                                    ),
+                                    None => println!("  {} Build: {}", "•".dimmed(), sv.green()),
+                                }
+                            }
+
                             // Show credentials info
                             let cred_dir = directories::ProjectDirs::from("com", "naridon", "aura")
                                 .map(|d| d.config_dir().to_path_buf())
@@ -9143,10 +10221,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         Ok(r) => {
-                            println!("{} Server responded with status {}", "⚠".yellow(), r.status());
+                            println!("{} Server responded with status {}", "✗".red().bold(), r.status());
+                            std::process::exit(1);
                         }
                         Err(e) => {
                             println!("{} Cannot reach server: {}", "✗".red().bold(), e);
+                            std::process::exit(1);
                         }
                     }
                 }
@@ -9154,12 +10234,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Ping => {
             let config = ConfigManager::load();
-            let cloud_url = config.cloud_url.as_deref().unwrap_or("");
+            // WRK-03: same precedence as every live-sync transport —
+            // AURA_CLOUD_URL beats config — so ping checks the server the
+            // other commands will actually talk to.
+            let cloud_url = std::env::var("AURA_CLOUD_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| config.cloud_url.clone())
+                .unwrap_or_default();
+            let cloud_url = cloud_url.as_str();
 
             if cloud_url.is_empty() {
                 println!("{} Not connected to any mothership or server.", "✗".red().bold());
                 println!("  Run {} to join a team, or {} to start hosting.", "aura join <token>".cyan(), "aura host start".cyan());
-                return Ok(());
+                // WRK-03: a health check with nothing to check is not healthy.
+                std::process::exit(1);
             }
 
             let mut client_builder = reqwest::blocking::Client::builder()
@@ -9180,6 +10269,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  {} URL:     {}", "•".dimmed(), cloud_url.cyan());
                     println!("  {} Latency: {}ms", "•".dimmed(), format!("{}", latency.as_millis()).green());
                     println!("  {} Mode:    {}", "•".dimmed(), tls.cyan());
+
+                    // Which build is actually answering. The Agent Card is
+                    // unauthenticated by A2A spec and is built from the
+                    // running binary's own CARGO_PKG_VERSION, so it is the
+                    // one honest statement of what is deployed — and until
+                    // now nothing read it. Production sat on 0.19.29 through
+                    // a whole release cycle for want of this line.
+                    let local_version = env!("CARGO_PKG_VERSION");
+                    let server_version = client
+                        .get(format!("{}{}", cloud_url, version_contract::CARD_PATH))
+                        .send()
+                        .ok()
+                        .and_then(|r| r.json::<serde_json::Value>().ok())
+                        .as_ref()
+                        .and_then(version_contract::card_version);
+                    match server_version.as_deref() {
+                        Some(sv) => {
+                            match version_contract::drift_note(local_version, sv) {
+                                // Drift is amber, not red: an older server
+                                // still serves, and the reader is the one who
+                                // decides whether that matters today.
+                                Some(note) => println!(
+                                    "  {} Build:   {} {}",
+                                    "•".dimmed(),
+                                    sv.yellow().bold(),
+                                    format!("({note})").dimmed()
+                                ),
+                                None => println!("  {} Build:   {}", "•".dimmed(), sv.green()),
+                            }
+                        }
+                        // No card, or one we could not read. Not worth a
+                        // warning — plenty of reachable things are not Aura
+                        // servers, and a proxy may answer for one that is.
+                        None => {}
+                    }
 
                     // Get credentials for authenticated requests
                     let token = config.cloud_api_token.as_deref().unwrap_or("");
@@ -9234,15 +10358,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!();
                 }
                 Ok(r) => {
-                    println!("{} Mothership responded with {}", "⚠".yellow(), r.status());
+                    // WRK-03: `aura ping` is THE health check — a non-2xx
+                    // answer or an unreachable mothership must fail it, or
+                    // automation polling it can never see an outage.
+                    println!("{} Mothership responded with {}", "✗".red().bold(), r.status());
                     println!("  {} URL: {}", "•".dimmed(), cloud_url);
+                    std::process::exit(1);
                 }
                 Err(e) => {
                     let latency = start.elapsed();
                     println!("\n  {} Mothership unreachable ({}ms)", "✗".red().bold(), latency.as_millis());
                     println!("  {} URL: {}", "•".dimmed(), cloud_url);
                     println!("  {} Error: {}\n", "•".dimmed(), format!("{}", e).red());
+                    std::process::exit(1);
                 }
+            }
+        }
+        Commands::Outbox { flush } => {
+            // WRK-03: the file-backed outbox already existed — every failed
+            // daemon push parks here — but nothing user-facing could see or
+            // drain it. This is that surface: inspect what's waiting, and
+            // `--flush` retries it now, failing loudly if anything remains.
+            use colored::Colorize;
+            println!("{}", "📤 Aura Outbox".bold());
+            println!();
+
+            let entries = outbox::drain(None);
+            if entries.is_empty() {
+                println!("  {} Outbox empty — nothing waiting on the cloud", "✓".green().bold());
+                return Ok(());
+            }
+
+            let mut by_kind: std::collections::BTreeMap<String, usize> = Default::default();
+            let mut attempts_max = 0u32;
+            for e in &entries {
+                *by_kind.entry(e.entry.kind.clone()).or_default() += 1;
+                attempts_max = attempts_max.max(e.entry.attempts);
+            }
+            println!("  {} {} entr{} pending",
+                "•".dimmed(),
+                entries.len().to_string().yellow().bold(),
+                if entries.len() == 1 { "y" } else { "ies" });
+            for (kind, n) in &by_kind {
+                println!("    {} {} × {}", "↳".dimmed(), n, kind.cyan());
+            }
+            if attempts_max > 0 {
+                println!("  {} most-retried entry: {} attempt{}",
+                    "•".dimmed(), attempts_max, if attempts_max == 1 { "" } else { "s" });
+            }
+
+            if !flush {
+                println!();
+                println!("  {} Run {} to retry them against the cloud now",
+                    "💡".blue(), "aura outbox --flush".cyan());
+                return Ok(());
+            }
+
+            let config = ConfigManager::load();
+            let token = config.cloud_api_token.clone()
+                .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+                .unwrap_or_default();
+            let cloud_url = live_sync::cloud_base_url(config.cloud_url.clone());
+            if token.is_empty() {
+                println!("  {} No cloud token configured — cannot flush. Run {} first.",
+                    "✗".red().bold(), "aura connect".cyan());
+                std::process::exit(1);
+            }
+
+            println!();
+            println!("  {} Flushing against {}...", "↳".dimmed(), cloud_url.cyan());
+            let report = outbox::drain_to_cloud(&cloud_url, &token);
+            println!("  {} accepted: {}  dropped (4xx): {}  still failing: {}",
+                if report.bumped == 0 { "✓".green().bold() } else { "✗".red().bold() },
+                report.acked.to_string().green(),
+                report.dropped.to_string().yellow(),
+                report.bumped.to_string().red());
+            if report.bumped > 0 {
+                println!("  {} {} entr{} remain queued — the daemon keeps retrying with backoff",
+                    "⚠".yellow(),
+                    report.bumped,
+                    if report.bumped == 1 { "y" } else { "ies" });
+                std::process::exit(1);
             }
         }
         Commands::Save { message, no_git } => {
@@ -9252,11 +10448,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // 1. Find modified files
             let modified_files: Vec<String> = if let Ok(repo) = Repository::open(".") {
-                let diff = repo.diff_index_to_workdir(None, None)
-                    .or_else(|_| {
-                        let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-                        repo.diff_tree_to_workdir(head.as_ref(), None)
-                    });
+                // HEAD -> workdir *with the index*, so a file that is staged and
+                // then left alone still counts as changed. `diff_index_to_workdir`
+                // alone answered "no modified files" for a fully staged commit.
+                let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+                let diff = repo.diff_tree_to_workdir_with_index(head.as_ref(), None)
+                    .or_else(|_| repo.diff_index_to_workdir(None, None));
                 match diff {
                     Ok(d) => {
                         let mut files = Vec::new();
@@ -9301,8 +10498,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 log_entry["developer"] = serde_json::json!(identity.email);
                 log_entry["developer_handle"] = serde_json::json!(identity.handle);
             }
-            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(".aura/intent_log.jsonl") {
-                let _ = writeln!(file, "{}", log_entry.to_string());
+            // CAP-01: scope the row or quarantine it — a save with no
+            // resolvable identity must not attach to this project's log.
+            match scope::stamp_or_quarantine(
+                std::path::Path::new("."),
+                "intent",
+                "user",
+                None,
+                &mut log_entry,
+            ) {
+                Ok(()) => {
+                    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(".aura/intent_log.jsonl") {
+                        let _ = writeln!(file, "{}", log_entry.to_string());
+                    }
+                }
+                Err(reason) => println!("  {} intent quarantined ({})", "⚠".yellow(), reason),
             }
             let _ = std::fs::write(".gemini.intent", &message);
             let _ = std::fs::write(".aura/.intent_logged", "1");
@@ -9337,6 +10547,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // 5. Auto-push changed functions to mothership
             let mut total_pushed: u64 = 0;
+            let mut push_failures: u64 = 0;
             for file_path in &modified_files {
                 if std::path::Path::new(file_path).exists() {
                     if let Ok(source) = std::fs::read_to_string(file_path) {
@@ -9359,8 +10570,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         })
                                     }).collect();
                                 if !payloads.is_empty() {
-                                    if let Ok(resp) = live_sync::push_function_bodies(&payloads) {
-                                        total_pushed += resp["pushed"].as_u64().unwrap_or(0);
+                                    match live_sync::push_function_bodies(&payloads) {
+                                        Ok(resp) => {
+                                            total_pushed += resp["pushed"].as_u64().unwrap_or(0);
+                                        }
+                                        Err(e) => {
+                                            // WRK-03: the save itself succeeded, but the
+                                            // team push did not — say so instead of
+                                            // burying it (the error notes whether the
+                                            // payload was parked in the outbox).
+                                            push_failures += 1;
+                                            eprintln!("  {} Team push failed for {}: {}",
+                                                "⚠".yellow().bold(), file_path, e);
+                                        }
                                     }
                                 }
                             }
@@ -9370,6 +10592,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if total_pushed > 0 {
                 println!("  {} Pushed {} functions to team", "🔄".cyan(), total_pushed);
+            }
+            if push_failures > 0 {
+                println!("  {} {} file{} did not reach the team — run {} to retry queued pushes",
+                    "⚠".yellow().bold(),
+                    push_failures,
+                    if push_failures == 1 { "" } else { "s" },
+                    "aura outbox --flush".cyan());
             }
 
             // 6. Push scaffolds for non-code files (JSON, YAML, text, etc) + code scaffolds
@@ -9434,7 +10663,123 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!();
         }
-        Commands::LogIntent { text, file, tool, session, source, intent_type } => {
+        Commands::Grant { action } => {
+            use colored::Colorize;
+            let root = Repository::discover(".")
+                .ok()
+                .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
+                .ok_or("aura grant: not inside a git repository")?;
+            match action {
+                GrantAction::Issue {
+                    op,
+                    target,
+                    ttl_mins,
+                    no_pin,
+                } => {
+                    let op = grants::ProtectedOp::parse(op).ok_or_else(|| {
+                        format!("unknown operation `{op}` — use delete, reset or force-push")
+                    })?;
+                    let grant =
+                        grants::issue(&root, op, target, ttl_mins.saturating_mul(60), !*no_pin)?;
+                    println!(
+                        "{} grant {} — `{}` on `{}`",
+                        "Issued".green().bold(),
+                        &grant.grant_id[..8],
+                        grant.operation,
+                        grant.target
+                    );
+                    println!(
+                        "  signed by {} ({}), expires in {} minute(s), one-time{}",
+                        grant.issued_by,
+                        grant.key_id,
+                        grant.expires_at.saturating_sub(grant.issued_at) / 60,
+                        if grant.expected_hash.is_some() {
+                            ", pinned to current content"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                GrantAction::List { json } => {
+                    let pending = grants::list_pending(&root);
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&pending)?);
+                    } else if pending.is_empty() {
+                        println!("No pending grants.");
+                    } else {
+                        for g in &pending {
+                            let targets = vec![g.target.clone()];
+                            let status = match grants::ProtectedOp::parse(&g.operation)
+                                .ok_or_else(|| "unknown op".to_string())
+                                .and_then(|op| grants::check_grant(&root, g, op, &targets))
+                            {
+                                Ok(_) => "valid".green().to_string(),
+                                Err(e) => format!("{}", format!("invalid: {e}").red()),
+                            };
+                            println!(
+                                "{}  {} `{}`  by {}  [{}]",
+                                &g.grant_id[..8].yellow(),
+                                g.operation.bold(),
+                                g.target,
+                                g.issued_by,
+                                status
+                            );
+                        }
+                    }
+                }
+                GrantAction::Revoke { grant_id } => {
+                    if grants::revoke(&root, grant_id)? {
+                        println!("Revoked grant {grant_id}.");
+                    } else {
+                        println!("No pending grant {grant_id} — nothing to revoke.");
+                    }
+                }
+            }
+        }
+        Commands::Migrate { apply, json } => {
+            std::process::exit(cmd_migrate::run(*apply, *json));
+        }
+        Commands::Scope { schema, migrate } => {
+            use colored::Colorize;
+            if *schema {
+                println!("{}", serde_json::to_string_pretty(&scope::schema_json())?);
+                return Ok(());
+            }
+            let repo_root = Repository::discover(".")
+                .ok()
+                .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+            let Some(root) = repo_root else {
+                eprintln!("aura scope: not inside a repository — no scope to show");
+                std::process::exit(1);
+            };
+            if *migrate {
+                let log = root.join(".aura").join("intent_log.jsonl");
+                let (total, migrated) = scope::migrate_jsonl(&log)?;
+                println!(
+                    "{} migrated {} of {} intent rows to the scope_version:0 legacy marker",
+                    "✓".green().bold(), migrated, total
+                );
+                return Ok(());
+            }
+            match scope::ScopeManifest::capture(&root, "user", None) {
+                Ok(m) => println!("{}", serde_json::to_string_pretty(&m)?),
+                Err(e) => {
+                    eprintln!("aura scope: cannot establish identity: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LogIntent {
+            text,
+            file,
+            tool,
+            session,
+            source,
+            intent_type,
+            writes,
+            subagent_id,
+            subagent_type,
+        } => {
             // Fire-and-forget intent capture. Called by the post-tool-use hook:
             //   aura log-intent "..." >/dev/null 2>&1 &
             // Appends ONE row to <repo>/.aura/intent_log.jsonl matching the
@@ -9448,11 +10793,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Resolve the repo root the way the rest of the CLI does: discover
-            // upward from cwd; fall back to "." so the hook never hard-fails.
-            let repo_root = Repository::discover(".")
+            // upward from cwd. NO "." fallback any more (CAP-01): an intent
+            // with no discoverable repository used to scaffold `./.aura` and
+            // attach itself to whatever directory the hook fired from —
+            // cross-project contamination. Such an event is quarantined to
+            // ~/.aura/quarantine instead, and the hook still exits 0.
+            let repo_root = match Repository::discover(".")
                 .ok()
                 .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
-                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            {
+                Some(root) => root,
+                None => {
+                    let event = serde_json::json!({
+                        "intent": trimmed,
+                        "cwd": std::env::current_dir().ok(),
+                        "source": source.clone().unwrap_or_else(|| "hook_auto".to_string()),
+                    });
+                    match scope::quarantine_event(None, "intent", "no repository discovered from cwd", &event) {
+                        Ok(p) => eprintln!("aura log-intent: no repository here — intent quarantined to {}", p.display()),
+                        Err(e) => eprintln!("aura log-intent: no repository here and quarantine failed: {}", e),
+                    }
+                    return Ok(());
+                }
+            };
 
             let aura_dir = repo_root.join(".aura");
             if let Err(e) = fs::create_dir_all(&aura_dir) {
@@ -9476,24 +10839,93 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| "hook_auto".to_string());
             let src = source.clone().unwrap_or_else(|| "hook_auto".to_string());
 
+            // A reason stated when the agent decided to touch this file beats
+            // the mechanical description the hook generates ("Claude Edit on
+            // src/main.rs"), which says what happened and nothing about why.
+            // The hook cannot know the reason — the agent stated it earlier,
+            // to `aura_snapshot` — so it is claimed here, at the one point
+            // that knows both the file and the row being written.
+            let claimed = file.as_deref().and_then(|f| edit_reason::take(&repo_root, f));
+            let intent_text = claimed.as_ref().map(|r| r.why.as_str()).unwrap_or(trimmed);
+
             let mut entry = serde_json::json!({
                 "agent_id": agent_id,
-                "intent": trimmed,
+                "intent": intent_text,
                 "timestamp": ts,
                 "source": src,
             });
+            if let Some(r) = claimed.as_ref() {
+                // What the row would have said. Kept so the mechanical fact is
+                // not lost when a reason replaces it, and so a reader can see
+                // that the why was stated rather than generated.
+                entry["change"] = serde_json::json!(trimmed);
+                entry["why_stated_at"] = serde_json::json!(r.at);
+            }
             if let Some(f) = file {
                 entry["file"] = serde_json::json!(f);
+            }
+            // The whole set this reason is about. Split on commas as well as
+            // repeats, because a caller assembling the list from a staged-file
+            // listing has one string, not a loop.
+            let scope: Vec<String> = writes
+                .iter()
+                .flat_map(|w| w.split(','))
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect();
+            if !scope.is_empty() {
+                entry["writes_paths"] = serde_json::json!(scope);
             }
             if let Some(t) = tool {
                 entry["tool"] = serde_json::json!(t);
             }
-            if let Some(s) = session {
+            // Which session this belongs to: what the caller said, then what
+            // the agent stated to `aura_snapshot`, then what the agent CLI put
+            // in the environment. Without that last fallback a row logged from
+            // a terminal had no session at all, so it could not extend — or
+            // reopen — the session the Console had synthesised for it.
+            let env_session = agent_session::current();
+            if let Some(s) = session
+                .as_deref()
+                .or(claimed.as_ref().and_then(|r| r.session.as_deref()))
+                .or(env_session.as_deref())
+            {
                 entry["session_id"] = serde_json::json!(s);
             }
-            if let Some(it) = intent_type {
-                entry["intent_type"] = serde_json::json!(it);
+            // The classification, if the caller stated one it can keep. A
+            // near-miss of spelling is repaired; anything outside the closed
+            // set is dropped with a word about why, because a value no
+            // histogram or `--type` filter can reach is worse than none —
+            // it looks filed and isn't. Never fatal: this command's contract
+            // is that the row lands and the exit code is 0.
+            match intent_type.as_deref() {
+                Some(raw) if !raw.trim().is_empty() => {
+                    match intent_query::canonicalize_intent_type(raw) {
+                        Some(canon) => entry["intent_type"] = serde_json::json!(canon),
+                        None => eprintln!(
+                            "aura log-intent: {}",
+                            intent_query::invalid_intent_type_message(raw)
+                        ),
+                    }
+                }
+                _ => eprintln!("aura log-intent: {}", intent_query::UNTYPED_INTENT_HINT),
             }
+            // Which worker inside the session did this, when it was a worker.
+            // `agent_id` above is the *program* ("Claude", "hook_auto"); this
+            // is the one worker inside a session, so both can be true at once
+            // and neither overwrites the other. Absent for main-thread work —
+            // which is what tells a reader it was the session itself.
+            if let Some(id) = subagent_id.as_deref().filter(|s| !s.trim().is_empty()) {
+                entry["subagent_id"] = serde_json::json!(id.trim());
+                let kind = subagent_type
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("subagent");
+                entry["subagent_type"] = serde_json::json!(kind);
+            }
+
             // Stamp the developer (git identity) — matches the `aura save`
             // row shape so per-teammate attribution covers hook captures too.
             let identity = usage_by_dev::dev_identity();
@@ -9502,23 +10934,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 entry["developer_handle"] = serde_json::json!(identity.handle);
             }
 
-            let log_path = aura_dir.join("intent_log.jsonl");
-            match OpenOptions::new().create(true).append(true).open(&log_path) {
-                Ok(mut f) => {
-                    if let Err(e) = writeln!(f, "{}", entry) {
-                        eprintln!("aura log-intent: write failed: {}", e);
-                        return Ok(());
-                    }
-                }
-                Err(e) => {
-                    eprintln!("aura log-intent: open {} failed: {}", log_path.display(), e);
-                    return Ok(());
-                }
+            // CAP-01: every new intent row carries the canonical scope
+            // manifest, or it goes to quarantine — never to the log unscoped.
+            if let Err(reason) = scope::stamp_or_quarantine(
+                &repo_root,
+                "intent",
+                &agent_id,
+                session.as_deref(),
+                &mut entry,
+            ) {
+                eprintln!("aura log-intent: {} — intent quarantined, not logged", reason);
+                return Ok(());
+            }
+
+            // One row, one write — `intent_log::append` serialises the whole
+            // line before touching the file, so two agents logging at once
+            // cannot interleave halves of a row into the same line.
+            if let Err(e) = intent_log::append(&repo_root, &entry) {
+                eprintln!("aura log-intent: write failed: {}", e);
+                return Ok(());
             }
 
             // Drop the marker the pre-commit hook checks, exactly as `aura save`
             // does. Best-effort — a marker write failure is non-fatal.
             let _ = fs::write(aura_dir.join(".intent_logged"), "1");
+
+            // Keep the state of every function this intent is about, so a later
+            // `aura rewind` has Aura's own record to restore from. `aura save`
+            // and `aura share` extracted these bodies to push them at the team
+            // and kept nothing; this command — the one Aura's protocol tells
+            // every agent to run before every commit — did not extract them at
+            // all. An agent following the documented shell workflow therefore
+            // left no function history behind it. Local only: nothing is sent
+            // anywhere, so no privacy level has an opinion about it.
+            let mut recorded_paths: Vec<String> = entry["writes_paths"]
+                .as_array()
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(|p| p.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(f) = entry["file"].as_str() {
+                if !recorded_paths.iter().any(|p| p == f) {
+                    recorded_paths.push(f.to_string());
+                }
+            }
+            function_history::record_for_intent(
+                &function_history::FunctionHistory::at(aura_dir.join("function_history")),
+                &repo_root,
+                &recorded_paths,
+            );
+
+            // Send it to the team. Until now nothing did: the outbox kind
+            // existed, no code path ever enqueued one, and the URL it would
+            // have used had no route — so the console's "intent log" was
+            // reading file-activity events instead. Best-effort and short-
+            // timeout; a miss goes to the outbox, never to the floor.
+            crate::intent_sync::push(&entry, &repo_root);
             // Exit 0, silent on success.
         }
         Commands::SignIntent { text, writes, agent, intent_type } => {
@@ -9545,9 +11019,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .as_deref()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or("aura-shell");
+            // Same closed set as the row writer, for the same reason: a block
+            // sealed under a type no reader knows is signed misinformation,
+            // and this is the surface the desktop app seals through.
+            let sealed_type: Option<&str> = match intent_type.as_deref() {
+                Some(raw) if !raw.trim().is_empty() => {
+                    match intent_query::canonicalize_intent_type(raw) {
+                        Some(canon) => Some(canon),
+                        None => {
+                            eprintln!(
+                                "aura sign-intent: {}",
+                                intent_query::invalid_intent_type_message(raw)
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
             let out = match mcp::sign_intent_best_effort(
                 trimmed,
-                intent_type.as_deref(),
+                sealed_type,
                 &declared,
                 agent_label,
             ) {
@@ -9615,11 +11107,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Find modified files via git diff
             let modified_files: Vec<String> = if let Ok(repo) = Repository::open(".") {
-                let diff = repo.diff_index_to_workdir(None, None)
-                    .or_else(|_| {
-                        let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-                        repo.diff_tree_to_workdir(head.as_ref(), None)
-                    });
+                // HEAD -> workdir *with the index*, so a file that is staged and
+                // then left alone still counts as changed. `diff_index_to_workdir`
+                // alone answered "no modified files" for a fully staged commit.
+                let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+                let diff = repo.diff_tree_to_workdir_with_index(head.as_ref(), None)
+                    .or_else(|_| repo.diff_index_to_workdir(None, None));
                 match diff {
                     Ok(d) => {
                         let mut files = Vec::new();
@@ -9638,6 +11131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let mut total_pushed: u64 = 0;
+            let mut failed_files: u64 = 0;
             for file_path in &modified_files {
                 if std::path::Path::new(file_path).exists() {
                     if let Ok(source) = std::fs::read_to_string(file_path) {
@@ -9665,6 +11159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             total_pushed += resp["pushed"].as_u64().unwrap_or(0);
                                         }
                                         Err(e) => {
+                                            failed_files += 1;
                                             eprintln!("  {} Push failed for {}: {}",
                                                 "✗".red().bold(), file_path, e);
                                         }
@@ -9675,9 +11170,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            // WRK-03: a share where pushes failed must not masquerade as
+            // "nothing to share". Say what shipped, say what didn't, and
+            // exit non-zero when anything didn't.
             if total_pushed > 0 {
                 println!("  {} Shared {} functions with team", "✓".green().bold(), total_pushed);
-            } else {
+            }
+            if failed_files > 0 {
+                println!("  {} {} file{} failed to push — failed payloads are parked in the outbox; run {} to retry",
+                    "✗".red().bold(),
+                    failed_files,
+                    if failed_files == 1 { "" } else { "s" },
+                    "aura outbox --flush".cyan());
+                println!();
+                std::process::exit(1);
+            }
+            if total_pushed == 0 {
                 println!("  {} No modified functions to share", "ℹ".blue());
             }
             println!();
@@ -9720,7 +11228,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                Err(e) => eprintln!("  {} Pull failed: {}", "✗".red().bold(), e),
+                Err(e) => {
+                    eprintln!("  {} Pull failed: {}", "✗".red().bold(), e);
+                    std::process::exit(1);
+                }
             }
             println!();
         }
@@ -9962,17 +11473,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Diff { file } => {
             use colored::Colorize;
             println!("{}", "🔍 Aura Diff — Semantic Changes".bold());
+            println!("{}", "your working tree, against each file's last Aura snapshot (or git HEAD where there is none)".dimmed());
             println!();
 
             // Get files to diff
             let files_to_diff: Vec<String> = if let Some(f) = file {
                 vec![f.clone()]
             } else if let Ok(repo) = Repository::open(".") {
-                let diff = repo.diff_index_to_workdir(None, None)
-                    .or_else(|_| {
-                        let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-                        repo.diff_tree_to_workdir(head.as_ref(), None)
-                    });
+                // HEAD -> workdir *with the index*, so a file that is staged and
+                // then left alone still counts as changed. `diff_index_to_workdir`
+                // alone answered "no modified files" for a fully staged commit.
+                let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+                let diff = repo.diff_tree_to_workdir_with_index(head.as_ref(), None)
+                    .or_else(|_| repo.diff_index_to_workdir(None, None));
                 match diff {
                     Ok(d) => {
                         let mut files = Vec::new();
@@ -10109,43 +11622,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{} {}", "🔎 Aura Trace —".bold(), function.cyan().bold());
             println!();
 
-            // Search local intent log for mentions of this function
-            let intent_path = ".aura/intent_log.jsonl";
-            let mut found = 0;
-            if let Ok(content) = std::fs::read_to_string(intent_path) {
-                let entries: Vec<serde_json::Value> = content.lines()
-                    .filter_map(|line| serde_json::from_str(line).ok())
-                    .collect();
-                for entry in entries.iter().rev() {
-                    let intent = entry["intent"].as_str().unwrap_or("");
-                    if intent.to_lowercase().contains(&function.to_lowercase()) {
-                        let agent = entry["agent_id"].as_str().unwrap_or("?");
-                        let ts = entry["timestamp"].as_u64().unwrap_or(0);
-                        let date = chrono::DateTime::from_timestamp(ts as i64, 0)
-                            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-                            .unwrap_or_else(|| "?".to_string());
-                        println!("  {} {} — {}", date.dimmed(), agent.cyan(), intent);
-                        found += 1;
+            // Ask the stores that actually track a symbol. This used to grep
+            // the intent log's prose for the name and snapshot file contents
+            // for the name as a substring, so a function nobody had spelled
+            // out in a commit message reported no history at all — while its
+            // recorded bodies, checkpoint nodes and snapshots sat on disk.
+            match Repository::discover(".") {
+                Err(_) => eprintln!("  {} Not inside a git repository", "✗".red()),
+                Ok(repo) => {
+                    let t = trace_symbol::trace(
+                        &repo,
+                        &function,
+                        trace_symbol::DEFAULT_CHECKPOINT_LOOKBACK,
+                    );
+                    // How much of the store was read, said out loud whenever it
+                    // was not all of it — so a thin answer reads as a bounded
+                    // look rather than as an absence of history.
+                    let bounded = (t.checkpoints_total > t.checkpoints_read).then(|| {
+                        format!(
+                            "read the {} newest of {} checkpoints",
+                            t.checkpoints_read, t.checkpoints_total
+                        )
+                    });
+
+                    if t.is_empty() {
+                        println!("  {} Nothing recorded for '{}'.", "ℹ".blue(), function);
+                        if let Some(note) = &bounded {
+                            println!(
+                                "  {} {} — an older change would not be here.",
+                                "•".dimmed(),
+                                note.dimmed()
+                            );
+                        }
+                    } else {
+                        for file in &t.files {
+                            println!("  {} {}", "in".dimmed(), file.cyan());
+                        }
+                        println!();
+                        // Which file a sighting is in only earns a column when
+                        // the symbol has lived in more than one; otherwise the
+                        // line above already said it.
+                        let many = t.files.len() > 1;
+                        for s in &t.sightings {
+                            let date = chrono::DateTime::from_timestamp_millis(s.at_ms as i64)
+                                .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                                .unwrap_or_else(|| "unknown time".to_string());
+                            let who = if s.who.is_empty() { "—" } else { s.who.as_str() };
+                            let where_ = if many {
+                                format!(" {}", s.file.dimmed())
+                            } else {
+                                String::new()
+                            };
+                            println!(
+                                "  {} {:<11} {}{} — {}",
+                                date.dimmed(),
+                                s.source.label().dimmed(),
+                                who.cyan(),
+                                where_,
+                                s.what
+                            );
+                        }
+                        println!();
+                        let counts: Vec<String> = t
+                            .by_source()
+                            .iter()
+                            .map(|(src, n)| format!("{n} {}", src.label()))
+                            .collect();
+                        println!("  {} {}", "•".dimmed(), counts.join(" · ").dimmed());
+                        if let Some(note) = &bounded {
+                            println!("  {} {}", "•".dimmed(), note.dimmed());
+                        }
                     }
                 }
-            }
-
-            // Search snapshots for this function
-            let snapshots = checkpoint::SnapshotStore::get_all_snapshots();
-            let mut fn_snapshots = 0;
-            for snap in &snapshots {
-                if snap.content.contains(&*function) {
-                    fn_snapshots += 1;
-                }
-            }
-
-            if found == 0 && fn_snapshots == 0 {
-                println!("  {} No trace found for '{}'. Full team trace available in v0.14 (mothership history).", "ℹ".blue(), function);
-            } else {
-                if fn_snapshots > 0 {
-                    println!("\n  {} Found in {} snapshot{}", "•".dimmed(), fn_snapshots, if fn_snapshots == 1 { "" } else { "s" });
-                }
-                println!("  {} Full team trace with mothership history coming in Phase 3", "•".dimmed());
             }
             println!();
         }
@@ -10164,8 +11712,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{} Repo '{}' is now team-managed", "✓".green().bold(), repo.cyan());
 
                         // Also register the repo on the mothership so msg/sync routes don't 404
-                        let cloud_url = config.cloud_url.clone().unwrap_or_default();
-                        let cloud_token = config.cloud_api_token.clone().unwrap_or_default();
+                        let cloud_url = cloud_endpoint::origin(config.cloud_url.as_deref()).unwrap_or_default();
+                        let cloud_token =
+                            cloud_endpoint::token(config.cloud_api_token.as_deref()).unwrap_or_default();
                         if !cloud_url.is_empty() && !cloud_token.is_empty() {
                             let cred_dir = directories::ProjectDirs::from("com", "naridon", "aura")
                                 .map(|d| d.config_dir().to_path_buf())
@@ -10937,8 +12486,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
-        Commands::Atlas { ai, json } => {
-            let code = atlas::run(*ai, *json);
+        Commands::Atlas { ai, json, full } => {
+            let code = atlas::run(*ai, *json, *full);
             if code != 0 {
                 std::process::exit(code);
             }
@@ -11104,7 +12653,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
-        Commands::Usage { period, json, project, plan, budget_daily, budget_weekly, budget_session, export, by_dev } => {
+        Commands::Usage { period, json, project, plan, budget_daily, budget_weekly, budget_session, export, by_dev, push, push_days } => {
+            // Reporting spend to the org is a write, not a view, so it runs
+            // first and returns — printing a local report afterwards would
+            // bury the one line the person actually asked for.
+            if *push {
+                let days = push_days.unwrap_or(usage_push::DEFAULT_WINDOW_DAYS);
+                match usage_push::push(days) {
+                    Ok((outcome, sent)) if sent == 0 => {
+                        println!(
+                            "  {} No finished days with model usage in the last {} days — nothing to report.",
+                            "ℹ".dimmed(),
+                            days
+                        );
+                        let _ = outcome;
+                    }
+                    Ok((outcome, sent)) => {
+                        println!(
+                            "  {} Reported {} day/model {} to your org's cost meter",
+                            "✓".green().bold(),
+                            sent,
+                            if sent == 1 { "row" } else { "rows" }
+                        );
+                        println!(
+                            "    {} {} new · {} already reported · {} skipped",
+                            "↳".dimmed(),
+                            outcome.recorded,
+                            outcome.duplicate,
+                            outcome.rejected
+                        );
+                        println!(
+                            "    {} Today is never sent — a day still in progress would freeze at whatever it was when first reported.",
+                            "↳".dimmed()
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("  {} Could not report usage: {}", "✗".red(), e);
+                        std::process::exit(1);
+                    }
+                }
+                return Ok(());
+            }
             // If any budget flags were passed, save them to config
             if budget_daily.is_some() || budget_weekly.is_some() || budget_session.is_some() {
                 let mut config = ConfigManager::load();
@@ -11196,7 +12785,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Check budget alerts
                     let config = ConfigManager::load();
                     if let Some(ref budget) = config.budget {
-                        let alerts = usage::check_budget(budget);
+                        // The report is already on screen — the alert
+                        // quotes it rather than rebuilding a second,
+                        // slightly later total for the same day.
+                        let alerts = usage::check_budget_with(budget, Some(&report));
                         if !alerts.is_empty() {
                             usage::print_budget_alerts(&alerts);
                         }
@@ -11302,6 +12894,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+        Commands::TranscriptSync {
+            session,
+            transcript,
+            backfill,
+            verbose,
+            agent_id,
+            agent_type,
+            description,
+            subagents: sweep_subagents,
+        } => {
+            // Never fails its caller: this is wired into a Stop hook, which
+            // must exit 0 whatever the network is doing.
+            let attribution = agent_id.as_ref().map(|id| transcript_sync::Attribution {
+                agent_id: id.clone(),
+                agent_type: agent_type
+                    .clone()
+                    .unwrap_or_else(|| "subagent".to_string()),
+                description: description.clone().unwrap_or_default(),
+            });
+            let outcome = if *sweep_subagents {
+                transcript_sync::sync_subagents(session, transcript, *backfill)
+            } else {
+                transcript_sync::sync_as(session, transcript, *backfill, attribution.as_ref())
+            };
+            match outcome {
+                Ok(report) if *verbose => {
+                    if report.primed {
+                        println!("primed — future turns of this session will sync");
+                    } else {
+                        println!(
+                            "read {} turn(s), sent {}, deferred {}",
+                            report.read, report.sent, report.deferred
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(e) if *verbose => eprintln!("{} {}", "✗".red().bold(), e),
+                Err(_) => {}
+            }
+        }
+        Commands::Subagents {
+            session,
+            transcript,
+            json,
+            push,
+        } => {
+            let runs = subagents::runs_of(transcript);
+            if *json {
+                let wire: Vec<_> = runs.iter().map(subagents::Run::to_json).collect();
+                println!("{}", serde_json::to_string_pretty(&wire).unwrap_or_default());
+            } else if runs.is_empty() {
+                println!("no sub-agents ran in this session");
+            } else {
+                println!(
+                    "{} sub-agent(s) — {}",
+                    runs.len(),
+                    transcript.display()
+                );
+                for run in &runs {
+                    let indent = "  ".repeat(run.spawn_depth.max(1) as usize);
+                    let purpose = if run.description.is_empty() {
+                        "—"
+                    } else {
+                        run.description.as_str()
+                    };
+                    println!(
+                        "{indent}{} {}  {}",
+                        run.agent_type.cyan(),
+                        purpose,
+                        run.agent_id.dimmed()
+                    );
+                }
+            }
+            if *push {
+                let Some(session_id) = session.as_deref() else {
+                    eprintln!("aura subagents: --push needs --session");
+                    return Ok(());
+                };
+                let repo_root = Repository::discover(".")
+                    .ok()
+                    .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let mut sent = 0usize;
+                for run in &runs {
+                    if subagents::push(session_id, run, None, &repo_root) {
+                        sent += 1;
+                    }
+                }
+                println!("pushed {sent}/{}", runs.len());
+            }
+        }
         Commands::Intents { action } => {
             if let Err(e) = run_intents(action) {
                 eprintln!("{} {}", "✗".red().bold(), e);
@@ -11366,15 +13049,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match action {
                 WsAction::Listen { seconds, stop_after, expect_min, format } => {
                     let config = ConfigManager::load();
-                    let cloud_url = config
-                        .cloud_url
-                        .clone()
-                        .or_else(|| std::env::var("AURA_CLOUD_URL").ok())
-                        .unwrap_or_else(|| "http://127.0.0.1:3001".to_string());
-                    let token = config
-                        .cloud_api_token
-                        .clone()
-                        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+                    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "http://127.0.0.1:3001");
+                    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
                         .unwrap_or_default();
                     let report = match live_ws::listen_blocking(
                         &cloud_url,
@@ -11793,31 +13469,117 @@ fn run_memory_cloud(action: &MemoryCloudAction) -> Result<(), String> {
             Ok(())
         }
         MemoryCloudAction::Push {
+            entry_id,
             body,
             title,
             kind,
             repo_full_name,
             json,
         } => {
-            if body.trim().is_empty() {
-                return Err("--body is required and must be non-empty".to_string());
-            }
-            let url = format!("{}/api/v2/memory", cloud_url.trim_end_matches('/'));
-            let mut body_obj = serde_json::Map::new();
-            body_obj.insert("body".into(), serde_json::json!(body));
-            if let Some(v) = title { body_obj.insert("title".into(), serde_json::json!(v)); }
-            if let Some(v) = kind { body_obj.insert("kind".into(), serde_json::json!(v)); }
+            // The indexing hints are the same either way; the two paths
+            // differ only in where the entry itself comes from.
+            let mut hints = serde_json::Map::new();
+            if let Some(v) = title { hints.insert("title".into(), serde_json::json!(v)); }
+            if let Some(v) = kind { hints.insert("kind".into(), serde_json::json!(v)); }
             if let Some(v) = repo_full_name {
-                body_obj.insert("repo_full_name".into(), serde_json::json!(v));
+                hints.insert("repo_full_name".into(), serde_json::json!(v));
             }
+            let hints = serde_json::Value::Object(hints);
+
+            let body_obj = match (entry_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                                  body.as_deref().map(str::trim).filter(|s| !s.is_empty())) {
+                (Some(id), _) => {
+                    let (section, entry) = memory::MemoryManager::find_entry(id).ok_or_else(|| {
+                        format!(
+                            "no memory entry `{id}` in this repo. `aura memory search <text>` \
+                             lists what is stored."
+                        )
+                    })?;
+                    mcp::memory_push_body_from_entry(section, &entry, &hints)
+                }
+                (None, Some(text)) => mcp::build_memory_push_body(text, &hints),
+                (None, None) => {
+                    return Err(
+                        "pass --entry-id to share a stored memory entry, or --body for a \
+                         free-text note"
+                            .to_string(),
+                    )
+                }
+            };
+
+            let url = format!("{}/api/v2/memory", cloud_url.trim_end_matches('/'));
             let req_body = serde_json::Value::Object(body_obj);
             let resp = recall_post(&client, &url, &token, &req_body)?;
+            // The push succeeded, so the fact is no longer only on this
+            // machine — stamp it, with the server's verdict rather than
+            // our own. Every surface that shares goes through here, so
+            // none of them can share without the entry saying so after.
+            let server_signature = resp
+                .get("signature")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unsigned")
+                .to_string();
+            if let Some(id) = entry_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                memory::MemoryManager::mark_shared(id, &server_signature);
+            }
             if *json {
                 println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_else(|_| resp.to_string()));
             } else {
                 let id = resp.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                 let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
-                println!("✓ memory-cloud push {} id={}", status, id);
+                // The server's verdict on the signature, not our own claim
+                // about it — an entry whose signature did not check out says
+                // so here rather than reading as a clean push.
+                let sig = resp.get("signature").and_then(|v| v.as_str()).unwrap_or("unsigned");
+                let created = resp.get("created").and_then(|v| v.as_bool()).unwrap_or(true);
+                println!(
+                    "✓ memory-cloud push {} id={} ({}, signature {})",
+                    status,
+                    id,
+                    if created { "new" } else { "updated in place" },
+                    sig
+                );
+            }
+            Ok(())
+        }
+        MemoryCloudAction::Retract { entry_id, json } => {
+            let id = entry_id.trim();
+            if id.is_empty() {
+                return Err("name the entry to withdraw: --entry-id mem-…".to_string());
+            }
+            // The id goes into the path, so it is checked rather than
+            // escaped: a memory id is `mem-<hex>` and nothing else, and an
+            // argument that is not one is a mistake worth naming instead of
+            // a request to build a URL out of.
+            if !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(format!(
+                    "`{id}` is not a memory entry id. `aura memory search <text>` prints them; \
+                     they look like `mem-1a2b3c4d`."
+                ));
+            }
+            let url = format!(
+                "{}/api/v2/memory/{}/retract",
+                cloud_url.trim_end_matches('/'),
+                id
+            );
+            let resp = recall_post(&client, &url, &token, &serde_json::json!({}))?;
+            // The server is the authority on whether the fact is still out
+            // there, so the local entry only stops claiming to be shared
+            // once the withdrawal actually landed.
+            let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
+            memory::MemoryManager::mark_unshared(id);
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_else(|_| resp.to_string()));
+            } else if status == "already_retracted" {
+                println!("✓ `{id}` was already withdrawn — your team cannot read it through Aura.");
+            } else {
+                println!(
+                    "✓ withdrew `{id}`. Your team can no longer read it through Aura.\n  \
+                     A copy someone already pulled onto their own machine is not reached."
+                );
             }
             Ok(())
         }
@@ -11877,7 +13639,7 @@ fn format_memory_cloud_list(body: &serde_json::Value) -> String {
 /// S2-AT: PATCH sibling of recall_get / recall_post for endpoints
 /// that take a JSON body via PATCH (currently the A2A task patch
 /// route). Same auth + error shape so the dispatch stays symmetric.
-fn recall_patch(
+pub(crate) fn recall_patch(
     client: &reqwest::blocking::Client,
     url: &str,
     token: &str,
@@ -11897,7 +13659,7 @@ fn recall_patch(
 /// happy path is a no-op; this is defense-in-depth so a malformed
 /// id can't escape the path. Empty result is rejected at the
 /// dispatch level.
-fn a2a_safe_id(id: &str) -> String {
+pub(crate) fn a2a_safe_id(id: &str) -> String {
     id.chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
         .collect()
@@ -11944,6 +13706,7 @@ fn run_a2a_task(action: &A2aTaskAction) -> Result<(), String> {
             branch,
             tag,
             assignee,
+            status,
             json,
         } => {
             if agent_kind.trim().is_empty() {
@@ -12022,6 +13785,18 @@ fn run_a2a_task(action: &A2aTaskAction) -> Result<(), String> {
             if let Some(v) = assignee {
                 body_obj.insert("assignee_user_id".into(), serde_json::json!(v));
             }
+            // WRK-02 — only planning states may be minted directly; the
+            // executable queue (`submitted`) is entered by offering, and
+            // every later state is a runner-side transition, not a create.
+            if let Some(v) = status {
+                let s = v.trim();
+                if !matches!(s, "draft" | "planned") {
+                    return Err(format!(
+                        "--status must be draft|planned (visibility states) — '{s}' is a runtime state the server owns"
+                    ));
+                }
+                body_obj.insert("status".into(), serde_json::json!(s));
+            }
             let req_body = serde_json::Value::Object(body_obj);
             let resp = recall_post(&client, &url, &token, &req_body)?;
             if *json {
@@ -12067,6 +13842,24 @@ fn run_a2a_task(action: &A2aTaskAction) -> Result<(), String> {
                 println!("{}", serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string()));
             } else {
                 println!("{}", format_a2a_task_list(&body));
+            }
+            Ok(())
+        }
+        A2aTaskAction::Delete { id, json } => {
+            let safe_id = a2a_safe_id(id);
+            if safe_id.is_empty() {
+                return Err("id contains no url-safe characters".to_string());
+            }
+            let url = format!(
+                "{}/api/v2/a2a/tasks/{}",
+                cloud_url.trim_end_matches('/'),
+                safe_id
+            );
+            let _ = recall_delete(&client, &url, &token)?;
+            if *json {
+                println!("{}", serde_json::json!({ "deleted": safe_id }));
+            } else {
+                println!("✓ a2a-task delete id={}", safe_id);
             }
             Ok(())
         }
@@ -12706,11 +14499,10 @@ fn run_agent_card(
     cloud: Option<&str>,
     json: bool,
 ) -> Result<(), String> {
-    let cloud_url = cloud
-        .map(|s| s.to_string())
-        .or_else(|| ConfigManager::load().cloud_url)
-        .or_else(|| std::env::var("AURA_CLOUD_URL").ok())
-        .unwrap_or_else(|| "https://api.auravcs.com".to_string());
+    // An explicit `--cloud` beats everything; otherwise the usual resolution.
+    let cloud_url = cloud.map(|s| s.to_string()).unwrap_or_else(|| {
+        cloud_endpoint::origin_or_public(ConfigManager::load().cloud_url.as_deref())
+    });
     let trimmed = cloud_url.trim_end_matches('/');
     let url = format!("{}/.well-known/agent-card.json", trimmed);
     let client = cloud_http_client();
@@ -12892,6 +14684,45 @@ fn format_a2a_task_list(body: &serde_json::Value) -> String {
 fn run_intents(action: &IntentsAction) -> Result<(), String> {
     let path = std::path::Path::new(".aura/intent_log.jsonl");
     match action {
+        IntentsAction::Push { json } => {
+            // Resolve the repo root the way the rest of the CLI does, so this
+            // works from any subdirectory of the checkout.
+            let repo_root = Repository::discover(".")
+                .ok()
+                .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let report = intent_sync::backfill(&repo_root)?;
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "read": report.read,
+                        "stored": report.stored,
+                        "queued_batches": report.queued,
+                        "repo": repo_slug::of_cwd(),
+                    })
+                );
+            } else {
+                println!(
+                    "{} {} intent{} read, {} new to the cloud",
+                    "✓".green().bold(),
+                    report.read.to_string().cyan(),
+                    if report.read == 1 { "" } else { "s" },
+                    report.stored.to_string().cyan(),
+                );
+                if report.queued > 0 {
+                    // Say it plainly: the rows are not lost, they are waiting.
+                    println!(
+                        "  {} {} batch{} could not be delivered and are queued in \
+                         .aura/outbox — they retry on the next sync",
+                        "⚠".yellow(),
+                        report.queued,
+                        if report.queued == 1 { "" } else { "es" },
+                    );
+                }
+            }
+            Ok(())
+        }
         IntentsAction::Query {
             intent_type,
             since_hours,
@@ -13012,18 +14843,10 @@ fn run_intents(action: &IntentsAction) -> Result<(), String> {
 
 pub(crate) fn recall_cloud_creds() -> Result<(String, String), String> {
     let config = ConfigManager::load();
-    let token = config
-        .cloud_api_token
-        .clone()
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
-        .ok_or_else(|| {
-            "No cloud token configured. Run `aura cloud login` or set AURA_CLOUD_TOKEN.".to_string()
-        })?;
-    let cloud_url = config
-        .cloud_url
-        .clone()
-        .or_else(|| std::env::var("AURA_CLOUD_URL").ok())
-        .unwrap_or_else(|| "https://api.auravcs.com".to_string());
+    let token = cloud_endpoint::token(config.cloud_api_token.as_deref()).ok_or_else(|| {
+        "No cloud token configured. Run `aura cloud login` or set AURA_CLOUD_TOKEN.".to_string()
+    })?;
+    let cloud_url = cloud_endpoint::origin_or_public(config.cloud_url.as_deref());
     Ok((cloud_url, token))
 }
 
@@ -13899,11 +15722,21 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                 None => None,
             };
             let body = if input.is_empty() { title.clone() } else { input.clone() };
+            // WRK-02 — a bare `aura loop add` (default kind `task`, no
+            // --ac) mints a `subtask`: the AC-optional leaf that means
+            // "just run this". A `task` is a provable unit and without
+            // acceptance it would sit unrunnable at the execution gate.
+            let no_ac = ac.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true);
+            let effective_kind = if kind == "task" && no_ac {
+                "subtask".to_string()
+            } else {
+                kind.clone()
+            };
             let mut task = graph.create(
                 title.clone(),
                 body,
                 priority.clone(),
-                kind.clone(),
+                effective_kind.clone(),
                 deps.clone(),
                 ac.clone(),
                 agent.clone(),
@@ -13917,6 +15750,13 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                 println!("{}", serde_json::to_string(&task)?);
             } else {
                 println!("{} minted", task.short_id().green().bold());
+                if effective_kind != *kind {
+                    println!(
+                        "       {}",
+                        "no --ac given — minted as subtask (add --ac to mint a provable task)"
+                            .dimmed()
+                    );
+                }
                 print_loop_task(&task);
             }
         }
@@ -13962,6 +15802,14 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                     }
                 };
                 section("READY".green().bold(), &view.ready);
+                section("PLANNED".blue().bold(), &view.planned);
+                if !view.unrunnable.is_empty() {
+                    println!("\n{} ({})", "UNRUNNABLE".red().bold(), view.unrunnable.len());
+                    for (t, reason) in &view.unrunnable {
+                        print_loop_task(t);
+                        println!("       {} {}", "why:".red().dimmed(), reason.red().dimmed());
+                    }
+                }
                 section("WORKING".cyan().bold(), &view.working);
                 if !view.blocked.is_empty() {
                     println!("\n{} ({})", "BLOCKED".yellow().bold(), view.blocked.len());
@@ -14011,6 +15859,8 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
             if *json {
                 let obj = serde_json::json!({
                     "ready": view.ready.len(),
+                    "planned": view.planned.len(),
+                    "unrunnable": view.unrunnable.len(),
                     "blocked": view.blocked.len(),
                     "working": view.working.len(),
                     "done": view.done.len(),
@@ -14019,8 +15869,10 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                 println!("{}", serde_json::to_string(&obj)?);
             } else {
                 println!(
-                    "{} ready · {} blocked · {} working · {} done · {} other",
+                    "{} ready · {} planned · {} unrunnable · {} blocked · {} working · {} done · {} other",
                     view.ready.len().to_string().green().bold(),
+                    view.planned.len().to_string().blue(),
+                    view.unrunnable.len().to_string().red(),
                     view.blocked.len().to_string().yellow(),
                     view.working.len().to_string().cyan(),
                     view.done.len().to_string().dimmed(),
@@ -14044,10 +15896,28 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
             let task = graph
                 .set_status(id, status)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            // Keep the console in step with the laptop. Best-effort: the
+            // local write already stands, and `aura crew push` reconciles.
+            crew_push::mirror_one(&repo_root, &task.id);
             if *json {
                 println!("{}", serde_json::to_string(&task)?);
             } else {
                 println!("{} → {}", task.short_id().yellow().bold(), loop_status_color(&task.status));
+            }
+        }
+        LoopSubcommands::Offer { id, json } => {
+            let task = graph
+                .offer(id)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            crew_push::mirror_one(&repo_root, &task.id);
+            if *json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!(
+                    "{} offered → {}",
+                    task.short_id().green().bold(),
+                    loop_status_color(&task.status)
+                );
             }
         }
         LoopSubcommands::Pause { id, goal, crew, json } => {
@@ -14059,6 +15929,7 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                 let task = graph
                     .pause(id)
                     .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                crew_push::mirror_one(&repo_root, &task.id);
                 if *json {
                     println!("{}", serde_json::to_string(&task)?);
                 } else {
@@ -14070,6 +15941,9 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                     return Err("nothing to pause — pass a node id, --goal, or --crew".into());
                 }
                 let paused = graph.pause_scope(&scope);
+                for t in &paused {
+                    crew_push::mirror_one(&repo_root, t);
+                }
                 if *json {
                     println!("{}", serde_json::to_string(&paused)?);
                 } else {
@@ -14085,6 +15959,7 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                 let task = graph
                     .resume(id)
                     .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                crew_push::mirror_one(&repo_root, &task.id);
                 if *json {
                     println!("{}", serde_json::to_string(&task)?);
                 } else {
@@ -14096,6 +15971,9 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                     return Err("nothing to resume — pass a node id, --goal, or --crew".into());
                 }
                 let resumed = graph.resume_scope(&scope);
+                for t in &resumed {
+                    crew_push::mirror_one(&repo_root, t);
+                }
                 if *json {
                     println!("{}", serde_json::to_string(&resumed)?);
                 } else {
@@ -14138,41 +16016,37 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
         }
         LoopSubcommands::Crews { json } => {
             let registry = aura_loop::crew::CrewRegistry::at(&repo_root);
-            let metas = registry.list();
-            let all = graph.list();
-            let summaries = aura_loop::crews_summary(&all);
+            // Registry ∪ the crews that only live on nodes. Reading only the
+            // registry hid `env-plane` — four finished nodes, never spawned —
+            // and made the CLI disagree with the app about how many crews
+            // this project has.
+            let rows = aura_loop::crew::crew_rows(&graph.list(), &registry);
             if *json {
-                // Pair each registered crew with its live summary (or zeros).
-                let rows: Vec<serde_json::Value> = metas
+                let out: Vec<serde_json::Value> = rows
                     .iter()
-                    .map(|m| {
-                        let s = summaries.iter().find(|c| c.crew == m.id);
+                    .map(|r| {
                         serde_json::json!({
-                            "id": m.id,
-                            "title": m.title,
-                            "description": m.description,
-                            "total": s.map(|s| s.total).unwrap_or(0),
-                            "ready": s.map(|s| s.ready).unwrap_or(0),
-                            "working": s.map(|s| s.working).unwrap_or(0),
-                            "done": s.map(|s| s.done).unwrap_or(0),
-                            "failed": s.map(|s| s.failed).unwrap_or(0),
+                            "id": r.meta.id,
+                            "title": r.meta.title,
+                            "description": r.meta.description,
+                            "total": r.summary.total,
+                            "ready": r.summary.ready,
+                            "working": r.summary.working,
+                            "done": r.summary.done,
+                            "failed": r.summary.failed,
                         })
                     })
                     .collect();
-                println!("{}", serde_json::to_string(&rows)?);
+                println!("{}", serde_json::to_string(&out)?);
             } else {
-                for m in &metas {
-                    let s = summaries.iter().find(|c| c.crew == m.id);
-                    let total = s.map(|s| s.total).unwrap_or(0);
-                    let working = s.map(|s| s.working).unwrap_or(0);
-                    let done = s.map(|s| s.done).unwrap_or(0);
+                for r in &rows {
                     println!(
                         "{}  {}  ·  {} task(s)  ·  {} working  ·  {} done",
-                        m.id.cyan().bold(),
-                        m.title.dimmed(),
-                        total,
-                        working.to_string().yellow(),
-                        done.to_string().green(),
+                        r.meta.id.cyan().bold(),
+                        r.meta.title.dimmed(),
+                        r.summary.total,
+                        r.summary.working.to_string().yellow(),
+                        r.summary.done.to_string().green(),
                     );
                 }
             }
@@ -14245,6 +16119,17 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                 json: *json,
             };
             aura_loop_run::run(&repo_root, &opts)?;
+        }
+        LoopSubcommands::Push { crew, dry_run, limit, json } => {
+            crew_push::run(
+                &repo_root,
+                &crew_push::PushOpts {
+                    crew: crew.clone(),
+                    dry_run: *dry_run,
+                    json: *json,
+                    limit: *limit,
+                },
+            )?;
         }
         LoopSubcommands::Sync {
             pull_only,
@@ -14435,6 +16320,13 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("task")
                                 .to_string();
+                            // WRK-02 — a `plan` is a grouping envelope, never
+                            // executable. Pulling one would mint a local node
+                            // and claim the cloud row to `working`, i.e. an
+                            // agent "runs the plan". Leave it on the cloud.
+                            if kind == "plan" {
+                                continue;
+                            }
                             let ac = ct
                                 .get("acceptance_criteria")
                                 .and_then(|v| v.as_str())
@@ -15047,9 +16939,10 @@ fn handle_task_command(sub: &TaskSubcommands) -> Result<(), Box<dyn std::error::
                 if !task.body.is_empty() {
                     println!("\n{}", task.body);
                 }
-                if !task.comments.is_empty() {
+                let comments = store.comments(id);
+                if !comments.is_empty() {
                     println!("\n{}", "Comments".bold());
-                    for c in &task.comments {
+                    for c in &comments {
                         println!("  {} {}: {}", c.author.cyan(), c.at.to_string().dimmed(), c.body);
                     }
                 }
@@ -15528,6 +17421,26 @@ fn human_age(secs: u64) -> String {
 mod recall_tests {
     use super::*;
     use serde_json::json;
+
+    /// The updater must announce strictly newer releases only — `!=` told
+    /// every up-to-date install to "upgrade" the moment a release was yanked.
+    #[test]
+    fn version_is_newer_is_a_strict_semver_compare() {
+        assert!(version_is_newer("0.19.44", "0.19.43"));
+        assert!(version_is_newer("0.20.0", "0.19.43"));
+        assert!(version_is_newer("1.0.0", "0.19.43"));
+        // Same or older: never an update.
+        assert!(!version_is_newer("0.19.43", "0.19.43"));
+        assert!(!version_is_newer("0.19.42", "0.19.43"));
+        assert!(!version_is_newer("0.9.99", "0.19.43"));
+        // Numeric, not lexicographic: 0.19.9 < 0.19.43.
+        assert!(!version_is_newer("0.19.9", "0.19.43"));
+        // Pre-release suffix on the patch is tolerated on the digits prefix.
+        assert!(version_is_newer("0.19.44-rc1", "0.19.43"));
+        // Garbage never wins.
+        assert!(!version_is_newer("nightly", "0.19.43"));
+        assert!(!version_is_newer("", "0.19.43"));
+    }
 
     #[test]
     fn truncate_under_limit_passthrough() {
@@ -16200,5 +18113,47 @@ mod recall_tests {
         let blocks = read_blocks_dir(&tmp).unwrap();
         assert_eq!(blocks.len(), 1);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod init_agent_choice_tests {
+    use super::parse_agent_choice;
+
+    const AGENTS: &[&str] = &[
+        "Claude Code", "VS Code", "Gemini CLI", "Cursor", "Claude Desktop", "Aider", "OpenCode",
+    ];
+
+    #[test]
+    fn names_are_matched_however_they_are_spelled() {
+        assert_eq!(parse_agent_choice("claude code", AGENTS), Ok(vec![0]));
+        assert_eq!(parse_agent_choice("Claude-Code", AGENTS), Ok(vec![0]));
+        assert_eq!(parse_agent_choice("geminicli, CURSOR", AGENTS), Ok(vec![2, 3]));
+    }
+
+    #[test]
+    fn all_and_none_mean_what_they_say() {
+        assert_eq!(parse_agent_choice("all", AGENTS).map(|v| v.len()), Ok(AGENTS.len()));
+        assert_eq!(parse_agent_choice("none", AGENTS), Ok(Vec::new()));
+        // `none` anywhere in the list wins: someone who wrote it meant it.
+        assert_eq!(parse_agent_choice("cursor,none", AGENTS), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn a_name_we_do_not_know_is_named_back() {
+        // Not "one or more agents were invalid" — the typo itself, so the
+        // person can see which of four names they got wrong.
+        assert_eq!(parse_agent_choice("claude code, copilot", AGENTS), Err("copilot".into()));
+    }
+
+    #[test]
+    fn an_empty_list_installs_nothing_rather_than_everything() {
+        assert_eq!(parse_agent_choice("", AGENTS), Ok(Vec::new()));
+        assert_eq!(parse_agent_choice(" , ", AGENTS), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn a_repeated_name_is_wired_once() {
+        assert_eq!(parse_agent_choice("cursor,cursor", AGENTS), Ok(vec![3]));
     }
 }

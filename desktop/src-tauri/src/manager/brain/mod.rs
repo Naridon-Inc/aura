@@ -35,6 +35,8 @@ pub(crate) mod legacy;
 pub(crate) mod plain_cli_transcript;
 pub mod keychain;
 pub(crate) mod limits;
+// AURA-1296 — maps the composer's Concise chip onto Claude Code's flag.
+pub(crate) mod output_style;
 pub mod manager;
 /// What an agent run may do, decided from the project's own committed rules
 /// before anyone is prompted. `gate` asks the human; this decides whether the
@@ -134,12 +136,24 @@ pub mod place_secrets;
 pub mod secret_vault;
 /// The work running at a place — sessions, projects, what it can run.
 mod place_sessions;
+/// What a session at a place printed while nobody was attached — the
+/// scrollback, read back off tmux so a person returning can catch up.
+pub mod place_capture;
 /// Which of the projects a place holds belong to the org you opened it as. The
 /// discovery is `place_sessions`'; this narrows what came back.
 pub mod place_projects;
 /// The agent phase's allowlist at a place: what it may reach once the setup
 /// phase has finished installing, and what it was refused.
 pub mod place_egress;
+// AURA-1294
+/// What a place is listening on, brought to `localhost` on this Mac.
+pub mod place_ports;
+// end AURA-1294
+// AURA-1306
+/// The file tree, the editor, the Changes list and the git panel, for a
+/// workspace whose checkout lives at a place.
+pub mod place_work;
+// end AURA-1306
 /// What a turn cost in dollars — rate lookup for the spend meter.
 pub mod pricing;
 /// Reading the web — `web_fetch` / `web_search` for the native tool loop.

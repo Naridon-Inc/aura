@@ -45,7 +45,7 @@ impl Arbitrator {
         diff.foreach(&mut |delta, _| {
             if let Some(path) = delta.new_file().path() {
                 let path_str = path.to_string_lossy().to_string();
-                if path_str.ends_with(".rs") || path_str.ends_with(".ts") || path_str.ends_with(".js") || path_str.ends_with(".py") {
+                if path_str.ends_with(".rs") || path_str.ends_with(".ts") || path_str.ends_with(".mts") || path_str.ends_with(".cts") || path_str.ends_with(".js") || path_str.ends_with(".mjs") || path_str.ends_with(".cjs") || path_str.ends_with(".py") {
                     if let Ok(content) = fs::read_to_string(path) {
                         diff_files.push_str(&format!("===FILE: {} ===\n{}\n", path_str, content));
                     }

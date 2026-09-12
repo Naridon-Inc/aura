@@ -12,6 +12,7 @@ mod agent_event_listener;
 mod agent_installs;
 mod agent_mutation_guard;
 mod agent_policy;
+mod agent_session_title;
 mod api_spend;
 mod aurawatch_agentcli;
 mod aurawatch_inference;
@@ -20,6 +21,7 @@ mod aurawatch_inference;
 // what makes it a crate-level primitive rather than a brain's private helper.
 mod aws_sigv4;
 mod blocking;
+mod child_reaper;
 mod cli_bridge;
 mod fs_atomic;
 mod text;
@@ -43,15 +45,20 @@ mod cmd_capture;
 mod cmd_carryover;
 mod cmd_change_note;
 mod cmd_change_summary;
+mod change_warm;
+mod cloud_endpoint;
 mod cmd_symbol_impact;
 mod cmd_commons_app;
 mod cmd_changes;
 mod cmd_cloud_auth;
 mod cmd_cloud_billing;
 mod cmd_cloud_jobs;
+mod cmd_cloud_members;
 mod cmd_cloud_orgs;
 mod cmd_cloud_runners;
 mod cmd_kg;
+mod cmd_kg_features;
+mod cmd_kg_flows;
 mod cmd_chat_export;
 mod cmd_claude_sessions;
 mod cmd_claude_usage;
@@ -67,6 +74,11 @@ mod cmd_verify_intent;
 mod cmd_editors;
 mod cmd_ext_host;
 mod cmd_files;
+// Pure readers of git's output, shared by the local commands and their
+// remote-workspace twins (AURA-1306).
+mod git_parse;
+// AURA-1296 — "Reset chat → Also reset files".
+mod cmd_reset_files;
 mod cmd_integrations;
 mod cmd_sample;
 mod cmd_lane;
@@ -105,11 +117,13 @@ mod cmd_projects;
 mod cmd_prompts;
 mod cmd_repo_identity;
 mod cmd_repo_settings;
+mod recorded_reason;
 mod repo_identity;
 mod cmd_prs;
 mod cmd_native_term;
 mod cmd_pty;
 mod cmd_run;
+mod run_sniff;
 mod cmd_search;
 mod cmd_sentinel;
 mod cmd_session_live;
@@ -124,6 +138,7 @@ mod cmd_terminal_profiles;
 mod cmd_soundboard;
 mod cmd_taste;
 mod cmd_tasks;
+mod task_store;
 mod cmd_tasks_activity;
 mod cmd_tasks_sync;
 mod cmd_tasks_bulk;
@@ -154,10 +169,12 @@ mod cmd_remote;
 mod cmd_remote_connect;
 mod cmd_remote_devices;
 mod cmd_remote_relay;
+mod cmd_team_presence;
 pub mod provisioner;
 mod cmd_resources;
 mod cmd_zones;
 mod crash;
+mod deep_link;
 mod hud;
 mod ide_bridge;
 mod manager;
@@ -170,12 +187,18 @@ mod plugin_exchange;
 mod plugin_host;
 mod telemetry;
 mod telemetry_guard;
+mod pty_emit;
+mod watchdog;
+mod watchdog_sample;
 pub mod pty_daemon;
 mod pty_io;
 mod pty_reap;
 mod secret_store;
 pub mod spawn_dir;
+#[cfg(test)]
+mod test_home;
 mod worktree;
+mod worktree_recover;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -267,13 +290,33 @@ fn default_db_path() -> PathBuf {
 fn fix_path_for_gui_macos() {
     use std::process::Command;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let Ok(out) = Command::new(&shell).args(["-ilc", "echo $PATH"]).output() else {
+    // AURA-1297: a GUI app never sees the login shell's GitHub Enterprise
+    // settings, so `gh` inside the app would silently talk to github.com.
+    // Read PATH plus GH_HOST / GH_ENTERPRISE_TOKEN / GH_TOKEN in one shell
+    // spawn and import any that are set there but not here.
+    const GH_VARS: [&str; 3] = ["GH_HOST", "GH_ENTERPRISE_TOKEN", "GH_TOKEN"];
+    let Ok(out) = Command::new(&shell)
+        .args([
+            "-ilc",
+            r#"printf '%s\n' "$PATH" "$GH_HOST" "$GH_ENTERPRISE_TOKEN" "$GH_TOKEN""#,
+        ])
+        .output()
+    else {
         return;
     };
     if !out.status.success() {
         return;
     }
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines = stdout.lines().map(str::trim);
+    let p = lines.next().unwrap_or("").to_string();
+    for (key, value) in GH_VARS.iter().zip(lines) {
+        let already = std::env::var(key).map(|v| !v.trim().is_empty()).unwrap_or(false);
+        if !value.is_empty() && !already {
+            std::env::set_var(key, value);
+        }
+    }
+    // end AURA-1297
     if p.is_empty() {
         return;
     }
@@ -307,6 +350,11 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // `aura://session/<id>` from outside the app — the console's "Resume
+        // in app" has been writing that link since it shipped, and until now
+        // nothing here answered it.
+        .plugin(tauri_plugin_deep_link::init())
+        .manage(deep_link::Pending::default())
         .manage(cmd_pty::PtyRegistry::new())
         .manage(cmd_agent_pty::AgentPtyRegistry::new())
         .manage(cmd_ext_host::ExtHostState::new())
@@ -314,6 +362,7 @@ pub fn run() {
         .manage(agent_mutation_guard::EditorWriteTracker::new())
         .manage(cmd_daemon::DaemonHandle::new())
         .manage(cmd_watcher::WatcherRegistry::new())
+        .manage(change_warm::CommitWatchRegistry::new())
         .manage(cmd_aura::AuraLiveRegistry::new())
         .manage(cmd_aurawatch::WatchRegistry::new())
         .manage(cmd_agent_stream::ChildRegistry::new())
@@ -381,10 +430,20 @@ pub fn run() {
             // the old plugin path never registered, so there was no row and no
             // switch, which is why team messages arrived in silence.
             os_notify::init(app.handle());
+            // Claim `aura://` and start collecting. Installed after the
+            // window exists so a link that launched the app can bring it
+            // forward, and before anything long-running so a cold-start URL
+            // is already waiting when the webview asks.
+            deep_link::install(app.handle());
             // Seed the HUD master switch from persisted Settings BEFORE the
             // ⌘⇧A shortcut is live, so a user who turned the HUD off stays off
             // across restarts (the tray + shortcut register unconditionally;
             // the gate lives in hud::toggle/show).
+            // Watch the main thread. A frozen window is the one failure the
+            // app used to handle worse than a crash — no report, no toast, and
+            // Force Quit as the only way out. See `watchdog.rs` for the AppKit
+            // deadlock that motivates it.
+            watchdog::install(app.handle());
             hud::seed_enabled(cmd_settings_prefs::load_app_settings().hud.enabled);
             hud::register_shortcut(app);
             // macOS window vibrancy: give the MAIN window a frosted
@@ -557,6 +616,13 @@ pub fn run() {
             // cloud, and self-heals if the cloud predates the feature.
             cmd_remote_devices::spawn_presence_heartbeat(app.handle().clone());
 
+            // Team presence: the OTHER heartbeat — this person to their
+            // teammates, not this machine to its owner. Until now the only
+            // writer of `live_sessions` was a foreground `aura live`, so every
+            // team's "Online now" panel read zero forever even though everyone
+            // had Aura open. Advertises the active project only.
+            cmd_team_presence::spawn_team_presence_heartbeat(app.handle().clone());
+
             // Session sync: continuously publish live interactive agent
             // sessions (Claude Code, Gemini, Codex, Cursor) to the cloud so the
             // paired phone's Workspaces feed shows them. The Manager path only
@@ -586,6 +652,7 @@ pub fn run() {
             aura_status,
             os_notify::os_notify,
             os_notify::os_notify_available,
+            deep_link::deep_link_take,
             cmd_automations::automations_list,
             cmd_automations::automation_create,
             cmd_automations::automation_update,
@@ -631,6 +698,8 @@ pub fn run() {
             cmd_files::git_unstage,
             cmd_files::git_commit,
             cmd_files::git_discard,
+            // AURA-1296
+            cmd_reset_files::git_reset_files,
             cmd_files::git_status_v2,
             cmd_files::git_commit_file_stats,
             cmd_files::git_show_commit,
@@ -660,6 +729,9 @@ pub fn run() {
             worktree::worktree_create_managed,
             worktree::worktree_remove_managed,
             worktree::worktree_resolve_path,
+            worktree_recover::worktree_scan_lost,
+            worktree_recover::worktree_reattach,
+            worktree_recover::worktree_prune_ghosts,
             cmd_workspace_launch::workspace_launch,
             cmd_lane::lane_spawn,
             cmd_lane::lane_list,
@@ -739,11 +811,14 @@ pub fn run() {
             cmd_aura::aura_radar,
             cmd_aura::aura_log_intent,
             cmd_aura::aura_intent_recent,
+            cmd_aura::aura_ask,
             cmd_aura::aura_intent_coverage,
             cmd_aura::aura_intent_attribute,
             cmd_aura::aura_intent_split,
             cmd_aura::aura_intent_merge,
             cmd_aura::aura_strict_mode,
+            cmd_aura::aura_grants_pending,
+            cmd_aura::aura_grant_revoke,
             cmd_aura::aura_snapshot,
             cmd_op::aura_op_recent,
             cmd_op::aura_undo_last,
@@ -763,6 +838,12 @@ pub fn run() {
             cmd_symbol_impact::aura_symbol_impact,
             cmd_kg::aura_kg_build,
             cmd_kg::aura_kg_load,
+            cmd_kg::aura_kg_ensure,
+            cmd_kg::aura_kg_view,
+            cmd_kg::aura_kg_explain,
+            cmd_kg::aura_kg_path,
+            cmd_kg_features::aura_kg_features,
+            cmd_kg_flows::aura_kg_flows,
             cmd_aura_fs::git_diff_stats,
             cmd_aura_fs::git_diff_stats_batch,
             cmd_aura_fs::git_diff_stats_per_file,
@@ -788,6 +869,7 @@ pub fn run() {
             cmd_aura_fs::aura_count_intents_today,
             cmd_aura_fs::aura_count_snapshots_today,
             cmd_aura_fs::aura_list_snapshots_v2,
+            cmd_aura_fs::aura_read_snapshot,
             cmd_aura_fs::aura_read_audit_log_v2,
             cmd_aura_fs::aura_count_audit_unacked,
             cmd_aura_fs::aura_usage_summary,
@@ -978,6 +1060,7 @@ pub fn run() {
             cmd_team::chat_subscribe_since,
             cmd_team::chat_outbox_drain_kickoff,
             cmd_team::chat_doctor,
+            cmd_team::cloud_room_origin,
             cmd_team::cloud_room_token,
             cmd_team_notes::channel_notes_read,
             cmd_team_notes::channel_notes_write,
@@ -998,6 +1081,9 @@ pub fn run() {
             cmd_cloud_auth::cloud_auth_status,
             cmd_cloud_auth::cloud_auth_logout,
             cmd_cloud_auth::cloud_org_invite,
+            cmd_cloud_members::cloud_org_members,
+            cmd_cloud_members::cloud_org_member_set_role,
+            cmd_cloud_members::cloud_org_member_remove,
             cmd_cloud_orgs::cloud_orgs,
             cmd_cloud_orgs::cloud_org_switch,
             cmd_cloud_orgs::cloud_repos,
@@ -1056,6 +1142,8 @@ pub fn run() {
             cmd_change_summary::explain_change_diff,
             cmd_change_summary::explain_symbols,
             cmd_change_summary::prewarm_change_summaries,
+            change_warm::watch_commits,
+            change_warm::unwatch_commits,
             cmd_aurawatch::aurawatch_nudge_accept,
             cmd_aurawatch::aurawatch_nudge_dismiss,
             cmd_manager::manager_start,
@@ -1118,6 +1206,53 @@ pub fn run() {
             manager::brain::place_forward::place_forwarding,
             manager::brain::place_forward::place_forward_set,
             manager::brain::place_forward::place_forward_release,
+            // AURA-1294 — ports on a place, brought to localhost here
+            manager::brain::place_ports::place_ports_list,
+            manager::brain::place_ports::place_port_forward,
+            manager::brain::place_ports::place_port_release,
+            manager::brain::place_ports::place_ports_forwarded,
+            manager::brain::place_ports::place_ports_policy,
+            manager::brain::place_ports::place_ports_policy_set,
+            // end AURA-1294
+            // AURA-1306 — files, changes and git for a workspace at a place
+            manager::brain::place_work::fs::place_fs_list,
+            manager::brain::place_work::fs::place_fs_read,
+            manager::brain::place_work::fs::place_fs_write,
+            manager::brain::place_work::fs::place_fs_create_file,
+            manager::brain::place_work::fs::place_fs_create_folder,
+            manager::brain::place_work::fs::place_fs_rename,
+            manager::brain::place_work::fs::place_fs_delete,
+            manager::brain::place_work::fs::place_fs_find_files,
+            manager::brain::place_work::git::place_git_status_v2,
+            manager::brain::place_work::git::place_git_diff,
+            manager::brain::place_work::git::place_git_diff_at_commit,
+            manager::brain::place_work::git::place_git_diff_base,
+            manager::brain::place_work::git::place_git_diff_stats_per_file,
+            manager::brain::place_work::git::place_git_branch,
+            manager::brain::place_work::git::place_git_branches,
+            manager::brain::place_work::git::place_git_branches_rich,
+            manager::brain::place_work::git::place_git_ahead_behind,
+            manager::brain::place_work::git::place_git_show_commit,
+            manager::brain::place_work::git::place_git_show_head,
+            manager::brain::place_work::git::place_git_remote_origin,
+            // AURA-1309 — the History rail and the "can these tabs open here?" probe
+            manager::brain::place_work::git::place_git_commit_graph,
+            manager::brain::place_work::ready::place_work_ready,
+            manager::brain::place_work::git_ops::place_git_stage,
+            manager::brain::place_work::git_ops::place_git_unstage,
+            manager::brain::place_work::git_ops::place_git_discard,
+            manager::brain::place_work::git_ops::place_git_commit,
+            manager::brain::place_work::git_ops::place_git_push,
+            manager::brain::place_work::git_ops::place_git_pull,
+            manager::brain::place_work::git_ops::place_git_fetch,
+            manager::brain::place_work::git_ops::place_git_checkout,
+            manager::brain::place_work::git_ops::place_git_create_branch,
+            manager::brain::place_work::git_ops::place_git_reset_files,
+            // end AURA-1306
+            // AURA-1307 — "how do I run this?", asked of the checkout on the machine
+            manager::brain::place_work::run::place_run_detect,
+            // AURA-1308 — a session's scrollback, read off the machine
+            manager::brain::place_capture::place_session_capture,
             manager::brain::place_sleep::place_sleeping,
             manager::brain::place_sleep::place_sleep,
             manager::brain::place_sleep::places_sleep_idle,
@@ -1245,6 +1380,7 @@ pub fn run() {
             cmd_session_live::tunnel::session_live_tunnels,
             cmd_memory::aura_memory_view,
             cmd_memory::aura_memory_write_entry,
+            cmd_memory::aura_memory_update_entry,
             cmd_memory::aura_memory_import_claude_code,
             cmd_memory::aura_memory_forget_entry,
             cmd_memory::aura_session_list,
@@ -1379,34 +1515,66 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            // Tear down PTY children on shutdown so coding-agent CLIs
-            // don't outlive the shell. ExitRequested fires when the user
-            // ⌘Q's or closes the last window; Exit fires after the
-            // runtime's last cleanup step. We kill on both — kill_all
-            // is idempotent.
-            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
-                // How long this launch lasted. Sent before the teardown below
-                // so a slow kill_all can't eat the quit.
-                telemetry::on_shutdown();
-                if let Some(reg) = app.try_state::<cmd_agent_pty::AgentPtyRegistry>() {
-                    reg.kill_all();
-                }
-                // Plain terminals too. Daemon-backed plain sessions are
-                // intentionally left running — surviving a restart is the
-                // whole point of the daemon — so this only reaps
-                // in-process children.
-                if let Some(reg) = app.try_state::<cmd_pty::PtyRegistry>() {
-                    reg.kill_all();
-                }
-                // Tell anyone sharing a live session that the host is going
-                // away, rather than leaving them on a frozen transcript until
-                // the server times the socket out. Sends queued frames only —
-                // no network round-trip on the quit path.
-                tauri::async_runtime::block_on(cmd_session_live::shutdown_all(app));
-                // Stop advertising as an IDE. A lock file that outlives the
-                // process points the next agent at a dead port.
-                ide_bridge::shutdown(app);
-            }
+        .run(|app, event| match event {
+            // ExitRequested fires when the user ⌘Q's or closes the last
+            // window; Exit fires after the runtime's last cleanup step. We
+            // tear down on both — every step of it is idempotent.
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => teardown(app),
+            // Clicking the Dock icon of an app with no visible window. The
+            // close button above only *hides* the main window, so without
+            // this the app is resident, running, and unreachable by the one
+            // gesture every macOS user tries first — the tray's "Open Aura"
+            // was the only way back, and an app you cannot reopen reads as
+            // an app that crashed.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => tray::show_main(app),
+            _ => {}
         });
+}
+
+/// Everything that has to happen before this process goes away: reap the
+/// children we spawned, tell live-session peers the host is leaving, stop
+/// advertising as an IDE.
+///
+/// Called from the quit path, and from `watchdog.rs` when the main thread has
+/// wedged and there is no quit path left to run — which is why none of it may
+/// touch the main thread. Every step is idempotent, so running it twice (quit
+/// raises both `ExitRequested` and `Exit`) is free.
+pub fn teardown(app: &AppHandle<Wry>) {
+    // How long this launch lasted. Sent before the teardown below so a slow
+    // kill_all can't eat the quit.
+    telemetry::on_shutdown();
+    // Coding-agent CLIs must not outlive the shell.
+    if let Some(reg) = app.try_state::<cmd_agent_pty::AgentPtyRegistry>() {
+        reg.kill_all();
+    }
+    // Plain terminals too. Daemon-backed plain sessions are intentionally left
+    // running — surviving a restart is the whole point of the daemon — so this
+    // only reaps in-process children.
+    if let Some(reg) = app.try_state::<cmd_pty::PtyRegistry>() {
+        reg.kill_all();
+    }
+    // Headless agent turns. These are not PTY-backed, so neither registry
+    // above knew about them, and nothing else reaped them: `kill_on_drop` runs
+    // when a tokio `Child` is dropped and process exit drops nothing. A
+    // `claude -p …` turn was found still running with PPID 1 after Aura was
+    // quit.
+    if let Some(reg) = app.try_state::<cmd_agent_stream::ChildRegistry>() {
+        reg.kill_all();
+    }
+    // Last net: the manager brain's chat CLIs and the crew loop runner have no
+    // Tauri-state registry of their own — they are owned by whichever task
+    // spawned them. Anything still in the tracking book here is something no
+    // owner got to.
+    let left = child_reaper::sweep();
+    if left > 0 {
+        tracing::info!(count = left, "stopped children at quit");
+    }
+    // Tell anyone sharing a live session that the host is going away, rather
+    // than leaving them on a frozen transcript until the server times the
+    // socket out. Sends queued frames only — no network round-trip here.
+    tauri::async_runtime::block_on(cmd_session_live::shutdown_all(app));
+    // Stop advertising as an IDE. A lock file that outlives the process points
+    // the next agent at a dead port.
+    ide_bridge::shutdown(app);
 }

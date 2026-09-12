@@ -153,6 +153,56 @@ export const EXEMPT: Exemption[] = [
     why: "The 0.19.33 cycle's copy, under the name that cycle used. Same reach: Aura's own web host, and nothing the app ships invokes it.",
   },
   {
+    path: "release-0.19.39/deploy-0.19.39.sh",
+    kind: "ops",
+    why: "The 0.19.39 cycle's copy. Same reach: Aura's own web host, and nothing the app ships invokes it.",
+  },
+  {
+    path: "release-0.19.39/deploy-mac.sh",
+    kind: "ops",
+    why: "The macOS half of the 0.19.39 cycle, listed alongside its full-release sibling for the same reason the 0.19.37 and 0.19.38 pairs are.",
+  },
+  {
+    path: "release-0.19.40/deploy-0.19.40.sh",
+    kind: "ops",
+    why: "The 0.19.40 cycle's copy. Same reach: Aura's own web host, and nothing the app ships invokes it.",
+  },
+  {
+    path: "release-0.19.41/deploy-0.19.41.sh",
+    kind: "ops",
+    why: "The 0.19.41 cycle's copy. Same reach: Aura's own web host, and nothing the app ships invokes it.",
+  },
+  {
+    path: "release-0.19.42/deploy-0.19.42.sh",
+    kind: "ops",
+    why: "The 0.19.42 cycle's copy. Same reach: Aura's own web host, and nothing the app ships invokes it.",
+  },
+  {
+    path: "release-0.19.43/deploy-0.19.43.sh",
+    kind: "ops",
+    why: "The 0.19.43 cycle's copy. Same reach: Aura's own web host, and nothing the app ships invokes it.",
+  },
+  {
+    path: "release-0.19.44/deploy-0.19.44.sh",
+    kind: "ops",
+    why: "The 0.19.44 cycle's copy. Same reach: Aura's own web host, and nothing the app ships invokes it.",
+  },
+  {
+    path: "release-0.19.45/deploy-0.19.45.sh",
+    kind: "ops",
+    why: "The 0.19.45 cycle's copy. Same reach: Aura's own web host, and nothing the app ships invokes it.",
+  },
+  {
+    path: "release-0.19.46/deploy-0.19.46.sh",
+    kind: "ops",
+    why: "The 0.19.46 cycle's copy. Same reach: Aura's own web host, and nothing the app ships invokes it.",
+  },
+  {
+    path: "scripts/deploy-web-console.sh",
+    kind: "ops",
+    why: "The standing frontend-only deploy — it pushes a built site and console to Aura's own web host without cutting a release. Unlike the per-cycle scripts above there is one of it, so it is listed once and stays listed.",
+  },
+  {
     path: "aura-cloud/deploy/deploy.sh",
     kind: "ops",
     why: "Deploys the cloud server to Aura's own host. The box on the other end is infrastructure this company runs, not a machine any user brought or was given.",

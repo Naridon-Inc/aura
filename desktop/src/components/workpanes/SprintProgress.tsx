@@ -15,7 +15,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { api, type Sprint, type Task } from "../../lib/api";
 import { fetchTasks } from "../../lib/tasksCache";
-import { percent } from "../../lib/percent";
+import { sprintTasksOf, sprintWorkStats } from "../../lib/taskSelectors";
 
 /** Local-day YYYY-MM-DD for comparing against sprint start/end strings. */
 function ymd(d: Date): string {
@@ -71,7 +71,7 @@ export function SprintProgress({ repoRoot }: { repoRoot: string }) {
   useEffect(() => {
     aliveRef.current = true;
     if (!repoRoot) return;
-    void (async () => {
+    async function load() {
       try {
         const [s, t] = await Promise.all([
           api.sprintsList(repoRoot),
@@ -86,9 +86,19 @@ export function SprintProgress({ repoRoot }: { repoRoot: string }) {
           setTasks([]);
         }
       }
-    })();
+    }
+    void load();
+    // This card sits beside the board it is measuring, so closing a task in
+    // one and watching the other keep the old figure reads as a broken number
+    // rather than a stale one. Every task write broadcasts, and the slow timer
+    // covers the writes that happen somewhere else (an agent, another window).
+    const onMutate = () => void load();
+    window.addEventListener("aura:tasks:mutated", onMutate);
+    const id = window.setInterval(() => void load(), 60_000);
     return () => {
       aliveRef.current = false;
+      window.removeEventListener("aura:tasks:mutated", onMutate);
+      window.clearInterval(id);
     };
   }, [repoRoot]);
 
@@ -100,23 +110,13 @@ export function SprintProgress({ repoRoot }: { repoRoot: string }) {
     sprints.find((s) => s.active) ??
     [...sprints].sort((a, b) => b.end.localeCompare(a.end))[0];
 
-  const sprintTasks = tasks.filter(
-    (t) => t.cycle_id === active.id && !t.is_epic,
-  );
-  const usePoints =
-    sprintTasks.length > 0 &&
-    sprintTasks.every((t) => typeof t.estimate === "number" && t.estimate! > 0);
-  const total = usePoints
-    ? sprintTasks.reduce((n, t) => n + (t.estimate ?? 0), 0)
-    : sprintTasks.length;
-  const done = usePoints
-    ? sprintTasks.filter((t) => t.status === "done").reduce((n, t) => n + (t.estimate ?? 0), 0)
-    : sprintTasks.filter((t) => t.status === "done").length;
-  const pct = percent(done, total);
+  // Shared selectors — the same membership rule and the same math the task
+  // surfaces use, so two places showing one sprint cannot disagree about it.
+  const sprintTasks = sprintTasksOf(tasks, active.id);
+  const { total, done, pct, unit } = sprintWorkStats(sprintTasks);
 
   const trend = buildTrend(sprints, tasks, active.active ? active.id : null);
   const peak = Math.max(1, ...trend.map((d) => d.delivered));
-  const unit = usePoints ? "pts" : "tasks";
 
   const running = active.end >= today && active.start <= today;
 

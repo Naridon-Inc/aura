@@ -4,7 +4,10 @@ import {
   clearMachines,
   getActiveMachine,
   getEnteredMachines,
+  machineIdForPath,
   machineIdForRoot,
+  remotePlaceForPath,
+  remotePlaceForRoot,
   resolveMachine,
   subscribeActiveMachine,
   syncMachines,
@@ -341,5 +344,98 @@ describe("which place a new thing runs in", () => {
     syncMachines([{ key: "a", machineId: BOX, repoRoot: HERE }], "a");
     expect(machineIdForRoot(null)).toBeNull();
     expect(machineIdForRoot("  ")).toBeNull();
+  });
+});
+
+describe("the worktree on the box a launched workspace works in", () => {
+  const HERE = "/Users/mo/naridon";
+  const THERE = "/home/ubuntu/naridon-feat-x";
+
+  test("a place entered with one carries it to every routed command", () => {
+    syncMachines(
+      [{ key: "a", machineId: BOX, repoRoot: HERE, remoteRoot: `${THERE}/` }],
+      "a",
+    );
+    expect(remotePlaceForRoot(HERE)).toEqual({
+      machineId: BOX,
+      repoRoot: HERE,
+      remoteRoot: THERE,
+    });
+    expect(remotePlaceForPath(`${HERE}/src/main.rs`)).toEqual({
+      machineId: BOX,
+      repoRoot: HERE,
+      remoteRoot: THERE,
+    });
+    // The root is still the LOCAL one — the key everything is filed under.
+    expect(machineIdForRoot(HERE)).toBe(BOX);
+    expect(machineIdForRoot(THERE)).toBeNull();
+  });
+
+  test("a place without one names none, so the box's own checkout is used", () => {
+    syncMachines([{ key: "a", machineId: BOX, repoRoot: HERE }], "a");
+    expect(remotePlaceForRoot(HERE)?.remoteRoot).toBeUndefined();
+    expect(getEnteredMachines()[0]?.remoteRoot).toBeNull();
+  });
+
+  test("a resolution adds the worktree and never forgets it", () => {
+    syncMachines([{ key: "a", repoRoot: HERE, remoteRoot: THERE }], "a");
+    // The workspace learns which box "my machine" was, and says nothing
+    // about the worktree — which must survive, as the project does.
+    resolveMachine("a", BOX);
+    expect(remotePlaceForRoot(HERE)).toEqual({
+      machineId: BOX,
+      repoRoot: HERE,
+      remoteRoot: THERE,
+    });
+    // A re-sync from App, which only knows the request, changes nothing.
+    syncMachines([{ key: "a", repoRoot: HERE, remoteRoot: THERE }], "a");
+    expect(remotePlaceForRoot(HERE)?.remoteRoot).toBe(THERE);
+  });
+});
+
+describe("the machine a bare path belongs to", () => {
+  const HERE = "/Users/mo/naridon";
+  const OTHER_PROJECT = "/Users/mo/pomodoro";
+
+  test("a path under the focused place's project is that machine's", () => {
+    syncMachines([{ key: "a", machineId: BOX, repoRoot: HERE }], "a");
+    expect(machineIdForPath(`${HERE}/src/main.rs`)).toBe(BOX);
+    expect(remotePlaceForPath(`${HERE}/src/main.rs`)).toEqual({
+      machineId: BOX,
+      repoRoot: HERE,
+    });
+    // The root itself is inside its own project.
+    expect(machineIdForPath(HERE)).toBe(BOX);
+  });
+
+  test("a path outside that project stays on this laptop", () => {
+    syncMachines([{ key: "a", machineId: BOX, repoRoot: HERE }], "a");
+    expect(machineIdForPath(`${OTHER_PROJECT}/src/main.rs`)).toBeNull();
+    // A sibling whose name merely starts with the root's is not under it.
+    expect(machineIdForPath(`${HERE}-archive/notes.md`)).toBeNull();
+  });
+
+  test("a place that has not named a project cannot own a path", () => {
+    // `machineIdForRoot` takes such a place at its word, because a root IS
+    // the project. A bare path has nothing to be cut against on the far
+    // side, so guessing it onto the box would send the read to a path that
+    // does not exist there.
+    syncMachines([{ key: "a", machineId: BOX }], "a");
+    expect(machineIdForRoot(HERE)).toBe(BOX);
+    expect(machineIdForPath(`${HERE}/src/main.rs`)).toBeNull();
+  });
+
+  test("standing somewhere else means the path is read here", () => {
+    syncMachines(
+      [
+        { key: "a", machineId: BOX, repoRoot: HERE },
+        { key: "b", machineId: OTHER, repoRoot: OTHER_PROJECT },
+      ],
+      "b",
+    );
+    expect(machineIdForPath(`${HERE}/src/main.rs`)).toBeNull();
+    expect(machineIdForPath(`${OTHER_PROJECT}/README.md`)).toBe(OTHER);
+    expect(machineIdForPath(null)).toBeNull();
+    expect(machineIdForPath("")).toBeNull();
   });
 });

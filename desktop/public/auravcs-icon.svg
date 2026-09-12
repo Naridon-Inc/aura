@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 104 79" width="416" height="316" role="img" aria-labelledby="title desc">
+  <title id="title">Auravcs icon</title>
+  <desc id="desc">Rounded Auravcs binary 1 and 0 icon.</desc>
+
+  <style>
+    .ink { fill: #0b0b0d; }
+    .cutout { fill: #faf9f8; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #f2f2f3; }
+      .cutout { fill: #0c0d0f; }
+    }
+  </style>
+
+  <g id="auravcs-icon" transform="translate(1 1)">
+    <path id="icon-body" class="ink" d="M9 10 C4 11 0 15 0 20 L0 54 C0 56 1 57 3 58 L38 75 C41 76.2 45 76 48 74 C58 71 77 65 89 61 C95 59 100 55 102 47 L102 24 C102 21 101 18 97 16 C84 12 68 6 52 1 C49 .1 46 -.2 43 0 L9 10 Z"/>
+    <g id="binary-one">
+      <ellipse id="one-disc" class="cutout" cx="50.583" cy="48.377" rx="13.12" ry="18.196" transform="rotate(13.932 50.583 48.377)"/>
+      <path id="digit-one" class="ink" d="M47.4 45 L51.7 40.4 H54.6 V57.8 H50.1 V46.2 L47.4 48.2 Z"/>
+    </g>
+    <g id="binary-zero">
+      <ellipse id="zero-disc" class="cutout" cx="86.319" cy="37.873" rx="11.604" ry="16.508" transform="rotate(9.405 86.319 37.873)"/>
+      <ellipse id="digit-zero" class="ink" cx="86.486" cy="37.839" rx="4.792" ry="7.692" transform="rotate(6.825 86.486 37.839)"/>
+    </g>
+  </g>
+</svg>

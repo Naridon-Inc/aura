@@ -15,6 +15,7 @@ import { SLASH_COMMANDS } from "../lib/slashCommands";
 import type { AppActionId } from "../lib/keymap";
 import { api } from "../lib/api";
 import { fetchIntentRows } from "../lib/intentCache";
+import { fsFindFiles } from "../lib/place/workApi";
 import { relativeAge } from "../lib/relativeTime";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
 import { useExtCommands } from "../lib/vscodeExt/extCommandStore";
@@ -271,7 +272,9 @@ export function CommandPalette({
   useEffect(() => {
     if (!open || !repoRoot) return;
     let cancelled = false;
-    api.fsFindFiles(repoRoot).then((rels) => {
+    // Off the machine's checkout when the workspace is standing in one — the
+    // index has to describe the tree the picks will open (AURA-1306).
+    fsFindFiles(repoRoot).then((rels) => {
       if (cancelled) return;
       setWorkspaceFiles(rels);
     });
@@ -489,34 +492,47 @@ export function CommandPalette({
   // async fetch land on the same input snapshot.
   const debouncedRest = useDebouncedValue(rest, 60);
 
+  // The `@` view is its own picker — list agents (filtered by name) and let
+  // pick = "send the rest of the prompt to that agent". If the user hasn't
+  // typed anything past the @, prompt is empty and the host can decide whether
+  // to focus the agent's tab.
+  //
+  // It reads the RAW query on purpose: `prompt` is the text that gets
+  // dispatched, so a debounced snapshot would send a keystroke-stale prompt to
+  // the agent whenever ↵ lands inside the debounce window. Scanning a handful
+  // of agents per keystroke is free — unlike the pool scan below, which is why
+  // this lives in its own memo instead of an early return inside `hits`.
+  const agentHits = useMemo<PaletteEntry[] | null>(() => {
+    if (scope !== "agent") return null;
+    const promptIdx = query.indexOf(" ");
+    const namePart =
+      promptIdx >= 0
+        ? query.slice(1, promptIdx).trim().toLowerCase()
+        : rest.toLowerCase();
+    const promptText = promptIdx >= 0 ? query.slice(promptIdx + 1).trim() : "";
+    return agents
+      .filter((a) =>
+        namePart ? a.id.includes(namePart) || a.label.toLowerCase().includes(namePart) : true,
+      )
+      .map<PaletteEntry>((a) => ({
+        kind: "agent",
+        id: a.id,
+        label: a.label,
+        hint: promptText
+          ? `→ "${promptText.slice(0, 64)}${promptText.length > 64 ? "…" : ""}"`
+          : "select to focus tab",
+        prompt: promptText,
+      }));
+  }, [scope, query, rest, agents]);
+
+  // Everything below scans `all` — thousands of workspace paths — so it must
+  // key off the DEBOUNCED query only. Listing the raw `query` here (as this
+  // memo used to) re-ran the whole O(pool) scan on every keystroke and left
+  // the debounce deciding only WHICH query was used, never WHEN it ran.
   const hits = useMemo(() => {
     const q = debouncedRest.toLowerCase().trim();
 
-    if (scope === "agent") {
-      // The `@` view is its own picker — list agents (filtered by name)
-      // and let pick = "send the rest of the prompt to that agent".
-      // If the user hasn't typed anything past the @, prompt is empty
-      // and the host can decide whether to focus the agent's tab.
-      const promptIdx = query.indexOf(" ");
-      const namePart =
-        promptIdx >= 0
-          ? query.slice(1, promptIdx).trim().toLowerCase()
-          : rest.toLowerCase();
-      const promptText = promptIdx >= 0 ? query.slice(promptIdx + 1).trim() : "";
-      return agents
-        .filter((a) =>
-          namePart ? a.id.includes(namePart) || a.label.toLowerCase().includes(namePart) : true,
-        )
-        .map<PaletteEntry>((a) => ({
-          kind: "agent",
-          id: a.id,
-          label: a.label,
-          hint: promptText
-            ? `→ "${promptText.slice(0, 64)}${promptText.length > 64 ? "…" : ""}"`
-            : "select to focus tab",
-          prompt: promptText,
-        }));
-    }
+    if (agentHits) return agentHits;
 
     // Symbols rank highest (exact AST-level definitions), then content
     // matches, then files/actions. `code` scope shows only those.
@@ -628,7 +644,7 @@ export function CommandPalette({
       return [...chatHits, ...symLane, ...nonFile, ...wsLane, ...grepLane, ...intentLane, ...file];
     }
     return sortedPool.slice(0, scope === "file" ? FILE_RESULT_LIMIT : 200);
-  }, [all, agents, scope, debouncedRest, query, symbolHits, grepHits, intentRows, chatHits, workspaceEntries]);
+  }, [agentHits, all, scope, debouncedRest, symbolHits, grepHits, intentRows, chatHits, workspaceEntries]);
 
   // Group the ranked hits into plain-language sections; `flat` is the same
   // rows concatenated in display order so arrow keys walk every row.

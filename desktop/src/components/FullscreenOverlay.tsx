@@ -20,6 +20,7 @@
 
 import { useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { captureFocus } from "../lib/focusReturn";
 import { cn } from "../lib/utils";
 import { SurfaceHeader } from "./ui/SurfaceHeader";
 import { Kbd } from "./ui/kbd";
@@ -60,6 +61,18 @@ export function FullscreenOverlay({
   closeHint = "Esc",
   embedded = false,
 }: FullscreenOverlayProps) {
+  // Hand the keyboard back to whatever opened this. Without it, closing a
+  // wizard left focus on <body>, so a keyboard user who opened a row and
+  // pressed Esc landed at the top of the document and had to tab through the
+  // whole list again to get back to where they were. Runs once per mount and
+  // restores on unmount — see lib/focusReturn for what it will and won't do.
+  useEffect(() => {
+    return captureFocus(
+      typeof document === "undefined" ? null : document.activeElement,
+      typeof document === "undefined" ? undefined : document.body,
+    );
+  }, []);
+
   // Escape closes from anywhere — the overlay owns the whole window while up,
   // so a window-level listener is safe and mirrors the esc chip.
   useEffect(() => {

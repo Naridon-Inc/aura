@@ -29,13 +29,15 @@ use crate::merge_driver;
 use crate::repo_settings;
 use crate::worktree_scripts;
 use aura_env::Scope;
+use aura_loop::worktree_name;
 
 #[derive(clap::Subcommand)]
 pub enum WorkSubcommands {
     /// Open a fresh isolated worktree for a parallel session.
     New {
-        /// A short name for this piece of work (becomes branch `work/<slug>`).
-        /// Optional — a memorable name is generated if omitted.
+        /// What this piece of work is about — a name or a whole title, which
+        /// becomes branch `work/<slug>`. Optional: with no name the start
+        /// point is used, and only failing that a memorable place name.
         name: Option<String>,
         /// Branch or commit to start from (default: the current HEAD).
         #[arg(long)]
@@ -50,8 +52,9 @@ pub enum WorkSubcommands {
     /// Open a fresh isolated worktree AND launch Claude Code inside it in one
     /// step — the "spawn a new agent, it lands in its own workspace" flow.
     Claude {
-        /// A short name for this session (becomes branch `work/<slug>`).
-        /// Optional — a memorable name is generated if omitted.
+        /// What this session is about — a name or a whole title, which becomes
+        /// branch `work/<slug>`. Optional: with no name the start point is
+        /// used, and only failing that a memorable place name.
         name: Option<String>,
         /// Branch or commit to start from (default: the current HEAD).
         #[arg(long)]
@@ -63,8 +66,9 @@ pub enum WorkSubcommands {
     /// Open a fresh isolated worktree AND run any command inside it (codex, aura,
     /// your editor, a shell). `aura work spawn <name> -- <cmd> [args…]`.
     Spawn {
-        /// A short name for this session (becomes branch `work/<slug>`).
-        /// Optional — a memorable name is generated if omitted.
+        /// What this session is about — a name or a whole title, which becomes
+        /// branch `work/<slug>`. Optional: with no name the start point is
+        /// used, and only failing that a memorable place name.
         name: Option<String>,
         /// Branch or commit to start from (default: the current HEAD).
         #[arg(long)]
@@ -152,14 +156,13 @@ fn create_worktree(
     name: Option<&str>,
     from: Option<&str>,
 ) -> Result<(String, PathBuf, String), Box<dyn std::error::Error>> {
-    let slug = match name {
-        Some(n) => slugify(n),
-        None => random_place_name(repo_root),
-    };
+    let slug = derive_slug(repo_root, name, from);
     let (path, branch) = paths_for(repo_root, &slug);
     if path.exists() {
+        // `derive_slug` already stepped past every name that was taken when it
+        // looked, so reaching here means something claimed this one in between.
         return Err(format!(
-            "a work worktree already exists at {} — pick another name, or `aura work drop {}` first",
+            "a work worktree appeared at {} while this one was being opened — try again, or `aura work drop {}` first",
             path.display(),
             slug
         )
@@ -604,40 +607,93 @@ fn paths_for(repo_root: &Path, slug: &str) -> (PathBuf, String) {
     (path, branch)
 }
 
-/// Strip a leading `work/` then slugify, so `merge`/`drop` accept either the
-/// bare name, the slug, or the full branch.
+/// The slug `merge`/`drop`/`run` mean, from whatever the user typed: the bare
+/// name, the slug, or the full `work/<slug>` branch — [`slugify`] already
+/// drops the namespace, so all three land on the same worktree.
 fn normalize_name(name: &str) -> String {
-    slugify(name.strip_prefix("work/").unwrap_or(name))
+    slugify(name)
 }
 
 /// Lowercase, `[a-z0-9-]`-only, collapsed/ trimmed dashes, ≤40 chars, never
 /// empty. Filesystem- and git-ref-safe.
+///
+/// A leading branch-flow namespace comes off first (`feat/`, `fix/`, `work/`,
+/// a `fix(auth):` commit head): it says what KIND of change this is, never
+/// what the change is about, and the name's whole job is telling copies
+/// apart. So `feat/worktree-control-plane` opens `worktree-control-plane`.
 fn slugify(raw: &str) -> String {
-    let mut slug = String::with_capacity(raw.len());
-    let mut last_dash = false;
-    for ch in raw.chars().flat_map(|c| c.to_lowercase()) {
-        if ch.is_ascii_alphanumeric() {
-            slug.push(ch);
-            last_dash = false;
-        } else if !last_dash {
-            slug.push('-');
-            last_dash = true;
-        }
-    }
-    if slug.len() > 40 {
-        slug.truncate(40);
-    }
-    let trimmed = slug.trim_matches('-');
-    if trimmed.is_empty() {
-        "work".to_string()
-    } else {
-        trimmed.to_string()
-    }
+    worktree_name::from_label(raw).unwrap_or_else(|| "work".to_string())
 }
 
-/// Memorable place names used to auto-name an un-named worktree (Conductor-style:
-/// you get `work/houston`, not `work/work-1`). All lowercase and hyphen-safe so
-/// they survive `slugify` unchanged and make valid branch refs + sibling dirs.
+/// Is this name already spoken for? A sibling directory on disk, or a leftover
+/// `work/<slug>` branch from a worktree removed without it — either one makes
+/// `git worktree add -b` fail, so both count as taken.
+fn slug_taken(repo_root: &Path, slug: &str) -> bool {
+    let (path, branch) = paths_for(repo_root, slug);
+    path.exists() || branch_exists(repo_root, &branch)
+}
+
+/// Does `refs/heads/<branch>` resolve in `repo_root`? A git failure (no repo,
+/// no git) reads as "no", leaving the real error to `worktree add`.
+fn branch_exists(repo_root: &Path, branch: &str) -> bool {
+    let repo_str = repo_root.to_string_lossy().into_owned();
+    let refname = format!("refs/heads/{branch}");
+    Command::new("git")
+        .args(["-C", &repo_str, "rev-parse", "--verify", "--quiet", &refname])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The name a fresh worktree gets, in the order of what actually says what the
+/// work is about:
+///
+///   1. the name the caller typed — `aura work new "fix the login bug"` opens
+///      `fix-the-login-bug`, not `granada`;
+///   2. the ref it forks from, when that ref names work rather than a trunk —
+///      `aura work new --from feat/rate-limit` opens `rate-limit`;
+///   3. only with neither, a memorable place name (see [`PLACES`]) — the case
+///      where nothing on hand describes the work at all.
+///
+/// Whatever comes out is made unique against what is already there, so a
+/// second "fix the login bug" opens `fix-the-login-bug-2` rather than failing
+/// with a collision the user has to name their way out of.
+fn derive_slug(repo_root: &Path, name: Option<&str>, from: Option<&str>) -> String {
+    let taken = |slug: &str| slug_taken(repo_root, slug);
+    let described = name
+        .and_then(worktree_name::from_label)
+        .or_else(|| from.and_then(descriptive_ref));
+    let base = match described {
+        Some(base) => base,
+        None => random_place_name(&taken),
+    };
+    worktree_name::unique(&base, taken)
+}
+
+/// A start-point's slug when it names actual work, `None` when it names a
+/// trunk or a raw commit. Forking from `main` says nothing about what this
+/// copy is FOR, and a worktree called `main` would be an outright lie about
+/// which checkout you are standing in.
+fn descriptive_ref(raw: &str) -> Option<String> {
+    const TRUNKS: &[&str] = &["main", "master", "trunk", "develop", "development", "head"];
+    let slug = worktree_name::from_label(raw)?;
+    if TRUNKS.contains(&slug.as_str()) || looks_like_a_commit(&slug) {
+        return None;
+    }
+    Some(slug)
+}
+
+/// A bare object id (`4cd091e`, a full sha) — a perfectly good start-point,
+/// but a description of nothing.
+fn looks_like_a_commit(slug: &str) -> bool {
+    slug.len() >= 7 && slug.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Memorable place names — the LAST-RESORT name, for a worktree where nothing
+/// on hand says what the work is about (`aura work new` with no name and no
+/// `--from`). A named piece of work is named after itself; see [`derive_slug`].
+/// All lowercase and hyphen-safe so they survive `slugify` unchanged and make
+/// valid branch refs + sibling dirs.
 const PLACES: &[&str] = &[
     "houston", "auckland", "lagos", "machu-picchu", "kyoto", "oslo", "cairo",
     "lima", "dakar", "hanoi", "porto", "tbilisi", "nairobi", "bergen", "quito",
@@ -648,34 +704,19 @@ const PLACES: &[&str] = &[
     "zanzibar", "wellington", "bratislava", "ponce", "luanda",
 ];
 
-/// Pick a memorable place name for an un-named worktree whose sibling path is
-/// still free. Re-rolls on collision; after a cap it falls back to appending a
-/// short numeric suffix so it always returns a usable, slugified name.
-fn random_place_name(repo_root: &Path) -> String {
+/// Pick a place name that isn't already spoken for. Filters the pool by
+/// `taken` and picks from what's left, so it can't re-roll into the same
+/// collision forever; when every place IS taken it suffixes a pick
+/// (`houston-2`) so it always returns a usable, slugified name.
+fn random_place_name(taken: &dyn Fn(&str) -> bool) -> String {
     use rand::seq::SliceRandom;
     let mut rng = rand::thread_rng();
-    for _ in 0..32 {
-        if let Some(pick) = PLACES.choose(&mut rng) {
-            let slug = slugify(pick);
-            if !paths_for(repo_root, &slug).0.exists() {
-                return slug;
-            }
-        }
+    let free: Vec<&str> = PLACES.iter().copied().filter(|p| !taken(p)).collect();
+    if let Some(pick) = free.choose(&mut rng) {
+        return (*pick).to_string();
     }
-    // Every pick collided (a lot of worktrees) — append a short suffix derived
-    // from the clock and keep bumping until the sibling path is free.
-    let base = slugify(PLACES.choose(&mut rng).copied().unwrap_or("work"));
-    let mut n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() % 1000)
-        .unwrap_or(0);
-    loop {
-        let slug = slugify(&format!("{base}-{n}"));
-        if !paths_for(repo_root, &slug).0.exists() {
-            return slug;
-        }
-        n += 1;
-    }
+    let base = PLACES.choose(&mut rng).copied().unwrap_or("work");
+    worktree_name::unique(base, taken)
 }
 
 /// Parse `git worktree list --porcelain`, keeping only branches under `work/`.
@@ -926,10 +967,7 @@ mod tests {
 
     #[test]
     fn random_place_name_is_nonempty_and_slugified() {
-        // A directory that exists but contains no `<repo>-work-*` siblings, so no
-        // place name can collide → the pick comes straight from PLACES.
-        let repo_root = Path::new("/this/path/should/not/exist/myrepo");
-        let name = random_place_name(repo_root);
+        let name = random_place_name(&|_| false);
         assert!(!name.is_empty(), "generated name was empty");
         assert!(
             name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
@@ -940,12 +978,61 @@ mod tests {
     #[test]
     fn random_place_name_picks_a_known_place() {
         // With no collisions possible, the result must be a slugified PLACES entry.
-        let repo_root = Path::new("/this/path/should/not/exist/myrepo");
         let known: Vec<String> = PLACES.iter().map(|p| slugify(p)).collect();
         for _ in 0..20 {
-            let name = random_place_name(repo_root);
+            let name = random_place_name(&|_| false);
             assert!(known.contains(&name), "'{name}' is not a member of PLACES");
         }
+    }
+
+    #[test]
+    fn random_place_name_skips_taken_places() {
+        // Every place but one is spoken for → the one left is the only answer,
+        // instead of re-rolling into a collision.
+        let free = PLACES[PLACES.len() - 1];
+        for _ in 0..20 {
+            assert_eq!(random_place_name(&|slug| slug != free), free);
+        }
+    }
+
+    #[test]
+    fn random_place_name_suffixes_when_every_place_is_taken() {
+        // Nothing free at all — suffix a pick rather than return a name that
+        // is guaranteed to fail `git worktree add`.
+        let name = random_place_name(&|slug| !slug.ends_with("-2"));
+        assert!(name.ends_with("-2"), "got '{name}'");
+        let base = name.trim_end_matches("-2");
+        assert!(PLACES.contains(&base), "'{base}' is not a member of PLACES");
+    }
+
+    #[test]
+    fn descriptive_ref_ignores_trunks_and_commits() {
+        // Forking from the trunk says nothing about what the copy is for.
+        assert_eq!(descriptive_ref("main"), None);
+        assert_eq!(descriptive_ref("master"), None);
+        assert_eq!(descriptive_ref("origin/main"), None);
+        assert_eq!(descriptive_ref("HEAD"), None);
+        assert_eq!(descriptive_ref("develop"), None);
+        // Nor does a raw object id.
+        assert_eq!(descriptive_ref("4cd091e"), None);
+        assert_eq!(descriptive_ref("fdc9fe46f2c1b0a9"), None);
+        // A real feature branch does.
+        assert_eq!(
+            descriptive_ref("feat/worktree-control-plane").as_deref(),
+            Some("worktree-control-plane")
+        );
+        assert_eq!(descriptive_ref("rate-limit").as_deref(), Some("rate-limit"));
+        // Short hex that is too short to be an object id stays a name.
+        assert_eq!(descriptive_ref("beef").as_deref(), Some("beef"));
+    }
+
+    #[test]
+    fn slugify_strips_the_branch_flow_prefix() {
+        assert_eq!(slugify("feat/worktree-control-plane"), "worktree-control-plane");
+        assert_eq!(slugify("fix/login"), "login");
+        assert_eq!(slugify("fix(auth): reject expired tokens"), "reject-expired-tokens");
+        // The bare name is left exactly as it was.
+        assert_eq!(slugify("worktree-control-plane"), "worktree-control-plane");
     }
 
     #[test]

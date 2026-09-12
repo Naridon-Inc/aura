@@ -157,6 +157,7 @@ impl McpServer {
                             "name": "aura-semantic-vcs",
                             "version": "1.0.0"
                         },
+                        "instructions": "Graph-first retrieval: before reading whole files to answer 'where is X / what does X look like / who calls X', call aura_context_slice — it returns a bounded, worktree-verified symbol slice from the semantic graph, cached by graph version, and it is never stale after an edit or rewind. Read full files only when the slice says the symbol does not exist or you genuinely need surrounding code.",
                         "capabilities": {
                             "tools": {}
                         }
@@ -165,7 +166,10 @@ impl McpServer {
             }
             // List available tools to the Agent
             "tools/list" => {
-                json!({
+                // AURA-1295 — the aura_workspace_* tools are appended below
+                // from `mcp_workspace::tool_definitions()`.
+                let mut listing = json!({
+                // end AURA-1295
                     "jsonrpc": "2.0",
                     "id": req.id,
                     "result": {
@@ -191,15 +195,21 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_log_intent",
-                                "description": "MANDATORY: You MUST call this tool after making code changes and BEFORE committing. Logs your architectural intent so Aura can link your reasoning to the AST changes. If you skip this, the pre-commit hook will detect 'Intent Poisoning' and may block the commit. Call this every time you finish a set of edits. Pass `writes` with the files you touched so Aura can verify at commit that you did exactly what you said — anything you touch beyond that list is flagged (and blocked in strict mode). Optionally pass `intent_type` to tag the entry — one of FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps. Tagged entries are queryable via aura_intent_query.",
+                                "description": "MANDATORY: You MUST call this tool after making code changes and BEFORE committing. Logs your architectural intent so Aura can link your reasoning to the AST changes. If you skip this, the pre-commit hook will detect 'Intent Poisoning' and may block the commit. Call this every time you finish a set of edits. Pass `writes` with the files you touched so Aura can verify at commit that you did exactly what you said — anything you touch beyond that list is flagged (and blocked in strict mode). Always pass `intent_type` — one of FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps. It is what every classification view, histogram and `--type` filter reads; an entry without one is logged but appears in none of them, which is why most of this repo's log is unclassified. Pick the closest of the seven rather than leaving it out.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
                                         "intent": { "type": "string", "description": "1-2 sentence explanation of WHY you made these changes. Must reference the functions/classes you modified." },
                                         "writes": { "type": "array", "items": { "type": "string" }, "description": "The repo-relative paths this change touches (the files you edited/created). Aura records them as your declared scope and, at commit, flags any file you changed that isn't listed here — the 'did exactly what I said' check. List the files honestly; leave empty only if you truly can't scope the change." },
-                                        "intent_type": { "type": "string", "description": "Optional canonical type for this intent. One of: FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps. Case-sensitive. Invalid values are rejected with isError." }
+                                        "intent_type": { "type": "string", "description": "How to classify this change. One of: FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps — the closed set every reader treats as an enum. Case is repaired; a value outside the set is rejected with isError rather than stored, because a type no view can render looks filed and is not." }
                                     },
-                                    "required": ["intent"]
+                                    // `intent_type` is required so the model states one. The
+                                    // handler still accepts a call without it — the text is the
+                                    // part that binds to the AST, and refusing to log an intent
+                                    // over a missing label would trade a real capture for a
+                                    // taxonomy. It answers with a line saying the entry is
+                                    // unclassified instead.
+                                    "required": ["intent", "intent_type"]
                                 },
                                 "annotations": {
                                     "title": "Log Architectural Intent",
@@ -218,7 +228,8 @@ impl McpServer {
                                     "properties": {
                                         "intent_type": { "type": "string", "description": "Filter by canonical type. One of: FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps. Omit for all types." },
                                         "since_hours": { "type": "integer", "description": "Lookback window in hours. Default 168 (7 days). Set 0 to disable the cutoff." },
-                                        "limit": { "type": "integer", "description": "Max entries in the response slice (newest first). Default 50, capped at 500. The total_matches field reports the unbounded count." }
+                                        "limit": { "type": "integer", "description": "Max entries in the response slice (newest first). Default 50, capped at 500. The total_matches field reports the unbounded count." },
+                                        "question": { "type": "string", "description": "Ask about a file, a symbol or a subject instead of pulling a window. Returns {question, verdict, searched, hits[]} ranked by evidence: a record naming the file beats one naming a symbol, which beats word overlap, and recency only breaks ties inside a tier. A hook row that merely restates the edit never outranks a reason somebody wrote." }
                                     }
                                 },
                                 "annotations": {
@@ -289,7 +300,8 @@ impl McpServer {
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "file_path": { "type": "string", "description": "Path to the file to snapshot before editing." }
+                                        "file_path": { "type": "string", "description": "Path to the file to snapshot before editing." },
+                                        "why": { "type": "string", "description": "One short line: why you are changing THIS file. It is written into the intent log against this file, so a reviewer asking about a line here gets your reason instead of a whole-commit summary. Say the reason, not the mechanics — 'switch retry to exponential backoff so we stop tripping the rate limit', not 'edit retry_logic'." }
                                     },
                                     "required": ["file_path"]
                                 },
@@ -361,7 +373,7 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_handover",
-                                "description": "Generate a dense, token-optimized XML context block containing the full semantic state of the codebase. Use this to hand off context to another AI agent (Claude, Gemini, Cursor) without losing architectural understanding. Saves ~90% of tokens vs re-reading files.",
+                                "description": "Generate a dense, token-optimized XML context block containing the full semantic state of the codebase. Use this to hand off context to another AI agent (Claude, Gemini, Cursor) without losing architectural understanding. Far more compact than re-reading the underlying files; the exact reduction depends on repo size and is an estimate, not a measured guarantee.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -380,7 +392,7 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_ask",
-                                "description": "Ask a natural-language question about the codebase. Answers are synthesized from the rationale graph (per-function WHY explanations) and returned with citations to AST nodes. Use for: 'why does X do Y', 'what handles Z', 'who changed function F recently'.",
+                                "description": "Ask this repository why it is the way it is. Answers come from the local record first — the intent log and the checkpoint notes — ranked by evidence: a record naming the file you asked about beats one naming a symbol, which beats word overlap, and recency only breaks ties inside a tier. A hook row that restates the edit never outranks a reason somebody wrote. Works offline and with no token. When the cloud is reachable the rationale graph is appended as a second opinion with AST citations. Use for: 'why did build_verify.rs change', 'why does X do Y', 'who changed function F'.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -455,7 +467,7 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_rewind",
-                                "description": "Surgically revert a specific function or class to a previous safe state from snapshots or git history, WITHOUT touching the rest of the file. Use this when an AI hallucination corrupted a single function.",
+                                "description": "Surgically restore one function or class to the last state Aura recorded, WITHOUT touching the rest of the file. Looks through Aura's own recorded history for that function, then durable snapshots, then git. Use this when you have corrupted a single function — including when you deleted it, which it can put back.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -992,7 +1004,7 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_memory_read",
-                                "description": "Read the project's permanent memory — architecture, decisions, conventions, gotchas, and context accumulated across all past sessions. Call this when starting work on an unfamiliar area, or when you need to understand why something was built a certain way. Use 'query' to search, or omit for the full project memory. Query results are RANKED (BM25 + embeddings + recency, RRF-fused; each carries score + matched legs) and provenance-bound entries are verified against the live code at read time: 'stale': true with a 'stale_reason' means the symbol the memory was learned from has changed or been removed since — re-verify before trusting it.",
+                                "description": "Read the project's permanent memory — architecture, decisions, conventions, gotchas, and context accumulated across all past sessions. Call this when starting work on an unfamiliar area, or when you need to understand why something was built a certain way. Use 'query' to search, or omit for the full project memory. Query results are RANKED (file anchor + BM25 + embeddings + recency, RRF-fused; a query that names a file puts the entries about that file first; each carries score + matched legs) and provenance-bound entries are verified against the live code at read time: 'stale': true with a 'stale_reason' means the symbol the memory was learned from has changed or been removed since — re-verify before trusting it.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -1350,22 +1362,22 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_memory_cloud_push",
-                                "description": "Insert a project_memory entry org-wide (kind defaults to 'project'). Use when you've learned something durable that the team should see — design decisions, conventions, gotchas. Repo scope is optional and resolves by github_full_name.",
+                                "description": "Share a memory entry org-wide. Prefer entry_id: it pushes an entry already in .aura/memory.json together with its signature and provenance, so teammates can verify who wrote the fact and what it was learned from, and re-pushing the same id updates that entry instead of adding a near-duplicate. Use body only for a free-text note that has no local entry — it arrives unsigned. Repo scope is optional and resolves by github_full_name.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
-                                        "body": { "type": "string", "description": "Memory body (Markdown). Required." },
+                                        "entry_id": { "type": "string", "description": "Id of a local memory entry ('mem-...'), from aura_memory_read or aura_memory_write. Pushes it whole, signature included. Preferred." },
+                                        "body": { "type": "string", "description": "Free-text memory body (Markdown), for a note with no local entry. Mutually exclusive with entry_id; arrives unsigned." },
                                         "title": { "type": "string", "description": "Optional short title for indexing." },
                                         "kind": { "type": "string", "description": "Optional kind tag, e.g. 'decision', 'convention', 'gotcha'. Defaults to 'project'." },
                                         "repo_full_name": { "type": "string", "description": "Optional GitHub full_name (org/name) to scope the entry to one repo." }
-                                    },
-                                    "required": ["body"]
+                                    }
                                 },
                                 "annotations": {
                                     "title": "Push Cloud Memory",
                                     "readOnlyHint": false,
                                     "destructiveHint": false,
-                                    "idempotentHint": false,
+                                    "idempotentHint": true,
                                     "openWorldHint": true,
                                     "auraCapability": "auto"
                                 }
@@ -1676,6 +1688,25 @@ impl McpServer {
                                 }
                             },
                             {
+                                "name": "aura_crew_offer",
+                                "description": "Offer a planning node (status draft/planned) into the Crew's executable queue — the ONE deliberate act that arms work for agents. Board syncs and plan mirrors only ever land visibility rows; nothing runs until it is offered. Containers (kind=plan) and acceptance-less plan/wave/task nodes are refused at the execution gate — add acceptance first. Offering an already-queued node is a harmless no-op.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string", "description": "A draft/planned node id (see crew.counts.planned or aura loop list)." }
+                                    },
+                                    "required": ["id"]
+                                },
+                                "annotations": {
+                                    "title": "Offer Crew Node",
+                                    "readOnlyHint": false,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
                                 "name": "aura_crew_report",
                                 "description": "Heartbeat on a Crew node you're working: refreshes your lease so a long task isn't reclaimed as stale, and carries an optional progress note. Call this periodically during work that runs longer than the lease window. Real, not a no-op — the lease clock is reset (only the same holder may refresh).",
                                 "inputSchema": {
@@ -1780,7 +1811,7 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_refs",
-                                "description": "Find every site that references a symbol across an indexed file set, using a real cross-file stack-graph (not regex). Phase A surface for Python + TypeScript — the natural successor to grep/`aura_live_impacts`'s function-name heuristic. Returns sorted, deduplicated (caller_file, definition_file) tuples. Cross-repo resolution is Phase D (deferred).",
+                                "description": "Find every site that references a symbol across an indexed file set, using a real cross-file stack-graph (not regex). Phase A surface for Python + TypeScript — the natural successor to grep/`aura_live_impacts`'s function-name heuristic. Returns sorted, deduplicated (caller_file, definition_file) tuples. Cross-repo resolution is Phase D (deferred). NOTE: for 'who calls X / what does X look like' try `aura_context_slice` FIRST — it answers from the recorded semantic graph without you reading and shipping file bodies.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -1811,7 +1842,7 @@ impl McpServer {
                             },
                             {
                                 "name": "aura_defs",
-                                "description": "Find every definition site for a symbol across an indexed file set. Surfaces direct definitions AND import-as-local-binding sites (e.g. `from x import y` registers `y` in the importer). Use alongside `aura_refs` to disambiguate which definition a given reference resolves to.",
+                                "description": "Find every definition site for a symbol across an indexed file set. Surfaces direct definitions AND import-as-local-binding sites (e.g. `from x import y` registers `y` in the importer). Use alongside `aura_refs` to disambiguate which definition a given reference resolves to. NOTE: when checkpoints exist, `aura_context_slice` answers 'where is X defined' from the semantic graph without you reading and shipping file bodies — prefer it first.",
                                 "inputSchema": {
                                     "type": "object",
                                     "properties": {
@@ -1833,6 +1864,89 @@ impl McpServer {
                                 },
                                 "annotations": {
                                     "title": "Find Definitions",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_context_slice",
+                                "description": "GRAPH-FIRST RETRIEVAL — call this BEFORE reading whole files. Answers 'show me symbol X' from the canonical semantic graph (checkpoint AST nodes): the definition's own lines with a small margin, plus caller/callee edges from the reverse call graph. Every citation is verified against the worktree (file exists AND still contains the identifier), so deleted/renamed symbols are never returned. Answers are cached on disk keyed by (query, caps, graph version) and guarded by content fingerprints of every touched file — an edit or a rewind invalidates the entry, so a stale body is never served; repeated identical questions in one session return a deduplicated envelope with the body elided (pass refresh:true to re-emit). The response reports the measured token reduction vs reading the cited files whole. Prefer this over grep/whole-file reads for 'where is X / what does X look like / who calls X'; fall back to aura_refs/aura_defs only when there are no checkpoints yet or you need cross-file reference resolution over files you already hold.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "symbol": { "type": "string", "description": "Exact identifier of the function/class/struct to slice." },
+                                        "file": { "type": "string", "description": "Optional file path hint to disambiguate same-named definitions ('/'-aligned tail match)." },
+                                        "max_lines": { "type": "integer", "description": "Max body lines per definition (default 120; the elided tail is counted)." },
+                                        "refresh": { "type": "boolean", "description": "Re-emit the full body even if this exact answer was already served this session." }
+                                    },
+                                    "required": ["symbol"]
+                                },
+                                "annotations": {
+                                    "title": "Bounded Symbol Slice",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_graph_query",
+                                "description": "Find definitions matching a term in the semantic graph, confidence-ranked (exact > prefix > substring). Each hit cites graph evidence: node id, kind, file:line, signature, inbound caller count, and the graph version the answer was computed against. Use for 'is there a function like X' when you don't have the exact name; for the full body of a known symbol use aura_context_slice instead.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "term": { "type": "string", "description": "Symbol name or partial name to search for." },
+                                        "limit": { "type": "integer", "description": "Max hits (default 10, cap 50)." }
+                                    },
+                                    "required": ["term"]
+                                },
+                                "annotations": {
+                                    "title": "Graph Symbol Query",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_graph_path",
+                                "description": "Shortest call chain from one symbol to another through the semantic graph — 'does A transitively call B, and through what'. Every hop cites the edge's resolution confidence (exact / import-resolved / name-only) and the chain's overall confidence is the product of its edges, so one weak hop is visible. Follows call direction only; reports honestly when no chain exists within max_hops.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "from": { "type": "string", "description": "Caller-side symbol name." },
+                                        "to": { "type": "string", "description": "Callee-side symbol name." },
+                                        "max_hops": { "type": "integer", "description": "Max hops to search (default 8, cap 16)." }
+                                    },
+                                    "required": ["from", "to"]
+                                },
+                                "annotations": {
+                                    "title": "Graph Dependency Path",
+                                    "readOnlyHint": true,
+                                    "destructiveHint": false,
+                                    "idempotentHint": true,
+                                    "openWorldHint": false,
+                                    "auraCapability": "auto"
+                                }
+                            },
+                            {
+                                "name": "aura_graph_explain",
+                                "description": "Everything the semantic graph knows about one symbol: definition site, signature, callers with per-edge confidence, callee names, stub flag — plus a worktree freshness check (fresh:false means the identifier no longer appears in its file, so the citation predates an edit and must not be trusted as current). Cites node ids and the graph version. For the symbol's body, follow up with aura_context_slice.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "symbol": { "type": "string", "description": "Symbol to explain." },
+                                        "file": { "type": "string", "description": "Optional file path to disambiguate same-named definitions." }
+                                    },
+                                    "required": ["symbol"]
+                                },
+                                "annotations": {
+                                    "title": "Graph Explain Symbol",
                                     "readOnlyHint": true,
                                     "destructiveHint": false,
                                     "idempotentHint": true,
@@ -2160,7 +2274,13 @@ impl McpServer {
                             }
                         ]
                     }
-                })
+                });
+                // AURA-1295 — cloud workspace tools, defined in mcp_workspace.rs.
+                if let Some(tools) = listing["result"]["tools"].as_array_mut() {
+                    tools.extend(crate::mcp_workspace::tool_definitions());
+                }
+                listing
+                // end AURA-1295
             }
             // S1-P/1: canonical manifest of the tool surface. External
             // agents (A2A callers, ACP clients) can pin
@@ -2282,6 +2402,7 @@ impl McpServer {
                     "aura_crew_status" => Self::tool_crew_status(args),
                     "aura_crew_ready" => Self::tool_crew_ready(args),
                     "aura_crew_claim" => Self::tool_crew_claim(args),
+                    "aura_crew_offer" => Self::tool_crew_offer(args),
                     "aura_crew_report" => Self::tool_crew_report(args),
                     "aura_crew_complete" => Self::tool_crew_complete(args),
                     "aura_crew_fail" => Self::tool_crew_fail(args),
@@ -2295,6 +2416,10 @@ impl McpServer {
                     "aura_memory_cloud_push" => Self::tool_memory_cloud_push(args),
                     "aura_refs" => Self::tool_refs(args),
                     "aura_defs" => Self::tool_defs(args),
+                    "aura_context_slice" => Self::tool_context_slice(args),
+                    "aura_graph_query" => Self::tool_graph_query(args),
+                    "aura_graph_path" => Self::tool_graph_path(args),
+                    "aura_graph_explain" => Self::tool_graph_explain(args),
                     "aura_taste_rules" => Self::tool_taste_rules(args),
                     "aura_route_suggest" => Self::tool_route_suggest(args),
                     "aura_tasks_list" => Self::tool_tasks_list(args),
@@ -2311,6 +2436,10 @@ impl McpServer {
                     "aura_worktree_assign" => Self::tool_worktree_assign(args),
                     "aura_worktree_mine" => Self::tool_worktree_mine(args),
                     "aura_radar_emit" => Self::tool_radar_emit(args),
+                    // AURA-1295 — cloud workspace tools (create / prompt /
+                    // messages / list / get / sleep / archive / models / whoami).
+                    n if n.starts_with("aura_workspace_") => crate::mcp_workspace::call(n, args),
+                    // end AURA-1295
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
 
@@ -2590,7 +2719,15 @@ impl McpServer {
         format!("{:x}", digest)
     }
 
-    fn tool_read_history(_args: Value) -> Value {
+    fn tool_read_history(args: Value) -> Value {
+        // The tool is advertised as a *search* over semantic history, so the
+        // query must actually narrow the result — returning the same ten
+        // rows regardless is how unrelated intent ends up in an agent's
+        // context. Blank/omitted query still means "latest history".
+        let query = args["query"]
+            .as_str()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty());
         let repo = match Repository::open(".") {
             Ok(r) => r,
             Err(_) => return json!({ "content": [{ "type": "text", "text": "Not a git repository." }] }),
@@ -2599,15 +2736,32 @@ impl McpServer {
         if let Ok(checkpoints) = CheckpointStore::latest_checkpoints(&repo, 10) {
             if !checkpoints.is_empty() {
                 // Build structured data, encode as TOON for token efficiency
-                let entries: Vec<Value> = checkpoints.iter().take(10).map(|c| {
-                    json!({
-                        "id": &c.id[..8],
-                        "agent": c.agent_id,
-                        "intent": c.intent,
-                        "nodes": c.ast_nodes.len(),
-                        "ts": c.timestamp
+                let entries: Vec<Value> = checkpoints
+                    .iter()
+                    .filter(|c| {
+                        query.as_deref().is_none_or(|q| {
+                            c.intent.to_ascii_lowercase().contains(q)
+                                || c.agent_id.to_ascii_lowercase().contains(q)
+                        })
                     })
-                }).collect();
+                    .take(10)
+                    .map(|c| {
+                        json!({
+                            "id": &c.id[..8.min(c.id.len())],
+                            "agent": c.agent_id,
+                            // A checkpoint intent can be a whole paragraph;
+                            // ten of them untruncated defeats the point of
+                            // a compact history digest.
+                            "intent": crate::continuity::assemble::truncate(&c.intent, 240),
+                            "nodes": c.ast_nodes.len(),
+                            "ts": c.timestamp
+                        })
+                    })
+                    .collect();
+                if entries.is_empty() {
+                    let q = query.as_deref().unwrap_or_default();
+                    return json!({ "content": [{ "type": "text", "text": format!("No checkpoints matching '{}'.", q) }] });
+                }
                 let data = json!({ "history": entries });
                 let toon_text = aura_toon::encode(&data);
                 return json!({ "content": [{ "type": "text", "text": toon_text }] });
@@ -2959,24 +3113,31 @@ impl McpServer {
         // touching any side-effecting state — invalid types are a hard
         // reject so a typo'd "BugFx" doesn't get persisted alongside real
         // typed entries and silently break aura_intent_query filters.
+        // A near-miss of spelling is repaired rather than refused: `bugfix`
+        // and `BugFix` name the same bucket, and a caller who stated a type
+        // meant to file the entry. Anything genuinely outside the set is
+        // still a hard reject, so a typo'd "BugFx" doesn't get persisted
+        // alongside real typed entries and silently break the filters.
         let intent_type: Option<String> = match args.get("intent_type") {
             None | Some(Value::Null) => None,
-            Some(Value::String(s)) if s.is_empty() => None,
+            Some(Value::String(s)) if s.trim().is_empty() => None,
             Some(Value::String(s)) => {
-                if !crate::intent_query::is_canonical_intent_type(s) {
-                    return json!({
-                        "isError": true,
-                        "content": [{
-                            "type": "text",
-                            "text": format!(
-                                "Invalid intent_type '{}'. Must be one of: {}",
-                                s,
-                                crate::intent_query::CANONICAL_INTENT_TYPES.join(", "),
-                            )
-                        }]
-                    });
+                match crate::intent_query::canonicalize_intent_type(s) {
+                    Some(canon) => Some(canon.to_string()),
+                    None => {
+                        return json!({
+                            "isError": true,
+                            "content": [{
+                                "type": "text",
+                                "text": format!(
+                                    "Invalid intent_type '{}'. Must be one of: {}",
+                                    s,
+                                    crate::intent_query::CANONICAL_INTENT_TYPES.join(", "),
+                                )
+                            }]
+                        });
+                    }
                 }
-                Some(s.clone())
             }
             Some(other) => {
                 return json!({
@@ -3045,6 +3206,17 @@ impl McpServer {
                 .unwrap_or_default()
                 .as_secs()
         });
+        // Which agent session this intent belongs to. The MCP server is spawned
+        // by the agent CLI and inherits its environment, so `CLAUDE_CODE_SESSION_ID`
+        // (or a sibling CLI's) names the live session — and for Claude Code that
+        // id IS the transcript filename stem. Without it every MCP-logged row
+        // reached the Sessions view anonymous, and the only way back to its
+        // conversation was a nearest-by-mtime guess that lands on a *different*
+        // session far more often than the right one. `aura log-intent` has
+        // stamped this for the hook path all along; the MCP path never did.
+        if let Some(sid) = crate::agent_session::current() {
+            log_entry["session_id"] = json!(sid);
+        }
         if let Some(bid) = &signed_block_id {
             log_entry["signed_block_id"] = json!(bid);
         }
@@ -3070,15 +3242,35 @@ impl McpServer {
                 log_entry["task_seq"] = json!(seq);
             }
         }
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true).append(true).open(".aura/intent_log.jsonl")
-        {
-            use std::io::Write;
-            let _ = writeln!(file, "{}", log_entry.to_string());
+        // CAP-01: stamp the canonical scope manifest, or quarantine the row
+        // instead of attaching an unscoped event to this project's log.
+        let active_session_id = SessionManager::get_active_session().map(|s| s.session_id);
+        match crate::scope::stamp_or_quarantine(
+            std::path::Path::new("."),
+            "intent",
+            &agent,
+            active_session_id.as_deref(),
+            &mut log_entry,
+        ) {
+            Ok(()) => {
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true).append(true).open(".aura/intent_log.jsonl")
+                {
+                    use std::io::Write;
+                    let _ = writeln!(file, "{}", log_entry.to_string());
+                }
+            }
+            Err(reason) => eprintln!("aura mcp log_intent: {} — row quarantined", reason),
         }
 
         // Mark that intent has been logged for this session
         let _ = std::fs::write(".aura/.intent_logged", "1");
+
+        // Send the rationale to the team, the same way `aura log-intent` does.
+        // Both writers append the same row shape to the same file, so both
+        // have to push it or the cloud's copy depends on which surface the
+        // agent happened to use.
+        crate::intent_sync::push(&log_entry, std::path::Path::new("."));
 
         // Auto-push modified function bodies to mothership for real-time team sync
         let mut auto_push_msg = String::new();
@@ -3086,7 +3278,14 @@ impl McpServer {
             let touched = &session.files_touched;
             if !touched.is_empty() {
                 let mut total_pushed: u64 = 0;
+                let mut push_failure: Option<String> = None;
                 for file_path in touched {
+                    // CAP-02: a file the session marked external belongs to
+                    // ANOTHER project — its function bodies must never be
+                    // pushed onto this repo's sync channel.
+                    if file_path.starts_with(crate::session::EXTERNAL_PREFIX) {
+                        continue;
+                    }
                     if std::path::Path::new(file_path).exists() {
                         if let Ok(source) = std::fs::read_to_string(file_path) {
                             let ext = std::path::Path::new(file_path)
@@ -3108,8 +3307,16 @@ impl McpServer {
                                             })
                                         }).collect();
                                     if !payloads.is_empty() {
-                                        if let Ok(resp) = crate::live_sync::push_function_bodies(&payloads) {
-                                            total_pushed += resp["pushed"].as_u64().unwrap_or(0);
+                                        match crate::live_sync::push_function_bodies(&payloads) {
+                                            Ok(resp) => {
+                                                total_pushed += resp["pushed"].as_u64().unwrap_or(0);
+                                            }
+                                            Err(e) => {
+                                                // WRK-03: the agent must not be told its
+                                                // work synced when it did not — keep the
+                                                // first failure (they share one cause).
+                                                push_failure.get_or_insert(e);
+                                            }
                                         }
                                     }
                                 }
@@ -3120,10 +3327,27 @@ impl McpServer {
                 if total_pushed > 0 {
                     auto_push_msg = format!("\n🔄 AUTO-SYNC: Pushed {} function bodies to mothership. Teammates will see your changes in real-time.", total_pushed);
                 }
+                if let Some(err) = push_failure {
+                    auto_push_msg.push_str(&format!(
+                        "\n⚠️ AUTO-SYNC FAILED: {} — teammates have NOT received these changes; failed payloads are parked in the outbox (run `aura outbox --flush` or let the daemon retry).",
+                        err
+                    ));
+                }
             }
         }
 
-        let typed = intent_type.as_deref().map(|t| format!(" [type={}]", t)).unwrap_or_default();
+        // Say plainly when nothing classified the entry. The call succeeds —
+        // the text is what binds to the AST, and refusing a real capture over
+        // a missing label would be the worse trade — but silence here is how
+        // 78% of the rows that would carry a badge came to carry none.
+        let typed = match intent_type.as_deref() {
+            Some(t) => format!(" [type={}]", t),
+            None => format!(
+                " \u{26a0}\u{fe0f} No intent_type, so this entry joins no classification view. \
+Re-log with one of: {}.",
+                crate::intent_query::CANONICAL_INTENT_TYPES.join(", "),
+            ),
+        };
         let msg = format!("Intent logged{}. Aura will bind this reasoning to your AST changes on the next commit.{}", typed, auto_push_msg);
         json!({ "content": [{ "type": "text", "text": msg }] })
     }
@@ -3177,8 +3401,25 @@ impl McpServer {
             .unwrap_or(50)
             .min(500);
 
-        let path = std::path::Path::new(".aura/intent_log.jsonl");
-        let rows = crate::intent_query::read_all_rows(path);
+        // Anchored at the repository root, not the process cwd. An MCP server
+        // started anywhere but the root read an empty log and reported an
+        // empty history — which reads exactly like a repo with no intents.
+        let path = crate::goals::discover_repo_root()
+            .map(|r| r.join(".aura/intent_log.jsonl"))
+            .unwrap_or_else(|| std::path::PathBuf::from(".aura/intent_log.jsonl"));
+        let rows = crate::intent_query::read_all_rows(&path);
+
+        // A question narrows the log to the records that are about it, ranked
+        // so a row naming the file or symbol wins over one that merely reads
+        // like the question. Without this the only way to ask "why did this
+        // file change" was to pull a time window and read it by hand.
+        if let Some(q) = args.get("question").and_then(|v| v.as_str()).map(str::trim) {
+            if !q.is_empty() {
+                let (_, checkpoints) = crate::ask_local::read_stores();
+                let a = crate::ask_local::answer(q, &rows, &checkpoints, limit);
+                return json!({ "content": [{ "type": "text", "text": a.to_json().to_string() }] });
+            }
+        }
         let now_unix_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -3319,6 +3560,19 @@ impl McpServer {
             "strict_mode": config.strict_gatekeeper_mode,
             "strict_mode_locked": crate::config::ConfigManager::is_strict_mode_locked(&config),
             "dev_mode": config.dev_mode,
+            // The three flags above are the inputs; this is the answer they
+            // add up to — which commit-time checks are armed here, which are
+            // off and why, the three operations a logged intent can never
+            // authorize, and any human grant standing right now. An agent
+            // reading this knows what it may do before it tries.
+            "authority": crate::authority::to_json(&crate::authority::read(crate::authority::Inputs {
+                repo_root: std::path::Path::new("."),
+                hooks_dir: &crate::hook::HookInstaller::hooks_dir(),
+                strict: config.strict_gatekeeper_mode,
+                locked: crate::config::ConfigManager::is_strict_mode_locked(&config),
+                dev_mode: config.dev_mode,
+                taste_strict: config.taste_strict,
+            })),
             "latest_checkpoint_id": checkpoints.first().map(|c| c.id.clone()),
             "logic_nodes_tracked": tracked_count,
             // Counted from the notes tree — `checkpoints` above is only the
@@ -3526,12 +3780,39 @@ impl McpServer {
         // Track this file in the active session
         SessionManager::touch_file(file_path);
 
+        // Park the stated reason for the intent row the post-tool-use hook is
+        // about to write. Stated here because this is the moment the agent
+        // knows why it is editing; claimed there because that is the moment
+        // the record is made.
+        let why = args["why"].as_str().unwrap_or("").trim().to_string();
+        let repo_root = git2::Repository::discover(".")
+            .ok()
+            .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        if !why.is_empty() {
+            let session = SessionManager::get_active_session().map(|s| s.session_id.clone());
+            crate::edit_reason::record(&repo_root, file_path, &why, session.as_deref());
+        }
+
         match SnapshotStore::snapshot_file(file_path, "mcp_pre_edit", "MCP Agent") {
             Ok(snap_id) => {
                 let mut texts = vec![format!(
                     "Snapshot saved: {}. File '{}' can now be recovered with `aura rewind`.",
                     snap_id, file_path
                 )];
+                if why.is_empty() {
+                    // Asking is the point: the file-level record is only as
+                    // good as the reason attached to it, and nobody else can
+                    // supply that after the edit has happened.
+                    texts.push(
+                        "No reason recorded for this file. Pass `why` — one line on what you are \
+                         changing here and what it is for — so the intent log carries your \
+                         reasoning next to this file, not just the fact that it changed."
+                            .to_string(),
+                    );
+                } else {
+                    texts.push(format!("Reason recorded against {}: \"{}\"", file_path, why));
+                }
 
                 // Sentinel: claim functions in this file
                 if let Some(session) = SessionManager::get_active_session() {
@@ -3668,7 +3949,14 @@ impl McpServer {
             let changed: std::collections::HashSet<String> = match results.get(i + 1) {
                 Some(prev) => crate::parser::SemanticParser::diff_nodes(&prev.ast_nodes, &data.ast_nodes)
                     .into_iter()
-                    .map(|(ident, _action)| ident)
+                    // A rename arrives as "old -> new"; only the new name
+                    // exists in this checkpoint's nodes, so match on it —
+                    // otherwise renamed symbols silently vanish from the
+                    // handover.
+                    .map(|(ident, _action)| match ident.rsplit_once(" -> ") {
+                        Some((_, new_name)) => new_name.to_string(),
+                        None => ident,
+                    })
                     .collect(),
                 None => std::collections::HashSet::new(),
             };
@@ -4141,6 +4429,14 @@ impl McpServer {
         json!({ "content": [{ "type": "text", "text": text }] })
     }
 
+    /// Put one function back to the last state Aura recorded.
+    ///
+    /// The search lives in [`crate::rewind_search`] so this surface and the
+    /// `aura rewind` command look in the same places, in the same order. Two
+    /// things that used to be true here are not any more: a function the
+    /// agent **deleted** is recoverable rather than refused, and a version
+    /// that fails to splice falls through to the next one instead of ending
+    /// the rewind.
     fn tool_rewind(args: Value) -> Value {
         let identifier = match args["identifier"].as_str() {
             Some(i) => i.to_string(),
@@ -4171,80 +4467,69 @@ impl McpServer {
             Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": format!("Cannot read file: {}", e) }] }),
         };
 
-        let current_range = match parser.retrieve_node_source(&current_source, &ext, &identifier) {
-            Ok(Some((_, range))) => range,
-            Ok(None) => return json!({ "isError": true, "content": [{ "type": "text", "text": format!("Cannot find '{}' in current file.", identifier) }] }),
-            Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": format!("Parse error: {}", e) }] }),
+        // A missing node is not a refusal. Deleting a function is the damage
+        // an agent does, so it is precisely the case this tool exists for;
+        // `apply_rewind` splices it back beside its surviving neighbours.
+        let current = crate::rewind_search::current_node(&mut parser, &current_source, &ext, &identifier);
+        let (current_node_source, current_range) = match current {
+            Some((src, range)) => (Some(src), Some(range)),
+            None => (None, None),
         };
+        let was_deleted = current_node_source.is_none();
 
-        // Search snapshots first, then git history
-        let mut past_source: Option<String> = None;
+        let candidates = crate::rewind_search::candidates_here(
+            &mut parser,
+            &repo,
+            &file_path,
+            &ext,
+            &identifier,
+            current_node_source.as_deref(),
+        );
 
-        // Strategy A: Durable snapshots
-        let snapshots = SnapshotStore::get_snapshots_for_file(&file_path);
-        for snap in &snapshots {
-            if let Ok(Some((src, _))) = parser.retrieve_node_source(&snap.content, &ext, &identifier) {
-                if let Ok(Some((current_src, _))) = parser.retrieve_node_source(&current_source, &ext, &identifier) {
-                    if src != current_src {
-                        past_source = Some(src);
-                        break;
-                    }
-                }
-            }
+        if candidates.is_empty() {
+            let text = if was_deleted {
+                format!(
+                    "'{}' is gone from {} and Aura has no saved copy of it — nothing in its recorded history, no snapshot, and not in the last {} commits.",
+                    identifier, file_path, crate::rewind_search::GIT_DEPTH
+                )
+            } else {
+                format!(
+                    "No earlier version of '{}' to put back — nothing in its recorded history, no snapshot, and not in the last {} commits.",
+                    identifier, crate::rewind_search::GIT_DEPTH
+                )
+            };
+            return json!({ "isError": true, "content": [{ "type": "text", "text": text }] });
         }
 
-        // Strategy B: Git history (HEAD + up to 49 ancestors).
-        // Read each commit's tree at the top of the loop so HEAD itself
-        // is searched — the "uncommitted local edit, HEAD is clean"
-        // case (most common AI-hallucination recovery shape) was being
-        // silently skipped because the previous loop walked to
-        // commit.parent(0) before ever reading a tree.
-        if past_source.is_none() {
-            if let Ok(head) = repo.head().and_then(|r| r.peel_to_commit()) {
-                let mut commit = head;
-                for _ in 0..50 {
-                    if let Ok(tree) = commit.tree() {
-                        if let Ok(entry) = tree.get_path(Path::new(&file_path)) {
-                            if let Ok(obj) = entry.to_object(&repo) {
-                                if let Some(blob) = obj.as_blob() {
-                                    if let Ok(past_file) = std::str::from_utf8(blob.content()) {
-                                        if let Ok(Some((src, _))) = parser.retrieve_node_source(past_file, &ext, &identifier) {
-                                            if let Ok(Some((current_src, _))) = parser.retrieve_node_source(&current_source, &ext, &identifier) {
-                                                if src != current_src {
-                                                    past_source = Some(src);
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    match commit.parent(0) {
-                        Ok(p) => commit = p,
-                        Err(_) => break,
-                    }
-                }
-            }
-        }
+        let outcome = crate::rewind_search::apply_first(&candidates, |candidate| {
+            crate::rewind_txn::apply_rewind(
+                &mut parser,
+                &file_path,
+                &ext,
+                &identifier,
+                &current_source,
+                current_range.clone(),
+                &candidate.node_source,
+                candidate.file_source.as_deref(),
+                // The same trigger the CLI files it under: `--undo` finds the
+                // displaced version by this label and nothing else, so a
+                // rewind an agent did has to be undoable the same way.
+                || SnapshotStore::snapshot_file(&file_path, crate::rewind_plan::PRE_REWIND_TRIGGER, "MCP Agent"),
+            )
+        });
 
-        match past_source {
-            Some(old_src) => {
-                // Snapshot current file before rewriting
-                let _ = SnapshotStore::snapshot_file(&file_path, "pre_rewind", "MCP Agent");
-
-                // Surgical replacement
-                let mut new_file = current_source.clone();
-                new_file.replace_range(current_range, &old_src);
-                match std::fs::write(&file_path, &new_file) {
-                    Ok(_) => json!({ "content": [{ "type": "text", "text": format!("Successfully rewound '{}' in {}. Previous version restored surgically.", identifier, file_path) }] }),
-                    Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Write failed: {}", e) }] }),
-                }
+        match outcome {
+            Ok((i, applied)) => {
+                let verb = if was_deleted { "Put back" } else { "Rewound" };
+                json!({ "content": [{ "type": "text", "text": format!(
+                    "{} '{}' in {} from {}. The rest of the file is untouched. Safety snapshot: {}.",
+                    verb, identifier, file_path, candidates[i].origin.describe(), applied.safety_snapshot
+                ) }] })
             }
-            None => {
-                json!({ "isError": true, "content": [{ "type": "text", "text": format!("No previous version of '{}' found in snapshots or git history.", identifier) }] })
-            }
+            Err(last_error) => json!({ "isError": true, "content": [{ "type": "text", "text": format!(
+                "Rewind aborted: none of the {} saved version(s) of '{}' could be put back — nothing was written. Last reason: {}",
+                candidates.len(), identifier, last_error
+            ) }] }),
         }
     }
 
@@ -4530,12 +4815,27 @@ impl McpServer {
         let estimated_tokens = total_chars / 4; // rough chars-to-tokens ratio
         let handover_recommended = estimated_tokens > 50_000;
 
+        // Measured graph-first retrieval savings (AUDIT-CTX-03): what the
+        // bounded-slice cache has served vs the whole-file reads it replaced.
+        let slice_stats = repo
+            .workdir()
+            .map(crate::context_slice::read_stats)
+            .unwrap_or_default();
+
         let budget = json!({
             "tracked_files": tracked_files.len(),
             "total_checkpoints": total_checkpoints,
             "active_snapshots": snapshots.len(),
             "estimated_chars": total_chars,
             "estimated_tokens": estimated_tokens,
+            "slice_cache": {
+                "queries": slice_stats.queries,
+                "hits": slice_stats.hits,
+                "misses": slice_stats.misses,
+                "stale_recomputed": slice_stats.stale_recomputed,
+                "tokens_served_est": slice_stats.chars_served / 4,
+                "tokens_avoided_est": slice_stats.chars_avoided / 4,
+            },
             "handover_recommended": handover_recommended,
             "recommendation": if handover_recommended {
                 "Context is large. Run aura_handover to generate a compressed XML payload and start a fresh context window."
@@ -4564,7 +4864,9 @@ impl McpServer {
         // Include budget alerts if configured
         let config = crate::config::ConfigManager::load();
         if let Some(ref budget) = config.budget {
-            let alerts = crate::usage::check_budget(budget);
+            // Same report the payload carries, so a client cannot read
+            // two different answers for today out of one response.
+            let alerts = crate::usage::check_budget_with(budget, Some(&report));
             let alerts_json: Vec<Value> = alerts.iter().map(|a| {
                 json!({
                     "scope": a.scope,
@@ -4743,18 +5045,24 @@ impl McpServer {
         // 5. Shadow branch
         if let Ok(repo) = Repository::open(".") {
             if repo.find_reference("refs/heads/aura/checkpoints").is_ok() {
-                let count = CheckpointStore::get_shadow_checkpoints(&repo)
-                    .map(|c| c.len()).unwrap_or(0);
+                let count = CheckpointStore::count_shadow_checkpoints(&repo).unwrap_or(0);
                 report.push_str(&format!("✓ Shadow branch healthy ({} checkpoints)\n", count));
             } else {
                 report.push_str("ℹ Shadow branch not yet created\n");
             }
         }
 
-        // 6. Stale cleanup
-        let cleaned = SessionManager::cleanup_stale(7);
-        if cleaned > 0 {
-            report.push_str(&format!("🧹 Cleaned {} stale sessions\n", cleaned));
+        // 6. Stale sessions — counted, never removed. An agent asking for a
+        // health report has not asked for ten session records and their
+        // transcripts to be deleted, and this tool used to do exactly that
+        // and call it a finding.
+        let stale = SessionManager::stale_sessions(crate::session::STALE_SESSION_DAYS).len();
+        if stale > 0 {
+            report.push_str(&format!(
+                "🧹 {} ended session(s) older than {} days on disk — `aura sessions --prune`\n",
+                stale,
+                crate::session::STALE_SESSION_DAYS
+            ));
         }
 
         // 7. Signing-key health (S1-SHM)
@@ -4962,14 +5270,24 @@ impl McpServer {
             Some(s) if !s.trim().is_empty() => s.to_string(),
             _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "question is required." }] }),
         };
+
+        // The local record answers first. It is the only store that holds the
+        // sentence somebody wrote about a specific file, it needs no network
+        // and no token, and it is what an agent asking "why did this change"
+        // actually wants. The cloud rationale graph is a second opinion, added
+        // when it is reachable — it used to be the only one, which is why this
+        // tool returned an authentication error on a repo full of history.
+        let (rows, checkpoints) = crate::ask_local::read_stores();
+        let local = crate::ask_local::answer(&question, &rows, &checkpoints, 5);
+        let local_text = Self::render_local_answer(&local);
+
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
-            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
+            None => return json!({ "content": [{ "type": "text", "text": local_text }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let url = format!("{}/api/v2/ask", cloud_url.trim_end_matches('/'));
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -4990,17 +5308,48 @@ impl McpServer {
                             c["node_name"].as_str()?,
                             c["rationale"].as_str().unwrap_or("")))
                     }).collect::<Vec<_>>().join("\n");
-                    let text = if cite_text.is_empty() {
+                    let cloud = if cite_text.is_empty() {
                         answer
                     } else {
                         format!("{}\n\nCitations:\n{}", answer, cite_text)
                     };
+                    let text = format!(
+                        "{}\n\n--- rationale graph (cloud) ---\n{}",
+                        local_text, cloud
+                    );
                     json!({ "content": [{ "type": "text", "text": text }] })
                 }
-                Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Failed to parse response: {}", e) }] }),
+                // A cloud that cannot answer does not make the local record
+                // wrong, so the answer still goes back.
+                Err(_) => json!({ "content": [{ "type": "text", "text": local_text }] }),
             },
-            Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Request failed: {}", e) }] }),
+            Err(_) => json!({ "content": [{ "type": "text", "text": local_text }] }),
         }
+    }
+
+    /// Render a local answer for an agent: the ranking, the tier that earned
+    /// each place, and what was searched — so a caller can tell "nothing is
+    /// recorded" from "nothing matched".
+    fn render_local_answer(a: &crate::ask_local::Answer) -> String {
+        if a.hits.is_empty() {
+            return a.empty_line();
+        }
+        let mut out = format!(
+            "Searched {} intents and {} checkpoints in this repository.\n",
+            a.corpus.intents, a.corpus.checkpoints
+        );
+        for (i, h) in a.hits.iter().enumerate() {
+            out.push_str(&format!(
+                "\n{}. [{}] {}\n   {}\n   {} · {}\n",
+                i + 1,
+                h.tier.label(),
+                h.file.as_deref().unwrap_or("(no file recorded)"),
+                h.what.trim(),
+                h.store.label(),
+                h.who,
+            ));
+        }
+        out
     }
 
     pub(crate) fn tool_live_impacts(_args: Value) -> Value {
@@ -5022,15 +5371,13 @@ impl McpServer {
         };
 
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured." }] }),
         };
 
-        let cloud_url = config.cloud_url
-            .unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let url = format!("{}/api/v1/live/impacts/resolve", cloud_url.trim_end_matches('/'));
 
         let client = reqwest::blocking::Client::builder()
@@ -5553,17 +5900,42 @@ impl McpServer {
 
     fn tool_memory_read(args: Value) -> Value {
         if let Some(query) = args["query"].as_str() {
-            let results = crate::memory::MemoryManager::search(query);
+            let mut results = crate::memory::MemoryManager::search(query);
             if results.is_empty() {
                 return json!({ "content": [{ "type": "text", "text": format!("No memories matching '{}'.", query) }] });
+            }
+            for r in &mut results {
+                Self::strip_embeddings(r);
             }
             let data = serde_json::json!({ "query": query, "results": results });
             let toon_text = aura_toon::encode(&data);
             json!({ "content": [{ "type": "text", "text": toon_text }] })
         } else {
-            let full = crate::memory::MemoryManager::full_view();
+            let mut full = crate::memory::MemoryManager::full_view();
+            Self::strip_embeddings(&mut full);
             let toon_text = aura_toon::encode(&full);
             json!({ "content": [{ "type": "text", "text": toon_text }] })
+        }
+    }
+
+    /// Remove `embedding` vectors from a memory payload before it reaches
+    /// an agent's context. Search backfills + persists vectors lazily, so
+    /// once one exists a raw serialize would ship hundreds of floats per
+    /// entry — pure token waste, meaningless to the reader.
+    fn strip_embeddings(v: &mut Value) {
+        match v {
+            Value::Object(map) => {
+                map.remove("embedding");
+                for child in map.values_mut() {
+                    Self::strip_embeddings(child);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    Self::strip_embeddings(child);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -5615,6 +5987,214 @@ impl McpServer {
     /// reference tuples.
     fn tool_defs(args: Value) -> Value {
         Self::tool_stackgraph_query(args, /*defs_only=*/ true)
+    }
+
+    /// AUDIT-CTX-03 — graph-first bounded retrieval. Composes the current
+    /// graph view from checkpoints (newest-checkpoint-per-file authority),
+    /// slices the asked symbol with worktree verification, and serves it
+    /// through the fingerprint-guarded cache — an edit or rewind of any
+    /// touched file forces a recompute, so a stale body is never returned.
+    /// An identical answer already served this session comes back with the
+    /// bodies elided (dedup) unless `refresh:true`.
+    /// Shared loader for the graph-ops tools: repo → checkpoints →
+    /// coherent graph view. Errors come back as ready-to-return payloads.
+    fn graph_ops_view() -> Result<(Vec<crate::models::AstNode>, String), Value> {
+        let repo = Repository::open(".").map_err(|_| {
+            json!({ "isError": true, "content": [{ "type": "text", "text": "Not a git repository." }] })
+        })?;
+        let checkpoints = CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
+        if checkpoints.is_empty() {
+            return Err(json!({ "content": [{ "type": "text", "text": "No checkpoints yet — the semantic graph is empty. Run `aura init` (baseline) or commit through the Aura hooks, then retry." }] }));
+        }
+        Ok(crate::context_slice::current_graph_view(&checkpoints, 30))
+    }
+
+    /// `aura_graph_query(term, limit?)` — confidence-ranked definition
+    /// search over the semantic graph. See graph_ops::query_symbols.
+    fn tool_graph_query(args: Value) -> Value {
+        let term = match args.get("term").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "missing required `term` (non-empty string)" }] }),
+        };
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| (n as usize).clamp(1, 50))
+            .unwrap_or(10);
+        let (nodes, graph_version) = match Self::graph_ops_view() {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let rev = crate::callgraph::ReverseGraph::build(&nodes);
+        let hits = crate::graph_ops::query_symbols(&nodes, &rev, &term, limit);
+        let payload = json!({
+            "term": term,
+            "graph_version": graph_version.chars().take(12).collect::<String>(),
+            "hits": hits,
+        });
+        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap_or_default() }] })
+    }
+
+    /// `aura_graph_path(from, to, max_hops?)` — shortest call chain with
+    /// per-edge confidence. See graph_ops::dependency_path.
+    fn tool_graph_path(args: Value) -> Value {
+        let (from, to) = match (
+            args.get("from").and_then(|v| v.as_str()),
+            args.get("to").and_then(|v| v.as_str()),
+        ) {
+            (Some(f), Some(t)) if !f.trim().is_empty() && !t.trim().is_empty() => {
+                (f.trim().to_string(), t.trim().to_string())
+            }
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "missing required `from` and `to` (non-empty strings)" }] }),
+        };
+        let max_hops = args
+            .get("max_hops")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(8);
+        let (nodes, graph_version) = match Self::graph_ops_view() {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let rev = crate::callgraph::ReverseGraph::build(&nodes);
+        match crate::graph_ops::dependency_path(&nodes, &rev, &graph_version, &from, &to, max_hops)
+        {
+            Ok(path) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&path).unwrap_or_default() }] }),
+            Err(msg) => json!({ "content": [{ "type": "text", "text": msg }] }),
+        }
+    }
+
+    /// `aura_graph_explain(symbol, file?)` — callers, callees, freshness
+    /// and evidence for one symbol. See graph_ops::explain_symbol.
+    fn tool_graph_explain(args: Value) -> Value {
+        let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "missing required `symbol` (non-empty string)" }] }),
+        };
+        let file_hint = args
+            .get("file")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let (nodes, graph_version) = match Self::graph_ops_view() {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let rev = crate::callgraph::ReverseGraph::build(&nodes);
+        match crate::graph_ops::explain_symbol(
+            std::path::Path::new("."),
+            &nodes,
+            &rev,
+            &graph_version,
+            &symbol,
+            file_hint.as_deref(),
+        ) {
+            Ok(report) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&report).unwrap_or_default() }] }),
+            Err(msg) => json!({ "content": [{ "type": "text", "text": msg }] }),
+        }
+    }
+
+    fn tool_context_slice(args: Value) -> Value {
+        use std::sync::{Mutex, OnceLock};
+        static SERVED: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+
+        let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "missing required `symbol` (non-empty string)" }] }),
+        };
+        let repo = match Repository::open(".") {
+            Ok(r) => r,
+            Err(_) => return json!({ "isError": true, "content": [{ "type": "text", "text": "Not a git repository." }] }),
+        };
+        let root = match repo.workdir() {
+            Some(w) => w.to_path_buf(),
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "bare repo — no workdir" }] }),
+        };
+        let checkpoints = CheckpointStore::get_all_checkpoints(&repo).unwrap_or_default();
+        if checkpoints.is_empty() {
+            return json!({ "content": [{ "type": "text", "text": "No checkpoints yet — the semantic graph is empty. Run `aura init` (baseline) or commit through the Aura hooks, then retry. Until then, aura_defs/aura_refs with explicit files is the fallback." }] });
+        }
+        let (nodes, graph_version) = crate::context_slice::current_graph_view(&checkpoints, 30);
+
+        let mut q = crate::context_slice::SliceQuery::new(&symbol);
+        q.file_hint = args.get("file").and_then(|v| v.as_str()).map(|s| s.to_string());
+        if let Some(m) = args.get("max_lines").and_then(|v| v.as_u64()) {
+            q.max_lines = (m as usize).clamp(10, 2000);
+        }
+        let refresh = args.get("refresh").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let (result, outcome) = crate::context_slice::cached_slice(&root, &nodes, &graph_version, &q);
+        crate::context_slice::bump_stats(&root, outcome, &result);
+
+        let slice_tokens = result.slice_chars / 4;
+        let full_tokens = result.full_file_chars / 4;
+        let reduction_pct: usize = if result.full_file_chars > 0 {
+            100usize.saturating_sub((result.slice_chars * 100 / result.full_file_chars).min(100))
+        } else {
+            0
+        };
+
+        // Session dedup: serving the same bytes twice in one server lifetime
+        // only burns the agent's window. Track what this session has seen and
+        // elide unchanged bodies on repeats.
+        let key = crate::context_slice::cache_key(&q, &graph_version);
+        let body_hash = crate::context_slice::hash_str(
+            &serde_json::to_string(&result.defs).unwrap_or_default(),
+        );
+        let mut deduped = false;
+        let served = SERVED.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+        if let Ok(mut map) = served.lock() {
+            match map.get(&key) {
+                Some(prev) if *prev == body_hash && !refresh => deduped = true,
+                _ => {
+                    map.insert(key.clone(), body_hash.clone());
+                }
+            }
+        }
+
+        let defs_json: Vec<Value> = result
+            .defs
+            .iter()
+            .map(|d| {
+                json!({
+                    "identifier": d.identifier,
+                    "kind": d.kind,
+                    "file": d.file_path,
+                    "lines": [d.start_line, d.end_line],
+                    "signature": d.signature,
+                    "callers": d.callers,
+                    "callees": d.callees,
+                    "body_lines": d.body_lines,
+                    "elided_lines": d.elided_lines,
+                    "body": if deduped { Value::Null } else { json!(d.body) },
+                })
+            })
+            .collect();
+
+        let note = if result.defs.is_empty() {
+            "No definition of this symbol exists at the current graph view (or it was deleted/renamed in the worktree). Check the spelling, or fall back to aura_defs with explicit files."
+        } else if deduped {
+            "Unchanged since earlier this session — bodies elided (dedup). Pass refresh:true to re-emit."
+        } else if result.defs.iter().any(|d| d.elided_lines > 0) {
+            "Some bodies were capped; rerun with a higher max_lines to see the elided tail."
+        } else {
+            "Bounded slice from the semantic graph — no whole-file read needed."
+        };
+
+        let payload = json!({
+            "symbol": result.symbol,
+            "graph_version": graph_version.get(..12).unwrap_or(&graph_version),
+            "cache": outcome.as_str(),
+            "deduped": deduped,
+            "defs": defs_json,
+            "estimated": {
+                "basis": "chars/4 heuristic — estimated, not a measured provider-token count",
+                "slice_tokens_est": slice_tokens,
+                "full_file_read_tokens_est": full_tokens,
+                "reduction_pct_est": reduction_pct,
+            },
+            "note": note,
+        });
+        json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap_or_default() }] })
     }
 
     /// Phase 1 — surface the distilled Taste Engine rules to agents.
@@ -5768,14 +6348,12 @@ impl McpServer {
     /// can read both the narration string and the per-type counts.
     fn tool_episodic_narrate(args: Value) -> Value {
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let url = format!("{}/api/v2/episodic/narrate", cloud_url.trim_end_matches('/'));
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -5813,14 +6391,12 @@ impl McpServer {
             _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "function_name is required." }] }),
         };
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let mut url = format!(
             "{}/api/v2/episodic/timeline?function_name={}",
             cloud_url.trim_end_matches('/'),
@@ -5873,14 +6449,12 @@ impl McpServer {
             _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "agent_id is required." }] }),
         };
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let mut url = format!(
             "{}/api/v2/episodic/agent-digest?agent_id={}",
             cloud_url.trim_end_matches('/'),
@@ -5932,14 +6506,12 @@ impl McpServer {
             _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "agent_ids is required (comma-separated list)." }] }),
         };
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let mut url = format!(
             "{}/api/v2/episodic/multi-session-arc?agent_ids={}",
             cloud_url.trim_end_matches('/'),
@@ -5996,14 +6568,12 @@ impl McpServer {
             _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "agent_id is required." }] }),
         };
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let mut url = format!(
             "{}/api/v2/episodic/session-arc?agent_id={}",
             cloud_url.trim_end_matches('/'),
@@ -6059,14 +6629,12 @@ impl McpServer {
     /// .aura/intent_log.jsonl + sentinel + snapshot metadata directly).
     fn tool_episodic_recall_cloud(args: Value) -> Value {
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let mut url = format!("{}/api/v2/episodic/recall", cloud_url.trim_end_matches('/'));
         let mut sep = '?';
         let mut push_str = |k: &str, v: &str, sep: &mut char| {
@@ -6147,14 +6715,12 @@ impl McpServer {
             _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "function_name is required." }] }),
         };
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let mut url = format!(
             "{}/api/v2/impacts/cross-repo?function_name={}",
             cloud_url.trim_end_matches('/'),
@@ -6201,14 +6767,12 @@ impl McpServer {
     /// then polls.
     fn tool_a2a_task_create(args: Value) -> Value {
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let url = format!("{}/api/v2/a2a/tasks", cloud_url.trim_end_matches('/'));
         // Bucket-K default: the server rejects plan/wave/task without a
         // non-empty acceptance_criteria (400). Callers that pass neither a
@@ -6271,14 +6835,12 @@ impl McpServer {
             _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "id is required." }] }),
         };
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         // Path segment encoding — UUIDs are URL-safe, but a defensive
         // pass keeps the endpoint robust if a non-UUID id ever arrives.
         let safe_id: String = id
@@ -6319,14 +6881,12 @@ impl McpServer {
     /// repo, limit. Read-only, idempotent.
     fn tool_a2a_task_list(args: Value) -> Value {
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let url = build_a2a_task_list_url(cloud_url.trim_end_matches('/'), &args);
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
@@ -6364,14 +6924,12 @@ impl McpServer {
             _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "id is required." }] }),
         };
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let safe_id: String = id
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
@@ -6638,6 +7196,8 @@ impl McpServer {
         json!({
             "counts": {
                 "ready": view.ready.len(),
+                "planned": view.planned.len(),
+                "unrunnable": view.unrunnable.len(),
                 "working": view.working.len(),
                 "blocked": view.blocked.len(),
                 "paused": view.paused.len(),
@@ -6719,7 +7279,13 @@ impl McpServer {
             Ok(t) => Self::crew_reply(
                 &repo_root,
                 None,
-                "Claimed — do the work, commit, then call aura_crew_complete with the commit sha (or aura_crew_fail with a reason).",
+                {
+                    // The console should learn a node was claimed at the
+                    // moment it was, not the next time someone remembers
+                    // `aura crew push`.
+                    crate::crew_push::mirror_one(&repo_root, &t.id);
+                    "Claimed — do the work, commit, then call aura_crew_complete with the commit sha (or aura_crew_fail with a reason)."
+                },
                 json!({ "claimed": Self::crew_node_json(&t), "holder": holder, "lease_secs": lease_secs }),
             ),
             Err(e) => {
@@ -6727,6 +7293,39 @@ impl McpServer {
                 let payload = json!({
                     "ok": false,
                     "headline": format!("Couldn't claim {id}: {e}. Someone else may hold it — pick another from `crew.next_up`."),
+                    "crew": env,
+                });
+                json!({ "isError": true, "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string()) }] })
+            }
+        }
+    }
+
+    /// `aura_crew_offer` — WRK-02: move a planning node (draft/planned) into
+    /// the executable queue. The one deliberate transition that arms work;
+    /// board syncs and plan mirrors only ever land visibility rows. Refused
+    /// for containers (kind=plan) and acceptance-less plan/wave/task nodes.
+    fn tool_crew_offer(args: Value) -> Value {
+        let repo_root = match Self::crew_repo_root() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let id = match args.get("id").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+            Some(s) => s.to_string(),
+            None => return json!({ "isError": true, "content": [{ "type": "text", "text": "`id` is required — a draft/planned node id (see crew.counts.planned)." }] }),
+        };
+        let graph = aura_loop::LoopGraph::at(&repo_root);
+        match graph.offer(&id) {
+            Ok(t) => Self::crew_reply(
+                &repo_root,
+                None,
+                "Offered — the node is queued (`submitted`); claim it with aura_crew_claim when ready.",
+                json!({ "offered": Self::crew_node_json(&t) }),
+            ),
+            Err(e) => {
+                let env = Self::crew_envelope(&repo_root, None);
+                let payload = json!({
+                    "ok": false,
+                    "headline": format!("Couldn't offer {id}: {e}"),
                     "crew": env,
                 });
                 json!({ "isError": true, "content": [{ "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string()) }] })
@@ -6782,7 +7381,10 @@ impl McpServer {
             Ok(t) => Self::crew_reply(
                 &repo_root,
                 None,
-                "Marked complete. Pick the next from `crew.next_up`, or aura_crew_ready for the full set.",
+                {
+                    crate::crew_push::mirror_one(&repo_root, &t.id);
+                    "Marked complete. Pick the next from `crew.next_up`, or aura_crew_ready for the full set."
+                },
                 json!({ "completed": Self::crew_node_json(&t), "commit": commit }),
             ),
             Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Couldn't complete {id}: {e}") }] }),
@@ -6809,7 +7411,10 @@ impl McpServer {
             Ok(t) => Self::crew_reply(
                 &repo_root,
                 None,
-                "Marked failed. The crew moves on; a human can retry it from the Crew surface.",
+                {
+                    crate::crew_push::mirror_one(&repo_root, &t.id);
+                    "Marked failed. The crew moves on; a human can retry it from the Crew surface."
+                },
                 json!({ "failed": Self::crew_node_json(&t), "reason": reason }),
             ),
             Err(e) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("Couldn't fail {id}: {e}") }] }),
@@ -6892,57 +7497,29 @@ impl McpServer {
             Err(e) => return e,
         };
         let registry = aura_loop::crew::CrewRegistry::at(&repo_root);
-        let metas = registry.list();
         let graph = aura_loop::LoopGraph::at(&repo_root);
-        let all = graph.list();
-        let summaries = aura_loop::crews_summary(&all);
-        // Index live counts by crew id so a registered-but-empty crew still
-        // shows zeros rather than vanishing.
-        let crews: Vec<Value> = metas
-            .iter()
-            .map(|m| {
-                let s = summaries.iter().find(|c| c.crew == m.id);
+        // One derivation, shared with the CLI and the app: the registry AND
+        // every crew that only ever appears on a node, so nothing the loop is
+        // actually running stays hidden.
+        let out: Vec<Value> = aura_loop::crew::crew_rows(&graph.list(), &registry)
+            .into_iter()
+            .map(|r| {
+                let s = &r.summary;
                 json!({
-                    "id": m.id,
-                    "title": m.title,
-                    "description": m.description,
-                    "created_at": m.created_at,
-                    "counts": {
-                        "total": s.map(|s| s.total).unwrap_or(0),
-                        "ready": s.map(|s| s.ready).unwrap_or(0),
-                        "working": s.map(|s| s.working).unwrap_or(0),
-                        "blocked": s.map(|s| s.blocked).unwrap_or(0),
-                        "paused": s.map(|s| s.paused).unwrap_or(0),
-                        "done": s.map(|s| s.done).unwrap_or(0),
-                        "failed": s.map(|s| s.failed).unwrap_or(0),
-                    },
-                    "goals": s.map(|s| s.goals.clone()).unwrap_or_default(),
-                })
-            })
-            .collect();
-        // Any crew id that appears on nodes but isn't registered (e.g. a raw
-        // crew_id set directly) — surface it too so nothing is hidden.
-        let known: std::collections::HashSet<&str> = metas.iter().map(|m| m.id.as_str()).collect();
-        let unregistered: Vec<Value> = summaries
-            .iter()
-            .filter(|s| !known.contains(s.crew.as_str()))
-            .map(|s| {
-                json!({
-                    "id": s.crew,
-                    "title": s.crew,
-                    "description": Value::Null,
-                    "created_at": 0,
+                    "id": r.meta.id,
+                    "title": r.meta.title,
+                    "description": r.meta.description,
+                    "created_at": r.meta.created_at,
                     "counts": {
                         "total": s.total, "ready": s.ready, "working": s.working,
-                        "blocked": s.blocked, "paused": s.paused, "done": s.done, "failed": s.failed,
+                        "blocked": s.blocked, "paused": s.paused, "done": s.done,
+                        "failed": s.failed,
                     },
                     "goals": s.goals,
-                    "unregistered": true,
+                    "unregistered": r.meta.created_at == 0 && r.meta.id != aura_loop::crew::MAIN_CREW,
                 })
             })
             .collect();
-        let mut out = crews;
-        out.extend(unregistered);
         Self::crew_reply(&repo_root, None, "Crews in this project", json!({ "crews": out }))
     }
 
@@ -7013,14 +7590,12 @@ impl McpServer {
     /// the per-commit (id, risk_score, risk_label, model_used) summary.
     fn tool_pr_commit_review_generate(args: Value) -> Value {
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let url = format!("{}/api/v2/pr/commit-review-generate", cloud_url.trim_end_matches('/'));
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
@@ -7076,14 +7651,12 @@ impl McpServer {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let mut url = format!(
             "{}/api/v2/pr/commit-reviews?repo={}&platform={}&pr_number={}",
             cloud_url.trim_end_matches('/'),
@@ -7146,15 +7719,12 @@ impl McpServer {
             .map(|s| s.to_string());
 
         let config = crate::config::ConfigManager::load();
-        let token = match config
-            .cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let mut url = format!(
             "{}/api/v2/skill/stats?category={}",
             cloud_url.trim_end_matches('/'),
@@ -7226,14 +7796,12 @@ impl McpServer {
             _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "pr_number is required (integer)." }] }),
         };
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         // SHAs are hex; strip anything else defensively to keep the path
         // segment URL-safe even if a caller smuggles in junk.
         let safe_sha: String = commit_sha
@@ -7282,14 +7850,12 @@ impl McpServer {
     /// per-machine local memory file the local memory tools operate on.
     fn tool_memory_cloud_list(args: Value) -> Value {
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let mut url = format!("{}/api/v2/memory", cloud_url.trim_end_matches('/'));
         let mut sep = '?';
         if let Some(p) = args.get("page").and_then(|v| v.as_i64()) {
@@ -7328,22 +7894,68 @@ impl McpServer {
     /// Cloud project_memory store — proxies POST /api/v2/memory. Insert
     /// a durable org-wide memory entry. Whitelists the documented body
     /// fields so callers can't smuggle unknown keys through the insert.
+    /// Decide what this push is actually pushing.
+    ///
+    /// Two shapes, and the difference matters. Given `entry_id`, the entry is
+    /// read out of `.aura/memory.json` and travels whole — content, section,
+    /// write time, signature, provenance — so the org can check it came from
+    /// the person it says it did. Given `body`, it is a free-text note, which
+    /// is a perfectly good thing to push and simply arrives unsigned.
+    ///
+    /// Passing both is refused rather than silently resolved: the caller has
+    /// said two different things about what the entry says, and picking one
+    /// would either push text that the stored signature does not cover or
+    /// quietly discard what they typed.
+    fn memory_push_payload(args: &Value) -> Result<serde_json::Map<String, Value>, String> {
+        let entry_id = args
+            .get("entry_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let body = args
+            .get("body")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        match (entry_id, body) {
+            (Some(_), Some(_)) => Err("pass either entry_id (to push a stored memory entry with \
+                                       its signature) or body (to push a free-text note), not both."
+                .to_string()),
+            (Some(id), None) => {
+                let (section, entry) = crate::memory::MemoryManager::find_entry(id).ok_or_else(
+                    || {
+                        format!(
+                            "no memory entry `{id}` in this repo. `aura memory search <text>` \
+                             lists what is stored."
+                        )
+                    },
+                )?;
+                Ok(memory_push_body_from_entry(section, &entry, args))
+            }
+            (None, Some(text)) => Ok(build_memory_push_body(text, args)),
+            (None, None) => {
+                Err("pass entry_id to push a stored memory entry, or body to push a free-text note."
+                    .to_string())
+            }
+        }
+    }
+
     fn tool_memory_cloud_push(args: Value) -> Value {
-        let body = match args.get("body").and_then(|v| v.as_str()) {
-            Some(s) if !s.trim().is_empty() => s.to_string(),
-            _ => return json!({ "isError": true, "content": [{ "type": "text", "text": "body is required and must be non-empty." }] }),
+        let payload = match Self::memory_push_payload(&args) {
+            Ok(p) => p,
+            Err(msg) => {
+                return json!({ "isError": true, "content": [{ "type": "text", "text": msg }] })
+            }
         };
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let url = format!("{}/api/v2/memory", cloud_url.trim_end_matches('/'));
-        let payload = build_memory_push_body(&body, &args);
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
             .build()
@@ -7376,14 +7988,12 @@ impl McpServer {
     /// joining agent can pick which one to resume.
     fn tool_handover_cloud_list(args: Value) -> Value {
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let mut url = format!("{}/api/v2/handovers", cloud_url.trim_end_matches('/'));
         let mut sep = '?';
         if let Some(p) = args.get("page").and_then(|v| v.as_i64()) {
@@ -7424,14 +8034,12 @@ impl McpServer {
     /// Forwards only the documented body fields.
     fn tool_handover_cloud_push(args: Value) -> Value {
         let config = crate::config::ConfigManager::load();
-        let token = match config.cloud_api_token
-            .clone()
-            .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+        let token = match crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         {
             Some(t) => t,
             None => return json!({ "isError": true, "content": [{ "type": "text", "text": "No cloud token configured. Run `aura cloud login`." }] }),
         };
-        let cloud_url = config.cloud_url.unwrap_or_else(|| "https://auravcs.com".to_string());
+        let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
         let url = format!("{}/api/v2/handovers", cloud_url.trim_end_matches('/'));
         let body = build_handover_push_body(&args);
         let client = reqwest::blocking::Client::builder()
@@ -7665,9 +8273,94 @@ pub(crate) fn build_a2a_task_patch_body(args: &Value) -> serde_json::Map<String,
     body
 }
 
+/// Every key `POST /api/v2/memory` accepts beyond the body itself.
+///
+/// The first three are what a free-text push has always carried. The rest
+/// are the fields that make a shared entry checkable: the three the
+/// signature covers (`entry_id`, `section`, `added_at`), the signature
+/// triple, and the W2 provenance stamps. They are on the whitelist because a
+/// relay that already holds a signed entry must be able to forward it
+/// verbatim; nothing here is taken on trust, since the server rebuilds the
+/// payload and checks the signature against the key that travels with it, so
+/// a hand-written triple lands as `invalid` rather than as attestation.
+const MEMORY_PUSH_KEYS: [&str; 17] = [
+    "title",
+    "kind",
+    "repo_full_name",
+    "entry_id",
+    "section",
+    "added_at",
+    "added_by",
+    "tags",
+    "sig",
+    "sig_pubkey",
+    "sig_key_id",
+    "source_commit",
+    "source_symbol",
+    "source_symbol_hash",
+    "intent_id",
+    "signer_key_id",
+    "supersedes",
+];
+
 pub(crate) fn build_memory_push_body(body_text: &str, args: &Value) -> serde_json::Map<String, Value> {
     let mut payload = serde_json::Map::new();
     payload.insert("body".to_string(), Value::String(body_text.to_string()));
+    for k in MEMORY_PUSH_KEYS {
+        if let Some(v) = args.get(k) {
+            payload.insert(k.to_string(), v.clone());
+        }
+    }
+    // The two validity stamps are separated from the list above only because
+    // the server refuses anything that is not RFC3339, and a caller passing a
+    // number here would earn a 400 rather than a dropped field.
+    for k in ["valid_from", "valid_to"] {
+        if let Some(v) = args.get(k).and_then(|v| v.as_str()) {
+            payload.insert(k.to_string(), Value::String(v.to_string()));
+        }
+    }
+    payload
+}
+
+/// The push body for one entry that already exists in `.aura/memory.json`.
+///
+/// This is the path that actually syncs. `build_memory_push_body` forwards
+/// whatever a caller typed; this reads the stored entry, so the content, the
+/// section and the write time are the ones the signature was made over, and
+/// the entry arrives org-wide still checkable. `title`, `kind` and
+/// `repo_full_name` stay caller-supplied — they are indexing hints the local
+/// entry has no opinion about.
+pub(crate) fn memory_push_body_from_entry(
+    section: &str,
+    entry: &crate::memory::MemoryEntry,
+    args: &Value,
+) -> serde_json::Map<String, Value> {
+    let mut payload = serde_json::Map::new();
+    payload.insert("body".to_string(), Value::String(entry.content.clone()));
+    payload.insert("entry_id".to_string(), Value::String(entry.id.clone()));
+    payload.insert("section".to_string(), Value::String(section.to_string()));
+    payload.insert("added_at".to_string(), Value::from(entry.added_at));
+    payload.insert("added_by".to_string(), Value::String(entry.added_by.clone()));
+    payload.insert(
+        "tags".to_string(),
+        Value::Array(entry.tags.iter().cloned().map(Value::String).collect()),
+    );
+    let mut put = |k: &str, v: &Option<String>| {
+        if let Some(s) = v {
+            payload.insert(k.to_string(), Value::String(s.clone()));
+        }
+    };
+    put("sig", &entry.sig);
+    put("sig_pubkey", &entry.sig_pubkey);
+    put("sig_key_id", &entry.sig_key_id);
+    put("source_commit", &entry.source_commit);
+    put("source_symbol", &entry.source_symbol);
+    put("source_symbol_hash", &entry.source_symbol_hash);
+    put("intent_id", &entry.intent_id);
+    put("signer_key_id", &entry.signer_key_id);
+    put("valid_from", &entry.valid_from);
+    put("valid_to", &entry.valid_to);
+    put("supersedes", &entry.supersedes);
     for k in ["title", "kind", "repo_full_name"] {
         if let Some(v) = args.get(k) {
             payload.insert(k.to_string(), v.clone());
@@ -7680,6 +8373,19 @@ pub(crate) fn build_handover_push_body(args: &Value) -> serde_json::Map<String, 
     let mut body = serde_json::Map::new();
     for k in ["session_id", "agent_name", "summary", "token_count"] {
         if let Some(v) = args.get(k) {
+            // The summary is the whole context block, assembled from real
+            // work and therefore full of real paths. A handover is
+            // team-visible once pushed, so the host comes out of it here —
+            // at the boundary, not in whichever client happens to render it.
+            if k == "summary" {
+                if let Some(text) = v.as_str() {
+                    body.insert(
+                        k.to_string(),
+                        Value::String(crate::redact_paths::redact_local_paths(text)),
+                    );
+                    continue;
+                }
+            }
             body.insert(k.to_string(), v.clone());
         }
     }
@@ -7772,6 +8478,154 @@ mod tests {
         assert_eq!(body.get("repo_full_name").and_then(|v| v.as_str()), Some("owner/repo"));
         assert!(body.get("actor_id").is_none(), "unknown key actor_id must be dropped");
         assert!(body.get("created_at").is_none(), "unknown key created_at must be dropped");
+    }
+
+    /// One stored entry, filled in the way a real signed one is.
+    fn signed_entry() -> crate::memory::MemoryEntry {
+        crate::memory::MemoryEntry {
+            id: "mem-abc123".to_string(),
+            content: "psql on this laptop needs the homebrew binary".to_string(),
+            tags: vec!["tooling".to_string(), "macos".to_string()],
+            added_by: "claude".to_string(),
+            added_at: 1_757_030_400,
+            sig: Some("c2lnbmF0dXJlLWJ5dGVz".to_string()),
+            sig_pubkey: Some("cHVia2V5LWJ5dGVz".to_string()),
+            sig_key_id: Some("did:aura:key/AAAAAAAA".to_string()),
+            source_commit: Some("a2f5cf30".to_string()),
+            source_symbol: Some("aura-cli/src/db.rs#connect".to_string()),
+            source_symbol_hash: Some("deadbeef".to_string()),
+            intent_id: Some("ts:1757030400".to_string()),
+            signer_key_id: Some("did:aura:key/BBBBBBBB".to_string()),
+            valid_from: Some("2026-09-05T00:00:00Z".to_string()),
+            supersedes: Some("mem-older1".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pushing_a_stored_entry_carries_everything_its_signature_covers() {
+        // The three inputs beside the content are the point: without id,
+        // section and added_at the receiver cannot rebuild the signed payload,
+        // so the signature it does receive would be uncheckable.
+        let body = memory_push_body_from_entry("gotchas", &signed_entry(), &json!({}));
+        assert_eq!(
+            body.get("body").and_then(|v| v.as_str()),
+            Some("psql on this laptop needs the homebrew binary")
+        );
+        assert_eq!(body.get("entry_id").and_then(|v| v.as_str()), Some("mem-abc123"));
+        assert_eq!(body.get("section").and_then(|v| v.as_str()), Some("gotchas"));
+        assert_eq!(body.get("added_at").and_then(|v| v.as_u64()), Some(1_757_030_400));
+        assert_eq!(body.get("sig").and_then(|v| v.as_str()), Some("c2lnbmF0dXJlLWJ5dGVz"));
+        assert_eq!(body.get("sig_pubkey").and_then(|v| v.as_str()), Some("cHVia2V5LWJ5dGVz"));
+        assert_eq!(
+            body.get("sig_key_id").and_then(|v| v.as_str()),
+            Some("did:aura:key/AAAAAAAA")
+        );
+    }
+
+    #[test]
+    fn pushing_a_stored_entry_carries_its_provenance_and_authorship() {
+        let body = memory_push_body_from_entry("gotchas", &signed_entry(), &json!({}));
+        assert_eq!(body.get("added_by").and_then(|v| v.as_str()), Some("claude"));
+        assert_eq!(
+            body.get("tags").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(2)
+        );
+        assert_eq!(body.get("source_commit").and_then(|v| v.as_str()), Some("a2f5cf30"));
+        assert_eq!(
+            body.get("source_symbol").and_then(|v| v.as_str()),
+            Some("aura-cli/src/db.rs#connect")
+        );
+        assert_eq!(body.get("source_symbol_hash").and_then(|v| v.as_str()), Some("deadbeef"));
+        assert_eq!(body.get("intent_id").and_then(|v| v.as_str()), Some("ts:1757030400"));
+        assert_eq!(
+            body.get("signer_key_id").and_then(|v| v.as_str()),
+            Some("did:aura:key/BBBBBBBB")
+        );
+        assert_eq!(
+            body.get("valid_from").and_then(|v| v.as_str()),
+            Some("2026-09-05T00:00:00Z")
+        );
+        assert_eq!(body.get("supersedes").and_then(|v| v.as_str()), Some("mem-older1"));
+    }
+
+    #[test]
+    fn an_unsigned_stored_entry_pushes_without_inventing_fields() {
+        // A box that never ran `aura identity` writes unsigned entries. They
+        // must push as unsigned, not as an entry with empty signature fields
+        // — the server reads a half-present triple as tampering.
+        let entry = crate::memory::MemoryEntry {
+            id: "mem-plain1".to_string(),
+            content: "no identity on this box".to_string(),
+            added_by: "human".to_string(),
+            added_at: 42,
+            ..Default::default()
+        };
+        let body = memory_push_body_from_entry("context", &entry, &json!({}));
+        assert!(body.get("sig").is_none());
+        assert!(body.get("sig_pubkey").is_none());
+        assert!(body.get("sig_key_id").is_none());
+        assert!(body.get("source_commit").is_none());
+        assert_eq!(body.get("entry_id").and_then(|v| v.as_str()), Some("mem-plain1"));
+    }
+
+    #[test]
+    fn indexing_hints_stay_caller_supplied_and_nothing_else_gets_through() {
+        let args = json!({
+            "title": "the psql gotcha",
+            "kind": "gotcha",
+            "repo_full_name": "MHASK/aura-sovereign",
+            "org_id": "smuggled-org",
+            "sig_verified": true,
+        });
+        let body = memory_push_body_from_entry("gotchas", &signed_entry(), &args);
+        assert_eq!(body.get("title").and_then(|v| v.as_str()), Some("the psql gotcha"));
+        assert_eq!(body.get("kind").and_then(|v| v.as_str()), Some("gotcha"));
+        assert_eq!(
+            body.get("repo_full_name").and_then(|v| v.as_str()),
+            Some("MHASK/aura-sovereign")
+        );
+        assert!(body.get("org_id").is_none(), "unknown key org_id must be dropped");
+        assert!(
+            body.get("sig_verified").is_none(),
+            "the verdict is the server's to reach, never the pusher's to assert"
+        );
+    }
+
+    #[test]
+    fn a_relay_may_forward_a_signature_it_already_holds() {
+        // The free-text path is also how a relay forwards an entry it pulled
+        // from somewhere else. It is safe to accept the triple here because
+        // the server re-derives the payload and checks it — a hand-written
+        // one lands as `invalid`, not as attestation.
+        let args = json!({
+            "entry_id": "mem-relay1",
+            "section": "decisions",
+            "added_at": 99,
+            "sig": "c2ln",
+            "sig_pubkey": "cHVi",
+            "sig_key_id": "did:aura:key/CCCCCCCC",
+            "valid_from": "2026-09-05T00:00:00Z",
+            "user_id": "smuggled-user",
+        });
+        let body = build_memory_push_body("a forwarded fact", &args);
+        assert_eq!(body.get("entry_id").and_then(|v| v.as_str()), Some("mem-relay1"));
+        assert_eq!(body.get("section").and_then(|v| v.as_str()), Some("decisions"));
+        assert_eq!(body.get("added_at").and_then(|v| v.as_u64()), Some(99));
+        assert_eq!(body.get("sig").and_then(|v| v.as_str()), Some("c2ln"));
+        assert_eq!(
+            body.get("valid_from").and_then(|v| v.as_str()),
+            Some("2026-09-05T00:00:00Z")
+        );
+        assert!(body.get("user_id").is_none(), "unknown key user_id must be dropped");
+    }
+
+    #[test]
+    fn a_non_string_validity_stamp_is_dropped_rather_than_sent() {
+        // The server answers 400 for anything that is not RFC3339, and a
+        // number here is a caller mistake, not a fact worth failing a push on.
+        let body = build_memory_push_body("note", &json!({ "valid_from": 1757030400 }));
+        assert!(body.get("valid_from").is_none());
     }
 
     #[test]

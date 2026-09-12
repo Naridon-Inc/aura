@@ -38,7 +38,7 @@ import { useEditorStore } from "../../lib/editorStore";
 import { GhErrorNotice } from "../github/GhErrorNotice";
 import { Churn } from "../diff/Churn";
 import { AsciiSpinner } from "../ui/ascii-spinner";
-import { sentenceCase } from "../../lib/textCase";
+import { sentenceCase } from "@shared/textCase";
 
 // "all" is the implicit default chip; the rest mirror the Inbox buckets.
 type Filter = "all" | Bucket;

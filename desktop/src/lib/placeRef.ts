@@ -62,6 +62,7 @@ export function remotePlaceOf(ref: RemotePlaceRef): RemotePlace {
     machineId: ref.machineId,
     threadKey: ref.threadKey,
     repoRoot: ref.repoRoot,
+    remoteRoot: ref.remoteRoot,
   };
 }
 
@@ -126,11 +127,12 @@ export function parsePlaceRef(value: unknown): PlaceRef | null {
   const machineId = text(raw.machineId) || undefined;
   const threadKey = text(raw.threadKey) || undefined;
   const repoRoot = normalizeRoot(text(raw.repoRoot)) || undefined;
+  const remoteRoot = normalizeRoot(text(raw.remoteRoot)) || undefined;
   // "Names neither a box nor a conversation nor a project" is the one remote
   // shape with nothing to re-open — `remotePlaceKey` would hand back the same
   // wildcard key for every such member and a club would collapse into one row.
   if (!machineId && !threadKey && !repoRoot) return null;
-  return remotePlace({ machineId, threadKey, repoRoot });
+  return remotePlace({ machineId, threadKey, repoRoot, remoteRoot });
 }
 
 /** Drop repeats, keeping the first spelling of each place. Order is the user's

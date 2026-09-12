@@ -259,6 +259,83 @@ pub async fn aura_cli(repo_root: String, args: Vec<String>) -> Result<CliResult,
     })
 }
 
+/// One record that answers a question, as the CLI ranked it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AskHit {
+    /// Why this record placed where it did: names the file, names the symbol,
+    /// or mentions the words. Shown so a reader can judge the answer.
+    pub tier: String,
+    pub score: f32,
+    pub when: u64,
+    pub who: String,
+    pub what: String,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// `intent` or `checkpoint`.
+    pub store: String,
+}
+
+/// What was searched, so the empty case can say something true.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AskCorpus {
+    pub intents: usize,
+    pub checkpoints: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AskAnswer {
+    pub question: String,
+    /// `found`, `no_match`, or `nothing_recorded`. The last two are different
+    /// facts and the UI must not render them the same way: one means this
+    /// repository has no history, the other means it has plenty and none of it
+    /// is about what was asked.
+    pub verdict: String,
+    pub searched: AskCorpus,
+    pub hits: Vec<AskHit>,
+}
+
+/// Ask this repository why it is the way it is.
+///
+/// Deliberately a call into the CLI rather than a second implementation. The
+/// ranking that decides which record answers a question — file over symbol
+/// over words, a stated reason over a hook restating the edit — is one body of
+/// rules, and the desktop, the agent-facing MCP tool and the terminal have to
+/// give the same answer to the same question or the trace is worthless. A copy
+/// here would drift the first time either side was touched.
+#[tauri::command]
+pub async fn aura_ask(
+    repo_root: String,
+    question: String,
+    limit: Option<usize>,
+) -> Result<AskAnswer, String> {
+    let question = question.trim().to_string();
+    if question.is_empty() {
+        return Err("Ask something first.".to_string());
+    }
+    let limit = limit.unwrap_or(5).clamp(1, 50);
+    let out = aura_cli(
+        repo_root,
+        vec![
+            "ask".to_string(),
+            question.clone(),
+            "--json".to_string(),
+            "--limit".to_string(),
+            limit.to_string(),
+        ],
+    )
+    .await?;
+
+    // Exit 1 means "nothing matched", which is an answer, not a failure — the
+    // envelope on stdout still says what was searched and why it was empty.
+    serde_json::from_str::<AskAnswer>(out.stdout.trim()).map_err(|e| {
+        if out.stderr.trim().is_empty() {
+            format!("Could not read Aura's answer: {}", e)
+        } else {
+            out.stderr.trim().to_string()
+        }
+    })
+}
+
 #[tauri::command]
 pub async fn aura_live_start(
     repo_root: String,
@@ -606,6 +683,103 @@ pub async fn aura_strict_mode() -> Result<StrictMode, String> {
     .await
 }
 
+/// One human grant sitting in `.aura/grants/pending`. A grant is a
+/// person, at a terminal, authorizing exactly one delete / hard reset /
+/// force-push — the three things no logged intent can authorize. It is
+/// one-time and short-lived, and until now it was visible nowhere but
+/// `aura grant list` in a shell: the app could not tell you that a
+/// standing authorization existed, let alone take it back.
+///
+/// Read straight off disk rather than through `aura grant list --json`
+/// so the pane works against whatever CLI version is installed. That
+/// costs one thing and the UI must say so: `valid` here means only that
+/// the grant has not expired. Whether the signature, the repository,
+/// the checkout and the content pin still hold is the gate's judgement,
+/// made at the moment the action is attempted. Erring this way shows a
+/// grant that may already be void, which makes a reader more careful,
+/// never less.
+#[derive(Serialize)]
+pub struct PendingGrant {
+    pub id: String,
+    pub operation: String,
+    pub target: String,
+    pub issued_by: String,
+    /// Seconds until it expires; negative once it has.
+    pub expires_in: i64,
+}
+
+#[tauri::command]
+pub async fn aura_grants_pending(repo_root: String) -> Result<Vec<PendingGrant>, String> {
+    crate::blocking::run(move || {
+        let dir = PathBuf::from(&repo_root)
+            .join(".aura")
+            .join("grants")
+            .join("pending");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<PendingGrant> = entries
+            .flatten()
+            .filter_map(|e| {
+                let raw = fs::read_to_string(e.path()).ok()?;
+                let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+                let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let id = s("grant_id");
+                if id.is_empty() {
+                    return None;
+                }
+                Some(PendingGrant {
+                    id,
+                    operation: s("operation"),
+                    target: s("target"),
+                    issued_by: s("issued_by"),
+                    expires_in: v.get("expires_at").and_then(|x| x.as_i64()).unwrap_or(0) - now,
+                })
+            })
+            .collect();
+        // Soonest to expire first — the one a person most needs to decide
+        // about is the one about to be used or about to lapse.
+        out.sort_by_key(|g| g.expires_in);
+        Ok(out)
+    })
+    .await
+}
+
+/// Take a grant back. Deleting the pending file is exactly what `aura
+/// grant revoke` does, and the CLI notes why it needs no gate of its
+/// own: removing an authorization can only ever narrow what is allowed.
+#[tauri::command]
+pub async fn aura_grant_revoke(repo_root: String, grant_id: String) -> Result<(), String> {
+    crate::blocking::run(move || {
+        // Reject anything that is not a plain file name before it reaches
+        // the path join: this argument comes from the front end, and a
+        // grant id with a separator in it would delete a file elsewhere.
+        if grant_id.is_empty()
+            || grant_id.contains(['/', '\\'])
+            || grant_id.contains("..")
+        {
+            return Err(format!("not a grant id: {grant_id}"));
+        }
+        let path = PathBuf::from(&repo_root)
+            .join(".aura")
+            .join("grants")
+            .join("pending")
+            .join(format!("{grant_id}.json"));
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            // Already gone — consumed by the gate, or revoked in a
+            // terminal. The caller asked for it to not be there.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("could not revoke: {e}")),
+        }
+    })
+    .await
+}
+
 /// Take a durable snapshot of `file_path` so `aura rewind` can recover
 /// it later. Wraps the `aura snapshot create <file>` CLI. Wave B1 fires
 /// this from `agentStreamStore.applyEvent` whenever Claude is about to
@@ -663,6 +837,45 @@ fn walk_files(root: &Path) -> std::collections::HashSet<PathBuf> {
         }
     }
     out
+}
+
+/// Teammates' cloud intents, behind a short TTL and a hard deadline.
+///
+/// The underlying HTTP client allows itself eight seconds. That budget sat
+/// inline in the feed build, so one flaky network turned an otherwise local
+/// list into an eight-second stall. Two changes: a deadline short enough that
+/// nobody watches it, and a cache so navigating back doesn't re-hit the
+/// network at all. On a timeout we serve the last good pull rather than
+/// dropping teammates off the feed — stale by up to a minute beats absent.
+async fn cloud_intents_cached(repo_root: &str) -> Vec<serde_json::Value> {
+    const TTL_SECS: u64 = 45;
+    const DEADLINE: Duration = Duration::from_millis(1500);
+    #[allow(clippy::type_complexity)]
+    static CACHE: OnceLock<Mutex<HashMap<String, (u64, Vec<serde_json::Value>)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let now = now_unix_secs();
+    if let Ok(c) = cache.lock() {
+        if let Some((at, rows)) = c.get(repo_root) {
+            if now.saturating_sub(*at) < TTL_SECS {
+                return rows.clone();
+            }
+        }
+    }
+    let pull = crate::cloud_session_sync::pull_intents(Path::new(repo_root), 200);
+    match tokio::time::timeout(DEADLINE, pull).await {
+        Ok(rows) => {
+            if let Ok(mut c) = cache.lock() {
+                c.insert(repo_root.to_string(), (now, rows.clone()));
+            }
+            rows
+        }
+        Err(_) => cache
+            .lock()
+            .ok()
+            .and_then(|c| c.get(repo_root).map(|(_, r)| r.clone()))
+            .unwrap_or_default(),
+    }
 }
 
 fn now_unix_secs() -> u64 {
@@ -927,6 +1140,38 @@ pub struct IntentRow {
     /// time heuristic).
     #[serde(default)]
     pub claude_session_id: Option<String>,
+    /// The agent CLI's own session id, as `aura log-intent` writes it — for
+    /// Claude Code that IS the transcript stem, identical in meaning to
+    /// `claude_session_id` above. Two writers, two field names: the desktop
+    /// `aura_log_intent` command stamps `claude_session_id`, the hook / CLI
+    /// path stamps this one. Dropping it here meant the frontend never saw the
+    /// link on the rows that actually carry one (the hook writes almost all of
+    /// them), so every one of those sessions fell through to the ±3h nearest-
+    /// mtime guess and showed either a stranger's transcript or none at all.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// How the row got written: `Some("hook_auto")` when nothing passed
+    /// `--source`, which is every hook capture AND every plain `aura log-intent`
+    /// (the flag's default). So this alone does NOT mean "telemetry" — pair it
+    /// with `tool` and `change` below before deciding a row is machine noise.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// The agent tool call this row records — `Bash`, `Edit`, `Read`, an MCP
+    /// tool name. Present only on rows a hook wrote about a tool call, absent
+    /// on a reason somebody stated, which is what makes it the honest signal
+    /// for telling the two apart.
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// What the hook was going to say before a stated reason displaced it.
+    ///
+    /// An agent that calls `aura snapshot-file --why "…"` leaves a reason for
+    /// the file it is about to edit; `log-intent` claims it and writes it as
+    /// the row's `intent`, parking the mechanical text ("Claude Edit on
+    /// src/main.rs") here. Its presence is therefore a record that a person or
+    /// agent explained this change — the difference between a tool call worth
+    /// hiding and one worth reading.
+    #[serde(default)]
+    pub change: Option<String>,
     /// The human teammate this row is attributed to, resolved at read time by
     /// joining the row's signing `key_id` to `.aura/team/keys.jsonl` (and the
     /// friendlier roster name in `team/team.json`). NOT stored on disk — the
@@ -942,6 +1187,18 @@ pub struct IntentRow {
     /// The teammate's short handle (email local-part), for compact surfaces.
     #[serde(default)]
     pub developer_handle: Option<String>,
+    /// Branch this work happened on, stamped at write time. Read-time backfill
+    /// fills it in for older rows still sitting in a live checkout's working
+    /// copy; rows recovered from a branch blob keep `None`, because the ref we
+    /// read them from is NOT necessarily the branch they were authored on — an
+    /// append-only ledger propagates across merges. Never guess it.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Checkout the work happened in — the worktree directory's own name, not
+    /// an absolute path (paths don't survive a machine move). `None` means the
+    /// row predates stamping and came from somewhere we can't attribute.
+    #[serde(default)]
+    pub worktree: Option<String>,
 }
 
 /// mtime-gated cache for the parsed intent log, keyed by repo_root →
@@ -971,26 +1228,85 @@ fn intent_log_stamp(path: &Path) -> Option<(u128, u64)> {
     Some((mtime, meta.len()))
 }
 
-/// Parse `.aura/intent_log.jsonl` into rows, served from an mtime-gated cache so
-/// repeated Trace/Sessions opens against an unchanged log skip the disk parse.
-fn read_intent_rows(repo_root: &str) -> Result<Vec<IntentRow>, String> {
-    let path = PathBuf::from(repo_root).join(".aura").join("intent_log.jsonl");
+/// Branch currently checked out in `repo_root`, or `None` when HEAD is
+/// detached. Normally free — the worktree list the sessions scan already
+/// keeps under a short TTL knows it — with a git fallback for the case where
+/// `repo_root` doesn't string-match the path git reports.
+fn current_branch(repo_root: &str) -> Option<String> {
+    let listed = crate::cmd_claude_sessions::worktree_checkouts(repo_root)
+        .into_iter()
+        .find(|c| crate::cmd_claude_sessions::same_dir(&c.path, repo_root))
+        .and_then(|c| c.branch);
+    if listed.is_some() {
+        return listed;
+    }
+    let out = Command::new("git")
+        .args(["-C", repo_root, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!b.is_empty() && b != "HEAD").then_some(b)
+}
+
+/// The short name for a checkout — its own directory name.
+fn checkout_name(repo_root: &str) -> String {
+    repo_root
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Parse one checkout's `.aura/intent_log.jsonl`, served from an mtime-gated
+/// cache so repeated Trace/Sessions opens against an unchanged log skip the
+/// disk parse.
+///
+/// Rows written before branch stamping shipped carry no origin. We fill it in
+/// here from the checkout we found them in, which is sound: this is a working
+/// copy on disk, so the file *is* where the work happened. The equivalent
+/// guess for a row recovered from a branch blob would not be sound, and we
+/// deliberately don't make it — see `read_intent_rows_all_branches`.
+fn read_intent_rows_at(root: &str, branch: Option<&str>, name: &str) -> Vec<IntentRow> {
+    let path = PathBuf::from(root).join(".aura").join("intent_log.jsonl");
+    let key = path.to_string_lossy().into_owned();
     let stamp = match intent_log_stamp(&path) {
         Some(s) => s,
-        None => return Ok(vec![]), // missing/unstattable → no rows
+        None => return vec![], // missing/unstattable → no rows
     };
     if let Ok(cache) = intent_rows_cache().lock() {
-        if let Some((mtime, len, rows)) = cache.get(repo_root) {
+        if let Some((mtime, len, rows)) = cache.get(&key) {
             if (*mtime, *len) == stamp {
-                return Ok(rows.clone());
+                return rows.clone();
             }
         }
     }
-    let rows = parse_intent_rows(&path)?;
-    if let Ok(mut cache) = intent_rows_cache().lock() {
-        cache.insert(repo_root.to_string(), (stamp.0, stamp.1, rows.clone()));
+    let mut rows = parse_intent_rows(&path).unwrap_or_default();
+    for r in &mut rows {
+        if r.worktree.is_none() {
+            r.worktree = Some(name.to_string());
+        }
+        if r.branch.is_none() {
+            r.branch = branch.map(str::to_string);
+        }
     }
-    Ok(rows)
+    if let Ok(mut cache) = intent_rows_cache().lock() {
+        cache.insert(key, (stamp.0, stamp.1, rows.clone()));
+    }
+    rows
+}
+
+/// This checkout's intent rows and nobody else's — the "have I logged intent
+/// for what I'm about to commit" question, which is per-working-tree.
+pub(crate) fn read_intent_rows(repo_root: &str) -> Result<Vec<IntentRow>, String> {
+    Ok(read_intent_rows_at(
+        repo_root,
+        current_branch(repo_root).as_deref(),
+        &checkout_name(repo_root),
+    ))
 }
 
 /// Raw line-by-line JSONL parse — the cache miss path of `read_intent_rows`.
@@ -1019,7 +1335,78 @@ fn branch_blob_cache() -> &'static Mutex<HashMap<(String, String), (u64, Vec<Str
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-const BRANCH_BLOB_TTL_SECS: u64 = 8;
+/// Branch tips move on commit and fetch, not on navigation. Eight seconds was
+/// short enough that ordinary clicking around kept re-triggering a rebuild;
+/// a minute still feels live and stops the rebuild being part of the click.
+const BRANCH_BLOB_TTL_SECS: u64 = 60;
+
+/// Read many `<rev>:<path>` blobs in ONE `git cat-file --batch` process.
+///
+/// The obvious loop — one `git show` per ref — costs a process spawn each
+/// time, and this repo has 176 refs: measured at just over a second per pass,
+/// and the intent feed makes two passes. `--batch` takes the whole list on
+/// stdin and streams the blobs back, so it is one spawn regardless of ref
+/// count. Specs that don't resolve are simply absent from the result.
+///
+/// stdin is written from a second thread on purpose: the response can run to
+/// megabytes, and a single thread that writes the whole request before reading
+/// deadlocks as soon as git fills the pipe buffer waiting for us to drain it.
+fn cat_file_batch(repo_root: &str, specs: &[String]) -> Vec<Vec<u8>> {
+    if specs.is_empty() {
+        return Vec::new();
+    }
+    let mut child = match Command::new("git")
+        .args(["cat-file", "--batch"])
+        .current_dir(repo_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let Some(mut sink) = child.stdin.take() else {
+        let _ = child.wait();
+        return Vec::new();
+    };
+    let mut payload = specs.join("\n");
+    payload.push('\n');
+    let writer = std::thread::spawn(move || {
+        let _ = sink.write_all(payload.as_bytes());
+        let _ = sink.flush();
+        // Dropping the handle closes the pipe, which is how git learns the
+        // request list is finished and exits.
+    });
+    let mut buf = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_end(&mut buf);
+    }
+    let _ = writer.join();
+    let _ = child.wait();
+
+    // Response framing, per blob: `<sha> <type> <size>\n`, then exactly
+    // <size> bytes, then a trailing newline. A spec git can't resolve comes
+    // back as `<spec> missing\n` with no body.
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < buf.len() {
+        let Some(nl) = buf[i..].iter().position(|&b| b == b'\n') else { break };
+        let header = String::from_utf8_lossy(&buf[i..i + nl]).into_owned();
+        i += nl + 1;
+        let Some(size) = header
+            .rsplit(' ')
+            .next()
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            continue; // `missing`, `ambiguous`, or anything else bodyless
+        };
+        let end = (i + size).min(buf.len());
+        out.push(buf[i..end].to_vec());
+        i = end + 1; // skip the newline git writes after the body
+    }
+    out
+}
 
 /// Union the lines of a repo-relative file across EVERY branch tip (local +
 /// remote refs), deduped by exact line. This is how the team-wide reads work
@@ -1051,34 +1438,137 @@ fn union_branch_blob_lines(repo_root: &str, rel_path: &str) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     };
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut out: Vec<String> = Vec::new();
-    for rf in refnames {
+    let specs: Vec<String> = refnames
+        .iter()
         // `origin/HEAD` is a symbolic alias for another ref we already read.
-        if rf.ends_with("/HEAD") {
-            continue;
-        }
-        let spec = format!("{}:{}", rf, rel_path);
-        let show = Command::new("git")
-            .args(["show", &spec])
-            .current_dir(repo_root)
-            .output();
-        if let Ok(o) = show {
-            if o.status.success() {
-                for line in String::from_utf8_lossy(&o.stdout).lines() {
-                    let t = line.trim();
-                    if t.is_empty() {
-                        continue;
-                    }
-                    if seen.insert(t.to_string()) {
-                        out.push(t.to_string());
-                    }
-                }
-            }
-        }
-    }
+        .filter(|rf| !rf.ends_with("/HEAD"))
+        .map(|rf| format!("{rf}:{rel_path}"))
+        .collect();
+
+    // Most branches never touched this file after they diverged, so most of
+    // those specs resolve to a blob some other branch already carries. Ask git
+    // once which object each spec is, keep the distinct ones, and read only
+    // those. On this repo that is 209 refs collapsing to 34 blobs — 56 MB of
+    // text down to 12 MB, and 209 subprocesses down to two (AURA-267).
+    let check = run_git_bytes(repo_root, &["cat-file", "--batch-check"], specs.join("\n").as_bytes());
+    let oids = distinct_blob_oids(&String::from_utf8_lossy(&check));
+    let blobs = if oids.is_empty() {
+        Vec::new()
+    } else {
+        run_git_bytes(repo_root, &["cat-file", "--batch"], oids.join("\n").as_bytes())
+    };
+    let out = union_lines_of_batch(&blobs);
+
     if let Ok(mut cache) = branch_blob_cache().lock() {
         cache.insert(cache_key, (now, out.clone()));
+    }
+    out
+}
+
+/// Run a git command that is fed a list on stdin, returning raw stdout.
+///
+/// `cat-file --batch*` is the reason this exists: it answers one request per
+/// input line from a single process, which is what turns a per-ref subprocess
+/// storm into two spawns.
+fn run_git_bytes(repo_root: &str, args: &[&str], stdin: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut child = match Command::new("git")
+        .args(args)
+        .current_dir(repo_root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    if let Some(mut w) = child.stdin.take() {
+        // A closed pipe means git stopped reading, not that the run failed —
+        // whatever it already wrote is still worth having.
+        let _ = w.write_all(stdin);
+    }
+    match child.wait_with_output() {
+        Ok(o) => o.stdout,
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The distinct blob object ids named by `git cat-file --batch-check` output,
+/// in first-seen order.
+///
+/// One line per input spec: `<oid> <type> <size>` when it resolved, or
+/// `<spec> missing` when the ref has no such file — which is the common case
+/// for a branch that predates the ledger, and must be skipped rather than
+/// treated as an id.
+fn distinct_blob_oids(check_stdout: &str) -> Vec<String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for line in check_stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(oid), Some(kind)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        // Only blobs. A path that names a tree is not a ledger file, and
+        // `missing` / `ambiguous` land here too.
+        if kind != "blob" {
+            continue;
+        }
+        if seen.insert(oid) {
+            out.push(oid.to_string());
+        }
+    }
+    out
+}
+
+/// Every distinct non-empty line across the blobs in a `git cat-file --batch`
+/// stream, in first-seen order.
+///
+/// The stream is `<oid> blob <size>\n<contents>\n` per object, so it has to be
+/// walked by the declared length rather than split on newlines — a ledger line
+/// is JSON and could otherwise be mistaken for a header.
+///
+/// Dedup is by hash, not by an owned copy of the line. These blobs are mostly
+/// the same ledger seen from different branches, so keeping a `String` per
+/// candidate meant allocating the whole union twice over — tens of megabytes
+/// on a real repo — to discard nearly all of it.
+fn union_lines_of_batch(batch_stdout: &[u8]) -> Vec<String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < batch_stdout.len() {
+        let Some(nl) = batch_stdout[i..].iter().position(|b| *b == b'\n') else {
+            break;
+        };
+        let header = String::from_utf8_lossy(&batch_stdout[i..i + nl]).to_string();
+        i += nl + 1;
+        let mut parts = header.split_whitespace();
+        let (_oid, kind, size) = (parts.next(), parts.next(), parts.next());
+        let Some(size) = size.and_then(|s| s.parse::<usize>().ok()) else {
+            // `<oid> missing` has no body and no size — nothing to skip past.
+            if kind == Some("missing") {
+                continue;
+            }
+            break;
+        };
+        let end = (i + size).min(batch_stdout.len());
+        for line in batch_stdout[i..end].split(|b| *b == b'\n') {
+            let t = String::from_utf8_lossy(line);
+            let t = t.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let mut h = DefaultHasher::new();
+            t.hash(&mut h);
+            if seen.insert(h.finish()) {
+                out.push(t.to_string());
+            }
+        }
+        // Body, then the newline git writes after it.
+        i = end + 1;
     }
     out
 }
@@ -1325,9 +1815,22 @@ fn cloud_intent_to_row(it: &serde_json::Value) -> Option<IntentRow> {
         key_id: None,
         changeset: None,
         claude_session_id: None,
+        // A teammate's transcript lives on their machine, not ours — a session
+        // id here would resolve to nothing, or worse, to a local file that
+        // happens to share the stem.
+        session_id: None,
+        // Cloud rows are pushed intents, never hook captures — nothing on that
+        // plane records a tool call.
+        source: None,
+        tool: None,
+        change: None,
         developer: user.clone(),
         developer_email: None,
         developer_handle: user,
+        // The cloud plane carries no checkout identity — a teammate's worktree
+        // name means nothing on this machine anyway.
+        branch: None,
+        worktree: None,
     })
 }
 
@@ -1339,10 +1842,30 @@ fn cloud_intent_to_row(it: &serde_json::Value) -> Option<IntentRow> {
 /// store the moment they push. Working-tree rows win ties (freshest copy).
 fn read_intent_rows_all_branches(repo_root: &str) -> Vec<IntentRow> {
     let mut by_fp: HashMap<String, IntentRow> = HashMap::new();
-    // Working tree first → its copy wins for any row also present on a branch.
-    for r in read_intent_rows(repo_root).unwrap_or_default() {
-        by_fp.entry(intent_fingerprint(&r)).or_insert(r);
+    // Every live checkout's working copy, the active one first.
+    //
+    // `.aura/intent_log.jsonl` is a git-TRACKED file, so every worktree holds
+    // its own copy and an agent working in a sibling checkout appends there.
+    // Reading only the active checkout hid that work twice over: the rows are
+    // in the wrong file for the working-tree read, and they are uncommitted so
+    // the branch-blob union below can't reach them either. Fanning out here is
+    // what makes a session running in another worktree show up at all.
+    //
+    // Order decides which copy's labels win a tie, so it is explicit: the
+    // checkout the user is looking at first, then the rest as git lists them.
+    let mut checkouts = crate::cmd_claude_sessions::worktree_checkouts(repo_root);
+    checkouts.sort_by_key(|c| !crate::cmd_claude_sessions::same_dir(&c.path, repo_root));
+    for c in &checkouts {
+        for r in read_intent_rows_at(&c.path, c.branch.as_deref(), &c.name()) {
+            by_fp.entry(intent_fingerprint(&r)).or_insert(r);
+        }
     }
+    // Then every branch tip's committed copy — teammates' work that never
+    // touched this machine's disk. These rows keep whatever origin they were
+    // stamped with and get no backfill: the ref we read a row from is not
+    // necessarily the branch it was authored on, because an append-only ledger
+    // propagates across merges. An unlabelled row is honest; a wrong label
+    // would send someone to the wrong branch.
     for line in union_branch_blob_lines(repo_root, ".aura/intent_log.jsonl") {
         if let Ok(r) = serde_json::from_str::<IntentRow>(&line) {
             by_fp.entry(intent_fingerprint(&r)).or_insert(r);
@@ -1368,8 +1891,9 @@ struct CommitDiff {
 /// staleness is harmless (the Trace view re-fetches on navigation and a fresh
 /// commit lands on the next window), and the cache spares us re-shelling the
 /// full `git log` on every `aura_intent_recent` call.
-fn commit_index_cache() -> &'static Mutex<HashMap<String, (u64, Vec<CommitDiff>)>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, (u64, Vec<CommitDiff>)>>> = OnceLock::new();
+#[allow(clippy::type_complexity)]
+fn commit_index_cache() -> &'static Mutex<HashMap<String, (u64, Arc<Vec<CommitDiff>>)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (u64, Arc<Vec<CommitDiff>>)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -1387,18 +1911,22 @@ const COMMIT_INDEX_TTL_SECS: u64 = 4;
 /// list only, never line-diffing — which is two orders of magnitude faster
 /// than the old `--numstat` index (~0.12s vs ~18.7s here). The +/- counts are
 /// filled in lazily, per contributing commit, by `commit_numstat`.
-fn commit_diff_index(repo_root: &str) -> Vec<CommitDiff> {
+/// Shared, never copied: the index is a couple of thousand commits each
+/// carrying its full file list, and every caller only reads it. Handing back
+/// an `Arc` makes a cache hit a refcount bump instead of a multi-megabyte
+/// clone on a path the intent feed takes on every open.
+fn commit_diff_index(repo_root: &str) -> Arc<Vec<CommitDiff>> {
     let now = now_unix_secs();
     if let Ok(cache) = commit_index_cache().lock() {
         if let Some((built_at, commits)) = cache.get(repo_root) {
             if now.saturating_sub(*built_at) < COMMIT_INDEX_TTL_SECS {
-                return commits.clone();
+                return Arc::clone(commits);
             }
         }
     }
-    let commits = build_commit_index(repo_root);
+    let commits = Arc::new(build_commit_index(repo_root));
     if let Ok(mut cache) = commit_index_cache().lock() {
-        cache.insert(repo_root.to_string(), (now, commits.clone()));
+        cache.insert(repo_root.to_string(), (now, Arc::clone(&commits)));
     }
     commits
 }
@@ -1473,53 +2001,168 @@ fn build_commit_index(repo_root: &str) -> Vec<CommitDiff> {
 /// exclusion is what keeps each call ~7ms instead of seconds. Only commits
 /// that actually fall in an empty intent's window are ever counted.
 fn commit_numstat(repo_root: &str, sha: &str) -> HashMap<String, (u64, u64)> {
-    let key = format!("{repo_root}\0{sha}");
+    let key = numstat_key(repo_root, sha);
     if let Ok(cache) = commit_numstat_cache().lock() {
         if let Some(map) = cache.get(&key) {
             return map.clone();
         }
     }
-    let mut map: HashMap<String, (u64, u64)> = HashMap::new();
-    if let Ok(out) = Command::new("git")
+    // A miss is no longer a subprocess. It used to be one `git show --numstat`
+    // per contributing commit, and on this repo a cold Project timeline put
+    // ~2000 of them in a row: 57 seconds of line-diffing to draw a sparkline,
+    // which is why the pane sat on "Reading the project's history…" past 22s
+    // and only came back once a retry found the cache warm (AURA-267).
+    // `warm_commit_numstats` fills this cache in one process under a time
+    // budget; anything it did not reach stays uncounted — which the model
+    // already reads as zero churn — and is picked up on a later open.
+    HashMap::new()
+}
+
+fn numstat_key(repo_root: &str, sha: &str) -> String {
+    format!("{repo_root}\0{sha}")
+}
+
+/// How long one call may spend line-diffing commits it has not seen before.
+///
+/// The point is a *bounded* first paint, not a complete one. Whatever lands
+/// inside the budget is cached for the life of the process, so each open
+/// advances the frontier and a repo converges to fully counted within a few
+/// visits. Long enough to cover a normal session's commits on a cold open;
+/// short enough that the timeline appears while the reader is still looking
+/// at it.
+const NUMSTAT_BUDGET: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// Line-count as many of `shas` as the budget allows, newest first, in one
+/// `git log --stdin --no-walk --numstat` process.
+///
+/// Newest first because the timeline lands its playhead on the most recent
+/// moment; that is the part of the sparkline a reader sees before anything
+/// else. Already-cached shas are dropped before git is asked, so a second
+/// call pays only for what the first one did not reach.
+fn warm_commit_numstats(repo_root: &str, shas_newest_first: &[String]) {
+    use std::io::{BufRead, BufReader, Write};
+
+    let pending: Vec<String> = {
+        let cache = match commit_numstat_cache().lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        shas_newest_first
+            .iter()
+            .filter(|sha| !cache.contains_key(&numstat_key(repo_root, sha)))
+            .cloned()
+            .collect()
+    };
+    if pending.is_empty() {
+        return;
+    }
+
+    let mut child = match Command::new("git")
         .args([
-            "show",
-            sha,
+            "log",
+            "--stdin",
+            "--no-walk",
             "--no-color",
             "--no-renames",
             "--numstat",
-            "--format=format:",
+            "--format=@@C@@%H",
             "--",
             ".",
             ":(exclude,glob).aura/**",
         ])
         .current_dir(repo_root)
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
     {
-        if out.status.success() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                // numstat row: "adds<TAB>dels<TAB>path" ("-" for binary files).
-                let mut cols = line.splitn(3, '\t');
-                let adds = cols.next().unwrap_or("-");
-                let dels = cols.next().unwrap_or("-");
-                let path = cols.next().unwrap_or("").trim();
-                if path.is_empty() {
-                    continue;
-                }
-                map.insert(
-                    path.to_string(),
-                    (adds.parse::<u64>().unwrap_or(0), dels.parse::<u64>().unwrap_or(0)),
-                );
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if let Some(mut w) = child.stdin.take() {
+        // git stops reading once it has enough; a broken pipe here is normal.
+        let _ = w.write_all(pending.join("\n").as_bytes());
+        let _ = w.write_all(b"\n");
+    }
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    };
+
+    // Read on a worker so the budget is a real wall clock rather than a hope:
+    // a blocking read on a process still diffing a large commit cannot be
+    // interrupted, so the deadline has to live on this side of the pipe.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                return;
             }
         }
+    });
+
+    let deadline = std::time::Instant::now() + NUMSTAT_BUDGET;
+    let mut done: Vec<(String, HashMap<String, (u64, u64)>)> = Vec::new();
+    let mut current: Option<(String, HashMap<String, (u64, u64)>)> = None;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(left) {
+            Ok(line) => {
+                if let Some(sha) = line.strip_prefix("@@C@@") {
+                    // A commit is only cached once its rows have all arrived —
+                    // caching a half-read commit would record wrong counts
+                    // permanently.
+                    if let Some(prev) = current.take() {
+                        done.push(prev);
+                    }
+                    current = Some((sha.trim().to_string(), HashMap::new()));
+                } else if let Some((_, map)) = current.as_mut() {
+                    if let Some((path, adds, dels)) = parse_numstat_row(&line) {
+                        map.insert(path, (adds, dels));
+                    }
+                }
+            }
+            // Sender dropped: git finished and every commit was read.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                if let Some(prev) = current.take() {
+                    done.push(prev);
+                }
+                break;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+        }
     }
+    let _ = child.kill();
+    let _ = child.wait();
+
     if let Ok(mut cache) = commit_numstat_cache().lock() {
-        cache.insert(key, map.clone());
+        for (sha, map) in done {
+            cache.insert(numstat_key(repo_root, &sha), map);
+        }
     }
-    map
+}
+
+/// One `--numstat` row: `adds<TAB>dels<TAB>path`, with `-` for a binary file.
+fn parse_numstat_row(line: &str) -> Option<(String, u64, u64)> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let mut cols = line.splitn(3, '\t');
+    let adds = cols.next().unwrap_or("-");
+    let dels = cols.next().unwrap_or("-");
+    let path = cols.next().unwrap_or("").trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some((
+        path.to_string(),
+        adds.parse::<u64>().unwrap_or(0),
+        dels.parse::<u64>().unwrap_or(0),
+    ))
 }
 
 /// Aura's own committed bookkeeping — the intent log itself and the
@@ -1566,6 +2209,20 @@ fn is_noise_path(p: &str) -> bool {
 /// signature (no diff), and the agent file-capture watches the main repo
 /// working tree — but agent edits frequently land in a separate git worktree.
 /// So the bound changeset is empty even though the work is real and committed.
+/// The span of commits an intent may claim: from just before it was logged
+/// until the next intent, or half an hour, whichever comes first.
+///
+/// A commit normally lands within minutes of the intent that drove it, so a
+/// tight horizon keeps a per-commit cadence exact while stopping a sparsely
+/// logged intent (no follow-up for hours) from absorbing unrelated later
+/// commits. Dense logging self-bounds.
+fn intent_window(t: u64, ts_sorted: &[u64]) -> (u64, u64) {
+    const WINDOW_CAP: u64 = 1800; // 30 min max horizon for a dangling intent.
+    const SKEW: u64 = 120; // commit clock may trail the logged intent slightly.
+    let next = ts_sorted.iter().copied().find(|&x| x > t).unwrap_or(u64::MAX);
+    (t.saturating_sub(SKEW), next.min(t.saturating_add(WINDOW_CAP)))
+}
+
 fn backfill_changesets_from_git(repo_root: &str, rows: &mut [IntentRow]) {
     let needs = rows
         .iter()
@@ -1588,24 +2245,46 @@ fn backfill_changesets_from_git(repo_root: &str, rows: &mut [IntentRow]) {
     // logged intent (no follow-up intent for hours) from absorbing unrelated
     // later commits. The window also closes at the next intent, whichever comes
     // first — so dense logging self-bounds.
-    const WINDOW_CAP: u64 = 1800; // 30 min max horizon for a dangling intent.
-    const SKEW: u64 = 120; // commit clock may trail the logged intent slightly.
+    // Which commits will contribute at all — decided from the name-status index
+    // alone, which is already in memory. This costs nothing and lets the line
+    // counts for all of them be fetched in one process below instead of one
+    // subprocess per commit (AURA-267).
+    let mut warm_order: Vec<String> = Vec::new();
+    let mut warm_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for r in rows.iter() {
+        if r.changeset.as_ref().map(|c| !c.files.is_empty()).unwrap_or(false) {
+            continue;
+        }
+        let (lower, upper) = intent_window(r.timestamp, &ts_sorted);
+        for c in commits.iter() {
+            if c.ts < lower || c.ts >= upper {
+                continue;
+            }
+            if c.files.iter().all(|f| is_noise_path(&f.path)) {
+                continue;
+            }
+            if warm_seen.insert(c.sha.clone()) {
+                warm_order.push(c.sha.clone());
+            }
+        }
+    }
+    // `commits` is oldest-first, so reverse: the budget should be spent on the
+    // moments the timeline opens on, not on the far end of the history.
+    warm_order.reverse();
+    warm_commit_numstats(repo_root, &warm_order);
 
     for r in rows.iter_mut() {
         let has_files = r.changeset.as_ref().map(|c| !c.files.is_empty()).unwrap_or(false);
         if has_files {
             continue;
         }
-        let t = r.timestamp;
-        let next = ts_sorted.iter().copied().find(|&x| x > t).unwrap_or(u64::MAX);
-        let upper = next.min(t.saturating_add(WINDOW_CAP));
-        let lower = t.saturating_sub(SKEW);
+        let (lower, upper) = intent_window(r.timestamp, &ts_sorted);
 
         // Union files across every commit in [lower, upper).
         let mut by_path: HashMap<String, IntentChangesetFile> = HashMap::new();
         let mut first_sha: Option<String> = None;
         let mut first_ts: Option<u64> = None;
-        for c in &commits {
+        for c in commits.iter() {
             if c.ts < lower || c.ts >= upper {
                 continue;
             }
@@ -1616,9 +2295,9 @@ fn backfill_changesets_from_git(repo_root: &str, rows: &mut [IntentRow]) {
             if real.is_empty() {
                 continue;
             }
-            // Line-count this contributing commit lazily (cached). Only the
-            // handful of commits inside an empty intent's window are counted —
-            // not all 2000 in the index.
+            // Line counts for this commit, if the warm pass above reached it.
+            // Beyond its budget this is empty and the file keeps `None`, which
+            // the timeline already reads as no churn rather than as an error.
             let counts = commit_numstat(repo_root, &c.sha);
             for f in real {
                 let e = by_path.entry(f.path.clone()).or_insert_with(|| IntentChangesetFile {
@@ -1704,7 +2383,7 @@ pub async fn aura_intent_recent(
     // this is the path that carries it (over Aura's cloud, not git). Signed out
     // → the pull returns empty → the feed stays local-only, the privacy default.
     // A cloud error also returns empty, so the feed never breaks on a hiccup.
-    let cloud = crate::cloud_session_sync::pull_intents(std::path::Path::new(&repo_root), 200).await;
+    let cloud = cloud_intents_cached(&repo_root).await;
     if !cloud.is_empty() {
         let mut seen: std::collections::HashSet<String> =
             rows.iter().map(intent_text_key).collect();
@@ -2579,5 +3258,260 @@ mod cloud_intent_tests {
             remote_repo_path("/nonexistent", "/Users/sam/code/aura/src/ghost.rs"),
             "/Users/sam/code/aura/src/ghost.rs"
         );
+    }
+}
+
+#[cfg(test)]
+mod branch_union_tests {
+    use super::{distinct_blob_oids, union_lines_of_batch};
+
+    // AURA-267: Trace → Project timeline sat on "Reading the project's
+    // history…" past 22 seconds on the real repo, and a Try again then loaded
+    // it in ~12. The read walked 209 refs with one `git show` each and folded
+    // 56 MB of text — nearly all of it the same ledger seen from branches that
+    // had never touched it — through an owned-String dedupe. Those 209 specs
+    // resolve to 34 distinct blobs.
+
+    #[test]
+    fn the_same_ledger_on_many_branches_is_read_once() {
+        // Three refs, two of which point at the identical blob.
+        let check = "\
+abc123 blob 100\n\
+abc123 blob 100\n\
+def456 blob 200\n";
+        assert_eq!(distinct_blob_oids(check), vec!["abc123", "def456"]);
+    }
+
+    #[test]
+    fn a_branch_that_predates_the_ledger_is_skipped_not_read() {
+        // `git cat-file --batch-check` answers a spec it cannot resolve with
+        // `<spec> missing`. Taking that first word as an id would send git
+        // looking for an object named after a refspec.
+        let check = "\
+refs/heads/old:.aura/intent_log.jsonl missing\n\
+abc123 blob 10\n";
+        assert_eq!(distinct_blob_oids(check), vec!["abc123"]);
+    }
+
+    #[test]
+    fn only_blobs_are_read() {
+        // A path resolving to a tree is not a ledger file.
+        let check = "aaa tree 40\nbbb blob 5\n";
+        assert_eq!(distinct_blob_oids(check), vec!["bbb"]);
+    }
+
+    #[test]
+    fn nothing_resolved_is_an_empty_list_not_a_read_of_everything() {
+        assert!(distinct_blob_oids("").is_empty());
+        assert!(distinct_blob_oids("refs/heads/x:.aura/y missing\n").is_empty());
+    }
+
+    #[test]
+    fn the_batch_stream_is_walked_by_declared_length() {
+        // The body is JSON. Splitting the stream on newlines instead of
+        // stepping over each object by its size would read a ledger row as
+        // the next object's header.
+        let body_a = "{\"a\":1}\n{\"b\":2}\n";
+        let body_b = "{\"c\":3}\n";
+        let stream = format!(
+            "aaa blob {}\n{}\nbbb blob {}\n{}\n",
+            body_a.len(),
+            body_a,
+            body_b.len(),
+            body_b
+        );
+        assert_eq!(
+            union_lines_of_batch(stream.as_bytes()),
+            vec!["{\"a\":1}", "{\"b\":2}", "{\"c\":3}"]
+        );
+    }
+
+    #[test]
+    fn identical_rows_across_branches_collapse_and_keep_first_seen_order() {
+        // The whole reason the union is safe on an append-only ledger.
+        let a = "row-1\nrow-2\n";
+        let b = "row-1\nrow-2\nrow-3\n";
+        let stream = format!("aaa blob {}\n{}\nbbb blob {}\n{}\n", a.len(), a, b.len(), b);
+        assert_eq!(
+            union_lines_of_batch(stream.as_bytes()),
+            vec!["row-1", "row-2", "row-3"]
+        );
+    }
+
+    #[test]
+    fn blank_lines_and_trailing_whitespace_do_not_become_rows() {
+        let body = "row-1\n\n   \n  row-2  \n";
+        let stream = format!("aaa blob {}\n{}\n", body.len(), body);
+        assert_eq!(union_lines_of_batch(stream.as_bytes()), vec!["row-1", "row-2"]);
+    }
+
+    #[test]
+    fn a_truncated_stream_yields_what_arrived_instead_of_panicking() {
+        // git was killed mid-write, or the pipe closed. The rows already on
+        // the wire are still good.
+        let stream = b"aaa blob 40\nrow-1\nrow-2\n";
+        assert_eq!(union_lines_of_batch(stream), vec!["row-1", "row-2"]);
+    }
+
+    #[test]
+    fn an_empty_stream_is_no_rows() {
+        assert!(union_lines_of_batch(b"").is_empty());
+    }
+
+    #[test]
+    fn a_missing_object_mid_stream_does_not_stop_the_ones_after_it() {
+        // `--batch` answers an unknown id with `<id> missing` and no body.
+        let body = "row-1\n";
+        let stream = format!("deadbeef missing\naaa blob {}\n{}\n", body.len(), body);
+        assert_eq!(union_lines_of_batch(stream.as_bytes()), vec!["row-1"]);
+    }
+}
+
+#[cfg(test)]
+mod numstat_budget_tests {
+    use super::{commit_numstat, intent_window, parse_numstat_row, warm_commit_numstats};
+
+    // The other half of AURA-267. The branch union above was one stall; this
+    // was the bigger one. `backfill_changesets_from_git` called
+    // `commit_numstat` inside its window loop, and each miss spawned a
+    // `git show --numstat`. On the real repo a cold Project timeline reached
+    // ~2000 of them at ~28ms each — 57 seconds of line-diffing to draw a
+    // sparkline, on a read whose own commit index takes 0.7s. Now one process
+    // fills the cache under a wall-clock budget, and anything past the budget
+    // stays uncounted rather than holding the whole pane hostage.
+
+    #[test]
+    fn a_numstat_row_is_counts_then_path() {
+        assert_eq!(
+            parse_numstat_row("12\t3\tsrc/main.rs"),
+            Some(("src/main.rs".to_string(), 12, 3))
+        );
+    }
+
+    #[test]
+    fn a_binary_file_counts_as_nothing_rather_than_failing_the_commit() {
+        // git writes `-` for both columns on a binary blob. Dropping the row
+        // would lose the file from the changeset; counting it as 0/0 keeps the
+        // file and tells the truth about its lines.
+        assert_eq!(
+            parse_numstat_row("-\t-\tassets/icon.png"),
+            Some(("assets/icon.png".to_string(), 0, 0))
+        );
+    }
+
+    #[test]
+    fn a_path_with_tabs_in_it_survives() {
+        // splitn(3) — only the first two tabs separate columns.
+        assert_eq!(
+            parse_numstat_row("1\t0\tsrc/od\td.rs"),
+            Some(("src/od\td.rs".to_string(), 1, 0))
+        );
+    }
+
+    #[test]
+    fn the_blank_lines_between_commits_are_not_files() {
+        assert_eq!(parse_numstat_row(""), None);
+        assert_eq!(parse_numstat_row("   "), None);
+        // A malformed row with no path is not a file either.
+        assert_eq!(parse_numstat_row("1\t2\t"), None);
+    }
+
+    #[test]
+    fn an_intent_window_closes_at_the_next_intent() {
+        // Two intents four minutes apart: the first claims only up to the
+        // second, not its full half-hour horizon.
+        let ts = vec![1_000, 1_240];
+        assert_eq!(intent_window(1_000, &ts), (880, 1_240));
+    }
+
+    #[test]
+    fn a_dangling_intent_stops_after_half_an_hour() {
+        // Nothing logged after it — the horizon caps rather than running to
+        // the end of history and absorbing unrelated commits.
+        let ts = vec![1_000];
+        assert_eq!(intent_window(1_000, &ts), (880, 1_000 + 1800));
+    }
+
+    #[test]
+    fn the_window_opens_slightly_before_the_intent() {
+        // A commit's clock can trail the intent that drove it.
+        let (lower, _) = intent_window(10_000, &[10_000]);
+        assert!(lower < 10_000, "window must tolerate a commit landing early");
+    }
+
+    #[test]
+    fn an_early_timestamp_cannot_underflow_the_window() {
+        assert_eq!(intent_window(5, &[5]), (0, 5 + 1800));
+    }
+
+    #[test]
+    fn asking_for_no_commits_is_not_a_git_call() {
+        // The frequent case: everything already counted. Must not spawn.
+        warm_commit_numstats(".", &[]);
+    }
+
+    #[test]
+    fn a_sha_that_does_not_exist_leaves_the_cache_alone() {
+        // git answers nothing for it; the fill pass then sees no counts and
+        // leaves `additions`/`deletions` as None, which the timeline reads as
+        // no churn. It must not panic or block.
+        let root = repo_root();
+        let fake = "0000000000000000000000000000000000000000".to_string();
+        warm_commit_numstats(&root, std::slice::from_ref(&fake));
+        assert!(commit_numstat(&root, &fake).is_empty());
+    }
+
+    #[test]
+    fn a_miss_no_longer_reaches_git_by_itself() {
+        // The regression this whole change exists to prevent: if
+        // `commit_numstat` ever spawns again, the loop is back to one process
+        // per commit. Ask for a real commit *without* warming it first.
+        let root = repo_root();
+        // Pick a commit the warm pass can actually produce counts for, or
+        // the assertion below fails on the state of the repo rather than on
+        // the cache. Two ways it legitimately yields nothing: a merge commit
+        // has no line changes of its own, and `.aura/**` is excluded from
+        // the warm pass — so a checkout that just merged, or whose last
+        // commit only recorded intent, would go red for no reason. Ask git
+        // for the newest commit that is neither.
+        let out = std::process::Command::new("git")
+            .args([
+                "log",
+                "-n",
+                "1",
+                "--no-merges",
+                "--format=%H",
+                "--",
+                ".",
+                ":(exclude,glob).aura/**",
+            ])
+            .current_dir(&root)
+            .output()
+            .expect("git log");
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if sha.is_empty() {
+            return; // not a git checkout; nothing to pin
+        }
+        assert!(
+            commit_numstat(&root, &sha).is_empty(),
+            "an uncached commit must not be line-diffed on demand"
+        );
+        // …and warming it is what makes the counts appear.
+        warm_commit_numstats(&root, std::slice::from_ref(&sha));
+        assert!(
+            !commit_numstat(&root, &sha).is_empty(),
+            "the warm pass is what fills the cache"
+        );
+    }
+
+    fn repo_root() -> String {
+        // src-tauri/../.. — the checkout this crate lives in.
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or(&manifest)
+            .to_string_lossy()
+            .to_string()
     }
 }

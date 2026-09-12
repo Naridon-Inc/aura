@@ -22,18 +22,18 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, type ClaudeSession } from "../../lib/api";
 import { humanizeIdentifier } from "../../lib/prove";
-import { intentTypeChip } from "../../lib/intentTypeLabels";
+import { intentTypeChip } from "@shared/intentTypeLabels";
 import { StoryMarkdown } from "../story/StoryMarkdown";
 import { AgentBadge } from "../agent/AgentBadge";
 import { Button } from "../ui/button";
 import { goToTrace } from "../trace/traceRoute";
-import { sentenceCase } from "../../lib/textCase";
+import { sentenceCase } from "@shared/textCase";
 import {
   changeCounts,
   changeSummary,
   safetyLine,
   type SafetyTone,
-} from "../../lib/changeSafety";
+} from "@shared/changeSafety";
 import {
   deriveAskedSaid,
   deriveNodes,

@@ -15,6 +15,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type FileContent } from "./api";
+import { readFile as readFileWherever, writeFile as writeFileWherever } from "./place/workApi";
 import { clearAgentTerminalTitle } from "./agentTerminalTitles";
 import { languageSlugForPath } from "./monacoLanguage";
 import {
@@ -2338,7 +2339,7 @@ async function reloadFromDisk(path: string) {
   const cur = state.files[idx];
   let content;
   try {
-    content = await api.readFile(path);
+    content = await readFileWherever(path);
   } catch {
     return;
   }
@@ -2377,7 +2378,9 @@ async function readOrSeed(
   seed: string | undefined,
 ): Promise<FileContent> {
   try {
-    return await api.readFile(path);
+    // Wherever the file is: a workspace standing in a machine reads it off
+    // the box, in the same shape (AURA-1306).
+    return await readFileWherever(path);
   } catch (e) {
     if (seed === undefined) throw e;
     return {
@@ -3140,7 +3143,7 @@ async function saveActive() {
   const active = state.files.find((f) => f.path === state.activePath);
   if (!active) return;
   if (active.current === active.baseline) return;
-  await api.writeFile(active.path, active.current);
+  await writeFileWherever(active.path, active.current);
   // Promote current to new baseline so dirty flips off and the diff
   // baseline updates to match disk.
   const idx = state.files.findIndex((f) => f.path === active.path);
@@ -4077,7 +4080,7 @@ function splitWithEmpty(
  *  that wraps the previous full pane alongside the new file. */
 async function openFileSplit(path: string, direction: WorkSplitDirection): Promise<void> {
   if (!state.files.find((f) => f.path === path)) {
-    const content = await api.readFile(path);
+    const content = await readFileWherever(path);
     const name = path.split("/").pop() ?? path;
     const file: OpenFile = {
       path,
@@ -5409,7 +5412,10 @@ function layoutWithRef(ref: WorkPaneRef): WorkSplitTree {
   };
 }
 
-function focusOrAppendRef(ref: WorkPaneRef): void {
+/** Open (or focus) a workpane by ref, seeding a split layout when none
+ *  exists. Exported for the no-layout tab strip's "+" launcher — the one
+ *  state where there is no leaf to `addTabToPane` into. */
+export function focusOrAppendRef(ref: WorkPaneRef): void {
   setState({
     ...state,
     splitLayout: layoutWithRef(ref),
@@ -5504,6 +5510,10 @@ export function openRemoteWorkspace(entry: {
   machineId?: string;
   threadKey?: string;
   repoRoot?: string;
+  /** The worktree ON THE MACHINE the work lives in, when it is not the
+   *  machine's main checkout — what a launched workspace hands over so its
+   *  files, changes and git are read from the branch the agent is on. */
+  remoteRoot?: string;
 }): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(

@@ -8,6 +8,7 @@
 // can demux back to the bridge when dispatching events.
 
 import { useRef, type ReactNode } from "react";
+import { PanelActiveContext } from "../../lib/panelActive";
 import { PluginSandboxFrame } from "../plugins/PluginSandboxFrame";
 
 export type BuiltinRightRailTab =
@@ -143,6 +144,36 @@ const ICON = {
   ),
 } as const;
 
+/** One tab body. `mounted` is the once-seen-stays rule below; `active` is
+ *  whether it is the tab you are looking at right now.
+ *
+ *  Kept mounted is not the same as kept running. A body behind another tab
+ *  holds its scroll, its half-typed message and its selection — that is why it
+ *  stays — but its polls have nothing to keep current, and they used to run
+ *  forever anyway. `PanelActiveContext` is how the rail says "you're parked"
+ *  without unmounting; a poll that reads it stops while hidden and catches up
+ *  the moment the tab comes back. Every body goes through here so a tab added
+ *  later cannot quietly reintroduce a background timer. */
+function RailBody({
+  active,
+  children,
+}: {
+  active: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <PanelActiveContext.Provider value={active}>
+      <div
+        className={
+          active ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"
+        }
+      >
+        {children}
+      </div>
+    </PanelActiveContext.Provider>
+  );
+}
+
 export function RightRail({
   activeTab,
   onChangeTab,
@@ -267,41 +298,24 @@ export function RightRail({
         </div>
       </div>
       {filesView != null && opened("files") && (
-        <div className={activeTab === "files" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"}>
-          {filesView}
-        </div>
+        <RailBody active={activeTab === "files"}>{filesView}</RailBody>
       )}
       {changesView != null && opened("changes") && (
-        <div className={activeTab === "changes" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"}>
-          {changesView}
-        </div>
+        <RailBody active={activeTab === "changes"}>{changesView}</RailBody>
       )}
       {checksView != null && opened("checks") && (
-        <div className={activeTab === "checks" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"}>
-          {checksView}
-        </div>
+        <RailBody active={activeTab === "checks"}>{checksView}</RailBody>
       )}
       {commonsView != null && opened("commons") && (
-        <div className={activeTab === "commons" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"}>
-          {commonsView}
-        </div>
+        <RailBody active={activeTab === "commons"}>{commonsView}</RailBody>
       )}
       {scribbleView != null && opened("scribble") && (
-        <div className={activeTab === "scribble" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"}>
-          {scribbleView}
-        </div>
+        <RailBody active={activeTab === "scribble"}>{scribbleView}</RailBody>
       )}
       {pluginPanels
         .filter((p) => opened(p.id))
         .map((p) => (
-          <div
-            key={p.id}
-            className={
-              activeTab === p.id
-                ? "flex-1 min-h-0 flex flex-col overflow-hidden"
-                : "hidden"
-            }
-          >
+          <RailBody key={p.id} active={activeTab === p.id}>
             {/* A plugin panel is a sandboxed iframe running someone else's
                 code. Mounting one for a tab nobody opened is worse than the
                 cost — it runs a third party on your machine unasked. */}
@@ -311,12 +325,10 @@ export function RightRail({
               title={p.title}
               entry={p.entry}
             />
-          </div>
+          </RailBody>
         ))}
       {browserView != null && opened("browser") && (
-        <div className={activeTab === "browser" ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"}>
-          {browserView}
-        </div>
+        <RailBody active={activeTab === "browser"}>{browserView}</RailBody>
       )}
     </div>
   );

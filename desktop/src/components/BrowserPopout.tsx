@@ -105,14 +105,24 @@ export function BrowserPopout({ tabId, initialUrl }: { tabId: string; initialUrl
     return () => un?.();
   }, [tabId]);
 
+  // AUDIT-UI-02: the spinner used to be unbounded — it was cleared only
+  // by a native state event that never arrives when the navigate call
+  // itself fails. A failed navigate now clears it directly, and the
+  // deadline below caps the wait when no state event ever lands.
   const submitAddr = (e: React.FormEvent) => {
     e.preventDefault();
     const target = normalizeUrl(addr);
     if (!target) return;
-    void browserNavigate(tabId, target);
     setLoading(true);
+    void browserNavigate(tabId, target).catch(() => setLoading(false));
     (e.target as HTMLFormElement).querySelector("input")?.blur();
   };
+
+  useEffect(() => {
+    if (!loading) return;
+    const id = window.setTimeout(() => setLoading(false), 30_000);
+    return () => window.clearTimeout(id);
+  }, [loading]);
 
   return (
     <div className="flex-1 min-h-0 flex flex-col bg-bg-1 overflow-hidden">

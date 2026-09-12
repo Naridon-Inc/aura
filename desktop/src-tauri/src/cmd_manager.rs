@@ -26,7 +26,7 @@ use crate::cli_bridge::{BridgeRegistry, PlanDecision};
 use crate::manager::{
     self, ChatRole, ChatTurn, ManagerSession, ManagerStatus, ManagerTask, ManagerTaskStatus,
     OverrideMode, PendingPlan, PendingQuestion, ProjectRef, RibbonEvent, brain, chat, persist,
-    prompt, summarize_objective, team, tick, worktree,
+    prompt, session_card, summarize_objective, team, tick, worktree,
 };
 use tauri::Manager as _;
 
@@ -2094,19 +2094,33 @@ pub async fn manager_decide_plan(
         // without this the plan's todos land on neither. Best-effort,
         // local-only, never blocks the build; skipped without a root.
         if let (Some(plan), Some(root)) = (plan_snapshot.as_ref(), project_root.as_ref()) {
-            mirror_plan_to_board(root, plan).await;
-            // Crew becomes the runner. Now that the plan's tasks are on the
-            // board and synced into the loop graph, hand them straight to the
-            // Crew runner so Build *immediately* starts the work — real coding
-            // agents in dependency order, with live status / retry / proof in
-            // the Build rail — instead of the old invisible brain subagent
-            // fan-out the user couldn't see or steer. Serial plans run one
-            // task at a time; Auto/Parallel fan out across worktrees.
+            let handoff = mirror_plan_to_board(root, plan).await;
+            // Crew becomes the runner — but ONLY for this plan's own leaves
+            // (WRK-02). The mirror lands every card as `planned` (visible,
+            // not queued), then explicitly offers the plan's runnable leaves
+            // and hands the crew a run scoped to the plan's goal tag and
+            // capped at exactly that count. Build clicking can therefore
+            // never drain the whole graph's ready set — the old mass
+            // dispatch, where one Build started an agent on every backlog
+            // card the board sync had armed. Serial plans run one task at a
+            // time; Auto/Parallel fan out across worktrees.
             let jobs_override = match resolved_parallelism.unwrap_or(plan.parallelism) {
                 crate::manager::PlanParallelism::Serial => Some(1usize),
                 _ => None,
             };
-            autostart_crew(&app, root, jobs_override).await;
+            match handoff {
+                Some(h) if h.offered > 0 => {
+                    autostart_crew(&app, root, jobs_override, h).await;
+                }
+                _ => {
+                    // Nothing offerable (mirror failed, or every leaf was a
+                    // grouping). The cards still stand as the visible
+                    // plan-of-record for a later manual offer + Run.
+                    eprintln!(
+                        "aura-shell: plan Build — no runnable leaves offered; crew not started"
+                    );
+                }
+            }
         }
         PlanDecision::Build {
             a2a_task_ids: result.todo_task_ids,
@@ -2182,14 +2196,27 @@ fn first_line_clamped(s: &str, max: usize) -> String {
 /// neither. One epic (the plan) + one child task per todo, then a single
 /// `loop_sync_board` so Crew renders them without a manual "Sync from
 /// board". All best-effort: a failed leg is skipped, never fatal — the
-/// build proceeds regardless. Execution still flows through the brain's
-/// subagent dispatch; these rows are the visible plan-of-record.
-async fn mirror_plan_to_board(repo_root: &str, plan: &PendingPlan) {
+/// build proceeds regardless.
+///
+/// WRK-02: the board sync lands every card as `planned` — visible, never
+/// queued — so this function is also where the plan's runnable leaves get
+/// *explicitly* offered into the crew queue. Every card carries a
+/// `goal:plan-<id>` label (which the sync copies into the graph node's
+/// tags), and after the sync we `offer()` exactly the nodes wearing that
+/// tag. Containers and acceptance-less nodes refuse the offer at the
+/// gate. The returned handoff (goal tag + offered count) lets the Build
+/// flow start a crew run scoped and capped to precisely this plan's work,
+/// instead of draining whatever else the graph holds.
+async fn mirror_plan_to_board(repo_root: &str, plan: &PendingPlan) -> Option<PlanCrewHandoff> {
     use crate::cmd_tasks::{tasks_create, CreateTaskInput};
 
     if plan.todos.is_empty() {
-        return;
+        return None;
     }
+
+    let goal = plan_goal_slug(&plan.id);
+    let goal_label = format!("goal:{goal}");
+    let labels = vec!["plan".to_string(), goal_label.clone()];
 
     let objective = plan
         .objective
@@ -2216,7 +2243,7 @@ async fn mirror_plan_to_board(repo_root: &str, plan: &PendingPlan) {
             description: epic_description,
             objective,
             is_epic: true,
-            labels: vec!["plan".to_string()],
+            labels: labels.clone(),
             ..Default::default()
         },
     )
@@ -2251,6 +2278,10 @@ async fn mirror_plan_to_board(repo_root: &str, plan: &PendingPlan) {
                     .map(str::to_string),
                 agent_assignee: todo.agent.clone(),
                 assignee: todo.assignee.clone(),
+                // Structured acceptance rides the card into the graph so the
+                // execution gate can pass this node when it's offered (WRK-02).
+                acceptance: (!todo.acceptance.is_empty())
+                    .then(|| todo.acceptance.join("\n")),
                 parent_id: epic_id.clone(),
                 epic_id: epic_id.clone(),
                 // A todo that splits into sub-steps is a grouping the Crew does
@@ -2259,7 +2290,7 @@ async fn mirror_plan_to_board(repo_root: &str, plan: &PendingPlan) {
                 // the sub-steps below become the runnable leaves. A leaf todo
                 // (no subtasks) stays a normal runnable task, as before.
                 is_epic: has_subs,
-                labels: vec!["plan".to_string()],
+                labels: labels.clone(),
                 ..Default::default()
             },
         )
@@ -2300,9 +2331,11 @@ async fn mirror_plan_to_board(repo_root: &str, plan: &PendingPlan) {
                             .filter(|s| !s.is_empty())
                             .map(str::to_string),
                         agent_assignee: sub.agent.clone().or_else(|| todo.agent.clone()),
+                        acceptance: (!sub.acceptance.is_empty())
+                            .then(|| sub.acceptance.join("\n")),
                         parent_id: Some(t.id.clone()),
                         epic_id: epic_id.clone().or_else(|| Some(t.id.clone())),
-                        labels: vec!["plan".to_string()],
+                        labels: labels.clone(),
                         ..Default::default()
                     },
                 )
@@ -2323,8 +2356,49 @@ async fn mirror_plan_to_board(repo_root: &str, plan: &PendingPlan) {
     }
 
     // Project the new board cards into the loop graph Crew renders. Keyed
-    // on board_task_id, so re-running is idempotent.
+    // on board_task_id, so re-running is idempotent. The projection lands
+    // everything as `planned` (visible, not queued).
     let _ = crate::cmd_loop::loop_sync_board(repo_root.to_string()).await;
+
+    // Explicitly offer THIS plan's runnable leaves into the queue — the
+    // one deliberate act that arms work for the crew. `offer()` refuses
+    // containers (KIND_PLAN) and acceptance-less planning nodes, so a
+    // grouping todo stays a grouping and only real leaves queue up.
+    let graph = aura_loop::LoopGraph::at(std::path::Path::new(repo_root));
+    let offered = graph
+        .index()
+        .values()
+        .filter(|t| t.tags.iter().any(|tag| tag == &goal_label))
+        .filter(|t| graph.offer(&t.id).is_ok())
+        .count();
+
+    Some(PlanCrewHandoff { goal, offered })
+}
+
+/// What the plan mirror hands the Build flow: the `goal` slug scoping this
+/// plan's nodes in the loop graph (tagged `goal:<slug>`) plus how many
+/// runnable leaves were explicitly offered into the crew queue. WRK-02 —
+/// Build starts agents on exactly these, never the whole ready set.
+pub(crate) struct PlanCrewHandoff {
+    pub goal: String,
+    pub offered: usize,
+}
+
+/// Stable goal slug for a plan's crew scope: `plan-<sanitized id>`. Keeps
+/// [a-z0-9-], lowercased, so it survives the tag → `--goal` round trip.
+fn plan_goal_slug(plan_id: &str) -> String {
+    let slug: String = plan_id
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "plan-unnamed".to_string()
+    } else {
+        format!("plan-{slug}")
+    }
 }
 
 /// Compose a board-task body from the step text plus its goal + verify plan,
@@ -2402,7 +2476,16 @@ async fn attach_goal(
 /// so this never stalls the Build click. A missing dispatcher state or an empty
 /// ready set is a quiet no-op: the board rows still stand as the plan-of-record
 /// for a later manual Run.
-async fn autostart_crew(app: &AppHandle, repo_root: &str, jobs_override: Option<usize>) {
+///
+/// WRK-02: the run is scoped to the plan's own goal tag and capped at the
+/// number of leaves the mirror just offered — one Build click can start at
+/// most this plan's work, never the graph's whole ready set.
+async fn autostart_crew(
+    app: &AppHandle,
+    repo_root: &str,
+    jobs_override: Option<usize>,
+    handoff: PlanCrewHandoff,
+) {
     use tauri::Manager as _;
     let Some(state) =
         app.try_state::<Arc<crate::manager::dispatcher::DispatcherState>>()
@@ -2414,9 +2497,9 @@ async fn autostart_crew(app: &AppHandle, repo_root: &str, jobs_override: Option<
         app.clone(),
         state.inner().clone(),
         repo_root.to_string(),
-        None,
+        Some(handoff.offered),
         jobs_override,
-        None,
+        Some(handoff.goal),
         None,
     )
     .await
@@ -2647,6 +2730,11 @@ async fn mint_a2a_tasks_for_plan(
         branch: branch.clone(),
         tags: plan_tags,
         assignee: None,
+        // WRK-02: cloud mirror rows are visibility, not work — `planned`
+        // keeps them out of every runner's `?status=submitted` poll. The
+        // runnable copies live on the local board/graph and are offered
+        // explicitly by `mirror_plan_to_board`.
+        status: Some("planned".to_string()),
     })
     .await;
 
@@ -2708,6 +2796,7 @@ async fn mint_a2a_tasks_for_plan(
                 branch: branch.clone(),
                 tags: wave_tags,
                 assignee: None,
+                status: Some("planned".to_string()),
             })
             .await;
             waves.push(id);
@@ -2855,6 +2944,7 @@ async fn mint_a2a_tasks_for_plan(
             branch: branch.clone(),
             tags: todo_tags,
             assignee: todo.assignee.clone(),
+            status: Some("planned".to_string()),
         })
         .await;
         if let Some(id) = id {
@@ -2882,6 +2972,11 @@ struct CreateArgs {
     /// `assignee_user_id`. None = task is unassigned (the dispatching
     /// developer implicitly owns it).
     assignee: Option<String>,
+    /// WRK-02 — initial lifecycle state. `Some("planned")` mints a
+    /// visibility row that cloud runners polling `?status=submitted`
+    /// never pick up; None keeps the server default (`submitted`, the
+    /// executable queue).
+    status: Option<String>,
 }
 
 async fn create_a2a_task(args: CreateArgs) -> Option<String> {
@@ -2958,6 +3053,9 @@ async fn create_a2a_task(args: CreateArgs) -> Option<String> {
     }
     if let Some(ref a) = args.assignee {
         cmd.args(["--assignee", a]);
+    }
+    if let Some(ref s) = args.status {
+        cmd.args(["--status", s]);
     }
     cmd.arg("--json");
 
@@ -3718,7 +3816,7 @@ async fn spawn_task(
     // to the main project_root — the task still runs, just without
     // isolation. Failure surfaces in `output` for post-mortem.
     let task_cwd = if !zones.is_empty() {
-        match worktree::create(&project_root, &session_id, task_id) {
+        match worktree::create(&project_root, &session_id, task_id, &description) {
             Ok(path) => {
                 let mut s = state.lock().unwrap();
                 if let Some(t) = s.task_mut(task_id) {

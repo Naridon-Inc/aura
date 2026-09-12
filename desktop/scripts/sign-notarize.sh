@@ -54,6 +54,37 @@ fi
 IDENTITY="Developer ID Application: Aikolumi Software Private Limited (A5S8X4RCAS)"
 ENTITLEMENTS="src-tauri/entitlements.plist"
 
+# Submit to notarytool and require Apple's explicit "status: Accepted" verdict.
+# `notarytool submit --wait` can exit 0 while the verdict is Invalid; without
+# this check the failure surfaces later as an opaque stapler error with the
+# real reason (the notarization log) never shown.
+notarize_or_die() {
+  local artifact="$1" label="$2"
+  local out id status
+  out="$(xcrun notarytool submit "$artifact" \
+    --apple-id "$APPLE_ID" \
+    --password "$APPLE_PASSWORD" \
+    --team-id "$APPLE_TEAM_ID" \
+    --wait 2>&1 | tee /dev/stderr)" || {
+    echo "✗ FATAL: notarytool submit failed for $label"
+    exit 1
+  }
+  id="$(printf '%s\n' "$out" | awk '/^[[:space:]]*id:/ {print $2; exit}')"
+  status="$(printf '%s\n' "$out" | awk '/^[[:space:]]*status:/ {print $2}' | tail -1)"
+  if [ "$status" != "Accepted" ]; then
+    echo "✗ FATAL: notarization of $label was not accepted (status: ${status:-unknown})"
+    if [ -n "$id" ]; then
+      echo "▸ fetching notarization log for $id"
+      xcrun notarytool log "$id" \
+        --apple-id "$APPLE_ID" \
+        --password "$APPLE_PASSWORD" \
+        --team-id "$APPLE_TEAM_ID" || true
+    fi
+    exit 1
+  fi
+  echo "✓ $label notarization accepted (id: ${id:-unknown})"
+}
+
 # ── Clear the kernel code-signing cache lock ───────────────────────────────
 # `bun tauri build` already Developer-ID-signs the .app. We then cp
 # aura-shell-mcp + aura into Contents/MacOS, so the bundle must be re-signed.
@@ -116,11 +147,7 @@ else
   ditto -c -k --keepParent "$APP" "$ZIP"
 
   echo "▸ submitting to notarytool (waits until Apple is done)"
-  xcrun notarytool submit "$ZIP" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_PASSWORD" \
-    --team-id "$APPLE_TEAM_ID" \
-    --wait
+  notarize_or_die "$ZIP" "app"
 
   rm -f "$ZIP"
 
@@ -144,11 +171,7 @@ codesign --force --timestamp --sign "$IDENTITY" "$DMG"
 
 if [ "${SKIP_NOTARIZE:-0}" != "1" ]; then
   echo "▸ notarizing DMG"
-  xcrun notarytool submit "$DMG" \
-    --apple-id "$APPLE_ID" \
-    --password "$APPLE_PASSWORD" \
-    --team-id "$APPLE_TEAM_ID" \
-    --wait
+  notarize_or_die "$DMG" "DMG"
   xcrun stapler staple "$DMG"
 fi
 

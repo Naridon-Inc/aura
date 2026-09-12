@@ -1,0 +1,23 @@
+<!doctype html>
+<!--
+  Visual harness for the shared session transcript.
+
+  Dev-server only: Vite's build input is index.html, so this page never
+  reaches a bundle. `bun run dev` serves it at /transcript-harness.html.
+
+  It renders the SAME TranscriptView the desktop's SessionTranscript and the
+  web console's session detail render, fed a fixture stream — so a screenshot
+  of this page IS the desktop transcript, pixel for pixel, without needing a
+  Tauri window (whose WKWebView layer screencapture cannot composite).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Transcript harness</title>
+  </head>
+  <body>
+    <div id="transcript-harness"></div>
+    <script type="module" src="/src/components/workpanes/transcript/__harness__/main.tsx"></script>
+  </body>
+</html>

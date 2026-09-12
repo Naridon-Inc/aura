@@ -28,7 +28,8 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { api, type PrSummary } from "../../lib/api";
+import type { PrSummary } from "../../lib/api";
+import { prWhoami } from "../../lib/prApi";
 import {
   fetchPrList,
   getPrListCached,
@@ -46,7 +47,7 @@ import {
 import { Button } from "../ui/button";
 import { EmptyState, ErrorState, LoadingState } from "../ui/state";
 import { relativeAgeFromIso } from "../../lib/relativeTime";
-import { sentenceCase } from "../../lib/textCase";
+import { sentenceCase } from "@shared/textCase";
 
 // Shared filter state — the InboxPane's bucket list and the
 // InboxSidebar (mounted in the app's left sidebar slot when PR surface
@@ -144,7 +145,7 @@ export function InboxPane({ repoRoot, onClose }: Props) {
           : fetchPrList(repoRoot);
         const [list, who] = await Promise.all([
           listP,
-          api.prWhoami(repoRoot).catch(() => ""),
+          prWhoami(repoRoot).catch(() => ""),
         ]);
         setPrs(list);
         setViewer(who);
@@ -334,7 +335,7 @@ export function InboxSidebar({
           : fetchPrList(repoRoot);
         const [list, who] = await Promise.all([
           listP,
-          api.prWhoami(repoRoot).catch(() => ""),
+          prWhoami(repoRoot).catch(() => ""),
         ]);
         setPrs(list);
         setViewer(who);

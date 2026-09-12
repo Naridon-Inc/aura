@@ -14,8 +14,14 @@ import { applyUpdate, checkForUpdate } from "../lib/updater";
 import { getVersion } from "@tauri-apps/api/app";
 import { useDismiss } from "../lib/useDismiss";
 import { formatMegabytes } from "../lib/bytes";
+// AURA-1298
+import { DiskLowWarning } from "./topbar/DiskLowWarning";
 import { percent } from "../lib/percent";
 import { askConfirm } from "./ui/ask";
+// AURA-1294
+import { machineIdForRoot, useActiveMachine } from "../lib/activeMachine";
+import { PortsPopover } from "./place/PortsPopover";
+// end AURA-1294
 
 /**
  * Move the window from a mousedown on a chrome strip.
@@ -126,14 +132,57 @@ export function PaneToggles({
   terminalOpen,
   onToggleReview,
   onToggleTerminal,
+  repoRoot,
 }: {
   reviewOpen: boolean;
   terminalOpen: boolean;
   onToggleReview?: () => void;
   onToggleTerminal?: () => void;
+  // AURA-1294 — the workspace on screen, so Ports knows which place to ask.
+  repoRoot?: string | null;
 }) {
+  // AURA-1294 — Ports is only offered when the workspace runs on a machine
+  // other than this laptop; here, its ports are already here.
+  const active = useActiveMachine();
+  const portsMachine = machineIdForRoot(repoRoot) ?? active.machineId;
+  // end AURA-1294
   return (
     <div className="flex items-center gap-1 px-2 bg-bg-chrome border-b border-line-soft text-text-3">
+      {/* AURA-1294 */}
+      {portsMachine && (
+        <PortsPopover
+          machineId={portsMachine}
+          repoRoot={repoRoot}
+          trigger={({ active: open, onClick, badge, title }) => (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <ChromeBtn
+                  title={title}
+                  active={open}
+                  onClick={onClick}
+                  tooltip
+                  className="relative !w-auto gap-1 px-1.5 text-[11px]"
+                >
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                    <rect x="1.5" y="5.5" width="13" height="6" rx="1.5" stroke="currentColor" />
+                    <line x1="5" y1="5.5" x2="5" y2="2.5" stroke="currentColor" strokeWidth="1.2" />
+                    <line x1="11" y1="5.5" x2="11" y2="2.5" stroke="currentColor" strokeWidth="1.2" />
+                    <line x1="8" y1="11.5" x2="8" y2="14" stroke="currentColor" strokeWidth="1.2" />
+                  </svg>
+                  Ports
+                  {badge > 0 && (
+                    <span className="rounded-full bg-accent/15 px-1 font-mono text-[10px] leading-4 text-accent">
+                      {badge}
+                    </span>
+                  )}
+                </ChromeBtn>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">{title}</TooltipContent>
+            </Tooltip>
+          )}
+        />
+      )}
+      {/* end AURA-1294 */}
       <Tooltip>
         <TooltipTrigger asChild>
           <ChromeBtn
@@ -442,6 +491,8 @@ export function ResourcePill({
               value={snap ? `${snap.app_share_percent.toFixed(2)}%` : "—"}
             />
           </div>
+          {/* AURA-1298 — only renders when the workspace's volume is nearly full. */}
+          <DiskLowWarning snap={snap} />
           <div className="px-3 pt-2 pb-1">
             <div className="section-label">
               Aura processes

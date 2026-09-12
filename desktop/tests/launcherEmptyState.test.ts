@@ -124,7 +124,9 @@ describe("start something new / earlier sessions", () => {
     // root comes back as an empty REPL with none of the transcript in it.
     const src = await readSrc("components/launcher/earlierSessions.tsx");
     expect(src).toContain("const cwd = resumeCwdOf(s, repoRoot)");
-    expect(src).toMatch(/agentPtyOpen\(\s*"claude",\s*cwd,/);
+    // Through the shared guarded launch — same folder, and now the same claim
+    // that stops two surfaces opening one conversation twice.
+    expect(src).toMatch(/startResume\(\{\s*repoRoot,\s*cwd,\s*sessionId: s\.session_id,/);
     // The tab is bound to the conversation it reopened, so its own restarts
     // resume THIS thread rather than the repo's newest.
     expect(src).toContain("resumeSessionId: s.session_id");

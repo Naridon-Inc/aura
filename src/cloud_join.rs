@@ -18,14 +18,9 @@ use crate::live_events::repo_name;
 pub fn join_team(org_slug: &str, repo_override: Option<&str>) -> Result<(), String> {
     let mut config = ConfigManager::load();
 
-    let cloud_url = config
-        .cloud_url
-        .clone()
+    let cloud_url = crate::cloud_endpoint::origin(config.cloud_url.as_deref())
         .ok_or_else(|| "no cloud_url — run `aura connect` first".to_string())?;
-    let token = config
-        .cloud_api_token
-        .clone()
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "no cloud_api_token — run `aura connect` first".to_string())?;
 
     let client = reqwest::blocking::Client::builder()
@@ -135,7 +130,14 @@ pub fn join_team(org_slug: &str, repo_override: Option<&str>) -> Result<(), Stri
             );
         }
         Err(e) => {
-            println!("  {} Bootstrap failed ({}) — will retry on next sync", "⚠".yellow(), e);
+            // WRK-03: membership is persisted (so a re-run is idempotent),
+            // but a join whose bootstrap failed is a HALF-join — .aura/ was
+            // never hydrated. Say so and fail, instead of printing "Joined"
+            // and exiting 0 over an empty workspace.
+            return Err(format!(
+                "joined {} but bootstrap failed: {} — membership is saved; re-run `aura team join {}` to hydrate, or wait for the next sync",
+                org_slug, e, org_slug
+            ));
         }
     }
 

@@ -11,8 +11,13 @@
 // lib/changeNoteCache.ts — window-lifetime, no eviction (listings are small and
 // the set of dirs a user @-browses in a session is modest).
 
-import { api } from "./api";
 import type { DirEntry } from "./api";
+import { listDir, pathScope } from "./place/workApi";
+
+// Every map below is keyed by `pathScope(absPath)`, not the path: the same
+// project path names a different folder on this laptop and on a machine the
+// window is standing in, and a listing read from one must never paint for
+// the other (AURA-1306).
 
 // Last resolved listing per absolute dir path — the instant-paint source.
 const resolved = new Map<string, DirEntry[]>();
@@ -31,26 +36,26 @@ const epoch = new Map<string, number>();
  *  was never fetched/warmed. Lets a caller paint immediately before it
  *  revalidates via {@link loadDirList}. */
 export function peekDirList(absPath: string): DirEntry[] | undefined {
-  return resolved.get(absPath);
+  return resolved.get(pathScope(absPath));
 }
 
 /** Fetch a directory listing, deduping concurrent reads and caching the
  *  resolved payload for later instant paints. Always hits the backend when no
  *  fetch is already in flight, so callers that revalidate stay fresh. */
 export function loadDirList(absPath: string): Promise<DirEntry[]> {
-  const existing = inflight.get(absPath);
+  const key = pathScope(absPath);
+  const existing = inflight.get(key);
   if (existing) return existing;
-  const mine = epoch.get(absPath) ?? 0;
-  const p = api
-    .listDir(absPath)
+  const mine = epoch.get(key) ?? 0;
+  const p = listDir(absPath)
     .then((entries) => {
       // Only store this if the folder hasn't been declared changed since we
       // started. Within one epoch there is at most one read in flight per path
       // — a second caller joins the first — so passing this check also means
       // the in-flight slot is ours to clear.
-      if ((epoch.get(absPath) ?? 0) === mine) {
-        resolved.set(absPath, entries);
-        inflight.delete(absPath);
+      if ((epoch.get(key) ?? 0) === mine) {
+        resolved.set(key, entries);
+        inflight.delete(key);
       }
       return entries;
     })
@@ -58,10 +63,10 @@ export function loadDirList(absPath: string): Promise<DirEntry[]> {
       // Here the identity check is load-bearing: a read that fails *after*
       // being superseded would otherwise clear the replacement's slot, and the
       // next caller would start a third read of a directory already being read.
-      if (inflight.get(absPath) === p) inflight.delete(absPath);
+      if (inflight.get(key) === p) inflight.delete(key);
       throw e;
     });
-  inflight.set(absPath, p);
+  inflight.set(key, p);
   return p;
 }
 
@@ -74,14 +79,16 @@ export function loadDirList(absPath: string): Promise<DirEntry[]> {
  *  then sees the file they just made missing, which is indistinguishable from
  *  the create having failed. */
 export function reloadDirList(absPath: string): Promise<DirEntry[]> {
-  epoch.set(absPath, (epoch.get(absPath) ?? 0) + 1);
-  inflight.delete(absPath);
+  const key = pathScope(absPath);
+  epoch.set(key, (epoch.get(key) ?? 0) + 1);
+  inflight.delete(key);
   return loadDirList(absPath);
 }
 
 /** Best-effort pre-fetch — populate the cache for `absPath` unless it is
  *  already warm or loading. Errors are swallowed; warming must never throw. */
 export function warmDirList(absPath: string): void {
-  if (resolved.has(absPath) || inflight.has(absPath)) return;
+  const key = pathScope(absPath);
+  if (resolved.has(key) || inflight.has(key)) return;
   void loadDirList(absPath).catch(() => {});
 }

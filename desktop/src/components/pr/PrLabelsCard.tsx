@@ -10,7 +10,8 @@
 // missing or malformed we fall back to a neutral chip.
 
 import { useEffect, useRef, useState } from "react";
-import { api, type PrLabel } from "../../lib/api";
+import type { PrLabel } from "../../lib/api";
+import { prLabelsList, prLabelsSet } from "../../lib/prApi";
 import { invalidatePrList, patchCachedPr } from "../../lib/prsCache";
 import { invalidatePrDetail } from "../../lib/prDetailCache";
 import { Button } from "../ui/button";
@@ -43,7 +44,7 @@ export function PrLabelsCard({
 
   const onSet = async (names: string[]) => {
     try {
-      await api.prLabelsSet(repoRoot, prNumber, names);
+      await prLabelsSet(repoRoot, prNumber, names);
       // Optimistic update so the chip list reflects the picker's
       // selection while the parent's prList re-fetches.
       const next = (() => {
@@ -176,8 +177,7 @@ function LabelPicker({
 
   useEffect(() => {
     let cancelled = false;
-    api
-      .prLabelsList(repoRoot)
+    prLabelsList(repoRoot)
       .then((list) => {
         if (!cancelled) setAll(list);
       })

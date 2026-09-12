@@ -27,6 +27,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, type CloudPlacement } from "./api";
 import { fetchPrList } from "./prsCache";
 import { fetchWorktreeDiffs } from "./worktreeDiffCache";
+import { useDocumentVisibility } from "./useDocumentVisibility";
 
 export type WorktreeBadge = {
   added: number;
@@ -46,10 +47,41 @@ type WorktreeGroup = {
 
 const REFRESH_MS = 30_000;
 
+/** Same badges? Compares the marks a row actually draws, keyed by path.
+ *
+ *  Every refresh builds a fresh object, so handing it straight to `setBadges`
+ *  re-rendered the whole roster twice a minute whether or not a single number
+ *  had moved. */
+function sameBadges(
+  a: Record<string, WorktreeBadge>,
+  b: Record<string, WorktreeBadge>,
+): boolean {
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  for (const path of ka) {
+    const x = a[path];
+    const y = b[path];
+    if (
+      !y ||
+      x.added !== y.added ||
+      x.removed !== y.removed ||
+      x.changedFiles !== y.changedFiles ||
+      x.pr?.number !== y.pr?.number ||
+      x.pr?.state !== y.pr?.state ||
+      x.cloud?.branch !== y.cloud?.branch ||
+      x.cloud?.status !== y.cloud?.status
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function useWorktreeBadges(
   groups: WorktreeGroup[],
 ): Record<string, WorktreeBadge> {
   const [badges, setBadges] = useState<Record<string, WorktreeBadge>>({});
+  const visible = useDocumentVisibility();
 
   // Stable dependency: the set of (root, path, branch) tuples. Re-runs
   // only when a worktree is added/removed or a branch changes, not on
@@ -100,7 +132,7 @@ export function useWorktreeBadges(
                 ...(was?.cloud ? { cloud: was.cloud } : null),
               };
             }
-            return carried;
+            return sameBadges(prev, carried) ? prev : carried;
           });
         }
         return next;
@@ -184,17 +216,22 @@ export function useWorktreeBadges(
       }
 
       // Drop stale results if the worktree set changed mid-flight.
-      if (!cancelled && latest.current === key) setBadges(merged);
+      if (!cancelled && latest.current === key) {
+        setBadges((cur) => (sameBadges(cur, merged) ? cur : merged));
+      }
     }
 
     run();
-    const id = setInterval(run, REFRESH_MS);
+    // Hidden window → no interval. The effect re-runs when `visible` flips
+    // back, so returning to the app refreshes the roster right away rather
+    // than showing whatever it last painted until the next tick.
+    const id = visible ? setInterval(run, REFRESH_MS) : null;
     return () => {
       cancelled = true;
-      clearInterval(id);
+      if (id !== null) clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, visible]);
 
   return badges;
 }

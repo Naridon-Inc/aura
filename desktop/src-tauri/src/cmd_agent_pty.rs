@@ -43,8 +43,6 @@ const PTY_HISTORY_CAP: usize = 4 * 1024 * 1024;
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
-// One contract for "start something here", wherever here is — the same seam
-// the chat's tools and the session list already run on.
 use crate::manager::brain::place::Place;
 use crate::manager::brain::place_contract::Open;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -107,9 +105,7 @@ pub struct LiveAgentSession {
 #[derive(Serialize, Clone)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum BlockUpdate {
-    Open {
-        block: BlockEnvelope,
-    },
+    Open { block: BlockEnvelope },
     /// Rewrite the tail of a block: drop its last `drop_lines` lines, then put
     /// `lines` in their place.
     ///
@@ -125,9 +121,7 @@ pub enum BlockUpdate {
         drop_lines: usize,
         lines: Vec<String>,
     },
-    Close {
-        block: BlockEnvelope,
-    },
+    Close { block: BlockEnvelope },
 }
 
 /// What changed between the transcript we last mirrored and the one the
@@ -285,6 +279,9 @@ pub struct AgentPtySession {
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     blocks: Mutex<Vec<BlockEnvelope>>,
+    /// Id of the currently-open block, if any. Set when send_prompt
+    /// opens an Output block; cleared when a ;D marker or a new prompt
+    /// closes it.
     /// A shadow terminal fed the same bytes the child writes, so a block's
     /// text can be *what the screen showed* rather than every byte that
     /// produced it.
@@ -307,9 +304,6 @@ pub struct AgentPtySession {
     /// `current_block_id`. Bounds how far back a repaint is allowed to reach:
     /// a block may rewrite its own tail, never a finished block's.
     block_lines: Mutex<usize>,
-    /// Id of the currently-open block, if any. Set when send_prompt
-    /// opens an Output block; cleared when a ;D marker or a new prompt
-    /// closes it.
     current_block_id: Mutex<Option<String>>,
     agent_id: String,
     repo_root: String,
@@ -380,6 +374,16 @@ pub struct AgentPtyRegistry {
     /// "{agent_id}@{repo_root}" -> session_id, so a second open() on the
     /// same key returns the existing session.
     by_key: Mutex<HashMap<String, String>>,
+    /// Sessions are `Arc`ed so nothing ever needs to hold this map lock
+    /// while doing real work. The map lock guards only membership; every
+    /// reader clones the Arc out and drops the guard before touching the
+    /// session's own field mutexes, emitting to the webview, or waiting
+    /// on the child. This is the invariant that keeps the UI thread
+    /// responsive: the read-loop task used to hold this lock across
+    /// webview emits, and every sync command the frontend fires during a
+    /// window restore/resize/navigation cycle (replay, title, is_alive,
+    /// idle_status) runs on the macOS main thread — one slow emit under
+    /// the guard wedged the whole NSWindow scene while agents streamed.
     /// One in-flight `agent_pty_open` per key. The "is there already a
     /// session for this key" check and the `by_key` insert that publishes
     /// the answer sit far apart, with a CLI spawn in between — so two opens
@@ -394,7 +398,7 @@ pub struct AgentPtyRegistry {
     /// never awaits on the child's output, so it can't turn a quiet agent
     /// into a hung second tab.
     open_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    sessions: Mutex<HashMap<String, AgentPtySession>>,
+    sessions: Mutex<HashMap<String, Arc<AgentPtySession>>>,
     /// Parallel map for daemon-backed sessions. Looked up first by
     /// every mutating command — when present, route to daemon
     /// client; otherwise fall through to the in-process path.
@@ -414,11 +418,30 @@ pub struct AgentSyncInfo {
     pub repo_root: String,
 }
 
+/// Everything the main-thread watchdog persists for one in-process
+/// session before relaunching out of a wedge: enough for the user (or
+/// the next shell instance) to know which agent was running where, and
+/// to read back the conversation so far. The child process itself is
+/// deliberately NOT part of recovery — it is left running.
+pub struct RecoverySessionSnapshot {
+    pub session_id: String,
+    pub agent_id: String,
+    pub repo_root: String,
+    pub blocks: Vec<BlockEnvelope>,
+    /// Tail of the raw PTY stream (capped) — the visible screen plus
+    /// recent scrollback, same bytes `agent_pty_replay_bytes` serves.
+    pub raw_tail: Vec<u8>,
+}
+
 impl AgentPtyRegistry {
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Clone the Arc for one session out from under the map lock. Every
+    /// command and loop goes through this so the guard is held for a
+    /// HashMap probe and nothing else — child waits, field locks and
+    /// emits all happen after the guard is gone.
     /// The open gate for `key`, created on first use. Callers hold the
     /// returned `Arc` while they wait, which is what keeps
     /// [`Self::release_open_gate`] from pruning an entry someone is queued on.
@@ -444,6 +467,57 @@ impl AgentPtyRegistry {
         }
     }
 
+    fn session(&self, session_id: &str) -> Option<Arc<AgentPtySession>> {
+        self.sessions.lock().unwrap().get(session_id).cloned()
+    }
+
+    /// Watchdog-side snapshot for the wedge diagnostic bundle and the
+    /// pre-relaunch transcript dump. Returns the in-process session
+    /// transcripts plus the daemon-backed session count. `try_lock`
+    /// everywhere — this runs while the process is being declared
+    /// wedged, and the reporter must never join the deadlock it is
+    /// reporting; a lock it cannot get is recorded as an absent
+    /// transcript rather than waited on.
+    pub fn recovery_snapshot(&self) -> (Vec<RecoverySessionSnapshot>, usize) {
+        const RAW_TAIL_CAP: usize = 64 * 1024;
+        let mut out = Vec::new();
+        let arcs: Vec<(String, Arc<AgentPtySession>)> = match self.sessions.try_lock() {
+            Ok(map) => map
+                .iter()
+                .map(|(sid, s)| (sid.clone(), Arc::clone(s)))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        for (sid, s) in arcs {
+            let blocks = s
+                .blocks
+                .try_lock()
+                .map(|b| b.clone())
+                .unwrap_or_default();
+            let raw_tail = s
+                .raw_bytes
+                .try_lock()
+                .map(|b| {
+                    let start = b.len().saturating_sub(RAW_TAIL_CAP);
+                    b[start..].to_vec()
+                })
+                .unwrap_or_default();
+            out.push(RecoverySessionSnapshot {
+                session_id: sid,
+                agent_id: s.agent_id.clone(),
+                repo_root: s.repo_root.clone(),
+                blocks,
+                raw_tail,
+            });
+        }
+        let daemon_count = self
+            .daemon_sessions
+            .try_lock()
+            .map(|m| m.len())
+            .unwrap_or(0);
+        (out, daemon_count)
+    }
+
     /// Snapshot of every *live* agent session (in-process + daemon-backed)
     /// for `cloud_session_sync::spawn_session_heartbeat`. In-process sessions
     /// whose child has exited, and daemon sessions whose subscribe loop has
@@ -451,8 +525,17 @@ impl AgentPtyRegistry {
     pub fn live_sessions_for_sync(&self) -> Vec<AgentSyncInfo> {
         let mut out = Vec::new();
         {
-            let sessions = self.sessions.lock().unwrap();
-            for (sid, s) in sessions.iter() {
+            // Arc-snapshot first, then wait on children with the map
+            // unlocked — try_wait is a real waitpid and the heartbeat
+            // must never stall a command that needs the map.
+            let snapshot: Vec<(String, Arc<AgentPtySession>)> = {
+                let sessions = self.sessions.lock().unwrap();
+                sessions
+                    .iter()
+                    .map(|(sid, s)| (sid.clone(), Arc::clone(s)))
+                    .collect()
+            };
+            for (sid, s) in snapshot {
                 let alive = s
                     .child
                     .lock()
@@ -463,7 +546,7 @@ impl AgentPtyRegistry {
                     .is_none();
                 if alive {
                     out.push(AgentSyncInfo {
-                        session_id: sid.clone(),
+                        session_id: sid,
                         agent_id: s.agent_id.clone(),
                         repo_root: s.repo_root.clone(),
                     });
@@ -491,8 +574,13 @@ impl AgentPtyRegistry {
     /// process keeps writing to stdout into a now-disconnected PTY,
     /// eating CPU and leaking sessions until they `pkill` it manually.
     pub fn kill_all(&self) {
-        let mut sessions = self.sessions.lock().unwrap();
-        for (_, sess) in sessions.drain() {
+        // Drain under the lock, kill after — one wedged kill(2) must not
+        // hold the map hostage while the rest of shutdown proceeds.
+        let drained: Vec<Arc<AgentPtySession>> = {
+            let mut sessions = self.sessions.lock().unwrap();
+            sessions.drain().map(|(_, s)| s).collect()
+        };
+        for sess in drained {
             // Group hangup, not a bare SIGKILL of the CLI: a coding agent
             // spawns its own tool subprocesses, and those are what carry on
             // writing into a disconnected PTY when only their parent dies.
@@ -1165,21 +1253,46 @@ pub async fn agent_pty_open(
         let wiring_root = repo_root.clone();
         let mcp_config = crate::blocking::run(move || {
             if wiring_agent == "claude" {
-                let config = ensure_aura_mcp_config();
+                let config = aura_hooks::ensure_shell_mcp_config();
                 // Stamp the per-repo `.claude/settings.local.json` so claude
-                // wires our six hook scripts (SessionStart/Stop/Notification/
-                // PermissionRequest/UserPromptSubmit/PostToolUse) on its own.
-                // Idempotent — re-staging overwrites the script bodies but the
-                // settings merge de-dupes hook entries by exact path match.
-                let _ = ensure_aura_claude_hooks_stamped(&wiring_root);
+                // wires our hook scripts (SessionStart/Stop/Notification/
+                // PermissionRequest/UserPromptSubmit/Pre+PostToolUse) on its
+                // own. Idempotent, and re-staging is how an upgrade reaches a
+                // repo that was wired by an older version.
+                let _ = aura_hooks::stamp_claude_hooks(&wiring_root);
                 config
             } else if wiring_agent == "gemini" {
                 // Gemini uses its own extension system (not settings hooks);
                 // staging into ~/.gemini/extensions/aura-gemini/ is enough for
                 // the CLI to auto-load the extension at startup.
-                let _ = ensure_aura_gemini_extension_stamped();
+                let _ = aura_hooks::stamp_gemini_extension();
                 None
             } else {
+                // Every other CLI is stamped once per machine, not per repo —
+                // that is the only surface codex, kimi, opencode and pi offer.
+                // Doing it here as well as at repo-open costs nothing (each is
+                // a no-op when already correct) and covers the case where the
+                // CLI was installed after the repo was opened.
+                //
+                // cursor is deliberately not in this list: it reads the repo's
+                // `.claude/settings.local.json`, so the claude arm above is
+                // already its stamp, and a second one would log every edit
+                // twice.
+                match wiring_agent.as_str() {
+                    "codex" => {
+                        let _ = aura_hooks::stamp_codex_hooks();
+                    }
+                    "kimi" => {
+                        let _ = aura_hooks::stamp_kimi_hooks();
+                    }
+                    "opencode" => {
+                        let _ = aura_hooks::stamp_opencode_plugin();
+                    }
+                    "pi" => {
+                        let _ = aura_hooks::stamp_pi_extension();
+                    }
+                    _ => {}
+                }
                 None
             }
         })
@@ -1261,7 +1374,12 @@ pub async fn agent_pty_open(
         last_byte_ms: Mutex::new(now_ms()),
         last_title: Mutex::new(None),
     };
-    state.sessions.lock().unwrap().insert(id.clone(), session);
+    let session = Arc::new(session);
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(id.clone(), Arc::clone(&session));
     state.by_key.lock().unwrap().insert(key, id.clone());
 
     // Sync portable-pty reader → mpsc → tokio task. Same shape cmd_pty
@@ -1288,352 +1406,116 @@ pub async fn agent_pty_open(
     let app_for_emit = app.clone();
     let id_for_task = id.clone();
     let agent_id_for_task = agent_id.clone();
+    // The pump task owns its own Arc of the session and of the history
+    // ring — captured here, before spawn, so the loop below never takes
+    // the registry's `sessions` map lock at all. The map lock is what
+    // every main-thread command needs during a window restore/resize/
+    // navigation cycle; the old loop held it across webview emits, and
+    // a busy webview turned every streaming agent into a main-thread
+    // wedge (the "app frozen while agents alive" deadlock).
+    let sess_for_task = Arc::clone(&session);
+    let history_for_task = Arc::clone(&state.history);
     tauri::async_runtime::spawn(async move {
         // Single Parser per session — vte holds state across chunks for
         // OSC sequences that span reads.
         let mut parser = Parser::new();
+        // Everything pump_chunk wants to tell the frontend routes
+        // through this one sink, so the harness can substitute its own
+        // and assert nothing is locked while it runs.
+        let mut emit = |ev: PumpEvent| match ev {
+            PumpEvent::Block(update) => {
+                let _ = app_for_emit.emit(&block_event, update);
+            }
+            PumpEvent::Attention => {
+                let _ = app_for_emit.emit(
+                    "agent-attention",
+                    serde_json::json!({
+                        "session_id": id_for_task,
+                        "agent_id": agent_id_for_task,
+                    }),
+                );
+            }
+            PumpEvent::Notify => {
+                let title = format!("{} needs your input", agent_id_for_task);
+                let _ = app_for_emit
+                    .notification()
+                    .builder()
+                    .title(title)
+                    .body("Aura — click the tab to respond")
+                    .show();
+            }
+            PumpEvent::CliEvent(env) => {
+                let _ = app_for_emit.emit(&format!("agent-event:{id_for_task}"), env);
+            }
+            PumpEvent::Title(title) => {
+                let _ = app_for_emit.emit(
+                    &format!("agent-title:{id_for_task}"),
+                    serde_json::json!({
+                        "session_id": id_for_task,
+                        "title": title,
+                    }),
+                );
+            }
+        };
         // Idle timeout: if the read channel stays silent for IDLE_MS
         // and we still have an open Output block whose last append was
         // older than IDLE_MS, synthesize a clean close. Mirrors what
         // OSC 133 ;D would do — but agents that don't speak the
         // standard (claude/gemini/codex/cursor) get the same UX.
         const IDLE_MS: u64 = 2_500;
+        let idle = std::time::Duration::from_millis(IDLE_MS);
+        // One event per frame, not one per read. See `pty_emit` — each emit
+        // costs the main thread a synchronous RunningBoard round trip, and
+        // an unbatched agent was spending ~66 of them a second.
+        let mut gathered = crate::pty_emit::Coalescer::new();
+        let mut closed = false;
         loop {
-            let recv = tokio::time::timeout(
-                std::time::Duration::from_millis(IDLE_MS),
-                rx.recv(),
-            )
-            .await;
-            let bytes = match recv {
-                Ok(Some(b)) => b,
-                Ok(None) => break, // channel closed → child died
-                Err(_) => {
-                    // Idle tick — try to close a stale Output block.
-                    maybe_close_idle_output(
-                        &app_for_emit,
-                        &id_for_task,
-                        &agent_id_for_task,
-                        &block_event,
-                        IDLE_MS,
-                    );
-                    continue;
+            let recv = tokio::time::timeout(gathered.wait(idle), rx.recv()).await;
+            match recv {
+                Ok(Some(b)) => {
+                    gathered.push(&b);
+                    if !gathered.due() {
+                        // Still inside the frame — keep gathering.
+                        continue;
+                    }
                 }
-            };
+                // Channel closed → child died. Send what is held before going.
+                Ok(None) => closed = true,
+                Err(_) => {
+                    if gathered.is_empty() {
+                        // A real idle tick — try to close a stale Output block.
+                        maybe_close_idle_output(&sess_for_task, IDLE_MS, &mut emit);
+                        continue;
+                    }
+                    // Otherwise the flush window elapsed; fall through and send.
+                }
+            }
+            let bytes = gathered.take();
+            if bytes.is_empty() {
+                if closed {
+                    break;
+                }
+                continue;
+            }
             // Forward raw bytes to xterm verbatim — the Terminal view
             // wants a faithful render of every escape code.
             let _ = app_for_emit.emit(&pty_event, bytes.clone());
 
-            // Attention detector: agent CLIs emit BEL (`\x07`) when they
-            // need the user's eyes — claude-code on permission prompts,
-            // gemini on tool approval, codex on stop. We don't fire on
-            // every BEL (some TUIs ding on every keystroke); per-session
-            // throttle keeps the tab dot + OS toast sane.
-            if bytes.contains(&0x07) {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                let registry = app_for_emit.state::<AgentPtyRegistry>();
-                let mut should_emit = false;
-                let mut should_notify = false;
-                let mut attention_repo_root = None;
-                if let Some(sess) = registry.sessions.lock().unwrap().get(&id_for_task) {
-                    attention_repo_root = Some(sess.repo_root.clone());
-                    let mut last_att = sess.last_attention_ms.lock().unwrap();
-                    // saturating_sub: `now` falls back to 0 when SystemTime
-                    // fails, and a clock step can leave `t > now` — a raw
-                    // `now - t` would underflow (panic in debug, wrap to a
-                    // huge value in release, suppressing the next ding).
-                    if last_att.map(|t| now.saturating_sub(t) > 3_000).unwrap_or(true) {
-                        *last_att = Some(now);
-                        should_emit = true;
-                    }
-                    let mut last_notif = sess.last_notify_ms.lock().unwrap();
-                    if last_notif.map(|t| now.saturating_sub(t) > 15_000).unwrap_or(true) {
-                        *last_notif = Some(now);
-                        should_notify = true;
-                    }
-                }
-                if should_emit {
-                    let _ = app_for_emit.emit(
-                        "agent-attention",
-                        serde_json::json!({
-                            "session_id": id_for_task,
-                            "agent_id": agent_id_for_task,
-                            "repo_root": attention_repo_root,
-                        }),
-                    );
-                }
-                if should_notify {
-                    let title = format!("{} needs your input", agent_id_for_task);
-                    let _ = app_for_emit
-                        .notification()
-                        .builder()
-                        .title(title)
-                        .body("Aura — click the tab to respond")
-                        .show();
-                }
-            }
-
-            let registry = app_for_emit.state::<AgentPtyRegistry>();
             // Tee into the registry-level history map so phone clients
             // can replay this output via `agent_pty_history` regardless
             // of whether the session is in-process or daemon-backed.
             {
-                let mut all = registry.history.lock().unwrap();
+                let mut all = history_for_task.lock().unwrap();
                 let buf = all.entry(id_for_task.clone()).or_default();
                 buf.extend(bytes.iter().copied());
                 while buf.len() > PTY_HISTORY_CAP {
                     buf.pop_front();
                 }
             }
-            let sessions_guard = registry.sessions.lock().unwrap();
-            let Some(sess) = sessions_guard.get(&id_for_task) else {
-                continue;
-            };
-            // Keep a tail of recent bytes so a late-mounting xterm can
-            // replay the agent's welcome screen. Drop oldest bytes once
-            // we exceed the cap — the welcome screen redraws on resize
-            // anyway, this is just enough to bridge the spawn→listen race.
-            {
-                let mut buf = sess.raw_bytes.lock().unwrap();
-                buf.extend_from_slice(&bytes);
-                if buf.len() > BYTE_REPLAY_CAP {
-                    let drop_n = buf.len() - BYTE_REPLAY_CAP;
-                    buf.drain(..drop_n);
-                }
-            }
-            // Mark the session as having received bytes right now —
-            // the idle watchdog (agent_pty_idle_status) compares this
-            // against the wall clock to surface a "Stale · Reconnect"
-            // chip when the agent goes silent for ≥45s while alive.
-            *sess.last_byte_ms.lock().unwrap() = now_ms();
-            let cur_id = sess.current_block_id.lock().unwrap().clone();
 
-            // Feed the shadow terminal before anything reads a block's text.
-            // It is the only thing here that sees the bytes as a *screen*
-            // rather than as a stream, and every repaint the agent performs
-            // has to have landed before we ask what the screen says.
-            sess.grid.lock().unwrap().apply_output(&bytes);
-
-            let mut perf = OscPerf::default();
-            for b in &bytes {
-                parser.advance(&mut perf, *b);
-            }
-
-            // OSC 133;A — agent-emitted prompt-start. Close any open
-            // Output as Exit (no exit code), then open a fresh Prompt
-            // block. The text the agent prints between ;A and ;B is
-            // its own prompt redraw, which we accept into the Prompt
-            // block.
-            if perf.osc133_prompt_start {
-                if let Some(bid) = &cur_id {
-                    let mut blocks = sess.blocks.lock().unwrap();
-                    if let Some(b) = blocks.iter_mut().find(|b| &b.id == bid) {
-                        b.kind = BlockKind::Exit;
-                        b.finished_at = Some(now_ms());
-                        let snap = b.clone();
-                        drop(blocks);
-                        let _ = app_for_emit
-                            .emit(&block_event, BlockUpdate::Close { block: snap });
-                    }
-                }
-                let now = now_ms();
-                let pid = Uuid::new_v4().to_string();
-                let prompt_block = BlockEnvelope {
-                    id: pid.clone(),
-                    kind: BlockKind::Prompt,
-                    session_id: id_for_task.clone(),
-                    agent_id: sess.agent_id.clone(),
-                    started_at: now,
-                    finished_at: None,
-                    text: String::new(),
-                    exit_code: None,
-                };
-                sess.blocks.lock().unwrap().push(prompt_block.clone());
-                *sess.current_block_id.lock().unwrap() = Some(pid);
-                // A fresh block owns none of the transcript yet, so nothing a
-                // repaint does can reach into what came before it.
-                *sess.block_lines.lock().unwrap() = 0;
-                *sess.last_append_ms.lock().unwrap() = Some(now);
-                let _ = app_for_emit.emit(
-                    &block_event,
-                    BlockUpdate::Open {
-                        block: prompt_block,
-                    },
-                );
-            }
-
-            // Refresh cur_id since ;A may have rotated it.
-            let cur_id = sess.current_block_id.lock().unwrap().clone();
-
-            // Stream what the screen now says into the open Output (or
-            // Prompt, when ;A has just opened one) block.
-            //
-            // Read off the shadow terminal rather than off the byte stream.
-            // The two disagree exactly where it matters: a spinner, a
-            // progress bar or a status footer is drawn by painting over a
-            // line that is already there, and the byte stream carries every
-            // frame while the screen carries only the last one.
-            let next_lines = sess.grid.lock().unwrap().transcript_lines();
-            let delta = {
-                let mut mirror = sess.grid_lines.lock().unwrap();
-                let d = transcript_delta(&mirror, &next_lines);
-                let prev_len = mirror.len();
-                *mirror = next_lines;
-                (d, prev_len)
-            };
-            let (delta, prev_len) = delta;
-            if !delta.added.is_empty() || delta.rewrote > 0 {
-                if let Some(bid) = &cur_id {
-                    let mut owned = sess.block_lines.lock().unwrap();
-                    // Eviction takes lines off the *top* of the transcript,
-                    // which belong to the oldest blocks first. Only what it
-                    // ate past those is this block's loss.
-                    let older = prev_len.saturating_sub(*owned);
-                    *owned = owned.saturating_sub(delta.evicted.saturating_sub(older));
-                    // A repaint may rewrite this block's own tail; it may not
-                    // reach back into a block that has already been closed and
-                    // read. Clamping here is what keeps a full-screen redraw
-                    // from rewriting the answer to the previous question.
-                    let drop_lines = delta.rewrote.min(*owned);
-                    *owned = *owned - drop_lines + delta.added.len();
-                    drop(owned);
-
-                    let mut blocks = sess.blocks.lock().unwrap();
-                    if let Some(b) = blocks.iter_mut().find(|b| &b.id == bid) {
-                        reframe_text(&mut b.text, drop_lines, &delta.added);
-                        // Cap per-block retained text. Replay sends the
-                        // full block list to a remounting frontend, so
-                        // a single long run could otherwise serialize
-                        // hundreds of MB through Tauri's IPC. When we
-                        // overflow, drop the head and prepend a marker
-                        // so the user can see we trimmed.
-                        const BLOCK_TEXT_CAP: usize = 256 * 1024;
-                        if b.text.len() > BLOCK_TEXT_CAP {
-                            let keep = BLOCK_TEXT_CAP / 2;
-                            // Step back to a UTF-8 char boundary so we
-                            // never slice mid-codepoint.
-                            let mut start = b.text.len() - keep;
-                            while start < b.text.len() && !b.text.is_char_boundary(start) {
-                                start += 1;
-                            }
-                            let tail = b.text[start..].to_string();
-                            b.text.clear();
-                            b.text.push_str("[…earlier output trimmed…]\n");
-                            b.text.push_str(&tail);
-                        }
-                    }
-                    drop(blocks);
-                    *sess.last_append_ms.lock().unwrap() = Some(now_ms());
-                    let _ = app_for_emit.emit(
-                        &block_event,
-                        BlockUpdate::Reframe {
-                            block_id: bid.clone(),
-                            drop_lines,
-                            lines: delta.added,
-                        },
-                    );
-                }
-            }
-
-            // OSC 133;B — prompt-end / output-start. Close the open
-            // Prompt (if any), then open a fresh Output block.
-            if perf.osc133_output_start {
-                if let Some(bid) = &cur_id {
-                    let mut blocks = sess.blocks.lock().unwrap();
-                    if let Some(b) = blocks.iter_mut().find(|b| &b.id == bid) {
-                        b.finished_at = Some(now_ms());
-                        let snap = b.clone();
-                        drop(blocks);
-                        let _ = app_for_emit
-                            .emit(&block_event, BlockUpdate::Close { block: snap });
-                    }
-                }
-                let now = now_ms();
-                let oid = Uuid::new_v4().to_string();
-                let output_block = BlockEnvelope {
-                    id: oid.clone(),
-                    kind: BlockKind::Output,
-                    session_id: id_for_task.clone(),
-                    agent_id: sess.agent_id.clone(),
-                    started_at: now,
-                    finished_at: None,
-                    text: String::new(),
-                    exit_code: None,
-                };
-                sess.blocks.lock().unwrap().push(output_block.clone());
-                *sess.current_block_id.lock().unwrap() = Some(oid);
-                *sess.block_lines.lock().unwrap() = 0;
-                *sess.last_append_ms.lock().unwrap() = Some(now);
-                let _ = app_for_emit.emit(
-                    &block_event,
-                    BlockUpdate::Open {
-                        block: output_block,
-                    },
-                );
-            }
-
-            // Refresh cur_id again — ;B may have rotated it.
-            let cur_id = sess.current_block_id.lock().unwrap().clone();
-
-            // OSC 777 cli-agent events — emit each parsed event with
-            // the Aura PTY session id so the renderer can route them
-            // to the right tab. The frontend stores them in the agent
-            // session state machine (Blocked / InProgress / Success).
-            if !perf.cli_agent_events.is_empty() {
-                let event_channel = format!("agent-event:{id_for_task}");
-                for ev in perf.cli_agent_events.drain(..) {
-                    let env = CliAgentEventEnvelope {
-                        session_id: id_for_task.clone(),
-                        event: ev,
-                    };
-                    let _ = app_for_emit.emit(&event_channel, env);
-                }
-            }
-
-            // Native window title (OSC 0 / OSC 2) — the agent's own
-            // "what I'm doing now" string, à la Warp's auto-titled rows.
-            // Stash the latest on the session for replay to a
-            // late-mounting frontend, then emit the delta. Skip no-op
-            // repeats so we don't spam identical titles every chunk.
-            if let Some(title) = perf.osc_title.take() {
-                let changed = {
-                    let mut last = sess.last_title.lock().unwrap();
-                    if last.as_deref() == Some(title.as_str()) {
-                        false
-                    } else {
-                        *last = Some(title.clone());
-                        true
-                    }
-                };
-                if changed {
-                    let _ = app_for_emit.emit(
-                        &format!("agent-title:{id_for_task}"),
-                        serde_json::json!({
-                            "session_id": id_for_task,
-                            "title": title,
-                        }),
-                    );
-                }
-            }
-
-            // OSC 133;D — agent-emitted exit. Close the Output as Exit.
-            if let Some(exit) = perf.osc133_exit {
-                if let Some(bid) = cur_id {
-                    let mut blocks = sess.blocks.lock().unwrap();
-                    if let Some(b) = blocks.iter_mut().find(|b| b.id == bid) {
-                        b.kind = BlockKind::Exit;
-                        b.exit_code = Some(exit);
-                        b.finished_at = Some(now_ms());
-                        let snap = b.clone();
-                        drop(blocks);
-                        let _ = app_for_emit
-                            .emit(&block_event, BlockUpdate::Close { block: snap });
-                    }
-                    *sess.current_block_id.lock().unwrap() = None;
-                    *sess.block_lines.lock().unwrap() = 0;
-                }
+            pump_chunk(&sess_for_task, &mut parser, &bytes, &id_for_task, &mut emit);
+            if closed {
+                break;
             }
         }
     });
@@ -1683,83 +1565,73 @@ pub async fn agent_pty_send_prompt(
             .await
             .map_err(|e| e.to_string());
     }
+    let sess = state
+        .session(&session_id)
+        .ok_or_else(|| format!("unknown session: {session_id}"))?;
     let block_event = format!("agent-block:{session_id}");
 
-    // Synthesize the blocks under the registry lock, then hand back just
-    // the writer handle so the lock is released before the PTY write
-    // below. That write can park for as long as the agent takes to read
-    // its input, and no other terminal may wait on the map for that.
-    let writer = {
-        let sessions = state.sessions.lock().unwrap();
-        let sess = sessions
-            .get(&session_id)
-            .ok_or_else(|| format!("unknown session: {session_id}"))?;
-
-        // Close any currently-open Output block so the UI never shows two
-        // open answers stacked. Exit code unknown — leave `exit_code: None`
-        // so the UI can render "ended" rather than "exit 0".
-        {
-            let mut cur = sess.current_block_id.lock().unwrap();
-            if let Some(bid) = cur.take() {
-                let mut blocks = sess.blocks.lock().unwrap();
-                if let Some(b) = blocks.iter_mut().find(|b| b.id == bid) {
-                    b.finished_at = Some(now_ms());
-                    let snap = b.clone();
-                    drop(blocks);
-                    let _ = app.emit(&block_event, BlockUpdate::Close { block: snap });
-                }
+    // Close any currently-open Output block so the UI never shows two
+    // open answers stacked. Exit code unknown — leave `exit_code: None`
+    // so the UI can render "ended" rather than "exit 0".
+    {
+        let mut cur = sess.current_block_id.lock().unwrap();
+        if let Some(bid) = cur.take() {
+            let mut blocks = sess.blocks.lock().unwrap();
+            if let Some(b) = blocks.iter_mut().find(|b| b.id == bid) {
+                b.finished_at = Some(now_ms());
+                let snap = b.clone();
+                drop(blocks);
+                let _ = app.emit(&block_event, BlockUpdate::Close { block: snap });
             }
         }
+    }
 
-        // Synthetic Prompt block: opens and closes immediately because the
-        // user already typed the whole thing — there's no streaming half.
-        let now = now_ms();
-        let prompt_block = BlockEnvelope {
-            id: Uuid::new_v4().to_string(),
-            kind: BlockKind::Prompt,
-            session_id: session_id.clone(),
-            agent_id: sess.agent_id.clone(),
-            started_at: now,
-            finished_at: Some(now),
-            text: prompt.clone(),
-            exit_code: None,
-        };
-        sess.blocks.lock().unwrap().push(prompt_block.clone());
-        let _ = app.emit(
-            &block_event,
-            BlockUpdate::Open {
-                block: prompt_block.clone(),
-            },
-        );
-        let _ = app.emit(
-            &block_event,
-            BlockUpdate::Close {
-                block: prompt_block,
-            },
-        );
-
-        // Open the Output block; the read loop fills it as the agent replies.
-        let output_block = BlockEnvelope {
-            id: Uuid::new_v4().to_string(),
-            kind: BlockKind::Output,
-            session_id: session_id.clone(),
-            agent_id: sess.agent_id.clone(),
-            started_at: now,
-            finished_at: None,
-            text: String::new(),
-            exit_code: None,
-        };
-        sess.blocks.lock().unwrap().push(output_block.clone());
-        *sess.current_block_id.lock().unwrap() = Some(output_block.id.clone());
-        *sess.block_lines.lock().unwrap() = 0;
-        let _ = app.emit(
-            &block_event,
-            BlockUpdate::Open {
-                block: output_block,
-            },
-        );
-        sess.writer.clone()
+    // Synthetic Prompt block: opens and closes immediately because the
+    // user already typed the whole thing — there's no streaming half.
+    let now = now_ms();
+    let prompt_block = BlockEnvelope {
+        id: Uuid::new_v4().to_string(),
+        kind: BlockKind::Prompt,
+        session_id: session_id.clone(),
+        agent_id: sess.agent_id.clone(),
+        started_at: now,
+        finished_at: Some(now),
+        text: prompt.clone(),
+        exit_code: None,
     };
+    sess.blocks.lock().unwrap().push(prompt_block.clone());
+    let _ = app.emit(
+        &block_event,
+        BlockUpdate::Open {
+            block: prompt_block.clone(),
+        },
+    );
+    let _ = app.emit(
+        &block_event,
+        BlockUpdate::Close {
+            block: prompt_block,
+        },
+    );
+
+    // Open the Output block; the read loop fills it as the agent replies.
+    let output_block = BlockEnvelope {
+        id: Uuid::new_v4().to_string(),
+        kind: BlockKind::Output,
+        session_id: session_id.clone(),
+        agent_id: sess.agent_id.clone(),
+        started_at: now,
+        finished_at: None,
+        text: String::new(),
+        exit_code: None,
+    };
+    sess.blocks.lock().unwrap().push(output_block.clone());
+    *sess.current_block_id.lock().unwrap() = Some(output_block.id.clone());
+    let _ = app.emit(
+        &block_event,
+        BlockUpdate::Open {
+            block: output_block,
+        },
+    );
 
     // Push the prompt into the PTY using bracketed-paste semantics
     // (DEC mode 2004). All four agent CLIs we ship — claude, gemini,
@@ -1772,7 +1644,7 @@ pub async fn agent_pty_send_prompt(
     // Chunked at 4KB to play nice with line-discipline buffers; the
     // PTY reader on the child side coalesces these back into one paste
     // event because of the wrapping markers.
-    write_prompt_bracketed(&writer, &prompt)
+    write_prompt_bracketed(&sess.writer.clone(), &prompt)
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -1797,13 +1669,11 @@ async fn open_via_daemon(
     args: Vec<String>,
     env_extras: Vec<(String, String)>,
 ) -> Result<AgentSessionHandle, String> {
-    // The daemon doesn't see Tauri-managed state, so the vars that come
-    // from it get assembled here and passed across the wire; the daemon's
-    // open_session forwards them to portable-pty verbatim. Everything
-    // *ambient* — PATH, HOME, the keys a login shell exports — is layered
-    // in underneath by `client::open_session`, because the daemon's own
-    // environment is launchd's and is stale by construction. Between the
-    // two the daemon child sees what the in-process child below sees.
+    // The daemon doesn't see Tauri-managed state, so we have to
+    // assemble the env here and pass it across the wire. This is
+    // the same set of vars `cmd.env(...)` would set on the in-process
+    // child; the daemon's open_session forwards them to portable-pty
+    // verbatim.
     let mut env: Vec<(String, String)> = Vec::with_capacity(8 + env_extras.len());
     let session_id_pre = Uuid::new_v4().to_string();
     env.push(("AURA_MANAGER_SESSION_ID".into(), session_id_pre.clone()));
@@ -1814,23 +1684,6 @@ async fn open_via_daemon(
         AURA_CLI_AGENT_PROTOCOL_VERSION.to_string(),
     ));
     env.push(("AURA_CLIENT_VERSION".into(), env!("CARGO_PKG_VERSION").into()));
-    // Editor control plane, same as the in-process path. The daemon child
-    // reaches the socket over loopback, so a daemon-backed agent gets tab
-    // control on equal terms with one Aura spawned itself.
-    if let Some(bridge) = app.try_state::<std::sync::Arc<crate::ide_bridge::IdeBridgeState>>() {
-        if let Some(running) = bridge.running() {
-            env.push(("CLAUDE_CODE_SSE_PORT".into(), running.port.to_string()));
-        }
-    }
-    // Same reason as the in-process path: the daemon is a separate
-    // process and would otherwise resolve the well-known socket, which
-    // may belong to a different shell entirely.
-    env.push((
-        "AURA_SHELL_SOCKET".into(),
-        crate::cmd_permission_socket::socket_path()
-            .to_string_lossy()
-            .into_owned(),
-    ));
     if let Some(listener) = app
         .try_state::<std::sync::Arc<crate::agent_event_listener::AgentEventListenerState>>()
     {
@@ -1888,9 +1741,20 @@ async fn open_via_daemon(
                 return;
             }
         };
+        // Same coalescing as the in-process loop above, and for the same
+        // reason: a daemon-backed session drives the identical emit path.
+        let mut gathered = crate::pty_emit::Coalescer::new();
+        // Long enough to be "no output"; the coalescer shortens it whenever
+        // bytes are actually waiting.
+        let idle = std::time::Duration::from_secs(1);
         loop {
-            match crate::pty_daemon::client::recv_event(&mut sub).await {
-                Ok(crate::pty_daemon::proto::Event::Bytes { data, .. }) => {
+            let next = tokio::time::timeout(
+                gathered.wait(idle),
+                crate::pty_daemon::client::recv_event(&mut sub),
+            )
+            .await;
+            let ended = match next {
+                Ok(Ok(crate::pty_daemon::proto::Event::Bytes { data, .. })) => {
                     // Tee into the per-session ring buffer so a phone
                     // joining mid-session can replay this output.
                     {
@@ -1902,17 +1766,36 @@ async fn open_via_daemon(
                         }
                     }
                     *last_byte_for_loop.lock().unwrap() = now_ms();
-                    let _ = app_for_loop.emit(&pty_event, data);
+                    gathered.push(&data);
+                    if !gathered.due() {
+                        continue;
+                    }
+                    None
                 }
-                Ok(crate::pty_daemon::proto::Event::Exit { .. }) => {
-                    let _ = app_for_loop.emit(&exit_event, ());
-                    break;
-                }
-                Err(e) => {
+                Ok(Ok(crate::pty_daemon::proto::Event::Exit { .. })) => Some(None),
+                Ok(Err(e)) => Some(Some(e.to_string())),
+                // Flush window elapsed with bytes waiting, or a quiet second
+                // with none. Either way there is nothing to report.
+                Err(_) => None,
+            };
+            // Whatever happened, output already read must still reach the
+            // terminal — an exit that swallowed the child's last words would
+            // be a worse bug than the one this batching fixes.
+            let bytes = gathered.take();
+            if !bytes.is_empty() {
+                let _ = app_for_loop.emit(&pty_event, bytes);
+            }
+            match ended {
+                Some(Some(e)) => {
                     eprintln!("[daemon] subscribe recv: {e}");
                     let _ = app_for_loop.emit(&exit_event, ());
                     break;
                 }
+                Some(None) => {
+                    let _ = app_for_loop.emit(&exit_event, ());
+                    break;
+                }
+                None => {}
             }
         }
     });
@@ -1937,24 +1820,318 @@ async fn open_via_daemon(
     })
 }
 
+/// One frontend-visible effect of pumping a chunk of PTY output.
+/// The read loop maps these onto Tauri events / OS notifications; the
+/// deterministic deadlock harness maps them onto assertions. Keeping
+/// the sink abstract is what makes "the pump never holds a lock the UI
+/// thread needs while emitting" a *testable* property instead of a
+/// code-review hope.
+pub(crate) enum PumpEvent {
+    /// `agent-block:<sid>` — block open/append/close delta.
+    Block(BlockUpdate),
+    /// `agent-attention` — BEL-driven "needs your eyes" tab dot.
+    Attention,
+    /// OS toast (more aggressively throttled than the dot).
+    Notify,
+    /// `agent-event:<sid>` — parsed OSC 777 cli-agent event.
+    CliEvent(CliAgentEventEnvelope),
+    /// `agent-title:<sid>` — deduped OSC 0/2 window title.
+    Title(String),
+}
+
+/// Apply one chunk of raw PTY output to a session: attention/notify
+/// throttling, byte-replay tail, idle clock, OSC 133 block rotation,
+/// OSC 777 events, OSC 0/2 titles. Takes only the session (never the
+/// registry), and every `emit` call happens with no session-field lock
+/// held — the sink may be arbitrarily slow (a busy webview) without
+/// blocking anyone who needs this session or the registry map.
+fn pump_chunk(
+    sess: &AgentPtySession,
+    parser: &mut Parser,
+    bytes: &[u8],
+    session_id: &str,
+    emit: &mut dyn FnMut(PumpEvent),
+) {
+    // Attention detector: agent CLIs emit BEL (`\x07`) when they
+    // need the user's eyes — claude-code on permission prompts,
+    // gemini on tool approval, codex on stop. We don't fire on
+    // every BEL (some TUIs ding on every keystroke); per-session
+    // throttle keeps the tab dot + OS toast sane.
+    if bytes.contains(&0x07) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut should_emit = false;
+        let mut should_notify = false;
+        {
+            let mut last_att = sess.last_attention_ms.lock().unwrap();
+            // saturating_sub: `now` falls back to 0 when SystemTime
+            // fails, and a clock step can leave `t > now` — a raw
+            // `now - t` would underflow (panic in debug, wrap to a
+            // huge value in release, suppressing the next ding).
+            if last_att.map(|t| now.saturating_sub(t) > 3_000).unwrap_or(true) {
+                *last_att = Some(now);
+                should_emit = true;
+            }
+            let mut last_notif = sess.last_notify_ms.lock().unwrap();
+            if last_notif.map(|t| now.saturating_sub(t) > 15_000).unwrap_or(true) {
+                *last_notif = Some(now);
+                should_notify = true;
+            }
+        }
+        if should_emit {
+            emit(PumpEvent::Attention);
+        }
+        if should_notify {
+            emit(PumpEvent::Notify);
+        }
+    }
+
+    // Keep a tail of recent bytes so a late-mounting xterm can
+    // replay the agent's welcome screen. Drop oldest bytes once
+    // we exceed the cap — the welcome screen redraws on resize
+    // anyway, this is just enough to bridge the spawn→listen race.
+    {
+        let mut buf = sess.raw_bytes.lock().unwrap();
+        buf.extend_from_slice(bytes);
+        if buf.len() > BYTE_REPLAY_CAP {
+            let drop_n = buf.len() - BYTE_REPLAY_CAP;
+            buf.drain(..drop_n);
+        }
+    }
+    // Mark the session as having received bytes right now —
+    // the idle watchdog (agent_pty_idle_status) compares this
+    // against the wall clock to surface a "Stale · Reconnect"
+    // chip when the agent goes silent for ≥45s while alive.
+    *sess.last_byte_ms.lock().unwrap() = now_ms();
+    let cur_id = sess.current_block_id.lock().unwrap().clone();
+
+    // Feed the shadow terminal before anything reads a block's text.
+    // It is the only thing here that sees the bytes as a *screen* rather
+    // than as a stream, and every repaint the agent performs has to have
+    // landed before we ask what the screen says.
+    sess.grid.lock().unwrap().apply_output(bytes);
+
+    let mut perf = OscPerf::default();
+    for b in bytes {
+        parser.advance(&mut perf, *b);
+    }
+
+    // OSC 133;A — agent-emitted prompt-start. Close any open
+    // Output as Exit (no exit code), then open a fresh Prompt
+    // block. The text the agent prints between ;A and ;B is
+    // its own prompt redraw, which we accept into the Prompt
+    // block.
+    if perf.osc133_prompt_start {
+        if let Some(bid) = &cur_id {
+            let snap = {
+                let mut blocks = sess.blocks.lock().unwrap();
+                blocks.iter_mut().find(|b| &b.id == bid).map(|b| {
+                    b.kind = BlockKind::Exit;
+                    b.finished_at = Some(now_ms());
+                    b.clone()
+                })
+            };
+            if let Some(snap) = snap {
+                emit(PumpEvent::Block(BlockUpdate::Close { block: snap }));
+            }
+        }
+        let now = now_ms();
+        let pid = Uuid::new_v4().to_string();
+        let prompt_block = BlockEnvelope {
+            id: pid.clone(),
+            kind: BlockKind::Prompt,
+            session_id: session_id.to_string(),
+            agent_id: sess.agent_id.clone(),
+            started_at: now,
+            finished_at: None,
+            text: String::new(),
+            exit_code: None,
+        };
+        *sess.block_lines.lock().unwrap() = 0;
+        sess.blocks.lock().unwrap().push(prompt_block.clone());
+        *sess.current_block_id.lock().unwrap() = Some(pid);
+        *sess.last_append_ms.lock().unwrap() = Some(now);
+        emit(PumpEvent::Block(BlockUpdate::Open {
+            block: prompt_block,
+        }));
+    }
+
+    // Refresh cur_id since ;A may have rotated it.
+    let cur_id = sess.current_block_id.lock().unwrap().clone();
+
+    // Stream printable text into the open Output (or Prompt
+    // when ;A has just opened one) block.
+    //
+    // Read off the shadow terminal rather than off the byte stream. The two
+    // disagree exactly where it matters: a spinner, a progress bar or a
+    // status footer is drawn by painting over a line that is already there,
+    // and the byte stream carries every frame while the screen carries only
+    // the last one.
+    let next_lines = sess.grid.lock().unwrap().transcript_lines();
+    let (delta, prev_len) = {
+        let mut mirror = sess.grid_lines.lock().unwrap();
+        let d = transcript_delta(&mirror, &next_lines);
+        let prev_len = mirror.len();
+        *mirror = next_lines;
+        (d, prev_len)
+    };
+    if !delta.added.is_empty() || delta.rewrote > 0 {
+        if let Some(bid) = &cur_id {
+            let drop_lines = {
+                let mut owned = sess.block_lines.lock().unwrap();
+                // Eviction takes lines off the *top* of the transcript, which
+                // belong to the oldest blocks first. Only what it ate past
+                // those is this block's loss.
+                let older = prev_len.saturating_sub(*owned);
+                *owned = owned.saturating_sub(delta.evicted.saturating_sub(older));
+                // A repaint may rewrite this block's own tail; it may not
+                // reach back into a block that has already been closed and
+                // read. Clamping here is what keeps a full-screen redraw from
+                // rewriting the answer to the previous question.
+                let drop_lines = delta.rewrote.min(*owned);
+                *owned = *owned - drop_lines + delta.added.len();
+                drop_lines
+            };
+            {
+                let mut blocks = sess.blocks.lock().unwrap();
+                if let Some(b) = blocks.iter_mut().find(|b| &b.id == bid) {
+                    reframe_text(&mut b.text, drop_lines, &delta.added);
+                    // Cap per-block retained text. Replay sends the
+                    // full block list to a remounting frontend, so
+                    // a single long run could otherwise serialize
+                    // hundreds of MB through Tauri's IPC. When we
+                    // overflow, drop the head and prepend a marker
+                    // so the user can see we trimmed.
+                    const BLOCK_TEXT_CAP: usize = 256 * 1024;
+                    if b.text.len() > BLOCK_TEXT_CAP {
+                        let keep = BLOCK_TEXT_CAP / 2;
+                        // Step back to a UTF-8 char boundary so we
+                        // never slice mid-codepoint.
+                        let mut start = b.text.len() - keep;
+                        while start < b.text.len() && !b.text.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        let tail = b.text[start..].to_string();
+                        b.text.clear();
+                        b.text.push_str("[…earlier output trimmed…]\n");
+                        b.text.push_str(&tail);
+                    }
+                }
+            }
+            *sess.last_append_ms.lock().unwrap() = Some(now_ms());
+            emit(PumpEvent::Block(BlockUpdate::Reframe {
+                block_id: bid.clone(),
+                drop_lines,
+                lines: delta.added,
+            }));
+        }
+    }
+
+    // OSC 133;B — prompt-end / output-start. Close the open
+    // Prompt (if any), then open a fresh Output block.
+    if perf.osc133_output_start {
+        if let Some(bid) = &cur_id {
+            let snap = {
+                let mut blocks = sess.blocks.lock().unwrap();
+                blocks.iter_mut().find(|b| &b.id == bid).map(|b| {
+                    b.finished_at = Some(now_ms());
+                    b.clone()
+                })
+            };
+            if let Some(snap) = snap {
+                emit(PumpEvent::Block(BlockUpdate::Close { block: snap }));
+            }
+        }
+        let now = now_ms();
+        let oid = Uuid::new_v4().to_string();
+        let output_block = BlockEnvelope {
+            id: oid.clone(),
+            kind: BlockKind::Output,
+            session_id: session_id.to_string(),
+            agent_id: sess.agent_id.clone(),
+            started_at: now,
+            finished_at: None,
+            text: String::new(),
+            exit_code: None,
+        };
+        *sess.block_lines.lock().unwrap() = 0;
+        sess.blocks.lock().unwrap().push(output_block.clone());
+        *sess.current_block_id.lock().unwrap() = Some(oid);
+        *sess.last_append_ms.lock().unwrap() = Some(now);
+        emit(PumpEvent::Block(BlockUpdate::Open {
+            block: output_block,
+        }));
+    }
+
+    // Refresh cur_id again — ;B may have rotated it.
+    let cur_id = sess.current_block_id.lock().unwrap().clone();
+
+    // OSC 777 cli-agent events — emit each parsed event with
+    // the Aura PTY session id so the renderer can route them
+    // to the right tab. The frontend stores them in the agent
+    // session state machine (Blocked / InProgress / Success).
+    for ev in perf.cli_agent_events.drain(..) {
+        emit(PumpEvent::CliEvent(CliAgentEventEnvelope {
+            session_id: session_id.to_string(),
+            event: ev,
+        }));
+    }
+
+    // Native window title (OSC 0 / OSC 2) — the agent's own
+    // "what I'm doing now" string, à la Warp's auto-titled rows.
+    // Stash the latest on the session for replay to a
+    // late-mounting frontend, then emit the delta. Skip no-op
+    // repeats so we don't spam identical titles every chunk.
+    if let Some(title) = perf.osc_title.take() {
+        let changed = {
+            let mut last = sess.last_title.lock().unwrap();
+            if last.as_deref() == Some(title.as_str()) {
+                false
+            } else {
+                *last = Some(title.clone());
+                true
+            }
+        };
+        if changed {
+            emit(PumpEvent::Title(title));
+        }
+    }
+
+    // OSC 133;D — agent-emitted exit. Close the Output as Exit.
+    if let Some(exit) = perf.osc133_exit {
+        if let Some(bid) = cur_id {
+            let snap = {
+                let mut blocks = sess.blocks.lock().unwrap();
+                blocks.iter_mut().find(|b| b.id == bid).map(|b| {
+                    b.kind = BlockKind::Exit;
+                    b.exit_code = Some(exit);
+                    b.finished_at = Some(now_ms());
+                    b.clone()
+                })
+            };
+            if let Some(snap) = snap {
+                emit(PumpEvent::Block(BlockUpdate::Close { block: snap }));
+            }
+            *sess.current_block_id.lock().unwrap() = None;
+        *sess.block_lines.lock().unwrap() = 0;
+        }
+    }
+}
+
 /// Idle-timeout block close. Called from the read loop's tokio
 /// timeout branch — when no PTY bytes have arrived for IDLE_MS and
 /// the open Output block hasn't been appended-to in IDLE_MS, close
 /// it cleanly. Mirrors what an OSC 133 ;D would do; agents that
 /// don't speak the standard (claude/gemini/codex/cursor today) get
-/// the same UX.
+/// the same UX. Like `pump_chunk`, takes the session directly (never
+/// the registry map) and emits with no lock held.
 fn maybe_close_idle_output(
-    app: &AppHandle,
-    session_id: &str,
-    _agent_id: &str,
-    block_event: &str,
+    sess: &AgentPtySession,
     idle_ms: u64,
+    emit: &mut dyn FnMut(PumpEvent),
 ) {
-    let registry = app.state::<AgentPtyRegistry>();
-    let sessions = registry.sessions.lock().unwrap();
-    let Some(sess) = sessions.get(session_id) else {
-        return;
-    };
     let cur_id = sess.current_block_id.lock().unwrap().clone();
     let Some(bid) = cur_id else { return };
     let last = *sess.last_append_ms.lock().unwrap();
@@ -1962,22 +2139,22 @@ fn maybe_close_idle_output(
     if now_ms().saturating_sub(last_ms) < idle_ms {
         return;
     }
-    let mut blocks = sess.blocks.lock().unwrap();
-    let Some(b) = blocks.iter_mut().find(|b| b.id == bid) else {
-        return;
+    let snap = {
+        let mut blocks = sess.blocks.lock().unwrap();
+        let Some(b) = blocks.iter_mut().find(|b| b.id == bid) else {
+            return;
+        };
+        // Only auto-close Output blocks. Prompt blocks shouldn't time
+        // out — the agent owns when its prompt is complete.
+        if b.kind != BlockKind::Output {
+            return;
+        }
+        b.finished_at = Some(now_ms());
+        b.clone()
     };
-    // Only auto-close Output blocks. Prompt blocks shouldn't time
-    // out — the agent owns when its prompt is complete.
-    if b.kind != BlockKind::Output {
-        return;
-    }
-    b.finished_at = Some(now_ms());
-    let snap = b.clone();
-    drop(blocks);
-    let _ = app.emit(block_event, BlockUpdate::Close { block: snap });
     *sess.current_block_id.lock().unwrap() = None;
-    *sess.block_lines.lock().unwrap() = 0;
     *sess.last_append_ms.lock().unwrap() = None;
+    emit(PumpEvent::Block(BlockUpdate::Close { block: snap }));
 }
 
 const PASTE_START: &[u8] = b"\x1b[200~";
@@ -2043,16 +2220,13 @@ pub async fn agent_pty_write(
             .await
             .map_err(|e| e.to_string());
     }
-    // Clone the writer handle and let go of the registry map BEFORE the
+    let sess = state
+        .session(&session_id)
+        .ok_or_else(|| format!("unknown session: {session_id}"))?;
+    // Clone the writer handle and let go of the session BEFORE the
     // write — see the note on `AgentPtySession::writer`. A wedged agent
     // must not take the other terminals (or the runtime) down with it.
-    let writer = {
-        let sessions = state.sessions.lock().unwrap();
-        let sess = sessions
-            .get(&session_id)
-            .ok_or_else(|| format!("unknown session: {session_id}"))?;
-        sess.writer.clone()
-    };
+    let writer = sess.writer.clone();
     crate::pty_io::write_bytes(&writer, data)
         .await
         .map_err(|e| e.to_string())
@@ -2075,10 +2249,14 @@ pub async fn agent_pty_resize(
             .await
             .map_err(|e| e.to_string());
     }
-    let sessions = state.sessions.lock().unwrap();
-    let sess = sessions
-        .get(&session_id)
+    let sess = state
+        .session(&session_id)
         .ok_or_else(|| format!("unknown session: {session_id}"))?;
+    // Bound to a local for the same E0597 reason as agent_pty_write.
+    // Keep the shadow terminal the same shape as the real one. A grid that
+    // still thinks it is 80 columns wide wraps text the agent placed at
+    // column 100, and every subsequent cursor move lands a row out.
+    sess.grid.lock().unwrap().resize(cols, rows);
     let res = sess
         .master
         .lock()
@@ -2090,10 +2268,6 @@ pub async fn agent_pty_resize(
             pixel_height: 0,
         })
         .map_err(|e| e.to_string());
-    // Keep the shadow terminal the same shape as the real one. A grid that
-    // still thinks it is 80 columns wide wraps text the agent placed at
-    // column 100, and every subsequent cursor move lands a row out.
-    sess.grid.lock().unwrap().resize(cols, rows);
     res
 }
 
@@ -2102,9 +2276,11 @@ pub fn agent_pty_replay(
     state: State<'_, AgentPtyRegistry>,
     session_id: String,
 ) -> Result<Vec<BlockEnvelope>, String> {
-    let sessions = state.sessions.lock().unwrap();
-    let sess = sessions
-        .get(&session_id)
+    // Sync command — runs on the macOS main thread. The map guard is
+    // dropped before the (potentially large) block-list clone so a
+    // streaming session can never make a window-restore replay wait.
+    let sess = state
+        .session(&session_id)
         .ok_or_else(|| format!("unknown session: {session_id}"))?;
     let snap = sess.blocks.lock().unwrap().clone();
     Ok(snap)
@@ -2120,8 +2296,9 @@ pub fn agent_pty_replay_bytes(
     state: State<'_, AgentPtyRegistry>,
     session_id: String,
 ) -> Result<Vec<u8>, String> {
-    let sessions = state.sessions.lock().unwrap();
-    let Some(sess) = sessions.get(&session_id) else {
+    // Main-thread sync command: Arc out first — this clone can be 4 MiB
+    // and must not run under the map guard.
+    let Some(sess) = state.session(&session_id) else {
         return Ok(Vec::new());
     };
     let snap = sess.raw_bytes.lock().unwrap().clone();
@@ -2137,8 +2314,7 @@ pub fn agent_pty_title(
     state: State<'_, AgentPtyRegistry>,
     session_id: String,
 ) -> Result<Option<String>, String> {
-    let sessions = state.sessions.lock().unwrap();
-    let Some(sess) = sessions.get(&session_id) else {
+    let Some(sess) = state.session(&session_id) else {
         return Ok(None);
     };
     let title = sess.last_title.lock().unwrap().clone();
@@ -2201,8 +2377,9 @@ pub fn agent_pty_is_alive(
     if daemon_session_live(&state, &session_id) {
         return Ok(true);
     }
-    let sessions = state.sessions.lock().unwrap();
-    let Some(sess) = sessions.get(&session_id) else {
+    // Main-thread sync command: try_wait is a real waitpid — Arc out and
+    // drop the map guard before making the kernel call.
+    let Some(sess) = state.session(&session_id) else {
         return Ok(false);
     };
     let alive = sess
@@ -2249,8 +2426,7 @@ pub fn agent_pty_idle_status(
             });
         }
     }
-    let sessions = state.sessions.lock().unwrap();
-    let Some(sess) = sessions.get(&session_id) else {
+    let Some(sess) = state.session(&session_id) else {
         return Ok(IdleStatus {
             idle_ms: 0,
             alive: false,
@@ -2308,8 +2484,12 @@ pub async fn agent_pty_close(
         state.by_key.lock().unwrap().remove(&proxy.key);
         return Ok(());
     }
-    let mut sessions = state.sessions.lock().unwrap();
-    if let Some(sess) = sessions.remove(&session_id) {
+    // Remove under the lock, kill after — kill(2) on a wedged child
+    // must not hold the map while other commands need it, and the old
+    // shape nested by_key inside the sessions guard (a lock-order
+    // hazard the rest of the file avoids).
+    let removed = state.sessions.lock().unwrap().remove(&session_id);
+    if let Some(sess) = removed {
         // See `pty_reap` — closing an agent tab has to stop the tools that
         // agent launched, not just the CLI process holding the PTY.
         crate::pty_reap::hangup_and_reap(&mut **sess.child.lock().unwrap());
@@ -2365,10 +2545,17 @@ pub async fn pty_list_alive(
 
     // 1. In-process sessions. Liveness is the same try_wait check
     // `agent_pty_is_alive` does; dead ones are skipped because they
-    // can't be reattached to in any meaningful sense.
+    // can't be reattached to in any meaningful sense. Arc-snapshot
+    // first so the waitpid calls run with the map unlocked.
     {
-        let sessions = state.sessions.lock().unwrap();
-        for (sid, sess) in sessions.iter() {
+        let snapshot: Vec<(String, Arc<AgentPtySession>)> = {
+            let sessions = state.sessions.lock().unwrap();
+            sessions
+                .iter()
+                .map(|(sid, s)| (sid.clone(), Arc::clone(s)))
+                .collect()
+        };
+        for (sid, sess) in snapshot {
             let alive = sess
                 .child
                 .lock()
@@ -2382,7 +2569,7 @@ pub async fn pty_list_alive(
             }
             let last = *sess.last_byte_ms.lock().unwrap();
             out.push(LivePtySession {
-                session_id: sid.clone(),
+                session_id: sid,
                 agent_id: sess.agent_id.clone(),
                 repo_root: sess.repo_root.clone(),
                 kind: LivePtyKind::InProcess,
@@ -2483,338 +2670,15 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Ensure `~/.aura/shell-mcp-config.json` exists with an entry that
-/// wires the `aura mcp` stdio server. Idempotent — overwrites every
-/// time so the config tracks any changes to the bin path or args. The
-/// path is returned for use as claude's `--mcp-config` argument so the
-/// user's claude PTY tabs ship with all aura MCP tools wired by
-/// default. Returns None on filesystem failure (in which case the
-/// spawn falls back to whatever the user has configured globally).
-fn ensure_aura_mcp_config() -> Option<String> {
-    let home = std::env::var_os("HOME")?;
-    let mut path = std::path::PathBuf::from(home);
-    path.push(".aura");
-    let _ = std::fs::create_dir_all(&path);
-    path.push("shell-mcp-config.json");
-
-    // Resolve the aura bin path. Prefer an absolute path so claude
-    // doesn't depend on PATH being right under whatever shell init it
-    // inherits. Falls back to bare `aura` if `which` fails.
-    let aura_bin = which_aura().unwrap_or_else(|| "aura".to_string());
-
-    let body = serde_json::json!({
-        "mcpServers": {
-            "aura": {
-                "command": aura_bin,
-                "args": ["mcp"],
-            }
-        }
-    });
-    let serialized = serde_json::to_string_pretty(&body).ok()?;
-    std::fs::write(&path, serialized).ok()?;
-    Some(path.to_string_lossy().into_owned())
-}
-
-/// Embedded copies of the aura-claude plugin scripts. Compiled into
-/// the binary so we don't depend on the bundle layout to find them at
-/// runtime — `include_str!` reads at compile time relative to this
-/// file. On first launch we stage them under
-/// `~/.aura/plugins/aura-claude/scripts/` and point Claude's hooks at
-/// the staged paths. Mirrors the stamping pattern from `ensure_aura_mcp_config`.
-const AURA_CLAUDE_SCRIPTS: &[(&str, &str)] = &[
-    (
-        "should-use-structured.sh",
-        include_str!("../../plugins/aura-claude/plugins/aura/scripts/should-use-structured.sh"),
-    ),
-    (
-        "aura-notify.sh",
-        include_str!("../../plugins/aura-claude/plugins/aura/scripts/aura-notify.sh"),
-    ),
-    (
-        "aura-notify-rpc.sh",
-        include_str!("../../plugins/aura-claude/plugins/aura/scripts/aura-notify-rpc.sh"),
-    ),
-    (
-        "build-payload.sh",
-        include_str!("../../plugins/aura-claude/plugins/aura/scripts/build-payload.sh"),
-    ),
-    (
-        "on-session-start.sh",
-        include_str!("../../plugins/aura-claude/plugins/aura/scripts/on-session-start.sh"),
-    ),
-    (
-        "on-stop.sh",
-        include_str!("../../plugins/aura-claude/plugins/aura/scripts/on-stop.sh"),
-    ),
-    (
-        "on-prompt-submit.sh",
-        include_str!("../../plugins/aura-claude/plugins/aura/scripts/on-prompt-submit.sh"),
-    ),
-    (
-        "on-permission-request.sh",
-        include_str!("../../plugins/aura-claude/plugins/aura/scripts/on-permission-request.sh"),
-    ),
-    (
-        "on-post-tool-use.sh",
-        include_str!("../../plugins/aura-claude/plugins/aura/scripts/on-post-tool-use.sh"),
-    ),
-    (
-        "on-pre-tool-use.sh",
-        include_str!("../../plugins/aura-claude/plugins/aura/scripts/on-pre-tool-use.sh"),
-    ),
-    (
-        "on-notification.sh",
-        include_str!("../../plugins/aura-claude/plugins/aura/scripts/on-notification.sh"),
-    ),
-];
-
-/// Stage the plugin scripts under `~/.aura/plugins/aura-claude/scripts/`
-/// and stamp `<repo_root>/.claude/settings.local.json` to wire Claude's
-/// hooks at the staged scripts. Idempotent: re-staging overwrites
-/// (so a shell upgrade picks up new script bodies); merge-edits the
-/// JSON so user customizations under other keys survive.
-///
-/// `settings.local.json` was chosen over `settings.json` because it
-/// is git-ignored by Claude convention — Aura's per-repo plumbing
-/// shouldn't show up in `git status`.
-fn ensure_aura_claude_hooks_stamped(repo_root: &str) -> Option<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    // 1. Stage embedded scripts under ~/.aura/plugins/aura-claude/scripts/
-    let home = std::env::var_os("HOME")?;
-    let mut script_dir = std::path::PathBuf::from(&home);
-    script_dir.push(".aura");
-    script_dir.push("plugins");
-    script_dir.push("aura-claude");
-    script_dir.push("scripts");
-    std::fs::create_dir_all(&script_dir).ok()?;
-    for (name, body) in AURA_CLAUDE_SCRIPTS {
-        let p = script_dir.join(name);
-        std::fs::write(&p, body).ok()?;
-        // chmod +x — bash hooks run via portable-pty's fork+exec, no
-        // shell wrapper, so the executable bit must be set.
-        if let Ok(meta) = std::fs::metadata(&p) {
-            let mut perms = meta.permissions();
-            perms.set_mode(0o755);
-            let _ = std::fs::set_permissions(&p, perms);
-        }
-    }
-
-    // 2. Read or initialize <repo_root>/.claude/settings.local.json
-    let mut settings_path = std::path::PathBuf::from(repo_root);
-    settings_path.push(".claude");
-    std::fs::create_dir_all(&settings_path).ok()?;
-    settings_path.push("settings.local.json");
-    let existing = std::fs::read_to_string(&settings_path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    let mut root = match existing {
-        serde_json::Value::Object(m) => m,
-        _ => serde_json::Map::new(),
-    };
-
-    // 3. Build our hook entries pointing at staged scripts.
-    let make_entry = |script: &str, matcher: Option<&str>| -> serde_json::Value {
-        let cmd = script_dir.join(script).to_string_lossy().into_owned();
-        let inner = serde_json::json!({
-            "hooks": [{ "type": "command", "command": cmd }]
-        });
-        let mut obj = match inner {
-            serde_json::Value::Object(m) => m,
-            _ => serde_json::Map::new(),
-        };
-        if let Some(m) = matcher {
-            obj.insert("matcher".into(), serde_json::Value::String(m.into()));
-        }
-        serde_json::Value::Object(obj)
-    };
-
-    let aura_entries: &[(&str, &str, Option<&str>)] = &[
-        ("SessionStart", "on-session-start.sh", Some("startup|resume")),
-        ("Stop", "on-stop.sh", None),
-        ("Notification", "on-notification.sh", Some("idle_prompt")),
-        ("PermissionRequest", "on-permission-request.sh", None),
-        ("UserPromptSubmit", "on-prompt-submit.sh", None),
-        ("PreToolUse", "on-pre-tool-use.sh", Some("*")),
-        ("PostToolUse", "on-post-tool-use.sh", None),
-    ];
-
-    let hooks_val = root
-        .entry("hooks".to_string())
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    let serde_json::Value::Object(hooks_map) = hooks_val else {
-        // Existing `hooks` key is non-object — refuse to merge to avoid
-        // corrupting it. User has hand-edited; leave their file alone.
-        return None;
-    };
-
-    for (event, script, matcher) in aura_entries {
-        let entry = make_entry(script, *matcher);
-        let arr = hooks_map
-            .entry(event.to_string())
-            .or_insert_with(|| serde_json::Value::Array(vec![]));
-        let serde_json::Value::Array(items) = arr else {
-            continue;
-        };
-        // De-dupe by exact-match (re-stamp may have rotated paths but
-        // our staged dir is stable under HOME, so this is exact).
-        if !items.contains(&entry) {
-            items.push(entry);
-        }
-    }
-
-    let serialized = serde_json::to_string_pretty(&serde_json::Value::Object(root)).ok()?;
-    std::fs::write(&settings_path, serialized).ok()?;
-    Some(())
-}
-
-/// Embedded copies of the aura-gemini extension. Same pattern as the
-/// claude scripts above — staged on first launch under
-/// `~/.gemini/extensions/aura-gemini/` (gemini's native extension dir),
-/// after which gemini auto-discovers the extension at startup. No
-/// settings.json edit needed; gemini reads its `extensions/` dir
-/// directly.
-const AURA_GEMINI_FILES: &[(&str, &str)] = &[
-    (
-        "gemini-extension.json",
-        include_str!("../../plugins/aura-gemini/gemini-extension.json"),
-    ),
-    (
-        "hooks/hooks.json",
-        include_str!("../../plugins/aura-gemini/hooks/hooks.json"),
-    ),
-    (
-        "scripts/should-use-structured.sh",
-        include_str!("../../plugins/aura-gemini/scripts/should-use-structured.sh"),
-    ),
-    (
-        "scripts/aura-notify.sh",
-        include_str!("../../plugins/aura-gemini/scripts/aura-notify.sh"),
-    ),
-    (
-        "scripts/build-payload.sh",
-        include_str!("../../plugins/aura-gemini/scripts/build-payload.sh"),
-    ),
-    (
-        "scripts/on-session-start.sh",
-        include_str!("../../plugins/aura-gemini/scripts/on-session-start.sh"),
-    ),
-    (
-        "scripts/on-stop.sh",
-        include_str!("../../plugins/aura-gemini/scripts/on-stop.sh"),
-    ),
-    (
-        "scripts/on-prompt-submit.sh",
-        include_str!("../../plugins/aura-gemini/scripts/on-prompt-submit.sh"),
-    ),
-    (
-        "scripts/on-post-tool-use.sh",
-        include_str!("../../plugins/aura-gemini/scripts/on-post-tool-use.sh"),
-    ),
-    (
-        "scripts/on-notification.sh",
-        include_str!("../../plugins/aura-gemini/scripts/on-notification.sh"),
-    ),
-];
-
-fn ensure_aura_gemini_extension_stamped() -> Option<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let home = std::env::var_os("HOME")?;
-    let mut ext_root = std::path::PathBuf::from(home);
-    ext_root.push(".gemini");
-    ext_root.push("extensions");
-    ext_root.push("aura-gemini");
-    std::fs::create_dir_all(&ext_root).ok()?;
-    for (rel, body) in AURA_GEMINI_FILES {
-        let p = ext_root.join(rel);
-        if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent).ok()?;
-        }
-        std::fs::write(&p, body).ok()?;
-        if rel.ends_with(".sh") {
-            if let Ok(meta) = std::fs::metadata(&p) {
-                let mut perms = meta.permissions();
-                perms.set_mode(0o755);
-                let _ = std::fs::set_permissions(&p, perms);
-            }
-        }
-    }
-    Some(())
-}
-
-fn which_aura() -> Option<String> {
-    let out = std::process::Command::new("/usr/bin/which")
-        .arg("aura")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8(out.stdout).ok()?;
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-/// Ensure the repo's `.mcp.json` declares the aura MCP server so ANY claude
-/// session opened in this repo — including one launched from a plain
-/// terminal rather than our in-app PTY — loads aura's tools
-/// (`aura_log_intent`, `aura_snapshot`, …). Merge-safe: preserves any
-/// servers the user already declared, only adds/refreshes the `aura` entry.
-/// The file is kept out of `git status` via `.git/info/exclude` (written by
-/// cmd_aura_track on the same repo-open pass).
-fn ensure_repo_mcp_json(repo_root: &str) -> bool {
-    let path = std::path::Path::new(repo_root).join(".mcp.json");
-    let aura_bin = which_aura().unwrap_or_else(|| "aura".to_string());
-
-    let mut root = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| match v {
-            serde_json::Value::Object(m) => Some(m),
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    let servers = root
-        .entry("mcpServers".to_string())
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    let serde_json::Value::Object(servers_map) = servers else {
-        // Existing `mcpServers` is a non-object — refuse to corrupt a file
-        // the user hand-wrote.
-        return false;
-    };
-    servers_map.insert(
-        "aura".to_string(),
-        serde_json::json!({ "command": aura_bin, "args": ["mcp"] }),
-    );
-
-    match serde_json::to_string_pretty(&serde_json::Value::Object(root)) {
-        Ok(s) => std::fs::write(&path, s).is_ok(),
-        Err(_) => false,
-    }
-}
-
 /// Wire every agent CLI so edits in this repo log intent through Aura,
-/// regardless of which agent — or how it was launched. Idempotent; called
-/// on repo-open (see `cmd_aura_track::aura_ensure_tracked`) as well as at
-/// in-app PTY spawn. Returns whether the core wiring landed.
+/// regardless of which agent — or how it was launched.
+///
+/// The work itself lives in `aura-hooks`, because it is not the app's: a
+/// repo used only from a terminal needs exactly the same hooks, and when
+/// this lived here `aura init` had no way to stamp them. Two copies would
+/// have drifted the first time a script was added to one of them.
 pub(crate) fn wire_agents_for_repo(repo_root: &str) -> bool {
-    // (a) Global MCP config claude reads via `--mcp-config` for in-app PTYs.
-    let mcp_cfg = ensure_aura_mcp_config().is_some();
-    // (b) Repo-level `.mcp.json` so external claude sessions here also get
-    //     aura's tools.
-    let repo_mcp = ensure_repo_mcp_json(repo_root);
-    // (c) Claude's per-repo hook scripts (PreToolUse → live intent capture).
-    let claude_hooks = ensure_aura_claude_hooks_stamped(repo_root).is_some();
-    // (d) Gemini extension (user-global; harmless if gemini isn't installed).
-    let _ = ensure_aura_gemini_extension_stamped();
-    mcp_cfg || repo_mcp || claude_hooks
+    aura_hooks::wire_agents_for_repo(repo_root).wired()
 }
 
 /// vte Performer that strips ANSI/CSI down to printable text and
@@ -2826,12 +2690,6 @@ pub(crate) fn wire_agents_for_repo(repo_root: &str) -> bool {
 ///     scripts (see `aura-shell/plugins/aura-claude/`). Only ;D is
 ///     honored for 133 — ;A and ;B are synthesized by `send_prompt` so
 ///     we never double-bracket if the agent echoes the prompt back.
-///
-/// It no longer collects the printable text: a block's text comes off the
-/// session's shadow grid, which is the only thing here that can tell a
-/// repainted line from a new one. What survives is the part a grid throws
-/// away — the out-of-band markers the agent addresses to us rather than to
-/// the screen.
 #[derive(Default)]
 struct OscPerf {
     /// Set when the agent emits OSC 133 ;A — open a new Prompt block.
@@ -2856,12 +2714,17 @@ struct OscPerf {
 }
 
 impl Perform for OscPerf {
-    // print/execute: intentionally no-op. Text is the grid's job. This pass
-    // used to keep every printable character and the three line-shaping
-    // bytes, which is as close to a transcript as you can get without a
-    // screen — and not close enough: it cannot tell a line being redrawn from
-    // a line being written, so a spinner arrived as one copy per frame and a
-    // menu painted by cursor address arrived as a single run-on line.
+    fn print(&mut self, c: char) {
+        let _ = c;
+    }
+    fn execute(&mut self, byte: u8) {
+        // Keep the line-shaping bytes — without them the UI view collapses
+        // multi-line answers into one wall of text. CSI/SGR/etc. are
+        // handled in csi_dispatch (dropped) so we don't keep ESC junk.
+        if byte == b'\n' || byte == b'\r' || byte == b'\t' {
+            let _ = byte;
+        }
+    }
     fn osc_dispatch(&mut self, params: &[&[u8]], _bel_terminated: bool) {
         if params.is_empty() {
             return;
@@ -2970,6 +2833,288 @@ impl OscPerf {
         if let Ok(ev) = serde_json::from_str::<CliAgentEvent>(text) {
             self.cli_agent_events.push(ev);
         }
+    }
+}
+
+// ── UI-01 deadlock regression harness ───────────────────────────────────
+//
+// The macOS window-layout hang ("app frozen while agents alive") was a
+// lock-order inversion: the PTY read loop held the registry's `sessions`
+// map lock across webview emits, while the sync commands the frontend
+// fires during every window restore / resize / navigation cycle
+// (agent_pty_replay, replay_bytes, title, is_alive, idle_status — all of
+// which run on the macOS main thread) blocked on that same lock. One
+// slow emit and the NSWindow scene wedged for as long as the agent kept
+// streaming.
+//
+// These tests make that property mechanical instead of hoped-for: the
+// emit sink asserts the map is never locked while it runs, and the
+// harness drives both sides flat out under a hard deadline — a
+// reintroduced hold turns the suite red by timeout, not by luck.
+#[cfg(test)]
+mod deadlock_harness {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    /// Real PTY session running `/bin/cat` — a child that stays alive
+    /// until killed, writes nothing unprompted, and gives the harness a
+    /// genuine writer/master/child triple (resize is a real ioctl,
+    /// is_alive a real waitpid) rather than a mock.
+    fn spawn_cat_session(key: &str) -> AgentPtySession {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                cols: 80,
+                rows: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        let mut cmd = CommandBuilder::new("/bin/cat");
+        cmd.cwd("/");
+        let child = pair.slave.spawn_command(cmd).expect("spawn /bin/cat");
+        drop(pair.slave);
+        let writer = pair.master.take_writer().expect("pty writer");
+        AgentPtySession {
+            writer: crate::pty_io::shared_writer(writer),
+            master: Mutex::new(pair.master),
+            child: Mutex::new(child),
+            blocks: Mutex::new(Vec::new()),
+            grid: Mutex::new(aura_term_core::GridTerminal::with_size(80, 24)),
+            grid_lines: Mutex::new(Vec::new()),
+            block_lines: Mutex::new(0),
+            raw_bytes: Mutex::new(Vec::new()),
+            current_block_id: Mutex::new(None),
+            agent_id: "claude".into(),
+            repo_root: "/tmp".into(),
+            key: key.into(),
+            last_append_ms: Mutex::new(None),
+            last_attention_ms: Mutex::new(None),
+            last_notify_ms: Mutex::new(None),
+            last_byte_ms: Mutex::new(now_ms()),
+            last_title: Mutex::new(None),
+        }
+    }
+
+    fn label(ev: &PumpEvent) -> String {
+        match ev {
+            PumpEvent::Block(BlockUpdate::Open { block }) => format!("open:{:?}", block.kind),
+            PumpEvent::Block(BlockUpdate::Reframe { .. }) => "reframe".into(),
+            PumpEvent::Block(BlockUpdate::Close { block }) => format!("close:{:?}", block.kind),
+            PumpEvent::Attention => "attention".into(),
+            PumpEvent::Notify => "notify".into(),
+            PumpEvent::CliEvent(_) => "cli".into(),
+            PumpEvent::Title(_) => "title".into(),
+        }
+    }
+
+    // The defect pin, single-threaded and fully deterministic: every
+    // emit the pump makes must find the registry's sessions map
+    // unlocked (the old loop provably could not pass this — the guard
+    // was held from lookup to end-of-chunk), and one full OSC 133
+    // prompt→output→exit round trip must rotate blocks exactly as the
+    // UI expects.
+    #[test]
+    fn pump_chunk_emits_with_sessions_map_unlocked() {
+        let registry = AgentPtyRegistry::new();
+        let sess = Arc::new(spawn_cat_session("claude@/pin"));
+        registry
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("s1".into(), Arc::clone(&sess));
+
+        let mut parser = Parser::new();
+        let mut events: Vec<String> = Vec::new();
+        let feed: &[&[u8]] = &[
+            b"\x1b]133;A\x07",             // prompt-start (BEL terminator dings attention)
+            b"> ",                          // prompt redraw text
+            b"\x1b]133;B\x07",             // prompt-end / output-start
+            b"hello from the agent\x07",   // streamed output + a raw BEL (throttled)
+            b"\x1b]0;fixing auth\x07",     // OSC 0 window title
+            b"\x1b]133;D;0\x07",           // exit 0
+        ];
+        for chunk in feed {
+            pump_chunk(&sess, &mut parser, chunk, "s1", &mut |ev| {
+                assert!(
+                    registry.sessions.try_lock().is_ok(),
+                    "pump emitted while the sessions map was locked — \
+                     main-thread commands would deadlock behind this"
+                );
+                events.push(label(&ev));
+            });
+        }
+
+        assert_eq!(
+            events,
+            vec![
+                "attention",
+                "notify",
+                "open:Prompt",
+                // A text update is a reframe, not an append: the block's
+                // tail is read off the shadow terminal, so a repaint
+                // rewrites lines rather than adding to them.
+                "reframe",
+                "close:Prompt",
+                "open:Output",
+                "reframe",
+                "title",
+                "close:Exit",
+            ],
+        );
+
+        let blocks = sess.blocks.lock().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].kind, BlockKind::Prompt);
+        assert!(blocks[0].finished_at.is_some());
+        // No trailing space: the text is read off the screen, and a screen
+        // line's blank cells past the last glyph are not content.
+        assert_eq!(blocks[0].text, ">");
+        assert_eq!(blocks[1].kind, BlockKind::Exit);
+        assert_eq!(blocks[1].exit_code, Some(0));
+        // The feed never moves off row 0, so the output shares a screen line
+        // with the prompt that preceded it. A block reading off the screen
+        // takes whole lines, so it carries the "> " it was typed after —
+        // where a byte-stream reader would have seen only its own bytes.
+        assert_eq!(blocks[1].text, "> hello from the agent");
+        assert!(sess.current_block_id.lock().unwrap().is_none());
+        assert_eq!(*sess.last_title.lock().unwrap(), Some("fixing auth".into()));
+        drop(blocks);
+
+        crate::pty_reap::hangup_and_reap(&mut **sess.child.lock().unwrap());
+    }
+
+    // Same pin for the idle-timeout closer — the second place the old
+    // code emitted under the map guard.
+    #[test]
+    fn idle_close_finalizes_stale_output_with_map_unlocked() {
+        let registry = AgentPtyRegistry::new();
+        let sess = Arc::new(spawn_cat_session("claude@/idle"));
+        registry
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("s2".into(), Arc::clone(&sess));
+
+        let mut parser = Parser::new();
+        pump_chunk(&sess, &mut parser, b"\x1b]133;B\x07streamed", "s2", &mut |_| {});
+        // Backdate the last append so the closer sees a stale block.
+        *sess.last_append_ms.lock().unwrap() = Some(now_ms().saturating_sub(10_000));
+
+        let mut closed = None;
+        maybe_close_idle_output(&sess, 2_500, &mut |ev| {
+            assert!(
+                registry.sessions.try_lock().is_ok(),
+                "idle closer emitted while the sessions map was locked"
+            );
+            if let PumpEvent::Block(BlockUpdate::Close { block }) = ev {
+                closed = Some(block);
+            }
+        });
+        let closed = closed.expect("stale Output block should auto-close");
+        assert_eq!(closed.kind, BlockKind::Output);
+        assert!(closed.finished_at.is_some());
+        assert!(sess.current_block_id.lock().unwrap().is_none());
+        assert!(sess.last_append_ms.lock().unwrap().is_none());
+
+        crate::pty_reap::hangup_and_reap(&mut **sess.child.lock().unwrap());
+    }
+
+    // The full regression harness the UI-01 spec asks for: repeated
+    // window restore / resize / navigation cycles on a simulated main
+    // thread while a live agent streams flat out through the real
+    // per-chunk pump path with a deliberately slow sink (worst-case
+    // webview backpressure). The run must finish — a reintroduced
+    // lock-hold across emits turns this into a 30s timeout failure
+    // rather than a flake.
+    #[test]
+    fn window_cycle_harness_never_hangs_while_agent_streams() {
+        let registry = Arc::new(AgentPtyRegistry::new());
+        let sess = Arc::new(spawn_cat_session("claude@/harness"));
+        registry
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("s1".into(), Arc::clone(&sess));
+
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // Agent side: the same code path the read loop runs per chunk,
+        // with a 1ms sleep per emit standing in for a busy webview.
+        let pump_reg = Arc::clone(&registry);
+        let pump_sess = Arc::clone(&sess);
+        let pump_stop = Arc::clone(&stop);
+        let pump = std::thread::spawn(move || {
+            let mut parser = Parser::new();
+            let mut n = 0u64;
+            while !pump_stop.load(Ordering::Relaxed) {
+                let chunk: Vec<u8> = match n % 4 {
+                    0 => b"\x1b]133;A\x07".to_vec(),
+                    1 => format!("agent output line {n}\r\n").into_bytes(),
+                    2 => b"\x1b]133;B\x07".to_vec(),
+                    _ => format!("\x1b]0;title {n}\x07").into_bytes(),
+                };
+                pump_chunk(&pump_sess, &mut parser, &chunk, "s1", &mut |_| {
+                    // Blocking probe, not try_lock: the UI thread below
+                    // legitimately holds this lock in short bursts, so
+                    // try_lock would flag mere contention. If the PUMP
+                    // thread itself held the lock across an emit — the
+                    // original deadlock — this lock() never returns and
+                    // the 30s hang detector fails the test.
+                    drop(pump_reg.sessions.lock().unwrap());
+                    std::thread::sleep(Duration::from_millis(1));
+                });
+                n += 1;
+            }
+        });
+
+        // Main-thread side: exactly what the frontend calls during a
+        // restore / resize / navigation cycle, through the same
+        // accessor path the sync commands use.
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let ui_reg = Arc::clone(&registry);
+        let ui = std::thread::spawn(move || {
+            for _ in 0..300 {
+                // Window restore: replay blocks, bytes, title.
+                let sess = ui_reg.session("s1").expect("session vanished");
+                let _blocks = sess.blocks.lock().unwrap().clone();
+                let _bytes = sess.raw_bytes.lock().unwrap().len();
+                let _title = sess.last_title.lock().unwrap().clone();
+                // Resize: a real TIOCSWINSZ against the live PTY.
+                let _ = sess.master.lock().unwrap().resize(PtySize {
+                    cols: 100,
+                    rows: 30,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
+                // Navigation poll: is_alive + idle status (real waitpid).
+                let alive = sess
+                    .child
+                    .lock()
+                    .unwrap()
+                    .try_wait()
+                    .ok()
+                    .flatten()
+                    .is_none();
+                assert!(alive, "cat exited mid-harness");
+                let _ = *sess.last_byte_ms.lock().unwrap();
+                // Heartbeat sweep (the other historical map-lock user).
+                let _ = ui_reg.live_sessions_for_sync();
+            }
+            let _ = done_tx.send(());
+        });
+
+        let finished = done_rx.recv_timeout(Duration::from_secs(30));
+        stop.store(true, Ordering::Relaxed);
+        pump.join().expect("pump thread panicked");
+        ui.join().expect("ui thread panicked");
+        finished.expect(
+            "window-cycle harness hung: a main-thread command path blocked \
+             >30s while an agent was streaming",
+        );
+
+        crate::pty_reap::hangup_and_reap(&mut **sess.child.lock().unwrap());
     }
 }
 
@@ -3242,4 +3387,5 @@ mod transcript_tests {
         }
         assert_eq!(text, "Explain this codebase\nWorking(9s)");
     }
+
 }

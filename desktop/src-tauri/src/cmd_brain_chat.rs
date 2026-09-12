@@ -136,6 +136,9 @@ pub struct BrainChatContext {
     /// Approvals chip). None → the agent's own default gating. CLI brains map
     /// it onto the real per-CLI approval flag; native brains ignore it.
     pub approval: Option<aura_agents::ApprovalPolicy>,
+    // AURA-1296 — the composer's Concise chip ("concise" | absent). Handed to
+    // Claude Code as `--output-style`; other brains ignore it.
+    pub output_style: Option<String>,
 }
 
 /// What the brain currently in use looks like — surfaced to the UI so
@@ -361,9 +364,14 @@ pub async fn brain_chat_turn(
         model: ctx.model,
         long_context: ctx.long_context,
         approval: ctx.approval,
+        output_style: ctx.output_style, // AURA-1296
         // The CLI-wrapper brain spawns its subprocess here (worktree-correct
         // root, resolved just above). Native brains ignore it.
         cwd: repo_root.clone(),
+        // …unless the session is bound to a machine, in which case the CLI
+        // runs THERE — the same binding the native brain's tools honour
+        // through `Place::resolve`. AURA-1308.
+        machine_id: session.as_ref().and_then(|s| s.machine_id.clone()),
     };
 
     let channel = format!("manager-chat-chunk:{session_id}");

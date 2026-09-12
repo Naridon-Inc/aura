@@ -17,6 +17,8 @@ import { resolveAgentId } from "./agents";
 import { managerCommandHelp } from "./managerCommands";
 import { findClaudeCommand, hasPrimed, primeClaudeCommands } from "./claudeCommands";
 import { buildPrSkillPrompt, getPrSkill, PR_SKILLS } from "./prSkills";
+// AURA-1296
+import { buildPrototypePrompt } from "./prototypePrompt";
 import { launchWorkspace } from "./workspaceCreateStore";
 import { placeForNewWork } from "./ambientSession";
 import { relativeAgeFromSecs } from "./relativeTime";
@@ -170,6 +172,10 @@ export async function handleChatSlash(
       return runPr(ctx.repoRoot, rest);
     case "launch":
       return runLaunch(ctx.repoRoot, rest);
+    // AURA-1296 — `/prototype [topic]` is a prompt, not an action: the brain
+    // gets the expanded ask instead of the raw slash line.
+    case "prototype":
+      return { handled: false, forwardText: buildPrototypePrompt(arg) };
     default: {
       // Not a native Aura verb. It may be one of Claude Code's OWN custom
       // slash commands (`.claude/commands/<verb>.md`). If so, run it on

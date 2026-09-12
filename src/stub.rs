@@ -45,7 +45,7 @@ impl StubEngine {
                 for file_entry in fs::read_dir(".").unwrap().flatten() {
                     let path = file_entry.path();
                     let path_str = path.to_string_lossy().to_string();
-                    let ext = if path_str.ends_with(".rs") { "rs" } else if path_str.ends_with(".py") { "py" } else if path_str.ends_with(".ts") || path_str.ends_with(".tsx") { "ts" } else if path_str.ends_with(".js") || path_str.ends_with(".jsx") { "js" } else { continue };
+                    let ext = if path_str.ends_with(".rs") { "rs" } else if path_str.ends_with(".py") { "py" } else if path_str.ends_with(".ts") || path_str.ends_with(".tsx") || path_str.ends_with(".mts") || path_str.ends_with(".cts") { "ts" } else if path_str.ends_with(".js") || path_str.ends_with(".jsx") || path_str.ends_with(".mjs") || path_str.ends_with(".cjs") { "js" } else { continue };
 
                     if let Ok(source_code) = fs::read_to_string(&path) {
                         let mut modified_code = source_code.clone();

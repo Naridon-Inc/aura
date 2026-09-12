@@ -53,6 +53,11 @@ pub struct AuraTrackStatus {
     /// "update it" — a button — instead of a Retry that reruns a command the
     /// old binary has never heard of.
     pub stale_cli: Option<StaleCli>,
+    /// The folder macOS refused, when that is what stopped us. Present only
+    /// for a privacy refusal, because it is the one failure whose fix is a
+    /// switch in System Settings rather than anything in the project — so it
+    /// is the one the strip can offer a button for instead of prose.
+    pub privacy_path: Option<String>,
     /// The helper's own words, all of them, unabridged. `detail` is the one
     /// line we put on screen; this is what the reader can open when that line
     /// isn't enough. Never the only copy of the diagnosis — the strip clips at
@@ -120,6 +125,30 @@ pub async fn aura_ensure_tracked(repo_root: String) -> Result<AuraTrackStatus, S
                 ),
                 stale_cli: None,
                 raw_detail: None,
+                privacy_path: None,
+            });
+        }
+
+        // (0) Ask macOS for the access this project needs, before anything that
+        // depends on having it. A refusal here is terminal — every step below
+        // shells out, and a helper we spawn cannot raise the consent panel —
+        // so there is nothing to gain by running them and finding out again in
+        // developer shorthand.
+        if let Some(blocked) = first_refused(&access_paths(&root)) {
+            return Ok(AuraTrackStatus {
+                repo_root,
+                is_git: true,
+                tracked: false,
+                newly_enabled: false,
+                wired: false,
+                detail: Some(privacy_message(&blocked, &root)),
+                stale_cli: None,
+                raw_detail: Some(format!(
+                    "macOS refused this process access to {} (EPERM, \"Operation not \
+                     permitted\"). Aura needs Full Disk Access to read it.",
+                    blocked.display()
+                )),
+                privacy_path: Some(blocked.display().to_string()),
             });
         }
 
@@ -175,9 +204,113 @@ pub async fn aura_ensure_tracked(repo_root: String) -> Result<AuraTrackStatus, S
             detail,
             stale_cli,
             raw_detail,
+            privacy_path: None,
         })
     })
     .await
+}
+
+/// Every directory this project needs Aura to be allowed into.
+///
+/// Usually that is one path — the checkout. For a linked worktree it is two,
+/// and the second is the one that actually gets refused: `.git` there is a
+/// *file* pointing at a git directory that can live anywhere on the disk,
+/// including inside a folder macOS protects while the checkout itself sits
+/// outside one. A worktree under `~/.aura/worktrees/` whose git directory is
+/// under `~/Documents` is exactly that shape, and it is why the old notice
+/// read as wrong advice: it said "this folder", the reader looked at a folder
+/// macOS does not protect, and the sentence lost them.
+fn access_paths(root: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![root.to_path_buf()];
+
+    // A `.git` directory lives inside the checkout we have already listed;
+    // only the gitfile form points somewhere else.
+    let Ok(text) = std::fs::read_to_string(root.join(".git")) else {
+        return paths;
+    };
+    let Some(target) = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("gitdir:"))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
+        return paths;
+    };
+    let git_dir = {
+        let p = PathBuf::from(target);
+        if p.is_absolute() {
+            p
+        } else {
+            root.join(p)
+        }
+    };
+
+    // `<common>/worktrees/<name>` — the shared objects, config and hooks sit
+    // one level above `worktrees/`, and the hooks are precisely what `aura
+    // enable` writes, so the common directory is the path that has to be
+    // reachable. Named before the per-worktree directory because it is the
+    // one a person can recognise: `…/Shopify/.git` reads as their project,
+    // `…/Shopify/.git/worktrees/windhoek` reads as machinery.
+    if let Some(common) = git_dir
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|n| n == "worktrees"))
+        .and_then(|p| p.parent())
+    {
+        paths.push(common.to_path_buf());
+    }
+    paths.push(git_dir);
+    paths
+}
+
+/// EPERM. macOS refuses a privacy-protected folder with "Operation not
+/// permitted"; a genuine ownership problem is EACCES, "Permission denied".
+/// Rust maps both to `PermissionDenied`, so the errno is the only thing that
+/// separates a refusal nobody can fix in the folder from one they can.
+const EPERM: i32 = 1;
+
+/// The first of these paths macOS refuses to let *this* process read.
+///
+/// The probe has to happen here, in the app's own process, rather than be
+/// inferred from what a spawned helper reported. Two reasons, and the second
+/// is the whole fix:
+///
+///   - It says which path is refused. `aura enable` reports EPERM without
+///     saying what it touched, and in a linked worktree that is usually not
+///     the folder the user is looking at.
+///   - It is what makes macOS ask. The consent panel belongs to the app the
+///     user launched; a `git` or an `aura` that app spawned cannot raise it.
+///     An app that only ever delegates its file access therefore never
+///     triggers the request for the access it needs — so the answer stays no
+///     forever and every retry fails identically. Reading the path ourselves
+///     *is* the request.
+fn first_refused(paths: &[PathBuf]) -> Option<PathBuf> {
+    paths
+        .iter()
+        .find(|p| {
+            std::fs::read_dir(p)
+                .err()
+                .is_some_and(|e| e.raw_os_error() == Some(EPERM))
+        })
+        .cloned()
+}
+
+/// The notice for a folder macOS is refusing.
+///
+/// Front-loaded, and the path goes last: the strip is one line tall and clips,
+/// so a long absolute path at the front would spend the entire visible line
+/// before reaching the fix. `raw_detail` carries it in full regardless.
+fn privacy_message(blocked: &Path, root: &Path) -> String {
+    let what = if blocked == root {
+        "this project's folder"
+    } else {
+        "this project's Git folder, which lives outside the project"
+    };
+    format!(
+        "macOS is blocking Aura from {what} — switch Aura on under System Settings › \
+         Privacy & Security › Full Disk Access, then try again. Aura cannot ask for \
+         this itself. Blocked: {}",
+        blocked.display()
+    )
 }
 
 /// Turn whatever went wrong into a sentence the person reading it can act on.
@@ -214,6 +347,25 @@ fn explain_failure(failure: Option<&EnableFailure>) -> String {
         );
     }
     let raw = &f.raw;
+    // macOS refuses a privacy-protected folder with EPERM — "Operation not
+    // permitted" — and that is a different fact from "you do not have write
+    // permission", which is EACCES and reads "Permission denied". Only EPERM is
+    // matched here, deliberately: a genuine ownership problem is the user's to
+    // fix in the folder, while this one cannot be fixed in the folder at all.
+    //
+    // Nothing is wrong with the project. The same command run from a terminal
+    // succeeds on the same files, because the terminal has been allowed into
+    // Documents and Aura has not — and a helper Aura launches can never raise
+    // the permission dialog itself, so the refusal arrives silently and every
+    // retry fails identically. Quoting `Os { code: 1, … }` at someone leaves
+    // them with a Retry button and no way to succeed, so name the switch.
+    if raw.contains("Operation not permitted") {
+        return "macOS is keeping Aura out of this folder — switch Aura on under System \
+                Settings › Privacy & Security › Full Disk Access, then try again. Folders \
+                like Documents and Desktop are protected, and Aura cannot ask for them \
+                itself."
+            .into();
+    }
     if raw.contains("NotADirectory") || raw.contains("Not a directory") {
         return "This folder is a linked copy of another project, and the version of \
                 Aura installed on this computer can't switch itself on inside one. \
@@ -508,6 +660,27 @@ mod tests {
     }
 
     #[test]
+    fn macos_privacy_refusal_names_the_setting_instead_of_the_errno() {
+        // Exactly what `aura enable` printed on 2026-08-23 for a project living
+        // under ~/Documents: the app had no Full Disk Access, so every write was
+        // refused with EPERM and the strip quoted the errno back at the reader.
+        let raw = r#"Error: Os { code: 1, kind: PermissionDenied, message: "Operation not permitted" }"#;
+        let msg = explain_failure(Some(&said(raw)));
+        assert!(msg.contains("Full Disk Access"), "names where to fix it: {msg}");
+        assert!(!msg.contains("Os {"), "no errno shorthand: {msg}");
+        assert!(!msg.contains("EPERM"), "no errno shorthand: {msg}");
+    }
+
+    #[test]
+    fn a_real_ownership_failure_is_not_mistaken_for_a_privacy_one() {
+        // EACCES is the user's own filesystem permissions and has nothing to do
+        // with macOS privacy — it must keep falling through to the quoting path.
+        let raw = r#"Error: Os { code: 13, kind: PermissionDenied, message: "Permission denied" }"#;
+        let msg = explain_failure(Some(&said(raw)));
+        assert!(!msg.contains("Full Disk Access"), "not a privacy refusal: {msg}");
+    }
+
+    #[test]
     fn missing_binary_failure_points_at_installing_it() {
         let msg = explain_failure(Some(&said(
             "couldn't start Aura (aura): No such file or directory",
@@ -591,4 +764,83 @@ mod tests {
         .unwrap();
         assert!(aura_capture_present(root), "hook marker => tracked");
     }
+
+    /// The bug this module got wrong twice: a linked worktree keeps its git
+    /// directory somewhere else entirely, so "this folder" is not the folder
+    /// that has to be reachable. Aura's own worktrees live under `~/.aura`,
+    /// which macOS does not protect, while the git directory they point at can
+    /// sit in Documents, which it does.
+    #[test]
+    fn a_worktrees_git_directory_is_listed_as_well_as_its_checkout() {
+        let tmp = std::env::temp_dir().join(format!("aura-track-wt-{}", std::process::id()));
+        let checkout = tmp.join("windhoek");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::write(
+            checkout.join(".git"),
+            "gitdir: /Users/x/Documents/Shopify/.git/worktrees/windhoek\n",
+        )
+        .unwrap();
+
+        let paths = access_paths(&checkout);
+        let shown: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+
+        assert!(shown.contains(&checkout.display().to_string()), "{shown:?}");
+        assert!(
+            shown.contains(&"/Users/x/Documents/Shopify/.git".to_string()),
+            "the common dir is where the hooks go, so it must be checked: {shown:?}"
+        );
+        assert!(
+            shown
+                .iter()
+                .any(|p| p.ends_with("worktrees/windhoek")),
+            "{shown:?}"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// An ordinary checkout has a `.git` directory inside it, so there is
+    /// nothing else to reach and nothing else to name.
+    #[test]
+    fn an_ordinary_checkout_lists_only_itself() {
+        let tmp = std::env::temp_dir().join(format!("aura-track-plain-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join(".git")).unwrap();
+        assert_eq!(access_paths(&tmp).len(), 1);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A readable folder is not a refusal. Guards the probe against reporting
+    /// every project as blocked, which would be worse than the bug it fixes.
+    #[test]
+    fn a_readable_folder_is_not_reported_as_refused() {
+        let tmp = std::env::temp_dir();
+        assert_eq!(first_refused(&[tmp]), None);
+    }
+
+    /// A path that does not exist is a missing path, not a privacy refusal —
+    /// ENOENT, not EPERM. Reported as such, or a deleted worktree would send
+    /// the user to System Settings to fix nothing.
+    #[test]
+    fn a_missing_folder_is_not_a_privacy_refusal() {
+        let gone = std::env::temp_dir().join("aura-track-definitely-not-here");
+        assert_eq!(first_refused(&[gone]), None);
+    }
+
+    /// When the blocked path is not the project, say so — the reader is
+    /// looking at a folder that is fine, and "this folder" would read as
+    /// simply untrue.
+    #[test]
+    fn the_notice_distinguishes_the_git_folder_from_the_project() {
+        let root = PathBuf::from("/Users/x/.aura/worktrees/p-1/windhoek");
+        let git = PathBuf::from("/Users/x/Documents/Shopify/.git");
+
+        let outside = privacy_message(&git, &root);
+        assert!(outside.contains("lives outside the project"), "{outside}");
+        assert!(outside.contains("/Users/x/Documents/Shopify/.git"), "{outside}");
+        assert!(outside.contains("Full Disk Access"), "{outside}");
+
+        let inside = privacy_message(&root, &root);
+        assert!(inside.contains("this project's folder"), "{inside}");
+        assert!(!inside.contains("lives outside"), "{inside}");
+    }
+
 }

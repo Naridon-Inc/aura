@@ -1,0 +1,12 @@
+[package]
+name = "aura-intent-grammar"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Tells an intent row a person wrote from one a hook composed."
+
+[lib]
+name = "aura_intent_grammar"
+path = "src/lib.rs"
+
+[dependencies]

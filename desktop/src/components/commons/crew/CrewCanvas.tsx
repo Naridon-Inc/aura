@@ -10,6 +10,7 @@
 // honestly as "these all run in parallel" rather than a broken graph.
 
 import {
+  memo,
   useCallback,
   useLayoutEffect,
   useMemo,
@@ -30,7 +31,7 @@ import {
   Users,
 } from "lucide-react";
 
-import type { ReadyViewDto } from "../../../lib/api";
+import type { LoopTask, ReadyViewDto } from "../../../lib/api";
 import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { AgentIcon } from "../../agent/AgentIcon";
 import { agentDisplayLabel, canonicalAgentId } from "../../../lib/agentIdentity";
@@ -95,6 +96,56 @@ const MAX_ZOOM = 1.6;
 const READABLE_ZOOM = 0.55;
 const clampZoom = (z: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z));
 
+// How far past the visible frame we keep cards mounted, in board pixels.
+// Generous enough that a fast pan never shows a hole before React catches up.
+const CULL_MARGIN = CREW_NODE_W * 2;
+
+// ── Layout memo keys ──────────────────────────────────────────────────────
+//
+// The board polls, and every tick hands us a brand-new `ReadyViewDto` even
+// when not one task moved. Keyed on that object, the (expensive) layout pass
+// re-ran on every tick for a 900-task board. These fingerprints let the memos
+// key on the WORK instead of the object identity: same string ⇒ same picture.
+//
+// `updated_at` stands in for the free-text fields the layout reads (title,
+// input) so we never have to hash task bodies — any edit to them moves the
+// timestamp. Everything the grouping depends on (tags, deps, parent, agent,
+// assignee, priority) is spelled out, because those decide which zone a card
+// lands in and we'd rather over-specify than miss a regroup.
+//
+// The separators are control characters, so a task's own text can never forge
+// a field boundary and make two different boards fingerprint alike.
+const KEY_SEP = "\u0001";
+const LANE_SEP = "\u0002";
+
+function laneKey(tasks: readonly LoopTask[]): string {
+  const parts: string[] = [];
+  for (const t of tasks) {
+    parts.push(
+      t.id,
+      String(t.updated_at),
+      t.priority,
+      t.agent_kind ?? "",
+      t.assignee ?? "",
+      t.parent_task_id ?? "",
+      t.tags.join(","),
+      (t.depends_on ?? []).join(","),
+    );
+  }
+  return parts.join(KEY_SEP);
+}
+
+function crewLayoutKey(view: ReadyViewDto): string {
+  return [
+    laneKey(view.working),
+    laneKey(view.ready),
+    laneKey(view.blocked.map((b) => b.task)),
+    laneKey(view.paused),
+    laneKey(view.done),
+    laneKey(view.other),
+  ].join(LANE_SEP);
+}
+
 export function CrewCanvas({
   view,
   selectedId,
@@ -125,9 +176,15 @@ export function CrewCanvas({
   // still collapsible is the leftover "no set order yet" pile (epics / sprints /
   // Unsorted), which stays shut as labelled bands you open one at a time.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Read through a ref so the layout memo can key on the fingerprint below
+  // rather than the poll's throwaway object. Same string ⇒ same board, so
+  // reusing the previous `view` to build it is sound.
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const layoutKey = useMemo(() => crewLayoutKey(view), [view]);
   const layout = useMemo(
-    () => computeCrewGraphLayout(view, undefined, expanded, boardSteps),
-    [view, expanded, boardSteps],
+    () => computeCrewGraphLayout(viewRef.current, undefined, expanded, boardSteps),
+    [layoutKey, expanded, boardSteps],
   );
   // The full chain the selected task belongs to — back to its roots and forward
   // to its ends — so picking one box lights the whole path, not just neighbours.
@@ -149,6 +206,30 @@ export function CrewCanvas({
     (id: string, title: string) => setWatch({ id, title }),
     [],
   );
+  // The card's click handler has to keep ONE identity for the whole life of
+  // the canvas, or `CanvasNode`'s memo is worthless — the caller re-creates
+  // `onSelect` on its own render cycle, so we route through a ref.
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
+  const selectNodeStable = useCallback(
+    (id: string) => onSelectRef.current?.(id),
+    [],
+  );
+  // Stay undefined when the caller wired no handler, so a read-only canvas
+  // still renders cards with no click affordance, exactly as before.
+  const selectNode = onSelect ? selectNodeStable : undefined;
+  // Live size of the board viewport, so we can work out which cards actually
+  // fall inside it. Tracked (not read ad-hoc) because the cull runs in render.
+  const [viewport, setViewport] = useState({ w: 0, h: 0 });
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const read = () => setViewport({ w: el.clientWidth, h: el.clientHeight });
+    read();
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(
     null,
   );
@@ -242,6 +323,13 @@ export function CrewCanvas({
   // Zone frames, for drawing the faint goal↔goal interconnections between them.
   const regionPos = new Map(layout.regions.map((r) => [r.id, r] as const));
 
+  // The only thing the per-flow pass below reads off `view` is the done lane's
+  // commit shas, so key it on those alone — otherwise a poll that changed
+  // nothing still re-walked every region.
+  const doneCommitsKey = useMemo(
+    () => view.done.map((t) => `${t.id}:${t.commit_sha ?? ""}`).join(KEY_SEP),
+    [view.done],
+  );
   // Per-flow data, computed once per layout/proof change so the render stays
   // cheap. A dependency COLUMN is an execution WAVE: everything in column 0 can
   // run at once, then column 1, and so on — that's exactly how the runner picks
@@ -262,7 +350,8 @@ export function CrewCanvas({
     // Only finished work carries a commit, so the proven count joins the done
     // lane's commit_sha to the goals ledger.
     const commitById = new Map<string, string>();
-    for (const t of view.done) if (t.commit_sha) commitById.set(t.id, t.commit_sha);
+    for (const t of viewRef.current.done)
+      if (t.commit_sha) commitById.set(t.id, t.commit_sha);
     const meta = new Map<
       string,
       {
@@ -308,7 +397,7 @@ export function CrewCanvas({
       });
     }
     return meta;
-  }, [layout.nodes, view.done, proof]);
+  }, [layout.nodes, doneCommitsKey, proof]);
 
   // Edge styling helpers. A node that fans out to ≥2 successors is a PARALLEL
   // SPLIT — those branches run side by side, so we tint that fan with a stable
@@ -327,6 +416,27 @@ export function CrewCanvas({
     for (const m of regionMeta.values()) for (const n of m.sinks) s.add(n.id);
     return s;
   }, [regionMeta]);
+
+  // Only mount the cards inside (or just outside) the frame. A synced board
+  // is 900+ nodes on a sheet many screens wide — mounting all of them cost a
+  // wall of DOM that then re-rendered on every pointer move while panning.
+  // Culling is invisible by construction: what we drop is off-screen anyway.
+  const visibleNodes = useMemo(() => {
+    if (viewport.w === 0 || viewport.h === 0) return layout.nodes;
+    // Screen → board coordinates: the sheet is translated by `pan` then
+    // scaled by `zoom` about its top-left.
+    const left = -pan.x / zoom - CULL_MARGIN;
+    const right = (viewport.w - pan.x) / zoom + CULL_MARGIN;
+    const top = -pan.y / zoom - CULL_MARGIN;
+    const bottom = (viewport.h - pan.y) / zoom + CULL_MARGIN;
+    return layout.nodes.filter(
+      (n) =>
+        n.x + CREW_NODE_W >= left &&
+        n.x <= right &&
+        n.y + CREW_NODE_H >= top &&
+        n.y <= bottom,
+    );
+  }, [layout.nodes, pan.x, pan.y, zoom, viewport.w, viewport.h]);
 
   return (
     <div
@@ -633,14 +743,14 @@ export function CrewCanvas({
             />
           ))}
 
-          {layout.nodes.map((n) => (
+          {visibleNodes.map((n) => (
             <CanvasNode
               key={n.id}
               node={n}
               selected={n.id === selectedId}
               dimmed={hasSelection && !chain.nodes.has(n.id)}
               inChain={hasSelection && chain.nodes.has(n.id)}
-              onSelect={onSelect}
+              onSelect={selectNode}
               onWatch={watchNode}
             />
           ))}
@@ -704,7 +814,11 @@ function CtrlButton({
   );
 }
 
-function CanvasNode({
+// Memoised on a plain shallow compare: the layout memo above hands out the
+// same node objects until the work genuinely changes, and both handlers are
+// identity-stable, so the only cards that re-render on a pan or a selection
+// are the ones whose own state moved.
+const CanvasNode = memo(function CanvasNode({
   node,
   selected,
   dimmed,
@@ -888,7 +1002,7 @@ function CanvasNode({
       </div>
     </button>
   );
-}
+});
 
 // Who's on it + a quiet progress bar — the shape of a group at a glance,
 // reused by goal regions and objective sections so every header reads the same.

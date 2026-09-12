@@ -1637,8 +1637,16 @@ async fn upvote_knowledge_handler(
 struct HistoryQuery {
     repo: Option<String>,
     file: Option<String>,
+    /// Narrow to one function. Without it the answer is a file's timeline;
+    /// with it, it is one function's history — the question a rewind asks.
+    function: Option<String>,
     #[serde(default = "default_history_limit")]
     limit: i64,
+    /// Ask for the recorded source, not just its hash. Off by default: a
+    /// timeline is a timeline, and only a caller that means to restore
+    /// something needs the code.
+    #[serde(default)]
+    body: bool,
 }
 fn default_history_limit() -> i64 { 50 }
 
@@ -1653,8 +1661,17 @@ async fn get_function_history(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let entries = host_db::query_function_history(&db, &repo.id, params.file.as_deref(), params.limit)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let entries = host_db::query_function_history(
+        &db,
+        &repo.id,
+        &host_db::HistoryFilter {
+            file_path: params.file.as_deref(),
+            function_name: params.function.as_deref(),
+            limit: params.limit,
+            with_body: params.body,
+        },
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "status": "ok", "entries": entries, "total": entries.len() })))
 }
@@ -1663,6 +1680,8 @@ async fn get_function_history(
 struct TraceQuery {
     repo: Option<String>,
     function: Option<String>,
+    #[serde(default)]
+    body: bool,
 }
 
 async fn trace_function_handler(
@@ -1677,7 +1696,7 @@ async fn trace_function_handler(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let entries = host_db::trace_function(&db, &repo.id, function_name)
+    let entries = host_db::trace_function(&db, &repo.id, function_name, params.body)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "status": "ok", "entries": entries, "total": entries.len() })))

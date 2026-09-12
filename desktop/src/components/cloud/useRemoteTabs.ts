@@ -32,6 +32,7 @@ import {
   hasSessionTabs,
   loadRemoteSnapshot,
   openSessionTab,
+  openWorkTab,
   refreshSessions,
   remoteSlotFor,
   remoteSlotKey,
@@ -39,6 +40,7 @@ import {
   switchRemoteSlot,
   type RemoteSlot,
   type RemoteTab,
+  type RemoteWorkKind,
   type RemoteWorkspaceSnapshot,
 } from "../../lib/remoteWorkspaceSnapshot";
 
@@ -51,6 +53,8 @@ export type RemoteTabs = {
   hasSessions: boolean;
   /** Join a session, or refresh and focus one already open. */
   openSession: (session: BoxSession, readOnly: boolean) => void;
+  /** Open a work surface — files, changes, git, PRs, run — or focus it. */
+  openWork: (kind: RemoteWorkKind) => void;
   /** Close the view. The session keeps running on the box. */
   closeTab: (id: string) => void;
   focusTab: (id: string) => void;
@@ -73,10 +77,11 @@ function readSlot(slot: RemoteSlot | null): RemoteWorkspaceSnapshot {
 export function useRemoteTabs(
   machineId: string | null,
   repoRoot: string | null | undefined,
+  remoteRoot?: string | null,
 ): RemoteTabs {
   const slot = useMemo(
-    () => remoteSlotFor(machineId, repoRoot),
-    [machineId, repoRoot],
+    () => remoteSlotFor(machineId, repoRoot, remoteRoot),
+    [machineId, repoRoot, remoteRoot],
   );
   const slotKey = slot ? remoteSlotKey(slot) : "";
 
@@ -142,6 +147,10 @@ export function useRemoteTabs(
       update((cur) => openSessionTab(cur, session, readOnly)),
     [update],
   );
+  const openWork = useCallback(
+    (kind: RemoteWorkKind) => update((cur) => openWorkTab(cur, kind)),
+    [update],
+  );
   const closeTab = useCallback(
     (id: string) => update((cur) => closeRemoteTab(cur, id)),
     [update],
@@ -162,6 +171,7 @@ export function useRemoteTabs(
     active: activeTab(snap),
     hasSessions: hasSessionTabs(snap),
     openSession,
+    openWork,
     closeTab,
     focusTab,
     syncSessions,

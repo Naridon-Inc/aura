@@ -13,6 +13,10 @@
 
 import { api } from "./api";
 import { buildPrContextMarkdown, collectPrContext } from "./prFlowState";
+// AURA-1297 — the repo's own review rules ride along with the review skill.
+import { appendReviewInstructions } from "./repoInstructions";
+import { loadRepoInstructions } from "./repoInstructionsStore";
+// end AURA-1297
 
 export type PrSkillId = "describe" | "review" | "address" | "ship";
 
@@ -164,5 +168,11 @@ export async function buildPrSkillPrompt(
   out = fill(out, "{{PR_TITLE}}", target.title?.trim() || "the current work");
   out = fill(out, "{{HEAD_REF}}", target.headRef?.trim() || ctx.branch || "current branch");
   out = fill(out, "{{CONTEXT}}", contextBlock);
+  // AURA-1297 — "How the agent should review this repo" (Settings → Copies &
+  // scripts) lands at the end of the review prompt, and only the review one.
+  if (skill.id === "review") {
+    out = appendReviewInstructions(out, await loadRepoInstructions(repoRoot));
+  }
+  // end AURA-1297
   return out.trim();
 }

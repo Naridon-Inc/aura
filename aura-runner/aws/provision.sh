@@ -22,7 +22,13 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-t4g.large}"
 VOLUME_GB="${VOLUME_GB:-40}"
 KEY_NAME="${KEY_NAME:-AuraKey}"
 KEY_PATH="${KEY_PATH:-$HOME/.ssh/$KEY_NAME.pem}"
-NAME="${NAME:-aura-runner}"
+# The fleet name, and also the instance's Name tag. It defaults to something
+# that identifies THIS box, because a fixed default does not: an org that ran
+# this script six times used to get six machines all called `aura-runner`, and
+# a fleet list — or the machine picker in the console — that reads
+# `aura-runner` six times cannot be used to pick one. Region plus four random
+# characters is short, sorts by region, and is still typeable.
+NAME="${NAME:-aura-$REGION-$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 4)}"
 SG_NAME="${SG_NAME:-aura-runner-sg}"
 MARKET="${MARKET:-on-demand}"                          # on-demand | spot
 # Resume an existing box instead of launching a new one. Set RESUME_IP (and

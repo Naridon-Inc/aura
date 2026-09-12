@@ -21,9 +21,20 @@ import {
   runCommandOverride,
 } from "../../lib/runPane";
 import { RUN_COMMAND_CHANGED, promptForRunCommand } from "./runPrompt";
+// AURA-1294
+import { ExternalLink } from "lucide-react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { machineIdForRoot, useActiveMachine } from "../../lib/activeMachine";
+import { openExternal } from "../../lib/openExternal";
+import { localUrlPort, placePortForward } from "../../lib/place/ports";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+// end AURA-1294
 
 type Props = {
   repoRoot: string;
+  // AURA-1294 — the pty Run is on, when it is open. The row watches it for a
+  // `http://localhost:<port>` line so a server on a place can be opened here.
+  runPtyId?: string | null;
   /** True when Run is open and is the panel's focused terminal. */
   active: boolean;
   /** True when a Run terminal exists at all (focused or not). */
@@ -35,9 +46,53 @@ type Props = {
   onStop: () => void;
 };
 
-export function RunRow({ repoRoot, active, open, onRun, onFocus, onStop }: Props) {
+export function RunRow({ repoRoot, runPtyId, active, open, onRun, onFocus, onStop }: Props) {
   const [command, setCommand] = useState<string | null>(null);
   const [source, setSource] = useState<string | null>(null);
+
+  // AURA-1294 — a localhost URL Run printed, when Run is on a place other
+  // than this laptop. On this laptop the URL already works; nothing to add.
+  const activeMachine = useActiveMachine();
+  const machineId = machineIdForRoot(repoRoot) ?? activeMachine.machineId;
+  const [remotePort, setRemotePort] = useState<number | null>(null);
+  const [bringing, setBringing] = useState(false);
+  useEffect(() => {
+    setRemotePort(null);
+    if (!runPtyId || !machineId) return;
+    let unlisten: UnlistenFn | undefined;
+    let gone = false;
+    const decoder = new TextDecoder();
+    // A URL can straddle two chunks; keep a short tail so the join is seen.
+    let tail = "";
+    void (async () => {
+      const off = await listen<number[]>(`pty:${runPtyId}`, (e) => {
+        const text = tail + decoder.decode(new Uint8Array(e.payload));
+        const port = localUrlPort(text);
+        if (port !== null) setRemotePort(port);
+        tail = text.slice(-160);
+      });
+      if (gone) off();
+      else unlisten = off;
+    })();
+    return () => {
+      gone = true;
+      unlisten?.();
+    };
+  }, [runPtyId, machineId]);
+
+  async function openOnMac() {
+    if (!machineId || remotePort === null || bringing) return;
+    setBringing(true);
+    try {
+      const got = await placePortForward(machineId, remotePort);
+      await openExternal(got.url);
+    } catch (e) {
+      console.error("RunRow: couldn't bring the port over:", e);
+    } finally {
+      setBringing(false);
+    }
+  }
+  // end AURA-1294
 
   // `resolveRunCommand` reads through a shared cache, so the two panels that
   // can be showing this row at once cost one backend read between them.
@@ -132,6 +187,25 @@ export function RunRow({ repoRoot, active, open, onRun, onFocus, onStop }: Props
           {subtitle}
         </div>
       </div>
+      {/* AURA-1294 — Run on a place printed a localhost URL; that address is
+          over there. This brings the port here and opens it. */}
+      {open && machineId && remotePort !== null && (
+        <button
+          type="button"
+          title={`Bring port ${remotePort} to your Mac and open it`}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            void openOnMac();
+          }}
+          disabled={bringing}
+          className="flex h-4 flex-shrink-0 items-center gap-1 rounded px-1 text-[10px] text-accent transition-colors hover:bg-state-hover disabled:opacity-60"
+        >
+          {bringing ? <AsciiSpinner size={10} /> : <ExternalLink className="h-2.5 w-2.5" />}
+          Open on your Mac
+        </button>
+      )}
+      {/* end AURA-1294 */}
       <div className="flex items-center gap-0.5 flex-shrink-0 opacity-0 transition-opacity group-hover:opacity-100">
         {open && (
           <button

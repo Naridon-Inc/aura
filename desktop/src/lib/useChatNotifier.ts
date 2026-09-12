@@ -28,12 +28,13 @@ import {
 import { playChime, isChimeMuted } from "./chime";
 import { routeToChatChannel } from "./chatRoute";
 import { roomTokenParam } from "./roomAuth";
+import { cloudOrigins } from "./cloudOrigin";
 import {
   AURA_GLOBAL_ROOM_ID,
   AURA_GLOBAL_CHANNEL,
 } from "../components/team/domain/channels";
 
-const WS_ORIGIN = "wss://auravcs.com";
+
 
 type IncomingMsg = {
   id: string;
@@ -205,10 +206,14 @@ export function useChatNotifier(repoRoot: string | null): void {
         // chat one — required once AURA_ROOMS_REQUIRE_AUTH is on.
         const tok = await roomTokenParam();
         if (cancelled) return;
+        // The cloud this app is talking to, not a literal — otherwise an
+        // app pointed at staging still listens to production's rooms.
+        const { ws: wsOrigin } = await cloudOrigins();
+        if (cancelled) return;
         let socket: WebSocket;
         try {
           socket = new WebSocket(
-            `${WS_ORIGIN}/api/v1/room/${encodeURIComponent(roomId)}/ws${
+            `${wsOrigin}/api/v1/room/${encodeURIComponent(roomId)}/ws${
               tok ? `?${tok}` : ""
             }`,
           );

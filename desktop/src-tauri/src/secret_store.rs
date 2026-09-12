@@ -133,15 +133,47 @@ mod file {
     ) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
         let p = path_for(dir, service);
-        let tmp = p.with_extension("json.tmp");
+        // Unique tmp name (pid + monotonic-ish nanos): a fixed `.json.tmp`
+        // lets two writers clobber each other's tmp mid-rename, and lets an
+        // attacker pre-create the path to defeat create_new below.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = p.with_extension(format!("json.tmp.{}.{}", std::process::id(), nanos));
         let bytes =
             serde_json::to_vec_pretty(map).map_err(|e| format!("encode: {e}"))?;
-        std::fs::write(&tmp, &bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        restrict(&tmp)?;
+        // The file must be born 0600 — write-then-chmod leaves the plaintext
+        // world-readable for the gap, and any reader who opened it in that
+        // window keeps the handle past the chmod.
+        write_restricted(&tmp, &bytes)
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
         // Atomic swap so a crash mid-write can't leave a half-file.
-        std::fs::rename(&tmp, &p).map_err(|e| format!("rename {}: {e}", p.display()))?;
+        if let Err(e) = std::fs::rename(&tmp, &p) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("rename {}: {e}", p.display()));
+        }
         restrict(&p)?;
         Ok(())
+    }
+
+    /// Create `p` fresh with owner-only permissions and write `bytes`.
+    #[cfg(unix)]
+    fn write_restricted(p: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(p)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    }
+
+    #[cfg(not(unix))]
+    fn write_restricted(p: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        std::fs::write(p, bytes)
     }
 
     /// Owner-only (0600) so a stray secret file isn't world-readable.
@@ -238,5 +270,48 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600, "secret file must be owner-only");
         }
+
+        // No tmp litter: every write renamed or cleaned up its scratch file.
+        let stray: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(stray.is_empty(), "no tmp files left behind: {stray:?}");
+    }
+
+    /// The plaintext must be born 0600 — a write-then-chmod sequence leaves a
+    /// world-readable window, and a fixed tmp name could be pre-created by
+    /// another local user. `write_restricted` uses create_new + mode(0o600),
+    /// so a pre-existing path at the tmp name must fail the write, never
+    /// inherit the attacker's permissions.
+    #[cfg(unix)]
+    #[test]
+    fn secret_bytes_are_never_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+
+        file::set_in(dir, "aura-shell", "anthropic", "sk-secret").unwrap();
+        let mode = std::fs::metadata(dir.join("aura-shell.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+
+        // Overwrite path: still 0600, still no window (create_new would have
+        // errored on any lingering tmp rather than reusing it).
+        file::set_in(dir, "aura-shell", "anthropic", "sk-rotated").unwrap();
+        let mode = std::fs::metadata(dir.join("aura-shell.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            file::get_in(dir, "aura-shell", "anthropic").unwrap(),
+            Some("sk-rotated".to_string())
+        );
     }
 }

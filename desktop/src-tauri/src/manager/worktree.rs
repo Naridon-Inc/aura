@@ -1,9 +1,12 @@
 //! Per-task worktree creation. When a Manager task carries non-empty
 //! `zones` we isolate it in a sibling worktree off the main repo so
 //! parallel subagents touching adjacent files don't collide. Each
-//! worktree gets a deterministic path (`<parent>/<repo>-aura-<sid8>-t<id>`)
-//! and a fresh branch (`aura/<sid8>/t<id>`) so the user can review or
-//! merge independently after the task completes.
+//! worktree is named after the task it is for — its description — with the
+//! session/task pair kept on the end so the name stays unique across a
+//! fan-out (`<parent>/<repo>-aura-<what-the-task-is>-<sid8>-t<id>`, branch
+//! `aura/<sid8>/<what-the-task-is>-t<id>`). A task whose description says
+//! nothing sluggable keeps the bare `<sid8>-t<id>` shape. Either way the
+//! user can review or merge independently after the task completes.
 //!
 //! On task Done/Failed/Cancelled we leave the worktree in place — the
 //! user reviews via the existing `WorktreeMenu` in `WorkspaceRail`. A
@@ -14,9 +17,22 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Compute the deterministic sibling worktree path + branch name for
-/// a given session/task pair. Pure — no filesystem I/O.
-pub fn paths_for(repo_root: &str, session_id: &str, task_id: usize) -> (PathBuf, String) {
+use aura_loop::worktree_name;
+
+/// Compute the deterministic sibling worktree path + branch name for a
+/// given session/task pair, named after what the task is (`description`).
+/// Pure — no filesystem I/O.
+///
+/// The `sid8`/`t<id>` pair stays in the name: it is what makes two tasks in
+/// one wave that describe themselves the same way land in two directories
+/// instead of one. The description goes in FRONT of it, because that is the
+/// half a person reads.
+pub fn paths_for(
+    repo_root: &str,
+    session_id: &str,
+    task_id: usize,
+    description: &str,
+) -> (PathBuf, String) {
     let parent = Path::new(repo_root)
         .parent()
         .map(|p| p.to_path_buf())
@@ -26,9 +42,16 @@ pub fn paths_for(repo_root: &str, session_id: &str, task_id: usize) -> (PathBuf,
         .and_then(|n| n.to_str())
         .unwrap_or("repo");
     let sid8 = session_id.chars().take(8).collect::<String>();
-    let path = parent.join(format!("{repo_name}-aura-{sid8}-t{task_id}"));
-    let branch = format!("aura/{sid8}/t{task_id}");
-    (path, branch)
+    match worktree_name::from_label(description) {
+        Some(slug) => (
+            parent.join(format!("{repo_name}-aura-{slug}-{sid8}-t{task_id}")),
+            format!("aura/{sid8}/{slug}-t{task_id}"),
+        ),
+        None => (
+            parent.join(format!("{repo_name}-aura-{sid8}-t{task_id}")),
+            format!("aura/{sid8}/t{task_id}"),
+        ),
+    }
 }
 
 /// Create the worktree synchronously. Returns the worktree path on
@@ -43,8 +66,13 @@ pub fn paths_for(repo_root: &str, session_id: &str, task_id: usize) -> (PathBuf,
 /// answer with the parent session's accumulated knowledge instead of a
 /// cold worktree. Tagged with `parent_session_id` in the memory blob
 /// so a future merge step can fold subagent learnings back.
-pub fn create(repo_root: &str, session_id: &str, task_id: usize) -> Result<String, String> {
-    let (path, branch) = paths_for(repo_root, session_id, task_id);
+pub fn create(
+    repo_root: &str,
+    session_id: &str,
+    task_id: usize,
+    description: &str,
+) -> Result<String, String> {
+    let (path, branch) = paths_for(repo_root, session_id, task_id, description);
     if path.exists() {
         // Already there — caller is rerunning, reuse it.
         return Ok(path.to_string_lossy().into_owned());
@@ -113,18 +141,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn paths_for_uses_sibling_directory_and_short_sid() {
-        let (path, branch) =
-            paths_for("/Users/m/repos/aura-shell", "abcdefgh-1234-5678", 3);
-        assert_eq!(path, PathBuf::from("/Users/m/repos/aura-shell-aura-abcdefgh-t3"));
-        assert_eq!(branch, "aura/abcdefgh/t3");
+    fn paths_for_names_the_worktree_after_the_task() {
+        let (path, branch) = paths_for(
+            "/Users/m/repos/aura-shell",
+            "abcdefgh-1234-5678",
+            3,
+            "Fix the login bug",
+        );
+        assert_eq!(
+            path,
+            PathBuf::from("/Users/m/repos/aura-shell-aura-fix-the-login-bug-abcdefgh-t3")
+        );
+        assert_eq!(branch, "aura/abcdefgh/fix-the-login-bug-t3");
+    }
+
+    #[test]
+    fn paths_for_keeps_the_pair_unique_across_a_wave() {
+        // Two tasks in one wave described identically still get two homes —
+        // the session/task pair is what guarantees that, so it stays.
+        let (a, ab) = paths_for("/r/repo", "sess1234", 1, "tidy the imports");
+        let (b, bb) = paths_for("/r/repo", "sess1234", 2, "tidy the imports");
+        assert_ne!(a, b);
+        assert_ne!(ab, bb);
+    }
+
+    #[test]
+    fn paths_for_falls_back_when_the_description_says_nothing() {
+        for description in ["", "   ", "★★★"] {
+            let (path, branch) =
+                paths_for("/Users/m/repos/aura-shell", "abcdefgh-1234-5678", 3, description);
+            assert_eq!(path, PathBuf::from("/Users/m/repos/aura-shell-aura-abcdefgh-t3"));
+            assert_eq!(branch, "aura/abcdefgh/t3");
+        }
     }
 
     #[test]
     fn paths_for_handles_root_with_trailing_slash() {
         // Path::parent of "/x/" returns Some("/x"), so the worktree lives
         // at /x/-aura-…. Acceptable; callers normalize repo_root.
-        let (_path, branch) = paths_for("/x", "ssss", 1);
+        let (_path, branch) = paths_for("/x", "ssss", 1, "");
         assert_eq!(branch, "aura/ssss/t1");
     }
 }

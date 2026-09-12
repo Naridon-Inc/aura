@@ -25,7 +25,7 @@ use axum::{
     Router,
 };
 
-use super::{auth, NodeStore};
+use super::{auth, mirror, tokens, NodeStore};
 
 /// Verify the system git exposes `git-http-backend` before we advertise the
 /// node as up. Checked once at startup so a misconfigured host fails loudly
@@ -53,6 +53,10 @@ pub fn ensure_http_backend() -> Result<(), Box<dyn std::error::Error>> {
 pub fn router(store: Arc<NodeStore>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        // The node's own read API — what it holds, for the operator and the
+        // console. It lives under `/.aura/node/…`, a prefix no repo id can
+        // reach, and carries its own always-on token gate; see `read_api`.
+        .merge(super::read_api::routes())
         .route("/{*path}", any(git_cgi))
         .with_state(store)
 }
@@ -64,6 +68,16 @@ struct CgiRequest {
     path_info: String,
     query: String,
     content_type: Option<String>,
+    /// The request's `Content-Encoding`, forwarded so `git http-backend` knows
+    /// to inflate a compressed body. Git gzips an upload-pack request once it
+    /// is large enough, which in practice means any repository with a real
+    /// number of refs — so dropping this header breaks cloning exactly the
+    /// repositories worth hosting.
+    content_encoding: Option<String>,
+    /// The client's `Git-Protocol` header. Without it every connection
+    /// negotiates with protocol v0, so a clone advertises every ref on the
+    /// server instead of only the ones it was asked about.
+    git_protocol: Option<String>,
     body: Bytes,
 }
 
@@ -119,6 +133,30 @@ async fn git_cgi(
         }
     }
 
+    // A mirror follows its upstream, so anything pushed here would be reset by
+    // the next sync. Refusing is the only honest answer: a push that appears to
+    // succeed and then vanishes costs someone their work and their afternoon.
+    if is_receive {
+        if let Some(path) = store.repo_path(repo) {
+            if mirror::is_mirror(&path) {
+                let upstream = mirror::read(&path)
+                    .ok()
+                    .flatten()
+                    .map(|c| c.upstream)
+                    .unwrap_or_else(|| "its upstream".to_string());
+                return (
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "{repo} is a mirror of {upstream} — it follows that repository, so a push \
+                         here would be overwritten by the next sync. Push to {upstream} instead, \
+                         or run `aura node mirror remove {repo}` to make this an ordinary repo."
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     if is_receive {
         if let Err(e) = store.open_or_init(repo) {
             return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
@@ -136,16 +174,23 @@ async fn git_cgi(
         BTreeMap::new()
     };
 
-    let content_type = headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let header_str = |name: &str| -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
+    let content_type = header_str("content-type");
+    let content_encoding = header_str("content-encoding");
+    let git_protocol = header_str("git-protocol");
 
     let req = CgiRequest {
         method: method.as_str().to_string(),
         path_info: format!("/{repo}.git/{rest}"),
         query,
         content_type,
+        content_encoding,
+        git_protocol,
         body,
     };
 
@@ -159,6 +204,20 @@ async fn git_cgi(
             if is_receive && resp.status().is_success() {
                 let _ = store.fixup_head(&repo_owned);
                 record_reflog(&store, &repo_owned, &before);
+                // Bridged repo? Forward the accepted refs downstream
+                // (GitHub et al) off the request path — the push already
+                // succeeded and is ref-logged, so a slow or failing
+                // downstream must never delay or fail this response. The
+                // outcome lands on the bridge record either way.
+                if let Some(path) = store.repo_path(&repo_owned) {
+                    if super::bridge::is_bridge(&path) {
+                        let store3 = store.clone();
+                        let repo3 = repo_owned.clone();
+                        tokio::task::spawn_blocking(move || {
+                            super::bridge::forward_after_push(&store3, &repo3);
+                        });
+                    }
+                }
             }
             resp
         }
@@ -188,6 +247,16 @@ fn run_http_backend(store: &NodeStore, req: CgiRequest) -> Result<Response, Stri
         .stderr(Stdio::piped());
     if let Some(ct) = &req.content_type {
         cmd.env("CONTENT_TYPE", ct);
+    }
+    // CGI passes request headers through as `HTTP_*`; http-backend reads this
+    // one to decide whether to inflate stdin before parsing pkt-lines.
+    if let Some(ce) = &req.content_encoding {
+        cmd.env("HTTP_CONTENT_ENCODING", ce);
+    }
+    // http-backend reads the negotiated protocol version from `GIT_PROTOCOL`,
+    // not from an `HTTP_`-prefixed name, so it is set explicitly.
+    if let Some(gp) = &req.git_protocol {
+        cmd.env("GIT_PROTOCOL", gp);
     }
 
     let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
@@ -308,14 +377,59 @@ fn authorize_request(
         Ok(t) => t,
         Err(e) => return Err(auth_challenge(&format!("invalid token: {e}"))),
     };
+    // Refuse for the *specific* reason, so a caller can tell "your token ran
+    // out" from "your token was never for this" from "your token cannot do
+    // this". `authorizes()` collapses all three into one bool; a person staring
+    // at a failed `git push` needs to know which. All three are 403, not a 401
+    // re-prompt: the token verified, so re-presenting the same one would only
+    // loop — a fresh token has to be minted (`aura node token`).
+    //
+    // A capability token is self-contained and verified offline, so the node has
+    // no revocation list: "revoked" is enforced one step upstream, at mint time,
+    // where `aura node token` reads only *live* cloud grants and bounds the
+    // token's TTL by the grant's own expiry — so a revoked grant yields no new
+    // token, and any token it already yielded lapses on its own.
     let now = chrono::Utc::now().timestamp();
-    if !tok.authorizes(repo, need_cap, now) {
+    if tok.is_expired(now) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("token expired at {} (now {now})", tok.exp),
+        )
+            .into_response());
+    }
+    if tok.repo_id != auth::SCOPE_ALL && tok.repo_id != repo {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("token is scoped to repo '{}', not '{repo}'", tok.repo_id),
+        )
+            .into_response());
+    }
+    if !tok.has_cap(need_cap) {
         return Err((
             StatusCode::FORBIDDEN,
             format!("token does not grant '{need_cap}' on repo '{repo}'"),
         )
             .into_response());
     }
+
+    // A capability token is self-certifying, which is exactly what makes it
+    // cheap to verify and impossible to withdraw by cryptography alone. The
+    // node's token ledger is the withdrawal mechanism: an id the operator has
+    // revoked is refused here even though the signature is still perfectly
+    // good. A token the ledger has never heard of is honoured — see
+    // `super::tokens` for why absence must not deny.
+    let token_id = tokens::token_id(&token);
+    if tokens::load(store.root())
+        .map(|l| l.is_revoked(&token_id))
+        .unwrap_or(false)
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "this token has been revoked".to_string(),
+        )
+            .into_response());
+    }
+    tokens::touch_used(store.root(), &token_id, now);
     Ok(())
 }
 
@@ -443,5 +557,114 @@ mod tests {
         assert_eq!(find_header_break(b"A: b\r\n\r\nbody"), Some((4, 8)));
         assert_eq!(find_header_break(b"A: b\n\nbody"), Some((4, 6)));
         assert_eq!(find_header_break(b"no break here"), None);
+    }
+
+    // ─── Capability-token gate (P2b) ────────────────────────────────────────
+    //
+    // The node enforces `repo:push` (and `read`) offline against a signed
+    // capability token. These drive `authorize_request` directly with a store
+    // whose signing key we hold, so we can mint the exact token each case needs
+    // and read the refusal it produces.
+
+    use axum::http::header::AUTHORIZATION;
+
+    /// A serving store with a real node key and auth required.
+    fn gated_store() -> (tempfile::TempDir, NodeStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = NodeStore::new(dir.path().to_path_buf()).unwrap();
+        store.load_key().unwrap();
+        store.set_auth(true, false);
+        (dir, store)
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+        h
+    }
+
+    /// Mint a wire token signed by the store's own node key.
+    fn mint(store: &NodeStore, repo: &str, caps: Vec<String>, ttl_secs: i64) -> String {
+        let key = store.node_signing_key().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        auth::CapabilityToken::new(repo, caps, now, ttl_secs)
+            .issue(&key)
+            .unwrap()
+    }
+
+    /// Run the gate and return (status, body-text) — Ok folds to 200/"".
+    async fn gate(store: &NodeStore, repo: &str, cap: &str, headers: &HeaderMap) -> (StatusCode, String) {
+        match authorize_request(store, repo, cap, headers) {
+            Ok(()) => (StatusCode::OK, String::new()),
+            Err(resp) => {
+                let status = resp.status();
+                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                (status, String::from_utf8_lossy(&bytes).to_string())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_valid_push_token_passes_the_gate() {
+        let (_d, store) = gated_store();
+        let token = mint(&store, "repo-a", auth::normalize_caps(true, false), 3_600);
+        let (status, _) = gate(&store, "repo-a", auth::CAP_PUSH, &bearer(&token)).await;
+        assert_eq!(status, StatusCode::OK, "a valid push token was refused");
+    }
+
+    #[tokio::test]
+    async fn a_missing_token_is_challenged() {
+        let (_d, store) = gated_store();
+        let (status, _) = gate(&store, "repo-a", auth::CAP_PUSH, &HeaderMap::new()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "a header-less push was not challenged");
+    }
+
+    #[tokio::test]
+    async fn a_garbage_token_is_challenged_not_forbidden() {
+        let (_d, store) = gated_store();
+        // A well-formed-looking but unverifiable token is a 401 (re-prompt), not
+        // a 403 — git should get a chance to supply a real credential.
+        let (status, body) = gate(&store, "repo-a", auth::CAP_PUSH, &bearer("auracap1.abc.def")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.contains("invalid token"), "the challenge did not say why: {body}");
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_says_so() {
+        let (_d, store) = gated_store();
+        // ttl of 1s, minted "now"; by the time authorize runs it is at/after exp
+        // for a token whose exp we force into the past.
+        let key = store.node_signing_key().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let token = auth::CapabilityToken::new("repo-a", auth::normalize_caps(true, false), now - 100, 10)
+            .issue(&key)
+            .unwrap();
+        let (status, body) = gate(&store, "repo-a", auth::CAP_PUSH, &bearer(&token)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.contains("expired"), "an expired token was not named as expired: {body}");
+    }
+
+    #[tokio::test]
+    async fn a_token_for_another_repo_says_so() {
+        let (_d, store) = gated_store();
+        let token = mint(&store, "repo-a", auth::normalize_caps(true, false), 3_600);
+        let (status, body) = gate(&store, "repo-b", auth::CAP_PUSH, &bearer(&token)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.contains("scoped to repo 'repo-a'"), "wrong-repo refusal was unclear: {body}");
+    }
+
+    #[tokio::test]
+    async fn a_read_token_cannot_push() {
+        let (_d, store) = gated_store();
+        // read-only token, asked for push.
+        let token = mint(&store, "repo-a", auth::normalize_caps(false, true), 3_600);
+        let (status, body) = gate(&store, "repo-a", auth::CAP_PUSH, &bearer(&token)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.contains("does not grant 'push'"), "missing-cap refusal was unclear: {body}");
+        // …but the same token reads fine.
+        let (status, _) = gate(&store, "repo-a", auth::CAP_READ, &bearer(&token)).await;
+        assert_eq!(status, StatusCode::OK, "a read token could not read");
     }
 }

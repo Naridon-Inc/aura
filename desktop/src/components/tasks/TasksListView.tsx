@@ -16,7 +16,7 @@
 // `components/board`, and the only thing said here is which task field goes in
 // which slot.
 
-import { useMemo, useState, type JSX, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type JSX, type ReactNode } from "react";
 import { Bot, Clock, GitBranch, Inbox, Link2, ListChecks, Target, Users } from "lucide-react";
 
 import {
@@ -44,6 +44,8 @@ import { formatDueDate, isOverdue } from "./taskColumns";
 import { groupTasks } from "./taskGrouping";
 import { TaskPriorityBars, TaskStatusTag } from "./taskGlyphs";
 import { DEFAULT_DISPLAY_PROPS } from "./TasksFilterBar";
+import { budgetGroups, rowCap } from "./rowBudget";
+import { RevealFoot } from "./RevealFoot";
 
 export function TasksListView({
   tasks,
@@ -100,6 +102,34 @@ export function TasksListView({
     [tasks, groupBy, members, taskLabels, goalOfTask],
   );
 
+  // How much of a long list is drawn — see ./rowBudget. This view used to
+  // render every row it had; on a board of a thousand-odd that is one render
+  // the webview's single thread sits inside for five seconds or more, which is
+  // what AURA-263 saw as the tab underline moving while the old view stayed on
+  // screen, and AURA-269 as a control that "needed a second click".
+  const [reveals, setReveals] = useState(0);
+  // A new task set, or a different way of cutting it, is a new list: start it
+  // at the top of the budget rather than carrying the old scroll's allowance.
+  useEffect(() => {
+    setReveals(0);
+  }, [tasks, groupBy]);
+
+  const { groups: drawn, hidden } = useMemo(
+    () =>
+      budgetGroups(
+        // A collapsed group draws nothing, so it must cost nothing — otherwise
+        // collapsing Backlog would spend the whole budget on rows nobody can
+        // see. Its true size rides along so the heading still says it.
+        groups.map((g) =>
+          collapsed.has(g.key) ? { ...g, tasks: [], total: g.tasks.length } : g,
+        ),
+        rowCap(reveals),
+      ),
+    [groups, collapsed, reveals],
+  );
+
+  const reveal = useCallback(() => setReveals((r) => r + 1), []);
+
   function toggle(id: string): void {
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -129,7 +159,7 @@ export function TasksListView({
         />
       )}
       {tasks.length > 0 &&
-        groups.map((g) => {
+        drawn.map((g) => {
           // Empty "In Review" and "Done" groups are hidden to keep the surface
           // on active work; Backlog and In Progress stay even when empty so the
           // canonical pipeline is always visible at the top of the view. The
@@ -137,7 +167,7 @@ export function TasksListView({
           // the process, whereas a heading with nothing under it is pure scroll
           // cost. Non-status groupings never arrive empty at all.
           if (
-            g.tasks.length === 0 &&
+            g.total === 0 &&
             (g.status === "in_review" || g.status === "done")
           ) {
             return null;
@@ -147,7 +177,10 @@ export function TasksListView({
               key={g.key}
               title={g.label}
               titleHint={g.hint}
-              count={g.tasks.length}
+              // The group's real size, not the number of rows drawn — a
+              // heading reading 40 over a group of 900 would be a worse bug
+              // than the slow render the budget exists to fix.
+              count={g.total}
               glyph={g.glyph}
               expanded={!collapsed.has(g.key)}
               onToggle={() => toggle(g.key)}
@@ -176,6 +209,7 @@ export function TasksListView({
             </BoardListGroup>
           );
         })}
+      <RevealFoot hidden={hidden} onReveal={reveal} />
     </div>
   );
 }

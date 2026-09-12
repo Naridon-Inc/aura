@@ -10,7 +10,7 @@
 // workspaces) tuck it behind a "Show" disclosure, capped so the DOM never
 // explodes. Read-only — no repairs are performed here.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dialog } from "../Dialog";
 import { Button } from "../ui/button";
 import { ErrorState, LoadingState } from "../ui/state";
@@ -21,6 +21,7 @@ import {
   type HealthItem,
   type Severity,
 } from "../../lib/doctorHealth";
+import { createLatestOnly } from "../../lib/latestOnly";
 
 type DoctorDialogProps = {
   open: boolean;
@@ -33,26 +34,50 @@ type DoctorDialogProps = {
 // stale sessions and mounting them all is both slow and pointless.
 const ROW_CAP = 40;
 
+// How long this card is willing to wait before it says something true.
+//
+// The backend has its own, shorter bound, so under normal failure this never
+// fires. It exists for the case the backend itself does not answer, because
+// the failure that brought people here was precisely a card that sat on
+// "Checking your project..." and never changed. A screen that cannot say what
+// went wrong must at least say that it does not know.
+const CHECK_TIMEOUT_MS = 60_000;
+
 export function DoctorDialog({ open, repoRoot, onClose, inline }: DoctorDialogProps) {
   const [report, setReport] = useState<DoctorReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Only the newest check may paint, and no check waits forever. Switching
+  // project starts a second one while the first is still out, and without this
+  // the slower of the two wins — one project's health under another project's
+  // name. The rules and their tests live in lib/latestOnly.
+  const checks = useRef(createLatestOnly());
+
   const run = async () => {
     setLoading(true);
     setError(null);
     setReport(null);
-    try {
-      setReport(await api.auraDoctorJson(repoRoot));
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
+
+    const settled = await checks.current.run(
+      () => api.auraDoctorJson(repoRoot),
+      CHECK_TIMEOUT_MS,
+      "The check is taking longer than it should. Try again.",
+    );
+
+    // A stale answer is not this screen's to paint, and not its to stop
+    // loading either — the run that replaced it owns both.
+    if (settled.kind === "stale") return;
+    if (settled.kind === "ok") setReport(settled.value);
+    else setError(settled.message);
+    setLoading(false);
   };
 
   useEffect(() => {
-    if (open) run();
+    if (open) void run();
+    // Closing, or moving to another project, retires whatever is in flight so
+    // its answer cannot arrive later and overwrite the screen.
+    return () => checks.current.retire();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, repoRoot]);
 

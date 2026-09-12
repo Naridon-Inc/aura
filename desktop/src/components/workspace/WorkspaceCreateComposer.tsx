@@ -89,7 +89,7 @@ import { newCloudThreadKey } from "../../lib/cloudJobs";
 import { openRemoteWorkspace } from "../../lib/editorStore";
 import { launchWorkspace } from "../../lib/workspaceCreateStore";
 import { trackFeature } from "../../lib/track";
-import { randomPlaceName } from "../../lib/placeNames";
+import { workBranchName } from "../../lib/workNames";
 import { CreateFromPicker, type CreateFromSelection } from "./CreateFromPicker";
 import { useDismiss } from "../../lib/useDismiss";
 import { WherePicker, useWherePlaces } from "../place/WherePicker";
@@ -101,9 +101,9 @@ import { WherePicker, useWherePlaces } from "../place/WherePicker";
 const DEFAULT_AGENT_ID = "claude";
 
 /** Branch names already in use for this repo — every local branch plus each
- *  remote's last path segment. Fed to `randomPlaceName` so the auto-namer
- *  never re-picks an existing name: a repo with dozens of parallel copies
- *  (each on its own place-name branch) would otherwise routinely collide, and
+ *  remote's last path segment. Fed to `workBranchName` so the auto-namer never
+ *  re-picks an existing name: two goes at the same objective, or a repo with
+ *  dozens of parallel copies, would otherwise routinely collide, and
  *  `git worktree add -b <name>` fails with "a branch named '<name>' already
  *  exists" — a hidden, auto-generated name, so the failure reads as nothing
  *  happening. */
@@ -443,12 +443,12 @@ export function WorkspaceCreateComposer() {
         } catch {
           /* branch read failed — a blind pick, and git still guards over there */
         }
-        const branch = randomPlaceName(taken);
+        const branch = workBranchName(mission, taken);
         // The agent named in this dialog is the one that starts over there. The
         // model chip's brain IS an agent id; with nothing pinned it falls to the
         // same default the rest of this card uses.
         const agentId = model?.brainId ?? DEFAULT_AGENT_ID;
-        const { errors } = await launchWorkspace({
+        const { errors, worktreePath } = await launchWorkspace({
           repoRoot,
           branch,
           agents: [{ agentId }],
@@ -468,7 +468,18 @@ export function WorkspaceCreateComposer() {
           requestAnimationFrame(() => textareaRef.current?.focus());
           return;
         }
-        openRemoteWorkspace({ machineId, repoRoot });
+        // The place is still keyed by the LOCAL root — that is where its
+        // board, transcript and intent log live. The worktree `box_start`
+        // made over there (`<project>-<branch>`, beside the machine's main
+        // checkout) travels alongside it, so the files, changes and git tabs
+        // of the workspace read the branch the agent is on, not the box's
+        // main checkout. `worktreePath` is the session's own project path
+        // on the machine, which is exactly that worktree.
+        openRemoteWorkspace({
+          machineId,
+          repoRoot,
+          remoteRoot: worktreePath || undefined,
+        });
         close();
       } catch (e) {
         const raw = e instanceof Error ? e.message : String(e);
@@ -527,10 +538,11 @@ export function WorkspaceCreateComposer() {
 
     trackFeature("workspace_launch");
     try {
-      // Branch name: always a fresh, memorable place-name (this composer always
-      // creates NEW work on a NEW branch). Read the live branch list first so
-      // the auto-namer skips names already taken by the repo's existing
-      // parallel copies — otherwise it collides and the worktree never gets
+      // Branch name: the objective, in words (this composer always creates NEW
+      // work on a NEW branch), so a row of parallel copies reads as the work
+      // they hold instead of a row of place names. Read the live branch list
+      // first so the auto-namer steps past names already taken by the repo's
+      // existing copies — otherwise it collides and the worktree never gets
       // created. Fetched here (not at open) so a name minted since the card
       // opened is still excluded; on read failure we fall back to a blind pick.
       let taken = new Set<string>();
@@ -539,7 +551,7 @@ export function WorkspaceCreateComposer() {
       } catch {
         /* branch read failed — fall back to a blind pick, Rust still guards */
       }
-      const branch = randomPlaceName(taken);
+      const branch = workBranchName(mission, taken);
 
       // ── In this folder: no second copy. `git checkout -b` is the whole of
       // it, which is why it needs a clean tree — git refuses to carry your

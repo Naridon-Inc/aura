@@ -35,7 +35,7 @@ import {
   type FormSeed,
 } from "./AutomationForm";
 import { AutomationCard } from "./AutomationCard";
-import { sentenceCase } from "../../lib/textCase";
+import { sentenceCase } from "@shared/textCase";
 import {
   elapsedBetween,
   localTzOffsetMin,

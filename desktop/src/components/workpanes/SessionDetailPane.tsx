@@ -11,15 +11,27 @@
 //
 // Tabs run through the shared WizardStepTabs (variant="tabs"), so the session
 // header reads identically to TaskDetailPane / PRDetailPane. The tab set is
-// STABLE — Summary · Transcript · Changes in a fixed order every time, so the
-// header never reshuffles between rows. Transcript shows the live conversation
-// when one was recorded, otherwise an honest empty state (e.g. an entry
-// reconstructed from a commit). Changes carries the live file count. Real data
-// only: no mock tabs, no fabricated verdicts.
+// STABLE — Summary · Changes · Transcript in a fixed order every time, so the
+// header never reshuffles between rows. Everything else is additive and folds
+// in only where there is something to show: Match and Genuine record when the
+// run was committed and signed, and Workers when this session fanned work out
+// to sub-agents. Transcript shows the live conversation when one was recorded,
+// otherwise an honest empty state (e.g. an entry reconstructed from a commit).
+// Changes carries the live file count. Real data only: no mock tabs, no
+// fabricated verdicts.
+//
+// Workers is a tab rather than a block inside Summary for two reasons. It is a
+// tree of runs, each with a closing report of its own — 311 have been recorded
+// under one session here — and Summary is a short report you read top to
+// bottom, which nothing that long can live inside. And it is absent far more
+// often than it is present: most sessions never fan out, and a session that
+// did not is one whose header should look exactly as it always did.
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Network } from "lucide-react";
 import {
   api,
+  isMechanicalHookCapture,
   type ClaudeSession,
   type IntentRow,
   type IntentChangeset,
@@ -28,7 +40,7 @@ import {
 import { fetchSessions } from "../../lib/sessionsCache";
 import { AgentBadge } from "../agent/AgentBadge";
 import { relativeAgeFromDelta } from "../../lib/relativeTime";
-import { intentTypeChip } from "../../lib/intentTypeLabels";
+import { intentTypeChip } from "@shared/intentTypeLabels";
 import { InlineEntities, splitIntent } from "./IntentProse";
 import { SessionSummary } from "./SessionSummary";
 import { SessionActions } from "./SessionActions";
@@ -40,6 +52,9 @@ import { ChangesView } from "./ChangesView";
 import { useBringBack, BringBackResult } from "./useBringBack";
 import { SessionAttestation } from "./SessionAttestation";
 import { SessionTranscript } from "./SessionTranscript";
+import { SessionSubagents } from "./SessionSubagents";
+import { useSubagentRuns } from "./useSubagentRuns";
+import type { SubagentRuns } from "./subagentRuns";
 import { WizardStepTabs, type WizardStepMeta } from "../ui/wizard";
 import { FullscreenOverlay } from "../FullscreenOverlay";
 import { useSessionIntentReport } from "./IntentStory";
@@ -53,6 +68,7 @@ import {
   provenanceLabel,
   provenanceNote,
   sessionDisplayTitle,
+  statedSessionId,
   type IntentProvenance,
 } from "../../lib/sessionMeta";
 
@@ -105,7 +121,13 @@ function LockIcon() {
   );
 }
 
-type Tab = "summary" | "alignment" | "attestation" | "transcript" | "changes";
+type Tab =
+  | "summary"
+  | "alignment"
+  | "attestation"
+  | "subagents"
+  | "transcript"
+  | "changes";
 
 // Tab-strip glyphs — small currentColor icons so WizardStepTabs can tint them
 // accent-when-active / text-4-when-idle like every other detail header.
@@ -185,6 +207,18 @@ const ALIGNMENT_TAB: WizardStepMeta = {
   label: "Match",
   icon: <AlignmentGlyph />,
 };
+const SUBAGENTS_TAB: WizardStepMeta = {
+  // "Workers" not "Sub-agents": the reader wants to know who else worked on
+  // this, and "sub-agent" is a word about how Claude Code is built rather than
+  // about their session. Same trade the two tabs below already make. The tab
+  // id stays `subagents`, which is what the record calls them.
+  //
+  // A lucide glyph like its siblings, passed bare — `.ade-tabs > button svg`
+  // sizes it 13×13, so a size class here would fight the strip.
+  id: "subagents",
+  label: "Workers",
+  icon: <Network aria-hidden />,
+};
 const ATTESTATION_TAB: WizardStepMeta = {
   id: "attestation",
   // "Genuine record" not "Attestation": plain language for the tamper-proof
@@ -198,10 +232,24 @@ export function SessionDetailPane({
   repoRoot,
   row,
   onBack,
+  renderReasons,
+  subagentRuns,
 }: {
   repoRoot: string;
   row: IntentRow;
   onBack: () => void;
+  /** What to lead a file's diff with when the recorded change-note cannot be
+   *  computed here. Unset in the desktop, which has a checkout and derives the
+   *  before/after itself; the console passes the intents written about that
+   *  file — the sentences, which were never derived from the diff anyway. */
+  renderReasons?: (file: IntentChangesetFile) => ReactNode;
+  /** This session's sub-agent runs, when the surrounding app already read
+   *  them. Unset in the desktop, which asks the cloud itself; the console
+   *  passes them, because its data layer holds the bearer and the org header
+   *  and because a surface there is handed rows rather than an endpoint.
+   *  Either way an unanswered read is `{ known: false }` and never an empty
+   *  list — see subagentRuns.ts for why the difference matters. */
+  subagentRuns?: SubagentRuns;
 }) {
   const [tab, setTab] = useState<Tab>("summary");
   // When the reader clicks a changed-file entity in the Summary (a file pill in
@@ -310,11 +358,33 @@ export function SessionDetailPane({
   // Same change-note source, but keyed by file so the Rewind menu can offer a
   // surgical per-function revert (identifier + file together).
   const symbolsByFile = useChangesetSymbolsByFile(repoRoot, files);
+
+  // Start writing the plain-language account of this session's commits the
+  // moment the session opens — not when the Changes tab is selected. Opening a
+  // session IS the signal that someone is about to read what it did, and the
+  // words take longer to write than it takes to click a tab.
+  //
+  // Fire-and-forget and safely repeatable: the backend serves anything already
+  // written straight from its cache and refuses to start a second run of a
+  // piece it is mid-way through, so an already-warm session costs nothing here.
+  const commitShas = useMemo(() => {
+    const seen = new Set<string>();
+    for (const f of files) if (f.commit) seen.add(f.commit);
+    return [...seen];
+  }, [files]);
+  useEffect(() => {
+    if (!repoRoot) return;
+    for (const sha of commitShas) {
+      void api.prewarmChangeSummaries(repoRoot, sha).catch(() => {});
+    }
+  }, [repoRoot, commitShas]);
   // Surgical "Bring this back" — the Time machine's recovery verb, folded into
   // the Changes tab so undo lives where you SEE the change. One per piece.
   const {
     state: bringBack,
     run: runBringBack,
+    confirm: confirmBringBack,
+    undo: undoBringBack,
     reset: resetBringBack,
     busySymbol,
   } = useBringBack(repoRoot);
@@ -346,6 +416,28 @@ export function SessionDetailPane({
         : correlateClaudeSession(row, sessions),
     [managerSessionId, isBlocked, row, sessions],
   );
+
+  // Which session to ask about its sub-agents. The runs were pushed under
+  // Claude's own session id — the same id the row was stamped with at
+  // log-intent time — so the stamped value is preferred and the correlated
+  // transcript is the fallback for rows written before stamping shipped.
+  //
+  // Null for two kinds of row that could only ever produce a false answer: a
+  // native Aura chat, which is a desktop runtime rather than a Claude session,
+  // and a blocked record, which is an attempt that was refused and has no
+  // session behind it at all. Null also when the app was handed the runs from
+  // outside, which is how the console avoids issuing a second read with a
+  // bearer it does not have.
+  const subagentSessionId =
+    subagentRuns || managerSessionId || isBlocked
+      ? null
+      : (row.claude_session_id ?? "").trim() || sess?.session_id || null;
+  // The hook runs on every render whatever the answer — it is handed a null
+  // session rather than skipped, because a hook called conditionally is a hook
+  // that reorders between renders.
+  const ownSubagents = useSubagentRuns(subagentSessionId);
+  const subagents = subagentRuns ?? ownSubagents;
+
   const title = sessionDisplayTitle(row, sessions);
   // Identity (headline + summary body) is the row's OWN logged intent for a
   // genuine intent row, and it must stay STABLE when the async Claude-session
@@ -361,6 +453,15 @@ export function SessionDetailPane({
   // body carries the elaboration — the same text never prints twice. Both render
   // through the entity-aware renderers (code chips + clickable changed files).
   const { headline, body } = useMemo(() => splitIntent(asked), [asked]);
+  // A run whose whole record is tool calls has no headline of its own. Its text
+  // is the command it ran, and a command is evidence of what happened, not a
+  // statement of what anyone set out to do — putting it in the h1 is how a
+  // temp-file path came to be the name of a session. So the title says the true
+  // thing ("No request was recorded") and the command moves down into the
+  // Summary body, under a heading that already reads "No reason was given".
+  const commandOnly = isMechanicalHookCapture(row);
+  const shownHeadline = commandOnly ? "" : headline;
+  const shownBody = commandOnly ? row.intent : body;
   // Where the words under that heading came from. The label used to be one of
   // two things, "Prompt" or "Reason", and three different origins mapped onto
   // "Reason": a stated intent, your own session prompt, and a line Aura's model
@@ -387,7 +488,30 @@ export function SessionDetailPane({
     }
     return null;
   }, [files]);
-  const showAlignment = TRACE_IA_V3 && !!alignmentSha;
+  // Both verdict tabs are computed by the CLI against a checkout: `aura
+  // intent-vs-actual` walks the AST at a commit, and `aura attest verify`
+  // needs the signed block, which never leaves the machine that signed it. A
+  // changeset the cloud assembled has neither, and both panes render a CLI
+  // failure as a red error card — so a console that filled in commit shas
+  // would have *gained* two tabs that can only fail. `source` is the writer of
+  // the changeset, and only the cloud reader writes "cloud".
+  const locallyDerivable = changeset?.source !== "cloud";
+  const showAlignment = TRACE_IA_V3 && !!alignmentSha && locallyDerivable;
+
+  // The same condition, said in words, for the Summary's evidence ledger — so
+  // "there is no Match tab" and "here is why the comparison can't be made" can
+  // never disagree about the reason.
+  const alignmentAvailability = useMemo(
+    () => ({
+      available: showAlignment,
+      unsupportedReason: !alignmentSha
+        ? "This run's changes aren't saved to the project's history yet, so there's no version to compare against."
+        : !locallyDerivable
+          ? "This record came from the cloud. Comparing what was asked with what changed needs the code on this computer."
+          : "Comparing what was asked with what changed isn't available for this run.",
+    }),
+    [showAlignment, alignmentSha, locallyDerivable],
+  );
 
   // Only fetch the alignment report while its tab is active — keeps the CLI
   // call off the critical path for the common Summary-first open. Aggregates
@@ -399,25 +523,52 @@ export function SessionDetailPane({
     error: alignError,
   } = useSessionIntentReport(repoRoot, files, showAlignment && tab === "alignment");
 
+  // Whether this session has workers worth a tab. Both halves matter. `known`
+  // is false on every server that has not shipped the read route yet, when the
+  // app is signed out, and when the network is down — three different reasons
+  // that all mean "we did not find out", and a Workers tab standing there
+  // empty would answer a question nobody got to ask. A `known` answer of zero
+  // is a real answer, and it is still no tab: most sessions never fan out, and
+  // a tab that is empty on most sessions teaches people to stop opening it.
+  const workers = useMemo(
+    () => (subagents.known ? subagents.runs : []),
+    [subagents],
+  );
+  const showSubagents = workers.length > 0;
+
   // Tab set, assembled left-to-right in a stable order so the header never
   // reshuffles between rows: Summary · [Alignment] · [Attestation] · Changes ·
-  // Transcript. Alignment folds in when the IA-v3 consolidation is on AND there
-  // is a committed change to judge (the former standalone Intent↔AST page);
-  // Attestation folds in when the run is signed (the former standalone
-  // Attestations dialog) so the run's cryptographic proof rides on the run
-  // itself. Both are additive — a plain unsigned, uncommitted run still reads
-  // Summary · Changes · Transcript.
+  // [Workers] · Transcript. Alignment folds in when the IA-v3 consolidation is
+  // on AND there is a committed change to judge (the former standalone
+  // Intent↔AST page); Attestation folds in when the run is signed (the former
+  // standalone Attestations dialog) so the run's cryptographic proof rides on
+  // the run itself. Workers folds in when the session fanned work out, and
+  // sits beside Transcript because it is an index of the other transcripts —
+  // the same record, one level down. All three are additive — a plain
+  // unsigned, uncommitted, single-threaded run still reads Summary · Changes ·
+  // Transcript.
   const tabs = useMemo<WizardStepMeta[]>(() => {
     // A blocked record is a single short report — no transcript, no changeset,
     // no alignment/attestation. Only the Summary applies.
     if (isBlocked) return [SUMMARY_TAB];
     const t: WizardStepMeta[] = [SUMMARY_TAB];
     if (showAlignment) t.push(ALIGNMENT_TAB);
-    if (signed) t.push(ATTESTATION_TAB);
+    if (signed && locallyDerivable) t.push(ATTESTATION_TAB);
     t.push({ ...CHANGES_TAB, label: `Changes · ${fileCount}` });
+    if (showSubagents) {
+      t.push({ ...SUBAGENTS_TAB, label: `Workers · ${workers.length}` });
+    }
     t.push(TRANSCRIPT_TAB);
     return t;
-  }, [isBlocked, fileCount, showAlignment, signed]);
+  }, [
+    isBlocked,
+    fileCount,
+    showAlignment,
+    signed,
+    locallyDerivable,
+    showSubagents,
+    workers.length,
+  ]);
   const tabIds = useMemo(() => tabs.map((t) => t.id) as Tab[], [tabs]);
 
   // Defensive: if the active tab ever leaves the set, fall back to Summary so
@@ -474,6 +625,8 @@ export function SessionDetailPane({
           managerLabel={title}
           files={files}
           symbolsByFile={symbolsByFile}
+          agentId={row.agent_id}
+          worktree={row.worktree ?? null}
           onDismiss={onBack}
         />
       }
@@ -498,7 +651,7 @@ export function SessionDetailPane({
           title={title}
         >
           <InlineEntities
-            text={headline || title}
+            text={shownHeadline || title}
             files={files}
             symbols={changedSymbols}
             onOpenFile={openFile}
@@ -531,6 +684,29 @@ export function SessionDetailPane({
               ) : null}
             </>
           ) : null}
+          {/* Where this run happened. Stamped when the row was written, so it
+              names the branch the work was actually done on — not wherever
+              you're standing while reading it. */}
+          {row.branch || row.worktree ? (
+            <>
+              <span className="text-text-4">·</span>
+              <span
+                className="rounded border border-line-soft px-1.5 py-px text-2xs text-text-4"
+                title={
+                  row.branch
+                    ? `Worked on the ${row.branch} branch${
+                        row.worktree ? ` in the ${row.worktree} folder` : ""
+                      }`
+                    : `Worked on in the ${row.worktree} folder`
+                }
+              >
+                {row.branch || row.worktree}
+              </span>
+            </>
+          ) : null}
+          {/* Blocked is the one intent type that is not a category but a
+              state you need to act on, so it wears the red chip instead of
+              the neutral one the other types share. */}
           {row.intent_type === "blocked" ? (
             <>
               <span className="text-text-4">·</span>
@@ -571,13 +747,18 @@ export function SessionDetailPane({
             repoRoot={repoRoot}
             files={files}
             symbols={changedSymbols}
-            bodyText={body}
+            bodyText={shownBody}
             bodyLabel={bodyLabel}
             bodyNote={bodyNote}
             provenance={provenance}
             whenAbsolute={whenAbsolute}
             rel={rel}
+            alignment={alignmentAvailability}
             onOpenFile={openFile}
+            // Offered only when the tab is actually there to open — an item
+            // whose action goes nowhere is worse than one that says it can't
+            // be settled here.
+            onOpenMatch={showAlignment ? () => setTab("alignment") : undefined}
           />
         ) : tab === "alignment" ? (
           // Does this run's committed change match what was asked? Rebuilt in
@@ -602,6 +783,11 @@ export function SessionDetailPane({
             keyId={row.key_id ?? null}
             intentType={row.intent_type ?? null}
           />
+        ) : tab === "subagents" ? (
+          // Who else worked on this session, as the chain of command they were
+          // spawned in. Gated to the non-empty case by the tab set, so this
+          // never renders a lane that reads as "there were none".
+          <SessionSubagents runs={workers} />
         ) : tab === "transcript" ? (
           // A native Aura chat (manager) row carries no Claude JSONL — replay
           // it from its persisted session instead. Claude rows replay from the
@@ -615,6 +801,23 @@ export function SessionDetailPane({
             />
           ) : sess?.file_path ? (
             <SessionTranscript filePath={sess.file_path} agentId={row.agent_id} />
+          ) : statedSessionId(row) ? (
+            // The row names the conversation it came from and we still could
+            // not find it — the agent's own transcript file is gone. Claude
+            // Code clears out `~/.claude/projects` after a few weeks, so this
+            // is the normal fate of anything older than that. Say that, rather
+            // than the commit-reconstruction line below, which would be a lie
+            // about a run we know was a live session.
+            <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 text-center">
+              <span className="text-base text-text-2">
+                The conversation is no longer on this computer
+              </span>
+              <span className="max-w-[340px] text-sm leading-relaxed text-text-4">
+                This run was a live chat, but the coding agent clears its own
+                chat history after a few weeks and this one is past that. What
+                it changed is still here — see the Summary and Changes tabs.
+              </span>
+            </div>
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 text-center">
               <span className="text-base text-text-2">
@@ -646,11 +849,17 @@ export function SessionDetailPane({
                 initialSelected={pendingFile}
                 onBringBack={runBringBack}
                 busySymbol={busySymbol}
+                renderReasons={renderReasons}
               />
             </div>
             {bringBack.kind !== "idle" ? (
               <div className="shrink-0 border-t border-line-soft px-3 pb-3">
-                <BringBackResult state={bringBack} onDismiss={resetBringBack} />
+                <BringBackResult
+                  state={bringBack}
+                  onConfirm={confirmBringBack}
+                  onUndo={undoBringBack}
+                  onDismiss={resetBringBack}
+                />
               </div>
             ) : null}
           </div>

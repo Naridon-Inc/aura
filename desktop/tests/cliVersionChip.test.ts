@@ -101,9 +101,15 @@ describe("a shadow is only reported on evidence", () => {
     // something unparseable is a legitimate setup, and "can't read it"
     // is not evidence of anything.
     expect(fn).toContain("let installed = installed_version_of(&path)?;");
-    // And a PATH copy that IS current is no shadow either.
+    // And a PATH copy that IS current is no shadow either — judged by the
+    // same rule the picker used, or this field goes quiet in the case most
+    // worth reporting. A same-minor, older-patch copy first on PATH is what
+    // the user's own terminal runs, and under the old major.minor test it
+    // counted as current: 0.19.35 shadowed the 0.19.44 the app ships and the
+    // chip said nothing while the two answered the same safety check
+    // differently.
     expect(fn).toContain(
-      "if major_minor_at_least(&installed, EXPECTED_AURA_CLI_VERSION) {",
+      "if runs_this_build(&installed, EXPECTED_AURA_CLI_VERSION) {",
     );
   });
 });

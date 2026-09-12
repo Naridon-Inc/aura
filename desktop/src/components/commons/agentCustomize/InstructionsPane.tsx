@@ -19,10 +19,12 @@ import {
   PaneSpinner,
 } from "./customizeShared";
 
-// House rules live in a single, human-named section so the surface stays
-// simple; other sections (architecture, decisions…) still render read-only
-// below so nothing the agent already knows is hidden.
-const RULES_SECTION = "rules";
+// House rules are real memory entries in the `conventions` section, tagged
+// so this pane can tell them apart from machine-learned conventions. The
+// old code wrote to a section named "rules" that the memory engine does
+// not have — every "Add rule" failed silently and the rule vanished.
+const RULES_SECTION = "conventions";
+const RULES_TAG = "house-rule";
 
 export function InstructionsPane({
   repoRoot,
@@ -38,15 +40,21 @@ export function InstructionsPane({
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const [addError, setAddError] = useState<string | null>(null);
+
   const add = async () => {
     const text = draft.trim();
     if (!text || busy) return;
     setBusy(true);
+    setAddError(null);
     try {
-      await api.auraMemoryWriteEntry(repoRoot, RULES_SECTION, text, []);
+      await api.auraMemoryWriteEntry(repoRoot, RULES_SECTION, text, [RULES_TAG]);
       setDraft("");
       refresh();
-    } catch {
+    } catch (e) {
+      // Never swallow the failure — the old silent catch made "Add rule"
+      // look like it worked while the rule went nowhere.
+      setAddError(String(e));
       refresh();
     } finally {
       setBusy(false);
@@ -62,10 +70,17 @@ export function InstructionsPane({
   };
 
   const sections = memory?.sections ?? [];
-  const rules = sections.find((s) => s.name === RULES_SECTION)?.entries ?? [];
-  const others = sections.filter(
-    (s) => s.name !== RULES_SECTION && s.entries.length > 0,
-  );
+  const conventions = sections.find((s) => s.name === RULES_SECTION)?.entries ?? [];
+  const rules = conventions.filter((e) => e.tags.includes(RULES_TAG));
+  // Everything else the agent knows — including machine-learned conventions,
+  // but not the house rules already shown above.
+  const others = sections
+    .map((s) =>
+      s.name === RULES_SECTION
+        ? { ...s, entries: s.entries.filter((e) => !e.tags.includes(RULES_TAG)) }
+        : s,
+    )
+    .filter((s) => s.entries.length > 0);
 
   return (
     <PaneScroll>
@@ -95,6 +110,12 @@ export function InstructionsPane({
           Add rule
         </Button>
       </div>
+
+      {addError && (
+        <div className="mb-3 rounded-md border border-line-soft bg-bg-1 px-3 py-2 text-[12px] text-red">
+          Couldn't add that rule: {addError}
+        </div>
+      )}
 
       {loading && !memory ? (
         <PaneSpinner label="Loading your rules…" />

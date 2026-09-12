@@ -16,6 +16,7 @@
 
 import type { JSX, ReactNode } from "react";
 import { ChevronDown, Plus } from "lucide-react";
+import { rowClickOpens } from "./rowActivation";
 
 export function BoardListGroup({
   title,
@@ -144,7 +145,14 @@ export function BoardListRow({
 }): JSX.Element {
   return (
     <div
-      className={`group flex min-h-11 w-full items-center gap-2 border-t-[0.5px] border-line-soft px-1 py-3 text-base transition-colors ${
+      // The whole row opens the task, not just its title — see
+      // ./rowActivation. Anything on the row with its own job (the status tag,
+      // a link) keeps its click; the title button below is one of those, so
+      // clicking the words still goes through it exactly as before.
+      onClick={(e) => {
+        if (rowClickOpens(e.target)) onSelect();
+      }}
+      className={`group flex min-h-11 w-full cursor-pointer items-center gap-2 border-t-[0.5px] border-line-soft px-1 py-3 text-base transition-colors ${
         selected ? "bg-state-selected" : "hover:bg-state-hover"
       }`}
       {...dataAttrs}

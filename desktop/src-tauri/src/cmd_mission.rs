@@ -53,9 +53,12 @@ pub async fn mission_state(roots: Option<Vec<String>>) -> Result<MissionState, S
     }
 
     // Host is global, not per-repo: a runner online for ANY root means online.
-    let (configured, online) = host_facts(&roots);
+    let (configured, online, last_active_age) = host_facts(&roots);
 
-    Ok(merge_state(&inputs, host_envelope(configured, online)))
+    Ok(merge_state(
+        &inputs,
+        host_envelope(configured, online, last_active_age),
+    ))
 }
 
 // ─── Per-root gather (IO; each piece best-effort) ─────────────────────────
@@ -431,18 +434,29 @@ fn iso_to_ms(iso: &str) -> Option<i64> {
 
 // ─── Host (Aura Runner) liveness — honest ─────────────────────────────────
 
-/// Decide (configured, online) for the Aura Runner across every root.
+/// AUDIT-UI-04 — a runner lease that expired longer ago than this proves
+/// history, not setup: it stops counting toward "configured" so a box
+/// torn down weeks ago finally reads as gone.
+const STALE_RUNNER_TTL_SECS: i64 = 14 * 24 * 3600;
+
+/// Decide (configured, online, last-active age) for the Aura Runner across
+/// every root.
 ///
 /// - **online**: at least one loop node is currently being worked under a
 ///   `runner:`-prefixed lease that has NOT expired. A live un-expired runner
 ///   lease is the only thing that proves a remote runner is actually drawing
 ///   work — we never claim online without it.
-/// - **configured**: a runner config exists on disk (the runner crate's
-///   `runner.env`, or a runner-style holder was ever seen), OR online is true.
-fn host_facts(roots: &[String]) -> (bool, bool) {
+/// - **configured**: a runner config exists on disk (or the token is in the
+///   environment), or a runner-style holder was seen recently enough to
+///   matter (within [`STALE_RUNNER_TTL_SECS`]), or online is true.
+/// - **last-active age**: seconds since the newest runner lease lapsed
+///   (`Some(0)` while one is live) — lets the envelope tell "winding down
+///   moments ago" apart from "gone for days". `None` = never seen.
+fn host_facts(roots: &[String]) -> (bool, bool, Option<i64>) {
     let now = chrono::Utc::now().timestamp();
     let mut configured = runner_config_present();
     let mut online = false;
+    let mut newest_expiry: Option<i64> = None;
 
     for root in roots {
         for t in LoopGraph::at(Path::new(root)).list() {
@@ -450,17 +464,19 @@ fn host_facts(roots: &[String]) -> (bool, bool) {
             if !is_runner_holder(&lease.holder) {
                 continue;
             }
-            // A runner holder was seen → at least configured somewhere.
-            configured = true;
+            newest_expiry =
+                Some(newest_expiry.map_or(lease.expires_at, |c| c.max(lease.expires_at)));
             if lease.expires_at > now {
                 online = true;
+                configured = true;
+            } else if now - lease.expires_at <= STALE_RUNNER_TTL_SECS {
+                // Recently-expired lease → set up somewhere, just not live.
+                configured = true;
             }
         }
-        if online {
-            break;
-        }
     }
-    (configured, online)
+    let last_active_age = newest_expiry.map(|e| (now - e).max(0));
+    (configured, online, last_active_age)
 }
 
 /// Is this lease holder a remote Aura Runner (vs the local `desktop:<pid>`)?
@@ -474,18 +490,86 @@ fn is_runner_holder(holder: &str) -> bool {
     h.starts_with("runner:") || h.starts_with("runner-") || h.starts_with("loop-")
 }
 
-/// Is an Aura Runner configured on this machine? The runner crate drops a
-/// `runner.env` (locally `aura-runner/runner.env`, on a VM
-/// `/opt/aura-runner/runner.env`). Presence of either = configured.
+/// Is an Aura Runner configured on this machine? True when the token is in
+/// the environment (`AURA_RUNNER_TOKEN` — the only thing `aura runner serve`
+/// actually reads), or a `runner.env` exists at any of the places setups
+/// drop it: `/opt/aura-runner/` on a VM, `~/.aura/` for the runner crate's
+/// local default, and `~/.config/aura/` — the path the Connect-Machine
+/// wizard writes (AUDIT-UI-04: it used to be invisible here, so a wizard-set
+/// box read as "not set up" forever).
 fn runner_config_present() -> bool {
+    if std::env::var("AURA_RUNNER_TOKEN")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return true;
+    }
     if Path::new("/opt/aura-runner/runner.env").exists() {
         return true;
     }
     if let Some(home) = std::env::var_os("HOME") {
-        let p = PathBuf::from(home).join(".aura").join("runner.env");
-        if p.exists() {
-            return true;
+        let home = PathBuf::from(home);
+        for p in [
+            home.join(".aura").join("runner.env"),
+            home.join(".config").join("aura").join("runner.env"),
+        ] {
+            if p.exists() {
+                return true;
+            }
         }
     }
     false
+}
+
+#[cfg(test)]
+mod runner_presence_tests {
+    use super::*;
+    use crate::test_home;
+
+    // AUDIT-UI-04 — the wizard writes ~/.config/aura/runner.env; before
+    // this fix only ~/.aura/runner.env and /opt were checked, so a
+    // wizard-configured box read "Not set up" forever.
+    #[test]
+    fn config_is_found_at_every_path_setups_write() {
+        let home = test_home::borrow();
+        let saved_token = std::env::var("AURA_RUNNER_TOKEN").ok();
+        std::env::remove_var("AURA_RUNNER_TOKEN");
+
+        assert!(!runner_config_present(), "fresh home has no runner config");
+
+        let legacy = home.path().join(".aura");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("runner.env"), "AURA_RUNNER_TOKEN=x\n").unwrap();
+        assert!(runner_config_present(), "~/.aura/runner.env counts");
+        std::fs::remove_file(legacy.join("runner.env")).unwrap();
+
+        let wizard = home.path().join(".config").join("aura");
+        std::fs::create_dir_all(&wizard).unwrap();
+        std::fs::write(wizard.join("runner.env"), "AURA_RUNNER_TOKEN=x\n").unwrap();
+        assert!(
+            runner_config_present(),
+            "the wizard's ~/.config/aura/runner.env counts"
+        );
+        std::fs::remove_file(wizard.join("runner.env")).unwrap();
+
+        std::env::set_var("AURA_RUNNER_TOKEN", "rk_live_test");
+        assert!(
+            runner_config_present(),
+            "the env token aura runner serve actually reads counts"
+        );
+
+        match saved_token {
+            Some(v) => std::env::set_var("AURA_RUNNER_TOKEN", v),
+            None => std::env::remove_var("AURA_RUNNER_TOKEN"),
+        }
+    }
+
+    // Holder-shape rules feed the stale gate: desktop leases never count.
+    #[test]
+    fn holder_shapes_are_classified() {
+        assert!(is_runner_holder("runner:abc"));
+        assert!(is_runner_holder("runner-abc"));
+        assert!(is_runner_holder("loop-mo-4242"));
+        assert!(!is_runner_holder("desktop:4242"));
+    }
 }

@@ -7,6 +7,12 @@
 // `refreshMcpTools()` is called on boot and after the user adds /
 // toggles / removes a server in Settings. Stale data is fine; users
 // can hit the Settings "Refresh" button to force a re-read.
+//
+// AUDIT-UI-04 — the catalog is scoped to the active project. The store
+// used to be a single global list, so a server attached to project A
+// stayed in project B's slash/mention pickers (and was invocable from
+// there). App.tsx calls `setMcpToolScope` when the active project
+// changes; a scope change drops the old catalog immediately.
 
 import { useSyncExternalStore } from "react";
 
@@ -24,12 +30,20 @@ type StoreShape = {
   loading: boolean;
 };
 
-const state: StoreShape = {
+// Snapshots are replaced, never mutated — useSyncExternalStore compares
+// them with Object.is, so an in-place mutation would notify subscribers
+// of a "change" they can't see and the UI would stay stale.
+let state: StoreShape = {
   perServer: [],
   loadedAt: null,
   error: null,
   loading: false,
 };
+
+function set(patch: Partial<StoreShape>) {
+  state = { ...state, ...patch };
+  emit();
+}
 
 const listeners = new Set<() => void>();
 
@@ -48,30 +62,50 @@ function getSnapshot(): StoreShape {
   return state;
 }
 
+/** The repo root the current catalog belongs to. `null` = no project
+ *  context (only globally-inherited servers). */
+let scopeRoot: string | null = null;
 let inflight: Promise<void> | null = null;
+let inflightRoot: string | null = null;
 
-/** Re-read every enabled server's tool catalog. Repeated calls coalesce
- *  so the Composer + Settings panel firing simultaneously only spawn
- *  each server once. */
+/** Point the catalog at a project. A change of root drops the previous
+ *  project's catalog immediately (its tools must not stay pickable
+ *  here) and starts a refresh for the new one. */
+export function setMcpToolScope(repoRoot: string | null | undefined): void {
+  const root = repoRoot ?? null;
+  if (scopeRoot === root) return;
+  scopeRoot = root;
+  set({ perServer: [], loadedAt: null, error: null });
+  void refreshMcpTools();
+}
+
+/** Re-read every enabled server's tool catalog for the current scope.
+ *  Repeated calls coalesce so the Composer + Settings panel firing
+ *  simultaneously only spawn each server once. */
 export function refreshMcpTools(): Promise<void> {
-  if (inflight) return inflight;
-  state.loading = true;
-  emit();
-  inflight = (async () => {
+  const root = scopeRoot;
+  if (inflight && inflightRoot === root) return inflight;
+  set({ loading: true });
+  const promise = (async () => {
     try {
-      const rows = await api.mcpToolsList();
-      state.perServer = rows;
-      state.loadedAt = Date.now();
-      state.error = null;
+      const rows = await api.mcpToolsList(root ?? undefined);
+      // A project switch mid-flight supersedes this read — the rows
+      // belong to the old project and must not land in the new scope.
+      if (scopeRoot !== root) return;
+      set({ perServer: rows, loadedAt: Date.now(), error: null });
     } catch (e) {
-      state.error = String(e);
+      if (scopeRoot === root) set({ error: String(e) });
     } finally {
-      state.loading = false;
-      inflight = null;
-      emit();
+      if (inflightRoot === root) {
+        inflight = null;
+        inflightRoot = null;
+      }
+      if (scopeRoot === root) set({ loading: false });
     }
   })();
-  return inflight;
+  inflight = promise;
+  inflightRoot = root;
+  return promise;
 }
 
 export function useMcpTools(): StoreShape {

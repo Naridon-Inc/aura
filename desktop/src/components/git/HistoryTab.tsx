@@ -8,7 +8,8 @@
 import { useEffect, useState } from "react";
 import { History } from "lucide-react";
 
-import { api, type ClaudeSession, type GraphCommit } from "../../lib/api";
+import type { ClaudeSession, GraphCommit } from "../../lib/api";
+import * as work from "../../lib/place/workApi";
 import { fetchSessions } from "../../lib/sessionsCache";
 import { CommitList } from "./CommitList";
 import { CommitDetailPane } from "./CommitDetailPane";
@@ -23,7 +24,9 @@ export function HistoryTab({ repoRoot }: { repoRoot: string }) {
     let alive = true;
     const loadCommits = (initial: boolean) => {
       if (initial) setLoading(true);
-      api
+      // Through the place door: a project standing in a machine draws the
+      // graph of the checkout over there, not of this laptop's copy.
+      work
         .gitCommitGraph(repoRoot, 200)
         .then((c) => {
           if (!alive) return;

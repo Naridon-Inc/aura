@@ -23,7 +23,8 @@
 // surface, not a landing page.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, type AheadBehind, type PrSummary } from "../../lib/api";
+import type { AheadBehind, PrSummary } from "../../lib/api";
+import { gitRemoteOrigin } from "../../lib/place/workApi";
 import { fetchAheadBehind } from "../../lib/gitStateCache";
 import { fetchPrList } from "../../lib/prsCache";
 import { startAuraJob, useAuraJobs } from "../../lib/auraJob";
@@ -59,7 +60,7 @@ export function CreatePrButton({ repoRoot }: { repoRoot: string }) {
       try {
         const [a, o, list] = await Promise.all([
           fetchAheadBehind(repoRoot),
-          api.gitRemoteOrigin(repoRoot).catch(() => ""),
+          gitRemoteOrigin(repoRoot).catch(() => ""),
           fetchPrList(repoRoot).catch(() => [] as PrSummary[]),
         ]);
         if (!alive) return;

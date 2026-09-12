@@ -20,7 +20,8 @@ import {
   RefreshCw,
   Triangle,
 } from "lucide-react";
-import { api, type PrCheck, type VercelDeployment } from "../../lib/api";
+import type { PrCheck, VercelDeployment } from "../../lib/api";
+import { prChecks, prVercelStatus } from "../../lib/prApi";
 import { openExternal } from "../../lib/openExternal";
 import { sendToAmbientManager } from "../../lib/focusManager";
 import { Button } from "../ui/button";
@@ -98,7 +99,7 @@ export function PrChecksTab({ repoRoot, prNumber }: Props) {
       if (bg) setRefreshing(true);
       else setLoading(true);
       try {
-        const list = await api.prChecks(repoRoot, prNumber);
+        const list = await prChecks(repoRoot, prNumber);
         setRows(list);
         setError(null);
       } catch (e) {
@@ -113,7 +114,7 @@ export function PrChecksTab({ repoRoot, prNumber }: Props) {
 
   const loadDeploy = useCallback(async () => {
     try {
-      setDeploy(await api.prVercelStatus(repoRoot, prNumber));
+      setDeploy(await prVercelStatus(repoRoot, prNumber));
     } catch {
       // Soft: an unconfigured or unreachable Vercel simply shows no chip.
       setDeploy(null);
@@ -138,14 +139,24 @@ export function PrChecksTab({ repoRoot, prNumber }: Props) {
     if (failing.length === 0 || dispatching) return;
     setDispatching(true);
     try {
+      // A run that never started has no logs to pull — the reason GitHub
+      // recorded (bad workflow file, no matching runner…) is the whole
+      // lead, so it goes in the prompt next to the check's name.
       const names = failing
-        .map((c) => `• ${c.name}${c.workflow ? ` (${c.workflow})` : ""}`)
+        .map((c) => {
+          const head = `• ${c.name}${c.workflow ? ` (${c.workflow})` : ""}`;
+          const reason = c.failure_reason?.trim();
+          return reason
+            ? `${head}\n  Didn't start. GitHub's reason: ${reason.replace(/\n/g, "\n  ")}`
+            : head;
+        })
         .join("\n");
       const prompt =
         `PR #${prNumber} has ${failing.length} failing check${
           failing.length === 1 ? "" : "s"
         }:\n${names}\n\n` +
-        `Please investigate why each is failing (pull the run logs if you need them), ` +
+        `Please investigate why each is failing (pull the run logs if you need them; ` +
+        `a check that didn't start has none, so start from the reason above and the workflow file), ` +
         `fix the underlying cause in this branch, and push so the checks go green. ` +
         `Explain what was wrong before you change anything.`;
       await sendToAmbientManager(repoRoot, prompt);
@@ -295,6 +306,10 @@ function Summary({
 function CheckRow({ check, bucket }: { check: PrCheck; bucket: Bucket }) {
   const meta = BUCKET_META[bucket];
   const hasUrl = check.url.length > 0;
+  // "STARTUP_FAILURE" on its own is a red row with no story. When the
+  // backend found GitHub's reason it is shown in full — it is the one line
+  // the reviewer needs, and truncating it would hide the file and line.
+  const startupReason = check.failure_reason?.trim() ?? "";
   return (
     <div
       className={`flex items-center gap-2.5 rounded-md border px-3 py-2 ${meta.ring}`}
@@ -309,6 +324,11 @@ function CheckRow({ check, bucket }: { check: PrCheck; bucket: Bucket }) {
         </div>
         {check.description && (
           <div className="text-xs text-text-4 truncate mt-0.5">{check.description}</div>
+        )}
+        {startupReason && (
+          <div className="mt-1 text-xs text-text-2 whitespace-pre-wrap break-words">
+            <span className="text-red">Didn't start.</span> {startupReason}
+          </div>
         )}
       </div>
       <span

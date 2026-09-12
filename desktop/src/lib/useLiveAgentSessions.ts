@@ -14,7 +14,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type LiveAgentSession } from "./api";
-import { titleCaseName } from "./textCase";
+import { titleCaseName } from "@shared/textCase";
 
 const POLL_MS = 6000;
 

@@ -5,28 +5,30 @@
 // Everything about the form itself lives in MobileWaitlistPane; this file is
 // only the frame.
 
+import { useRef } from "react";
 import { createPortal } from "react-dom";
 import { Smartphone, X } from "lucide-react";
 
 import { MobileWaitlistPane } from "./MobileWaitlistPane";
 import { Button } from "../ui/button";
+import { useDismiss } from "../../lib/useDismiss";
 
 export function MobileWaitlistDialog({ onClose }: { onClose: () => void }) {
+  // Escape was written as a React onKeyDown on the backdrop. The backdrop is
+  // not focusable and nothing in the card takes focus when it opens, so the
+  // key never arrived and the only way out was the ✕ or a click away. The
+  // app's shared dismissal covers both, from the document.
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useDismiss(true, onClose, panelRef);
+
   return createPortal(
     <div
       className="fixed inset-0 z-[75] flex items-center justify-center p-6 motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-150"
       style={{ background: "rgba(5,5,5,0.55)", backdropFilter: "blur(3px)" }}
-      onMouseDown={onClose}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") {
-          e.preventDefault();
-          e.stopPropagation();
-          onClose();
-        }
-      }}
       role="presentation"
     >
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="mobile-waitlist-title"
@@ -35,7 +37,6 @@ export function MobileWaitlistDialog({ onClose }: { onClose: () => void }) {
           background: "var(--color-bg-1)",
           border: "1px solid var(--color-line)",
         }}
-        onMouseDown={(e) => e.stopPropagation()}
       >
         <div
           className="relative px-5 pt-5 pb-4"

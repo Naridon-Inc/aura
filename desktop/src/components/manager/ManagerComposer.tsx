@@ -80,12 +80,22 @@ import { useEditorStore } from "../../lib/editorStore";
 import { useDismiss } from "../../lib/useDismiss";
 import {
   composerKey,
+  MANAGER_DRAFT_PREFIX,
   pushHistory,
   readDraft,
   readHistory,
   writeDraft,
   writeHistory,
 } from "../composer/composerDrafts";
+// AURA-1296 — ⌘⇧/ effort ladder and the Concise output-style chip.
+import { CYCLE_EFFORT_EVENT, effortLabel, nextEffort } from "../../lib/effortCycle";
+import {
+  readOutputStyle,
+  toggleOutputStyle,
+  writeOutputStyle,
+  type OutputStyle,
+} from "../../lib/outputStyle";
+import { toast } from "../../lib/toast";
 
 type ComposerImage = {
   id: string;
@@ -290,6 +300,9 @@ const MODE_OPTIONS: { value: ComposerMode; label: string; hint: string; blurb: s
 
 const MODE_KEY = "aura.manager.mode";
 const EFFORT_KEY = "aura.manager.effort";
+// AURA-1296 — the keypress every mounted composer last answered (see the
+// CYCLE_EFFORT_EVENT listener); module-level so they can share it.
+let lastEffortCycleAt = -1;
 const FAST_KEY = "aura.manager.fast";
 const APPROVAL_KEY = "aura.manager.approval";
 
@@ -302,9 +315,10 @@ const APPROVAL_KEY = "aura.manager.approval";
 // The rules themselves now live in `components/composer/composerDrafts`, because
 // the agent chat's composer needs byte-identical behaviour for a CLI session and
 // a second copy is how the edges drift. This file keeps only the namespace.
-const DRAFT_PREFIX = "aura.manager.draft:";
+// The prefix is exported from composerDrafts now (AURA-1296): the tab strip
+// reads the same key to draw a pencil on a tab that holds a draft.
 function draftKey(sessionId?: string | null): string {
-  return composerKey(DRAFT_PREFIX, sessionId);
+  return composerKey(MANAGER_DRAFT_PREFIX, sessionId);
 }
 
 // We store the RAW text the user typed (`/foo`, not the slash-expanded forward
@@ -533,6 +547,34 @@ export function ManagerComposer({
     window.addEventListener("aura:composer:set-mode", onSetMode);
     return () => window.removeEventListener("aura:composer:set-mode", onSetMode);
   }, []);
+
+  // AURA-1296 — ⌘⇧/ walks the effort ladder without opening the model
+  // switcher. Every mounted composer updates its own chip (the level is
+  // persisted under one key, so they must agree); only the first to hear a
+  // given keypress says so, or two composers on one session toast twice.
+  const effortRef = useRef(effort);
+  effortRef.current = effort;
+  useEffect(() => {
+    const onCycle = (e: Event) => {
+      const next = nextEffort(effortRef.current);
+      setEffort(next);
+      if (e.timeStamp !== lastEffortCycleAt) {
+        lastEffortCycleAt = e.timeStamp;
+        toast.info(`Effort: ${effortLabel(next)}`, undefined, { durationMs: 1500 });
+      }
+    };
+    window.addEventListener(CYCLE_EFFORT_EVENT, onCycle);
+    return () => window.removeEventListener(CYCLE_EFFORT_EVENT, onCycle);
+  }, []);
+
+  // AURA-1296 — "Concise" answers. Read at send time by ManagerChatView and
+  // handed to Claude Code as `--output-style`; other brains ignore it.
+  const [outputStyle, setOutputStyle] = useState<OutputStyle>(() => readOutputStyle());
+  const toggleConcise = () => {
+    const next = toggleOutputStyle(outputStyle);
+    writeOutputStyle(next);
+    setOutputStyle(next);
+  };
 
   // Draft persistence (per session). Two effects, ordered:
   //   1. On a session swap, point the ref at the new key and load that
@@ -1580,6 +1622,22 @@ export function ManagerComposer({
             })}
           </DropdownMenuContent>
         </DropdownMenu>
+
+        {/* AURA-1296 — Concise: shorter answers. Lit with the accent when on,
+            like the other toggles. Only Claude Code has the switch today. */}
+        <ChipButton
+          title={
+            outputStyle === "concise"
+              ? "Concise answers on. Claude Code keeps replies short. Click to turn off."
+              : "Concise answers. Claude Code keeps replies short; other engines ignore this"
+          }
+          chevron={false}
+          className={outputStyle === "concise" ? "chip-on" : undefined}
+          aria-pressed={outputStyle === "concise"}
+          onClick={toggleConcise}
+        >
+          <span className="chip-label">Concise</span>
+        </ChipButton>
 
         <div className="right justify-end" style={{ minWidth: 96 }}>
           {/* Live context-fill gauge — hidden until the native brain reports

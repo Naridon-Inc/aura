@@ -120,7 +120,7 @@ pub fn spawn_session_heartbeat(app: AppHandle) {
                     spawn_push(
                         s.repo_root.clone(),
                         s.session_id.clone(),
-                        agent_display_name(&s.agent_id),
+                        session_title(&s.agent_id, &s.repo_root),
                         s.agent_id.clone(),
                     );
                 }
@@ -147,7 +147,8 @@ pub fn spawn_session_heartbeat(app: AppHandle) {
                 .collect();
             for id in gone {
                 if let Some(k) = known.remove(&id) {
-                    spawn_push_close(k.repo_root, id, agent_display_name(&k.agent_id), k.agent_id);
+                    let title = session_title(&k.agent_id, &k.repo_root);
+                    spawn_push_close(k.repo_root, id, title, k.agent_id);
                 }
             }
             tokio::time::sleep(SESSION_BEAT_INTERVAL).await;
@@ -234,8 +235,19 @@ async fn push_repo_registration(repo_root: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Human label for an agent id, used as the session objective/title on the
-/// phone. Falls back to the raw id for agents we don't have a nice name for.
+/// What to call this agent session on the phone and in the console.
+///
+/// The person's own opening prompt when the CLI wrote one we can read, and the
+/// tool's name when it didn't — so a list of sessions reads as a list of work
+/// rather than as the same four product names repeated down the page.
+fn session_title(agent_id: &str, repo_root: &str) -> String {
+    crate::agent_session_title::opening_prompt(agent_id, repo_root)
+        .unwrap_or_else(|| agent_display_name(agent_id))
+}
+
+/// Human label for an agent id, used as the fallback session title when the
+/// CLI's own transcript can't tell us what the session is about. Falls back to
+/// the raw id for agents we don't have a nice name for.
 fn agent_display_name(agent_id: &str) -> String {
     match agent_id {
         "claude" => "Claude Code",
@@ -423,18 +435,41 @@ async fn push_status(
     } else {
         Value::Null
     };
+    // A blank objective goes over the wire as null, not as "". The sync
+    // endpoint upserts with `COALESCE(EXCLUDED.objective, sessions.objective)`,
+    // so null leaves whatever name the row already carries alone, while an
+    // empty string would overwrite a good name with nothing the first time a
+    // still-unnamed session heartbeats.
+    let objective = match objective.trim() {
+        "" => Value::Null,
+        named => Value::String(named.to_string()),
+    };
     let body = json!({
         "repo_full_name": repo_full_name,
+        // Names an older build filed this same checkout under. Empty for every
+        // main checkout; for a worktree it is the phantom `local/<dirname>`
+        // holding sessions that belong to the project above. The server owns
+        // the merge — this only tells it which two rows are one project, which
+        // is a thing only the machine holding the worktree can know.
+        "former_repo_names": crate::repo_identity::superseded_slugs(Path::new(&repo_root)),
         "sessions": [{
             "session_type": agent_kind,
             "objective":    objective,
             "status":       status,
             "started_at":   chrono::Utc::now().to_rfc3339(),
             "ended_at":     ended_at,
+            // `repo_full_name` above deliberately resolves a linked worktree to
+            // the project it is a worktree *of*, so one repo's work arrives as
+            // one roster instead of scattering across a phantom project per
+            // branch. These two carry the distinction that erases, as a label:
+            // null `worktree` means the main checkout, and both are absent on a
+            // path git doesn't recognise rather than guessed at.
             "data": {
                 "session_id":  session_id,
                 "source":      "aura-shell",
                 "repo_root":   repo_root,
+                "worktree":    crate::repo_identity::worktree_name(Path::new(&repo_root)),
+                "branch":      crate::repo_identity::branch(Path::new(&repo_root)),
             },
         }],
     });
@@ -589,19 +624,14 @@ pub(crate) fn write_credentials(map: &serde_json::Map<String, Value>) -> Result<
 }
 
 pub(crate) fn cloud_token(map: &serde_json::Map<String, Value>) -> Option<String> {
-    map.get("cloud_api_token")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .filter(|s| !s.is_empty())
+    crate::cloud_endpoint::token(map)
 }
 
+/// The API host this app syncs with. Resolved centrally so an
+/// `AURA_CLOUD_URL` run points every surface at the same place — see
+/// [`crate::cloud_endpoint`].
 pub(crate) fn cloud_origin(map: &serde_json::Map<String, Value>) -> String {
-    map.get("cloud_url")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("https://api.auravcs.com")
-        .trim_end_matches('/')
-        .to_string()
+    crate::cloud_endpoint::origin(map, "https://api.auravcs.com")
 }
 
 /// The canonical name of the repo hosted at `repo_root`, or `None` when the

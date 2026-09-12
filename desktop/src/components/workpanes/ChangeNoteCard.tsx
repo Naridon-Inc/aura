@@ -13,7 +13,7 @@ import { useEffect, useState } from "react";
 import { fetchChangeNoteReport } from "../../lib/changeNoteCache";
 import { relativeAgeAuto } from "../../lib/relativeTime";
 import { humanizeIdentifier } from "../../lib/prove";
-import { sentenceCase } from "../../lib/textCase";
+import { sentenceCase } from "@shared/textCase";
 import type {
   FileChangeNote,
   ChangedSymbol,

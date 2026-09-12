@@ -25,6 +25,7 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 
 use crate::aurawatch_inference::{self, InferContext, InferTask, InferenceBackend};
+use crate::recorded_reason::{self, RecordedReason};
 
 /// What the frontend receives for the "What changed" line.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +181,22 @@ pub struct ChangeExplanation {
     pub what: String,
     /// Why the change was made and, briefly, how it now works.
     pub why: String,
+    /// Where the `why` came from, on its own, because it is the one angle that
+    /// can be a fact rather than a reading: `"recorded"` when the author stated
+    /// it against this file (`aura snapshot-file --why`), else `"model"` /
+    /// `"cache"` / `"fallback"` / `"none"` like the rest. A reviewer has to be
+    /// able to tell "the author said this" from "Aura read the diff and thinks
+    /// this", and the rolled-up `source` below cannot carry that.
+    #[serde(default)]
+    pub why_source: String,
+    /// Who recorded the reason, when `why_source` is `"recorded"` — the human
+    /// handle if the log has one, else the agent's name. Empty otherwise.
+    #[serde(default)]
+    pub why_author: String,
+    /// When the reason was recorded (unix seconds), for `"recorded"` only. 0
+    /// otherwise.
+    #[serde(default)]
+    pub why_stated_at: i64,
     /// Rolled-up provenance: `"model"`, `"cache"`, `"fallback"` when every
     /// angle shares one source, `"mixed"` when they differ, `"none"` for no diff.
     pub source: String,
@@ -237,7 +254,58 @@ pub async fn explain_change(
         None => single_file_diff(&repo_root, &rel).await,
     };
 
-    Ok(explain_from_diff(&cwd, &rel, &diff).await)
+    // A reason the author stated for THIS file, bounded to the change under
+    // review, beats anything a model can read off the diff. Only this entry
+    // point knows which revision is being explained, so the window is computed
+    // here and the shared explanation path is simply handed the answer.
+    let recorded = recorded_reason_for(&repo_root, &rel, commit.as_deref()).await;
+
+    Ok(explain_from_diff(&cwd, &rel, &diff, recorded).await)
+}
+
+/// The reason recorded for `rel` against the revision being explained.
+///
+/// A commit takes the window between its parent's commit time and its own, so a
+/// reason written for a later edit of the same file can never be shown as the
+/// reason for this one. A working-tree edit takes everything since `HEAD`,
+/// which is exactly the span the uncommitted diff covers.
+async fn recorded_reason_for(
+    repo_root: &str,
+    rel: &str,
+    commit: Option<&str>,
+) -> Option<RecordedReason> {
+    let (after, until) = match commit {
+        Some(sha) => (
+            git_commit_time(repo_root, &format!("{sha}^")).await,
+            git_commit_time(repo_root, sha).await,
+        ),
+        None => (git_commit_time(repo_root, "HEAD").await, None),
+    };
+    let root = PathBuf::from(repo_root);
+    let rel = rel.to_string();
+    // The log is a few thousand lines; read it off the async runtime's thread.
+    tokio::task::spawn_blocking(move || {
+        let rows = recorded_reason::read_reason_rows(&root);
+        recorded_reason::reason_for_file(&rows, &rel, after, until)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Author time of a revision, or `None` when it does not resolve — a root
+/// commit has no parent, and an unborn `HEAD` has nothing at all.
+async fn git_commit_time(repo_root: &str, rev: &str) -> Option<i64> {
+    let out = Command::new("git")
+        .args(["show", "-s", "--format=%ct", rev])
+        .current_dir(repo_root)
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
 /// Same before / what / why explanation, but for a diff the caller already
@@ -255,7 +323,10 @@ pub async fn explain_change_diff(
         return Err(format!("repo root does not exist: {repo_root}"));
     }
     let rel = rel_path(&cwd, &path);
-    Ok(explain_from_diff(&cwd, &rel, &diff).await)
+    // A pull request's base..head range spans many commits, so no single window
+    // bounds a recorded reason to it. Rather than borrow one that may belong to
+    // a different commit in the range, this path stays inferred.
+    Ok(explain_from_diff(&cwd, &rel, &diff, None).await)
 }
 
 /// Plain-language meaning for ONE changed piece — the per-node "New is this" /
@@ -438,7 +509,10 @@ pub async fn prewarm_change_summaries(
             // The file-level angles. This resolves cache → model → deterministic
             // and caches real model output, which is the whole point: run it
             // now, with nobody waiting, and the reader's call is a cache hit.
-            explain_from_diff(&cwd, &rel, &diff).await;
+            // The recorded reason is resolved here too, so a file whose author
+            // already stated why doesn't spend a model call guessing at one.
+            let recorded = recorded_reason_for(&repo_root, &rel, commit.as_deref()).await;
+            explain_from_diff(&cwd, &rel, &diff, recorded).await;
 
             // Then the per-piece "does now" / "used to do" lines — the ones the
             // split header fills in a piece at a time. Same jobs the view-time
@@ -596,11 +670,24 @@ fn claim_symbol_job(key: String) -> Option<SymbolJobGuard> {
     Some(SymbolJobGuard(key))
 }
 
-/// Off-request-path model computation for the per-piece blurbs: for each
-/// (piece, side) with no cached line, ask the user's backend to describe just
-/// that piece and cache real output. Jobs run concurrently (bounded) so a whole
-/// file's nodes fill in seconds, not one-cold-spawn-after-another. Never touches
-/// the response the user is waiting on.
+/// Off-request-path model computation for the per-piece blurbs: fill in every
+/// (piece, side) that has no cached line yet, and cache real output. Never
+/// touches the response the user is waiting on.
+///
+/// It asks about a whole side's pieces IN ONE CALL. The obvious shape — one
+/// model call per piece per side — is what made this surface feel broken: a
+/// file with a dozen changed pieces is twenty-odd calls, each a cold agent-CLI
+/// spawn of some twenty seconds, three at a time. That is minutes of generic
+/// placeholders for a change that finished long ago. The pieces share one diff
+/// and one reading of it, so one call answers for all of them, and the reply is
+/// split back into per-piece lines cached under each piece's own key — the read
+/// path cannot tell a batched line from a singly-generated one.
+///
+/// Anything the batch doesn't answer for — a piece the model skipped, a reply
+/// that came back unusable, or a side with only one piece, where the
+/// single-piece prompt is simply better — falls through to the original
+/// one-call-per-piece path. So a partial answer costs a few calls, not a lost
+/// description.
 fn spawn_symbol_backfill(
     cwd: PathBuf,
     rel: String,
@@ -614,55 +701,278 @@ fn spawn_symbol_backfill(
             return;
         }
         let backend = Arc::new(backend);
-        // A cold agent-CLI spawn is heavy; cap in-flight model calls so a file
-        // with many changed pieces doesn't fork a dozen processes at once.
-        let sem = Arc::new(Semaphore::new(3));
-        let futs = jobs.into_iter().map(|(sym, side)| {
-            let cwd = cwd.clone();
-            let rel = rel.clone();
-            let diff = diff.clone();
-            let diff_hash = diff_hash.clone();
-            let backend = Arc::clone(&backend);
-            let sem = Arc::clone(&sem);
-            async move {
-                let _permit = sem.acquire().await;
-                let tag = match side {
-                    SymSide::Now => symbol_tag(&sym.identifier),
-                    SymSide::Before => symbol_before_tag(&sym.identifier),
-                };
-                if cache_lookup(&cwd, &rel, &diff_hash, &tag).await.is_some() {
-                    return;
-                }
-                // Skip if another poll's spawn is already generating this exact
-                // (piece, side); the guard releases the claim when this finishes.
-                let _job = match claim_symbol_job(format!("{diff_hash}\u{0}{tag}")) {
-                    Some(g) => g,
-                    None => return,
-                };
-                // Re-check the cache under the claim — the job we'd have raced
-                // may have just cached it between our miss and our claim.
-                if cache_lookup(&cwd, &rel, &diff_hash, &tag).await.is_some() {
-                    return;
-                }
-                let (text, src) = generate_symbol_side(&backend, &rel, &diff, &sym, side).await;
-                if src == "model" {
-                    let _ = cache_store(
-                        &cwd,
-                        &CacheRecord {
-                            path: rel.clone(),
-                            diff_hash: diff_hash.clone(),
-                            task: tag,
-                            summary: text,
-                            source: src,
-                            ts: now_secs(),
-                        },
-                    )
-                    .await;
-                }
+        for side in [SymSide::Now, SymSide::Before] {
+            let mine: Vec<SymbolInput> = jobs
+                .iter()
+                .filter(|(_, s)| *s == side)
+                .map(|(sym, _)| sym.clone())
+                .collect();
+            if mine.is_empty() {
+                continue;
             }
-        });
-        futures_util::future::join_all(futs).await;
+            let left = run_symbol_batch(
+                &cwd, &rel, &diff, &diff_hash, &backend, &mine, side,
+            )
+            .await;
+            if !left.is_empty() {
+                run_symbols_one_by_one(
+                    &cwd, &rel, &diff, &diff_hash, &backend, &left, side,
+                )
+                .await;
+            }
+        }
     });
+}
+
+/// One model call for a whole side of a file. Returns the pieces it did NOT
+/// answer for, so the caller can fall back for those and only those.
+///
+/// A single piece skips the batch entirely: the single-piece prompt names its
+/// subject in the system prompt and gives a better sentence, and there is
+/// nothing to amortise.
+async fn run_symbol_batch(
+    cwd: &Path,
+    rel: &str,
+    diff: &str,
+    diff_hash: &str,
+    backend: &InferenceBackend,
+    syms: &[SymbolInput],
+    side: SymSide,
+) -> Vec<SymbolInput> {
+    // Only ask about pieces that still need an answer, and hold their claims
+    // for the length of the call so a concurrent poll doesn't fork per-piece
+    // calls for the very pieces this batch is about to describe.
+    let mut wanted: Vec<SymbolInput> = Vec::new();
+    let mut guards: Vec<SymbolJobGuard> = Vec::new();
+    for sym in syms {
+        let tag = side_tag(&sym.identifier, side);
+        if cache_lookup(cwd, rel, diff_hash, &tag).await.is_some() {
+            continue;
+        }
+        match claim_symbol_job(format!("{diff_hash}\u{0}{tag}")) {
+            Some(g) => {
+                guards.push(g);
+                wanted.push(sym.clone());
+            }
+            // Someone else is already writing this one — not ours to redo.
+            None => continue,
+        }
+    }
+    if wanted.len() < 2 {
+        // Nothing to amortise: hand it straight back to the single-piece path,
+        // which reads better. Dropping the guards first lets it claim its own.
+        drop(guards);
+        return wanted;
+    }
+    let lines = generate_symbol_batch(backend, rel, diff, &wanted, side).await;
+    let mut missed = Vec::new();
+    for sym in wanted {
+        match lines.get(&sym.identifier) {
+            Some(text) if !text.is_empty() => {
+                let _ = cache_store(
+                    cwd,
+                    &CacheRecord {
+                        path: rel.to_string(),
+                        diff_hash: diff_hash.to_string(),
+                        task: side_tag(&sym.identifier, side),
+                        summary: text.clone(),
+                        source: "model".into(),
+                        ts: now_secs(),
+                    },
+                )
+                .await;
+            }
+            _ => missed.push(sym),
+        }
+    }
+    drop(guards);
+    missed
+}
+
+/// The original path: one model call per piece, bounded so a cold agent-CLI
+/// spawn per piece doesn't fork a dozen processes at once. Now the fallback for
+/// what a batch couldn't answer, rather than the way every line is written.
+async fn run_symbols_one_by_one(
+    cwd: &Path,
+    rel: &str,
+    diff: &str,
+    diff_hash: &str,
+    backend: &InferenceBackend,
+    syms: &[SymbolInput],
+    side: SymSide,
+) {
+    let sem = Arc::new(Semaphore::new(3));
+    let futs = syms.iter().map(|sym| {
+        let sem = Arc::clone(&sem);
+        async move {
+            let _permit = sem.acquire().await;
+            let tag = side_tag(&sym.identifier, side);
+            if cache_lookup(cwd, rel, diff_hash, &tag).await.is_some() {
+                return;
+            }
+            // Skip if another spawn is already generating this exact (piece,
+            // side); the guard releases the claim when this finishes.
+            let _job = match claim_symbol_job(format!("{diff_hash}\u{0}{tag}")) {
+                Some(g) => g,
+                None => return,
+            };
+            // Re-check under the claim — the job we'd have raced may have just
+            // cached it between our miss and our claim.
+            if cache_lookup(cwd, rel, diff_hash, &tag).await.is_some() {
+                return;
+            }
+            let (text, src) = generate_symbol_side(backend, rel, diff, sym, side).await;
+            if src == "model" {
+                let _ = cache_store(
+                    cwd,
+                    &CacheRecord {
+                        path: rel.to_string(),
+                        diff_hash: diff_hash.to_string(),
+                        task: tag,
+                        summary: text,
+                        source: src,
+                        ts: now_secs(),
+                    },
+                )
+                .await;
+            }
+        }
+    });
+    futures_util::future::join_all(futs).await;
+}
+
+/// The cache tag for one piece on one side.
+fn side_tag(identifier: &str, side: SymSide) -> String {
+    match side {
+        SymSide::Now => symbol_tag(identifier),
+        SymSide::Before => symbol_before_tag(identifier),
+    }
+}
+
+/// Ask the backend to describe every listed piece at once, and split the reply
+/// back into one plain sentence per piece. Returns only the pieces it actually
+/// answered for — a name the model invented is dropped, and a piece it skipped
+/// is simply absent, so the caller can retry that one on its own.
+async fn generate_symbol_batch(
+    backend: &InferenceBackend,
+    rel: &str,
+    diff: &str,
+    syms: &[SymbolInput],
+    side: SymSide,
+) -> std::collections::HashMap<String, String> {
+    if matches!(backend, InferenceBackend::Generic) || syms.is_empty() {
+        return Default::default();
+    }
+    let (task, verb) = match side {
+        SymSide::Now => (InferTask::SymbolBatch, "does now"),
+        SymSide::Before => (
+            InferTask::SymbolBatchBefore,
+            "used to do, before this change",
+        ),
+    };
+    let listed = syms
+        .iter()
+        .map(|s| format!("- {} (a {})", s.identifier, plain_symbol_kind(&s.kind)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let focus = format!(
+        "Describe what each of these pieces {verb}. Write one line per piece, \
+as `name: sentence`.\n\n{listed}\n\n{}",
+        diff.chars().take(6000).collect::<String>(),
+    );
+    let ctx = InferContext {
+        files: vec![rel.to_string()],
+        diff_excerpt: focus,
+        assistant_tail: String::new(),
+        task,
+    };
+    match aurawatch_inference::infer(backend, &ctx).await {
+        Ok(reply) => parse_batch_lines(
+            &reply,
+            &syms.iter().map(|s| s.identifier.clone()).collect::<Vec<_>>(),
+        ),
+        Err(_) => Default::default(),
+    }
+}
+
+/// Split one `name: sentence` line at the colon that separates the two — the
+/// first one that isn't part of a `::` path, so `Foo::bar: does a thing` splits
+/// after `bar` and not after `Foo`.
+fn split_name_from_sentence(line: &str) -> Option<(&str, &str)> {
+    let b = line.as_bytes();
+    for (i, ch) in b.iter().enumerate() {
+        if *ch != b':' {
+            continue;
+        }
+        let joins_path = b.get(i + 1) == Some(&b':') || (i > 0 && b[i - 1] == b':');
+        if joins_path {
+            continue;
+        }
+        return Some((&line[..i], &line[i + 1..]));
+    }
+    None
+}
+
+/// Split a batched reply into one sentence per piece.
+///
+/// The model was asked for `name: sentence` lines and usually obliges, but it
+/// is a model: it numbers them, bullets them, back-ticks the name, wraps the
+/// whole thing in a preamble, or answers about a name nobody asked for. So the
+/// name is matched against the pieces we asked about rather than trusted, and
+/// anything unmatched is dropped — a piece with no line simply gets retried on
+/// its own, which is far better than showing the reader a sentence about the
+/// wrong piece.
+///
+/// The sentence goes through the same `sanitize` every single-piece line does,
+/// so a refusal or a piece of meta-commentary is discarded here too.
+fn parse_batch_lines(
+    reply: &str,
+    wanted: &[String],
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for raw in reply.lines() {
+        // Strip list furniture the prompt asked for and the model added anyway.
+        let line = raw
+            .trim()
+            .trim_start_matches(|c: char| c == '-' || c == '*' || c == '•')
+            .trim_start();
+        let line = line
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .trim_start_matches(['.', ')'])
+            .trim();
+        let Some((head, rest)) = split_name_from_sentence(line) else {
+            continue;
+        };
+        let name = head
+            .trim()
+            .trim_matches(|c: char| c == '`' || c == '"' || c == '\'' || c == '*')
+            .trim();
+        if name.is_empty() {
+            continue;
+        }
+        // Match the name to a piece we actually asked about. Exact first, then
+        // case-insensitively, then on the last path/namespace segment — models
+        // will happily answer for `Foo::bar` when asked about `bar`.
+        let Some(id) = wanted
+            .iter()
+            .find(|w| w.as_str() == name)
+            .or_else(|| wanted.iter().find(|w| w.eq_ignore_ascii_case(name)))
+            .or_else(|| {
+                let tail = name.rsplit(['.', ':']).next().unwrap_or(name);
+                wanted.iter().find(|w| w.eq_ignore_ascii_case(tail))
+            })
+        else {
+            continue;
+        };
+        let sentence = sanitize(rest);
+        if sentence.is_empty() {
+            continue;
+        }
+        // First line for a piece wins; a model that repeats itself doesn't get
+        // to overwrite its own better answer.
+        out.entry(id.clone()).or_insert(sentence);
+    }
+    out
 }
 
 /// Ask the (already-selected) backend to describe one piece — its "does now" or
@@ -759,7 +1069,12 @@ fn summary_key(diff: &str) -> String {
 /// Core of both explanation commands: given a file's diff, produce the
 /// before/what/why explanation, resolving each angle cache → model →
 /// deterministic and caching only real model output.
-async fn explain_from_diff(cwd: &Path, rel: &str, diff: &str) -> ChangeExplanation {
+async fn explain_from_diff(
+    cwd: &Path,
+    rel: &str,
+    diff: &str,
+    recorded: Option<RecordedReason>,
+) -> ChangeExplanation {
     if diff.trim().is_empty() {
         return empty_explanation();
     }
@@ -767,17 +1082,35 @@ async fn explain_from_diff(cwd: &Path, rel: &str, diff: &str) -> ChangeExplanati
 
     // A pure addition has no "before" — skip that angle entirely.
     let (_, dels) = count_changes(diff);
-    let angles: &[ExplainAngle] = if dels > 0 {
-        &[ExplainAngle::Before, ExplainAngle::What, ExplainAngle::Why]
+    let mut angles: Vec<ExplainAngle> = if dels > 0 {
+        vec![ExplainAngle::Before, ExplainAngle::What, ExplainAngle::Why]
     } else {
-        &[ExplainAngle::What, ExplainAngle::Why]
+        vec![ExplainAngle::What, ExplainAngle::Why]
     };
+    // The author already said why. Asking a model to guess it, and then showing
+    // the guess, would be replacing a fact with a reading of the same change.
+    if recorded.is_some() {
+        angles.retain(|a| !matches!(a, ExplainAngle::Why));
+    }
+    let angles = &angles[..];
 
     let mut before = String::new();
     let mut what = String::new();
     let mut why = String::new();
     let mut sources: Vec<&str> = Vec::new();
     let mut uncached: Vec<ExplainAngle> = Vec::new();
+
+    // The recorded reason goes in verbatim, in the author's own words, and its
+    // provenance travels with it so the surface can attribute it rather than
+    // presenting it as Aura's reading.
+    let (why_source, why_author, why_stated_at) = match &recorded {
+        Some(r) => {
+            why = r.text.clone();
+            sources.push("recorded");
+            ("recorded".to_string(), r.author.clone(), r.stated_at)
+        }
+        None => (String::new(), String::new(), 0),
+    };
 
     // Paint INSTANTLY. A cached model line wins per angle; otherwise the
     // deterministic, diff-mined line shows now. We never block this view on a
@@ -816,13 +1149,36 @@ async fn explain_from_diff(cwd: &Path, rel: &str, diff: &str) -> ChangeExplanati
         );
     }
 
+    // When nothing was recorded, the `why` angle ran like any other and its own
+    // source is whatever that angle produced.
+    let why_source = if why_source.is_empty() {
+        angle_source(angles, &sources, ExplainAngle::Why)
+    } else {
+        why_source
+    };
+
     ChangeExplanation {
         before,
         what,
         why,
+        why_source,
+        why_author,
+        why_stated_at,
         source: roll_up(&sources),
         diff_hash,
     }
+}
+
+/// The provenance recorded for one angle. `sources` is filled in `angles` order
+/// after any recorded-reason entry, so the offset accounts for that entry.
+fn angle_source(angles: &[ExplainAngle], sources: &[&str], want: ExplainAngle) -> String {
+    let offset = sources.len().saturating_sub(angles.len());
+    angles
+        .iter()
+        .position(|a| a.tag() == want.tag())
+        .and_then(|i| sources.get(i + offset))
+        .map(|s| (*s).to_string())
+        .unwrap_or_else(|| "none".into())
 }
 
 /// Off-request-path model computation: for each angle with no cached model line,
@@ -873,6 +1229,9 @@ fn empty_explanation() -> ChangeExplanation {
         before: String::new(),
         what: String::new(),
         why: String::new(),
+        why_source: "none".into(),
+        why_author: String::new(),
+        why_stated_at: 0,
         source: "none".into(),
         diff_hash: String::new(),
     }
@@ -1628,5 +1987,136 @@ It sends emails and retries the ones that fail.";
             sanitize(reply),
             "It sends emails and retries the ones that fail.",
         );
+    }
+
+    // The reading these pin: one model call now speaks for a whole file's
+    // changed pieces, and the reply has to be split back apart correctly. A
+    // line matched to the wrong piece would describe the wrong code to the
+    // reader, which is worse than no line at all — so anything unmatched is
+    // dropped and retried on its own.
+
+    fn wanted(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn splits_a_clean_batch_reply_into_one_line_per_piece() {
+        let reply = "retry: Waits longer between attempts so the service stops refusing us.\n\
+                     noop: Does nothing, kept so older callers still work.";
+        let got = parse_batch_lines(reply, &wanted(&["retry", "noop"]));
+        assert_eq!(
+            got.get("retry").map(String::as_str),
+            Some("Waits longer between attempts so the service stops refusing us.")
+        );
+        assert_eq!(
+            got.get("noop").map(String::as_str),
+            Some("Does nothing, kept so older callers still work.")
+        );
+    }
+
+    #[test]
+    fn strips_the_list_furniture_a_model_adds_anyway() {
+        let reply = "- `retry`: Waits longer between attempts.\n\
+                     2. **noop**: Does nothing on purpose.";
+        let got = parse_batch_lines(reply, &wanted(&["retry", "noop"]));
+        assert_eq!(
+            got.get("retry").map(String::as_str),
+            Some("Waits longer between attempts.")
+        );
+        assert_eq!(
+            got.get("noop").map(String::as_str),
+            Some("Does nothing on purpose.")
+        );
+    }
+
+    #[test]
+    fn a_name_nobody_asked_about_is_dropped_not_guessed_at() {
+        let reply = "somethingElse: Sends the welcome email.\nretry: Waits longer.";
+        let got = parse_batch_lines(reply, &wanted(&["retry"]));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got.get("retry").map(String::as_str), Some("Waits longer."));
+    }
+
+    #[test]
+    fn a_piece_the_model_skipped_is_absent_so_it_can_be_retried_alone() {
+        let reply = "retry: Waits longer between attempts.";
+        let got = parse_batch_lines(reply, &wanted(&["retry", "noop"]));
+        assert!(got.contains_key("retry"));
+        assert!(!got.contains_key("noop"));
+    }
+
+    #[test]
+    fn a_qualified_name_still_finds_its_piece() {
+        // Asked about `bar`, answered about `Foo::bar` — the same piece.
+        let reply = "Foo::bar: Adds up what the order costs.";
+        let got = parse_batch_lines(reply, &wanted(&["bar"]));
+        assert_eq!(
+            got.get("bar").map(String::as_str),
+            Some("Adds up what the order costs.")
+        );
+    }
+
+    #[test]
+    fn a_refusal_inside_a_batch_is_dropped_like_any_other() {
+        // The same meta-reply guard every single-piece line goes through: a
+        // sentence about the prompt is a failed generation, not a description.
+        let reply = "retry: I don't see a function called retry in the diff provided.\n\
+                     noop: Does nothing on purpose.";
+        let got = parse_batch_lines(reply, &wanted(&["retry", "noop"]));
+        assert!(!got.contains_key("retry"), "a refusal must not be cached");
+        assert!(got.contains_key("noop"));
+    }
+
+    #[test]
+    fn preamble_and_blank_lines_are_ignored() {
+        let reply = "Here are the descriptions:\n\n\
+                     retry: Waits longer between attempts.\n\n";
+        let got = parse_batch_lines(reply, &wanted(&["retry"]));
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got.get("retry").map(String::as_str),
+            Some("Waits longer between attempts.")
+        );
+    }
+
+    #[test]
+    fn the_first_answer_for_a_piece_wins() {
+        let reply = "retry: Waits longer between attempts.\nretry: Something vaguer.";
+        let got = parse_batch_lines(reply, &wanted(&["retry"]));
+        assert_eq!(
+            got.get("retry").map(String::as_str),
+            Some("Waits longer between attempts.")
+        );
+    }
+
+    #[test]
+    fn a_side_tag_is_the_same_key_the_read_path_looks_up() {
+        // Batched lines must be indistinguishable from singly-generated ones,
+        // which means writing them under the tags `explain_symbols` reads.
+        assert_eq!(side_tag("retry", SymSide::Now), symbol_tag("retry"));
+        assert_eq!(
+            side_tag("retry", SymSide::Before),
+            symbol_before_tag("retry")
+        );
+    }
+
+    #[test]
+    fn a_batch_sees_far_more_of_the_diff_than_a_single_piece_does() {
+        // A batch answers for every piece in the file, including the ones near
+        // the end — so it must not be handed the single-piece excerpt budget.
+        let big = "x".repeat(5000);
+        let one = InferContext {
+            files: vec!["a.rs".into()],
+            diff_excerpt: big.clone(),
+            assistant_tail: String::new(),
+            task: InferTask::Symbol,
+        };
+        let many = InferContext {
+            files: vec!["a.rs".into()],
+            diff_excerpt: big,
+            assistant_tail: String::new(),
+            task: InferTask::SymbolBatch,
+        };
+        assert!(many.user_prompt().len() > one.user_prompt().len() + 3000);
     }
 }

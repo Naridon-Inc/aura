@@ -831,6 +831,10 @@ pub async fn machine_forget(id: String) -> Result<(), String> {
     if all.len() == before {
         return Ok(());
     }
+    // AURA-1294 — a port still forwarded from an address the book no longer
+    // holds is a child nothing can stop. Let it go with the row.
+    crate::manager::brain::place_ports::forward::release_all(&id);
+    // end AURA-1294
     write_book(&all)
 }
 

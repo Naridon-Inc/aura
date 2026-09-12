@@ -53,6 +53,19 @@ pub struct RepoSettings {
     /// `[copy] files` — repo-root-relative paths (or simple `*` globs) copied
     /// into each fresh worktree.
     pub copy_files: Vec<String>,
+    /// `[copy] include_binaries` — copy binary-looking files too. Off by
+    /// default: a `.env*` glob that also catches a SQLite dump or a bundle
+    /// should not silently drag megabytes into every fresh worktree.
+    pub copy_files_include_binaries: bool,
+    /// `[instructions] review` — how the agent should review this repo.
+    pub review_instructions: Option<String>,
+    /// `[instructions] pr` — how pull requests are written here.
+    pub pr_instructions: Option<String>,
+    /// `[instructions] conflicts` — how merge conflicts get resolved here.
+    pub conflict_instructions: Option<String>,
+    /// `[github] host` — a GitHub Enterprise hostname; `gh` gets it as
+    /// `GH_HOST` for this repo's calls. None means github.com.
+    pub gh_host: Option<String>,
 }
 
 impl RepoSettings {
@@ -63,7 +76,50 @@ impl RepoSettings {
             && self.archive.is_none()
             && self.base.is_none()
             && self.copy_files.is_empty()
+            && !self.copy_files_include_binaries
+            && self.review_instructions.is_none()
+            && self.pr_instructions.is_none()
+            && self.conflict_instructions.is_none()
+            && self.gh_host.is_none()
     }
+}
+
+/// Files larger than this are treated as binary for the copy step, whatever
+/// their bytes say — nobody wants a 20 MiB blob seeded into every worktree.
+pub const BINARY_SIZE_LIMIT: u64 = 20 * 1024 * 1024;
+
+/// How many leading bytes `looks_binary` inspects for a NUL byte.
+const BINARY_SNIFF_BYTES: usize = 8 * 1024;
+
+/// PURE over bytes: a file is "binary" when its first 8 KiB carry a NUL byte —
+/// the same heuristic git uses to decide a blob is not text.
+pub fn bytes_look_binary(head: &[u8]) -> bool {
+    head.iter().take(BINARY_SNIFF_BYTES).any(|b| *b == 0)
+}
+
+/// Does this file look binary — NUL in the first 8 KiB, or over
+/// [`BINARY_SIZE_LIMIT`]? An unreadable file answers `false` so the copy step
+/// can decide what to do with it (it will fail to copy on its own terms).
+pub fn looks_binary(path: &Path) -> bool {
+    use std::io::Read;
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > BINARY_SIZE_LIMIT {
+            return true;
+        }
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = vec![0u8; BINARY_SNIFF_BYTES];
+    let mut filled = 0usize;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => return false,
+        }
+    }
+    bytes_look_binary(&head[..filled])
 }
 
 /// Path to a repo's settings file: `<repo_root>/.aura/settings.toml`.
@@ -106,6 +162,11 @@ pub fn save(repo_root: &Path, settings: &RepoSettings) -> std::io::Result<()> {
 ///     function never returns an error — a missing/failed copy must NEVER block
 ///     worktree creation.
 ///
+/// Binary-looking files (NUL in the first 8 KiB, or over 20 MiB) are skipped
+/// with a notice on stderr unless `[copy] include_binaries = true` — a
+/// `.env*` glob that also matches a database dump must not seed it into
+/// every worktree by accident.
+///
 /// Returns the count of files actually copied (useful for a progress line).
 pub fn copy_files_into(repo_root: &Path, worktree: &Path, settings: &RepoSettings) -> usize {
     let mut copied = 0usize;
@@ -115,6 +176,13 @@ pub fn copy_files_into(repo_root: &Path, worktree: &Path, settings: &RepoSetting
             continue;
         }
         for rel in expand_entry(repo_root, entry) {
+            if !settings.copy_files_include_binaries && looks_binary(&repo_root.join(&rel)) {
+                eprintln!(
+                    "aura: skipped copying `{rel}` into the new copy — it looks like a binary file. \
+                     Set `include_binaries = true` under [copy] in .aura/settings.toml to copy it anyway."
+                );
+                continue;
+            }
             if copy_one(repo_root, worktree, &rel) {
                 copied += 1;
             }
@@ -247,6 +315,10 @@ fn parse(text: &str) -> RepoSettings {
     s.run = str_at("worktree", "run");
     s.archive = str_at("worktree", "archive");
     s.base = str_at("git", "base");
+    s.review_instructions = str_at("instructions", "review");
+    s.pr_instructions = str_at("instructions", "pr");
+    s.conflict_instructions = str_at("instructions", "conflicts");
+    s.gh_host = str_at("github", "host");
 
     if let Some(arr) = doc
         .get("copy")
@@ -263,6 +335,12 @@ fn parse(text: &str) -> RepoSettings {
             }
         }
     }
+    s.copy_files_include_binaries = doc
+        .get("copy")
+        .and_then(|t| t.as_table())
+        .and_then(|t| t.get("include_binaries"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     s
 }
@@ -279,6 +357,15 @@ fn render(existing: &str, settings: &RepoSettings) -> Result<String, String> {
     set_or_clear_str(&mut doc, "worktree", "run", settings.run.as_deref());
     set_or_clear_str(&mut doc, "worktree", "archive", settings.archive.as_deref());
     set_or_clear_str(&mut doc, "git", "base", settings.base.as_deref());
+    set_or_clear_str(&mut doc, "instructions", "review", settings.review_instructions.as_deref());
+    set_or_clear_str(&mut doc, "instructions", "pr", settings.pr_instructions.as_deref());
+    set_or_clear_str(
+        &mut doc,
+        "instructions",
+        "conflicts",
+        settings.conflict_instructions.as_deref(),
+    );
+    set_or_clear_str(&mut doc, "github", "host", settings.gh_host.as_deref());
 
     // [copy] files = [...] — set when non-empty, otherwise clear the key.
     if settings.copy_files.is_empty() {
@@ -290,6 +377,14 @@ fn render(existing: &str, settings: &RepoSettings) -> Result<String, String> {
             arr.push(f.as_str());
         }
         table["files"] = toml_edit::value(arr);
+    }
+    // `include_binaries` only exists in the file when it is on — the default
+    // (off) is the absent key, so an untouched file stays untouched.
+    if settings.copy_files_include_binaries {
+        let table = ensure_table(&mut doc, "copy");
+        table["include_binaries"] = toml_edit::value(true);
+    } else {
+        clear_key(&mut doc, "copy", "include_binaries");
     }
 
     prune_empty_owned_tables(&mut doc);
@@ -322,11 +417,11 @@ fn clear_key(doc: &mut toml_edit::DocumentMut, table: &str, key: &str) {
     }
 }
 
-/// Drop any of OUR tables (`worktree`/`git`/`copy`) that we emptied out, so
-/// clearing the last key doesn't leave a dangling `[copy]` header behind. Tables
-/// we don't own are never touched, even if empty.
+/// Drop any of OUR tables (`worktree`/`git`/`copy`/`instructions`/`github`)
+/// that we emptied out, so clearing the last key doesn't leave a dangling
+/// `[copy]` header behind. Tables we don't own are never touched, even if empty.
 fn prune_empty_owned_tables(doc: &mut toml_edit::DocumentMut) {
-    for table in ["worktree", "git", "copy"] {
+    for table in ["worktree", "git", "copy", "instructions", "github"] {
         let empty = doc
             .get(table)
             .and_then(|t| t.as_table())
@@ -544,6 +639,100 @@ setup = "OLD"
         write_settings(repo.path(), "[worktree]\nsetup = \"x\"\n");
         let s = load(repo.path());
         assert_eq!(copy_files_into(repo.path(), wt.path(), &s), 0);
+    }
+
+    // ── binary detection (AURA-1297) ────────────────────────────────────────
+
+    #[test]
+    fn bytes_look_binary_finds_nul_in_head_only() {
+        assert!(bytes_look_binary(b"\x00binary"));
+        assert!(bytes_look_binary(b"PNG\r\n\x1a\n\x00"));
+        assert!(!bytes_look_binary(b"SECRET=1\nOTHER=2\n"));
+        assert!(!bytes_look_binary(b""));
+        // A NUL past the sniff window is not inspected.
+        let mut late = vec![b'a'; BINARY_SNIFF_BYTES];
+        late.push(0);
+        assert!(!bytes_look_binary(&late));
+    }
+
+    #[test]
+    fn looks_binary_by_nul_and_by_size() {
+        let dir = TempDir::new().unwrap();
+        let text = dir.path().join("text.env");
+        fs::write(&text, "A=1\n").unwrap();
+        assert!(!looks_binary(&text));
+
+        let nul = dir.path().join("blob.bin");
+        fs::write(&nul, b"abc\x00def").unwrap();
+        assert!(looks_binary(&nul));
+
+        // Sparse file over the limit: metadata says huge, no NUL needed.
+        let big = dir.path().join("big.db");
+        let f = fs::File::create(&big).unwrap();
+        f.set_len(BINARY_SIZE_LIMIT + 1).unwrap();
+        assert!(looks_binary(&big));
+
+        assert!(!looks_binary(&dir.path().join("missing")));
+    }
+
+    #[test]
+    fn copy_skips_binary_unless_included() {
+        let repo = TempDir::new().unwrap();
+        fs::write(repo.path().join(".env"), "A=1").unwrap();
+        fs::write(repo.path().join(".env.db"), b"\x00\x01\x02").unwrap();
+
+        let wt = TempDir::new().unwrap();
+        let s = RepoSettings {
+            copy_files: vec![".env*".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(copy_files_into(repo.path(), wt.path(), &s), 1);
+        assert!(wt.path().join(".env").is_file());
+        assert!(!wt.path().join(".env.db").exists(), "binary skipped by default");
+
+        let wt2 = TempDir::new().unwrap();
+        let s2 = RepoSettings {
+            copy_files_include_binaries: true,
+            ..s
+        };
+        assert_eq!(copy_files_into(repo.path(), wt2.path(), &s2), 2);
+        assert!(wt2.path().join(".env.db").is_file());
+    }
+
+    #[test]
+    fn parse_and_render_instructions_host_and_binaries() {
+        let doc = r#"
+            [instructions]
+            review = "Check the migrations first."
+            pr = "Title with the ticket id."
+            conflicts = "Prefer the incoming schema."
+            [github]
+            host = "github.example.com"
+            [copy]
+            files = [".env"]
+            include_binaries = true
+        "#;
+        let s = parse(doc);
+        assert_eq!(s.review_instructions.as_deref(), Some("Check the migrations first."));
+        assert_eq!(s.pr_instructions.as_deref(), Some("Title with the ticket id."));
+        assert_eq!(s.conflict_instructions.as_deref(), Some("Prefer the incoming schema."));
+        assert_eq!(s.gh_host.as_deref(), Some("github.example.com"));
+        assert!(s.copy_files_include_binaries);
+
+        // Missing keys stay None/false — an older file is still valid.
+        let old = parse("[copy]\nfiles = [\".env\"]\n");
+        assert!(old.review_instructions.is_none() && old.gh_host.is_none());
+        assert!(!old.copy_files_include_binaries);
+
+        let out = render("", &s).unwrap();
+        assert!(out.contains("[instructions]") && out.contains("[github]"));
+        assert!(out.contains("include_binaries = true"));
+        assert_eq!(parse(&out), s);
+
+        // Clearing everything prunes the tables we own.
+        let cleared = render(&out, &RepoSettings { copy_files: vec![".env".into()], ..Default::default() }).unwrap();
+        assert!(!cleared.contains("[instructions]") && !cleared.contains("[github]"));
+        assert!(!cleared.contains("include_binaries"));
     }
 
     // ── glob_match unit ─────────────────────────────────────────────────────

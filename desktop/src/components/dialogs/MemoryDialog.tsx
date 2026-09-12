@@ -4,8 +4,8 @@
 // conventions, and gotchas Aura and your agents carry into every session so
 // nobody has to repeat themselves. It reads the real Aura memory engine
 // (`.aura/memory.json` via cmd_memory) — NOT any one agent's private notes —
-// and lets you search it (ranked: BM25 + embeddings + recency), see where each
-// fact came from, and forget anything that's wrong.
+// and lets you search it (ranked: file anchor + BM25 + embeddings +
+// recency), see where each fact came from, and forget anything that's wrong.
 //
 // Design intent (non-engineer first): lead with plain language, not CRUD.
 // A vibecoder's question is "what does my AI think it knows, and can I fix it
@@ -18,11 +18,18 @@
 // valid_from (passed through by cmd_memory.rs). Staleness is NOT stored — it's
 // computed at read time by `aura memory why <id> --json` (a live code check),
 // called lazily once per anchored entry and cached in component state.
+//
+// AUDIT-CTX-05: every mutation shells the CLI's reconciled write path (the
+// backend does this), and the backend emits `memory:changed` after each one —
+// this surface listens and reloads, so adds/edits/forgets from ANY session
+// (this dialog, an agent, the terminal) appear without a restart. Entries are
+// Ed25519-signed at mint and verified at view time (the `signed` verdict),
+// carry a confidence weight and a scope manifest, and can be shared to the
+// team explicitly — memory stays on this machine until you do.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { Dialog } from "../Dialog";
-import { shortDate } from "../../lib/calendarDate";
-import { relativeAge } from "../../lib/relativeTime";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select } from "../ui/select";
@@ -40,7 +47,13 @@ type MemoryDialogProps = {
 
 /** Read-time verdict from `aura memory why <id> --json`, cached per id.
  *  Only `stale === true` renders a badge; fresh/unverifiable stay quiet. */
-type StaleInfo = { stale: boolean; reason?: string };
+type WhyInfo = {
+  stale: boolean;
+  reason?: string;
+  /** When this entry replaced one that had already been shared, the day that
+   *  older wording went out. The team still has it; this correction did not. */
+  supersedesSharedAt?: string;
+};
 
 /** One ranked hit from `aura memory search <q> --json`. The CLI returns a
  *  loose JSON array; we read only the fields we render and look the full
@@ -60,11 +73,11 @@ const ALL = "__all__";
 const SECTIONS: Record<string, { label: string; blurb: string }> = {
   decisions: {
     label: "Decisions",
-    blurb: "Choices made and why, so they're never re-litigated.",
+    blurb: "Choices made and why — so they're never re-litigated.",
   },
   conventions: {
     label: "Conventions",
-    blurb: "How things are done here. The style and patterns to follow.",
+    blurb: "How things are done here — the style and patterns to follow.",
   },
   gotchas: {
     label: "Gotchas",
@@ -84,6 +97,11 @@ const SECTIONS: Record<string, { label: string; blurb: string }> = {
   },
 };
 
+/** Sections a person may write into. `decisions` and `architecture` are
+ *  maintained by Aura itself (they hold structured shapes, not free-text
+ *  facts) — offering them in the composer used to corrupt the store. */
+const WRITABLE_SECTIONS = ["conventions", "gotchas", "context", "active_work"] as const;
+
 function sectionLabel(name: string): string {
   return SECTIONS[name]?.label ?? name;
 }
@@ -92,15 +110,23 @@ export function MemoryDialog({ open, repoRoot, onClose, inline = false }: Memory
   const [memory, setMemory] = useState<MemoryView | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Per-entry-id staleness verdicts; `whyRequested` dedupes in-flight and
-  // failed checks so each entry shells out to the CLI at most once per load.
-  const [staleness, setStaleness] = useState<Record<string, StaleInfo>>({});
+  // Per-entry-id `memory why` verdicts — the read-time staleness check plus
+  // whether the wording this one replaced had already left the machine.
+  // `whyRequested` dedupes in-flight and failed checks so each entry shells
+  // out to the CLI at most once per load.
+  const [whyById, setWhyById] = useState<Record<string, WhyInfo>>({});
   const whyRequested = useRef<Set<string>>(new Set());
 
   // Active category filter ("__all__" = everything, newest-first).
   const [activeSection, setActiveSection] = useState<string>(ALL);
   // "Add a fact" inline composer.
   const [adding, setAdding] = useState(false);
+  // Show closed rows too (superseded by an edit, or soft-forgotten) — the
+  // audit trail behind "forget hides, it doesn't erase".
+  const [showHistory, setShowHistory] = useState(false);
+  // One calm line about what the last write actually did (reconcile may
+  // update/supersede/no-op instead of appending) or how a share went.
+  const [notice, setNotice] = useState<string | null>(null);
 
   // Search — ranked recall over the whole memory.
   const [query, setQuery] = useState("");
@@ -115,20 +141,47 @@ export function MemoryDialog({ open, repoRoot, onClose, inline = false }: Memory
   const reload = useCallback(async () => {
     setLoading(true);
     setError(null);
-    // Refresh re-verifies: staleness is a live code check, not stored state.
+    // Refresh re-verifies: the verdict is a live check, not stored state.
     whyRequested.current = new Set();
-    setStaleness({});
+    setWhyById({});
     try {
-      const mem = await api.auraMemoryView(repoRoot);
+      const mem = await api.auraMemoryView(repoRoot, showHistory);
       setMemory(mem);
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, [repoRoot]);
+  }, [repoRoot, showHistory]);
 
-  const requestStaleness = useCallback(
+  // Live updates: the backend emits `memory:changed` after every mutation
+  // (from this dialog, another window, or any agent shelling the CLI), and
+  // the fs watcher emits `fs:changed` when memory.json changes on disk.
+  // Either way: reload, debounced, while the surface is open.
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+  useEffect(() => {
+    if (!open) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const bump = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => reloadRef.current(), 250);
+    };
+    const unlistens = [
+      listen<string>("memory:changed", (e) => {
+        if (!e.payload || e.payload === repoRoot) bump();
+      }),
+      listen<string>("fs:changed", (e) => {
+        if (typeof e.payload === "string" && e.payload.endsWith("memory.json")) bump();
+      }),
+    ];
+    return () => {
+      if (timer) clearTimeout(timer);
+      for (const p of unlistens) p.then((u) => u()).catch(() => {});
+    };
+  }, [open, repoRoot]);
+
+  const requestWhy = useCallback(
     (id: string) => {
       if (whyRequested.current.has(id)) return;
       whyRequested.current.add(id);
@@ -136,11 +189,19 @@ export function MemoryDialog({ open, repoRoot, onClose, inline = false }: Memory
         .auraCli(repoRoot, ["memory", "why", id, "--json"])
         .then((r) => {
           if (r.status !== 0) return; // CLI failure → no badge
-          const v = JSON.parse(r.stdout) as { stale?: boolean; stale_reason?: string };
+          const v = JSON.parse(r.stdout) as {
+            stale?: boolean;
+            stale_reason?: string;
+            supersedes_shared_at?: string;
+          };
           if (typeof v?.stale !== "boolean") return; // unverifiable → quiet
-          setStaleness((prev) => ({
+          setWhyById((prev) => ({
             ...prev,
-            [id]: { stale: v.stale === true, reason: v.stale_reason },
+            [id]: {
+              stale: v.stale === true,
+              reason: v.stale_reason,
+              supersedesSharedAt: v.supersedes_shared_at,
+            },
           }));
         })
         .catch(() => {
@@ -193,10 +254,119 @@ export function MemoryDialog({ open, repoRoot, onClose, inline = false }: Memory
     setHits(null);
   }, []);
 
+  // Default forget is SOFT: the fact leaves recall but stays on disk as
+  // audit trail (visible under "Show history"). `hard` is the privacy
+  // path — the row is erased entirely.
   const forget = useCallback(
-    async (id: string) => {
-      await api.auraMemoryForgetEntry(repoRoot, id);
+    async (id: string, hard = false) => {
+      try {
+        await api.auraMemoryForgetEntry(repoRoot, id, hard);
+        setNotice(
+          hard
+            ? "Erased completely — no trace kept."
+            : "Forgotten — Aura stops carrying it into sessions. It stays under “Show history” until you erase it.",
+        );
+      } catch (e) {
+        setNotice(`Couldn't forget: ${String(e)}`);
+      }
       await reload();
+    },
+    [repoRoot, reload],
+  );
+
+  // Edit = supersede: the old row closes, a fresh signed row lands with a
+  // back-pointer. The CLI does all of it; we just narrate the outcome.
+  const saveEdit = useCallback(
+    async (id: string, content: string, tags: string[]) => {
+      await api.auraMemoryUpdateEntry(repoRoot, id, content, tags);
+      setNotice("Updated — the previous wording is kept under “Show history”.");
+      await reload();
+    },
+    [repoRoot, reload],
+  );
+
+  // Explicit sharing: memory is local until this is pressed.
+  //
+  // Through `--entry-id`, which is the CLI's own recommendation and the
+  // only path that carries the fact's signature in the fields the server
+  // verifies. This used to hand-build an envelope and push it as `--body`
+  // — documented as arriving unsigned, and carrying no entry id, so a
+  // second Share added a near-duplicate org-wide instead of updating the
+  // one already there. The dialog nevertheless told the user the fact was
+  // "signed, so they can verify it came from you", which was the one
+  // thing that path could not deliver.
+  //
+  // The verdict now comes from the server's reply rather than from
+  // whether we happen to hold a local signature, and the push records
+  // itself on the entry, so reopening this dialog still says what left.
+  /** The other direction. Sharing was one-way until the CLI grew a retract
+   *  verb: a fact you sent by mistake, or corrected afterwards, stayed with
+   *  the team with no way to take it back from here. */
+  const unshare = useCallback(
+    async (entry: MemoryEntry) => {
+      try {
+        const r = await api.auraCli(repoRoot, [
+          "memory-cloud",
+          "retract",
+          "--entry-id",
+          entry.id,
+          "--json",
+        ]);
+        if (r.status !== 0) {
+          const why = r.stderr.trim() || r.stdout.trim() || "the withdrawal failed";
+          setNotice(`Couldn't stop sharing: ${why}`);
+          return;
+        }
+        // Said plainly, because the one thing a withdrawal cannot do is the
+        // thing people assume it does.
+        setNotice(
+          "Withdrawn — your team can no longer read this through Aura. A copy someone already pulled onto their own machine isn't reached.",
+        );
+        await reload();
+      } catch (e) {
+        setNotice(`Couldn't stop sharing: ${String(e)}`);
+      }
+    },
+    [repoRoot, reload],
+  );
+
+  const share = useCallback(
+    async (entry: MemoryEntry, _section: string) => {
+      const title = entry.content.length > 72 ? `${entry.content.slice(0, 72)}…` : entry.content;
+      try {
+        const r = await api.auraCli(repoRoot, [
+          "memory-cloud",
+          "push",
+          "--entry-id",
+          entry.id,
+          "--title",
+          title,
+          "--json",
+        ]);
+        if (r.status !== 0) {
+          const why = r.stderr.trim() || r.stdout.trim() || "the push failed";
+          setNotice(`Couldn't share: ${why}`);
+          return;
+        }
+        let verdict = "";
+        let created = true;
+        try {
+          const body = JSON.parse(r.stdout) as { signature?: string; created?: boolean };
+          verdict = body.signature ?? "";
+          created = body.created ?? true;
+        } catch {
+          // A reply we can't read is not a reason to claim anything about
+          // the signature; the share still happened.
+        }
+        setNotice(
+          verdict === "signed"
+            ? `${created ? "Shared with" : "Updated for"} your team — signed, so they can verify it came from you.`
+            : `${created ? "Shared with" : "Updated for"} your team. Your team can read it, but not verify who wrote it${verdict ? ` (${verdict})` : ""}.`,
+        );
+        await reload();
+      } catch (e) {
+        setNotice(`Couldn't share: ${String(e)}`);
+      }
     },
     [repoRoot, reload],
   );
@@ -213,7 +383,7 @@ export function MemoryDialog({ open, repoRoot, onClose, inline = false }: Memory
         return;
       }
       if (r.total === 0) {
-        setImportResult("Claude Code's memory for this project was empty. Nothing to bring in.");
+        setImportResult("Claude Code's memory for this project was empty — nothing to bring in.");
         return;
       }
       const broughtIn = r.imported + r.updated;
@@ -328,6 +498,21 @@ export function MemoryDialog({ open, repoRoot, onClose, inline = false }: Memory
           </div>
         )}
 
+        {notice && (
+          <div className="mx-1 mt-2 flex items-start gap-2 rounded-md border border-line-soft bg-bg-1 px-3 py-2 text-sm text-text-2">
+            <span className="mt-0.5 text-[var(--color-accent)]">✓</span>
+            <span className="flex-1 leading-relaxed">{notice}</span>
+            <button
+              type="button"
+              onClick={() => setNotice(null)}
+              className="text-text-4 hover:text-text-1"
+              title="Dismiss"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
         {error ? (
           <div role="alert" className="text-red text-sm px-1 py-4">{error}</div>
         ) : !memory && loading ? (
@@ -350,47 +535,84 @@ export function MemoryDialog({ open, repoRoot, onClose, inline = false }: Memory
             />
 
             <div className="mt-2 min-h-0 flex-1 overflow-auto pr-1">
+              {/* The composer renders in EVERY state — including the empty
+                  store, where "Add the first fact" used to press a button
+                  that opened nothing. */}
+              {adding && (
+                <div className="mt-1">
+                  <NewEntryForm
+                    defaultSection={
+                      activeSection !== ALL &&
+                      (WRITABLE_SECTIONS as readonly string[]).includes(activeSection)
+                        ? activeSection
+                        : "context"
+                    }
+                    onCancel={() => setAdding(false)}
+                    onSubmit={async (section, content, tags) => {
+                      const out = await api.auraMemoryWriteEntry(repoRoot, section, content, tags);
+                      setAdding(false);
+                      setActiveSection(section);
+                      if (out.op === "noop") {
+                        setNotice("Aura already knew that — nothing was added.");
+                      } else if (out.op === "updated") {
+                        setNotice("That refined an existing fact — the old wording is kept under “Show history”.");
+                      } else if (out.op === "deleted") {
+                        setNotice("That contradicted an old fact, which is now retired. Nothing new was added.");
+                      } else {
+                        setNotice(null);
+                      }
+                      await reload();
+                    }}
+                  />
+                </div>
+              )}
               {hits !== null ? (
                 <SearchResults
                   hits={hits}
                   byId={byId}
                   query={query}
-                  staleness={staleness}
-                  onCheckStaleness={requestStaleness}
+                  whyById={whyById}
+                  onCheckWhy={requestWhy}
                   onForget={forget}
+                  onSaveEdit={saveEdit}
+                  onShare={share}
+                  onUnshare={unshare}
                 />
               ) : totalCount === 0 ? (
-                <EmptyMemory onAdd={() => setAdding(true)} />
+                adding ? null : <EmptyMemory onAdd={() => setAdding(true)} />
               ) : (
                 <>
-                  <CategoryChips
-                    sections={liveSections}
-                    active={activeSection}
-                    total={totalCount}
-                    onSelect={setActiveSection}
-                  />
-                  {adding && (
-                    <div className="mt-3">
-                      <NewEntryForm
-                        defaultSection={activeSection === ALL ? "decisions" : activeSection}
-                        onCancel={() => setAdding(false)}
-                        onSubmit={async (section, content, tags) => {
-                          await api.auraMemoryWriteEntry(repoRoot, section, content, tags);
-                          setAdding(false);
-                          setActiveSection(section);
-                          await reload();
-                        }}
-                      />
-                    </div>
-                  )}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <CategoryChips
+                      sections={liveSections}
+                      active={activeSection}
+                      total={totalCount}
+                      onSelect={setActiveSection}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowHistory((v) => !v)}
+                      className={`ml-auto rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                        showHistory
+                          ? "border-transparent bg-bg-2 text-text-1"
+                          : "border-line-soft text-text-4 hover:text-text-1"
+                      }`}
+                      title="Also show facts that were edited away or forgotten — nothing is erased unless you say so"
+                    >
+                      {showHistory ? "Hiding nothing" : "Show history"}
+                    </button>
+                  </div>
                   <div className="mt-3 flex flex-col gap-2">
-                    {visible.map(({ entry }) => (
+                    {visible.map(({ entry, section }) => (
                       <EntryCard
                         key={entry.id}
                         entry={entry}
-                        stale={staleness[entry.id]}
-                        onCheckStaleness={requestStaleness}
-                        onForget={() => forget(entry.id)}
+                        why={whyById[entry.id]}
+                        onCheckWhy={requestWhy}
+                        onForget={(hard) => forget(entry.id, hard)}
+                        onSaveEdit={(content, tags) => saveEdit(entry.id, content, tags)}
+                        onShare={() => share(entry, section)}
+                        onUnshare={() => unshare(entry)}
                       />
                     ))}
                   </div>
@@ -415,8 +637,12 @@ function Masthead({ memory, count }: { memory: MemoryView | null; count: number 
   return (
     <div className="px-1 pb-3 border-b border-line-soft">
       <p className="text-base leading-relaxed text-text-2 max-w-[640px]">
-        What Aura remembers about this project. The decisions, conventions, and
+        What Aura remembers about this project — the decisions, conventions, and
         gotchas it carries into every session, so nobody repeats themselves.
+        <span className="text-text-4">
+          {" "}
+          Memory stays on this machine unless you share a fact with your team.
+        </span>
       </p>
       {(identity || stack.length > 0) && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs text-text-4">
@@ -486,16 +712,22 @@ function SearchResults({
   hits,
   byId,
   query,
-  staleness,
-  onCheckStaleness,
+  whyById,
+  onCheckWhy,
   onForget,
+  onSaveEdit,
+  onShare,
+  onUnshare,
 }: {
   hits: SearchHit[];
   byId: Map<string, { entry: MemoryEntry; section: string }>;
   query: string;
-  staleness: Record<string, StaleInfo>;
-  onCheckStaleness: (id: string) => void;
-  onForget: (id: string) => void;
+  whyById: Record<string, WhyInfo>;
+  onCheckWhy: (id: string) => void;
+  onForget: (id: string, hard?: boolean) => void;
+  onSaveEdit: (id: string, content: string, tags: string[]) => Promise<void>;
+  onShare: (entry: MemoryEntry, section: string) => void;
+  onUnshare: (entry: MemoryEntry) => void;
 }) {
   if (hits.length === 0) {
     return (
@@ -517,9 +749,12 @@ function SearchResults({
               key={`${h.id}-${i}`}
               entry={found.entry}
               section={found.section}
-              stale={staleness[found.entry.id]}
-              onCheckStaleness={onCheckStaleness}
-              onForget={() => onForget(found.entry.id)}
+              why={whyById[found.entry.id]}
+              onCheckWhy={onCheckWhy}
+              onForget={(hard) => onForget(found.entry.id, hard)}
+              onSaveEdit={(content, tags) => onSaveEdit(found.entry.id, content, tags)}
+              onShare={() => onShare(found.entry, found.section)}
+              onUnshare={() => onUnshare(found.entry)}
             />
           );
         }
@@ -592,9 +827,10 @@ function FilterChip({
       title={title}
       className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-sm transition-colors ${
         active
-          ? "border-transparent bg-accent text-bg-0"
-          : "border-line-soft text-text-3 hover:text-text-1 hover:bg-state-hover"
+          ? "border-transparent"
+          : "border-line-soft text-text-3 hover:text-text-1 hover:bg-bg-2"
       }`}
+      style={active ? { background: "var(--color-accent)", color: "#05140b" } : undefined}
     >
       <span>{label}</span>
       <span className={active ? "opacity-70" : "text-text-4"}>{count}</span>
@@ -620,7 +856,7 @@ function EmptyMemory({ onAdd }: { onAdd: () => void }) {
       </div>
       <p className="mt-2 text-base leading-relaxed text-text-3">
         As you and your agents work, the decisions and conventions worth keeping
-        get recorded here, and travel into every future session, so the AI stops
+        get recorded here — and travel into every future session, so the AI stops
         re-asking and re-breaking the same things. You can also add a fact by hand.
       </p>
       <div className="mt-4">
@@ -637,34 +873,107 @@ function EmptyMemory({ onAdd }: { onAdd: () => void }) {
 function EntryCard({
   entry,
   section,
-  stale,
-  onCheckStaleness,
+  why,
+  onCheckWhy,
   onForget,
+  onSaveEdit,
+  onShare,
+  onUnshare,
 }: {
   entry: MemoryEntry;
   section?: string;
-  stale: StaleInfo | undefined;
-  onCheckStaleness: (id: string) => void;
-  onForget: () => void;
+  why: WhyInfo | undefined;
+  onCheckWhy: (id: string) => void;
+  onForget: (hard?: boolean) => void;
+  onSaveEdit: (content: string, tags: string[]) => Promise<void>;
+  onShare: () => void;
+  onUnshare: () => void;
 }) {
-  // Lazy read-time verification: only anchored entries can go stale, and the
-  // parent caches per id, so rendering at most triggers one `memory why` call.
+  // Lazy read-time verification, for the two things only the engine knows:
+  // whether an anchored fact has gone stale, and whether the wording this one
+  // corrected had already been shared. The second cannot be answered from the
+  // list — the replaced entry is only loaded under "Show history" — so it has
+  // to come from `memory why`. The parent caches per id, so rendering at most
+  // triggers one call per entry.
   useEffect(() => {
-    if (entry.source_symbol) onCheckStaleness(entry.id);
-  }, [entry.id, entry.source_symbol, onCheckStaleness]);
+    if (entry.source_symbol || entry.supersedes) onCheckWhy(entry.id);
+  }, [entry.id, entry.source_symbol, entry.supersedes, onCheckWhy]);
 
-  const hasProvenance = !!(entry.source_commit || entry.source_symbol);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(entry.content);
+  const [draftTags, setDraftTags] = useState(entry.tags.join(", "));
+  const [saving, setSaving] = useState(false);
+
+  // Closed rows only show under "Show history": superseded by an edit, or
+  // soft-forgotten. They are read-only audit trail (plus Erase).
+  const closed = !!entry.valid_to;
+
   // Humanize the author the same way Sessions does: a fact written over MCP
   // is stamped "MCP Agent", which is jargon to a vibecoder ("what's MCP?").
   // Resolve it to the real agent ("Claude Code"); human names pass through.
   const whoRaw = entry.added_by?.trim();
   const who = whoRaw ? agentDisplayLabel(whoRaw) : undefined;
+
+  const confidence = confidenceLabel(entry.importance);
+  const scopeTip = scopeTooltip(entry.scope);
+
+  const startEdit = () => {
+    setDraft(entry.content);
+    setDraftTags(entry.tags.join(", "));
+    setEditing(true);
+  };
+  const submitEdit = async () => {
+    const content = draft.trim();
+    if (!content) return;
+    setSaving(true);
+    try {
+      const tags = draftTags.split(",").map((t) => t.trim()).filter(Boolean);
+      await onSaveEdit(content, tags);
+      setEditing(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <div className="group rounded-md border border-line-soft bg-bg-1 px-3 py-2.5">
-      {/* Content leads — it's the fact, not the metadata. */}
-      <div className="text-base leading-relaxed text-text-1 whitespace-pre-wrap break-words">
-        {entry.content}
-      </div>
+    <div
+      className={`group rounded-md border border-line-soft bg-bg-1 px-3 py-2.5 ${
+        closed ? "opacity-60" : ""
+      }`}
+    >
+      {editing ? (
+        <div className="flex flex-col gap-2">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={3}
+            className="px-2 py-1.5 rounded bg-bg-0 border border-line-soft text-text-1 text-sm resize-y"
+            aria-label="Edit this fact"
+          />
+          <Input
+            value={draftTags}
+            onChange={(e) => setDraftTags(e.target.value)}
+            placeholder="tags, comma-separated"
+            aria-label="Tags"
+          />
+          <div className="flex items-center gap-2">
+            <Button variant="default" size="xs" onClick={submitEdit} disabled={saving || !draft.trim()}>
+              {saving ? "Saving…" : "Save"}
+            </Button>
+            <Button variant="ghost" size="xs" onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+            <span className="text-xs text-text-4">
+              The previous wording is kept — nothing is silently rewritten.
+            </span>
+          </div>
+        </div>
+      ) : (
+        /* Content leads — it's the fact, not the metadata. */
+        <div className="text-base leading-relaxed text-text-1 whitespace-pre-wrap break-words">
+          {entry.content}
+        </div>
+      )}
 
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         {section && <CategoryTag name={section} />}
@@ -689,33 +998,183 @@ function EntryCard({
             {shortSymbol(entry.source_symbol)}
           </span>
         )}
-        {stale?.stale && (
+        {closed && (
+          <StatusChip
+            tone="neutral"
+            dense
+            title={
+              entry.supersedes
+                ? "This wording was replaced by an edit; kept as history."
+                : "Forgotten — kept as history until erased."
+            }
+          >
+            {entry.supersedes ? "replaced" : "forgotten"}
+          </StatusChip>
+        )}
+        {entry.signed === "valid" && (
+          <StatusChip
+            tone="neutral"
+            dense
+            title={`Signed by ${entry.sig_key_id ?? "a verified identity"} — the signature checks out.`}
+          >
+            signed
+          </StatusChip>
+        )}
+        {entry.signed === "invalid" && (
           <StatusChip
             tone="amber"
             dense
-            title={stale.reason ?? "The code this fact referenced has changed since it was written."}
+            title="This fact carries a signature that does NOT verify — it may have been altered since it was written."
+          >
+            signature broken
+          </StatusChip>
+        )}
+        {confidence && (
+          <span
+            className="text-2xs px-1.5 py-0.5 rounded bg-bg-2 text-text-4"
+            title="How strongly Aura weighs this fact when recalling memory."
+          >
+            {confidence}
+          </span>
+        )}
+        {scopeTip && (
+          <span className="text-2xs px-1.5 py-0.5 rounded bg-bg-2 text-text-4" title={scopeTip}>
+            scoped
+          </span>
+        )}
+        {/* What has left this machine. The promise above the list — memory
+            stays here until you share it — is only worth something if you
+            can see which ones you shared, and the fact looked identical
+            before and after until it recorded the push. */}
+        {entry.shared_at && (
+          <StatusChip
+            tone="neutral"
+            dense
+            title={
+              `Shared with your team on ${fmtDate(entry.shared_at)}` +
+              (entry.shared_signature === "signed"
+                ? " — signed, so they can verify it came from you."
+                : " — your team can read it, but not verify who wrote it.")
+            }
+          >
+            shared
+          </StatusChip>
+        )}
+        {!entry.shared_at && entry.shared_retracted_at && (
+          <StatusChip
+            tone="neutral"
+            dense
+            title={`Withdrawn on ${fmtDate(entry.shared_retracted_at)} — your team can no longer read it through Aura, but a copy someone already pulled isn't reached.`}
+          >
+            withdrawn
+          </StatusChip>
+        )}
+        {!entry.shared_at && why?.supersedesSharedAt && (
+          <StatusChip
+            tone="amber"
+            dense
+            title={`You corrected this here, but the wording it replaced was shared on ${fmtDate(why.supersedesSharedAt)} and is still what your team has.`}
+          >
+            correction not shared
+          </StatusChip>
+        )}
+        {why?.stale && (
+          <StatusChip
+            tone="amber"
+            dense
+            title={why.reason ?? "The code this fact referenced has changed since it was written."}
           >
             may be out of date
           </StatusChip>
         )}
 
-        {/* Quiet provenance line + Forget, pushed to the right. */}
+        {/* Quiet provenance line + controls, pushed to the right. */}
         <span className="ml-auto flex items-center gap-2 text-xs text-text-4">
           {who && <span title={`Remembered by ${who}`}>{who}</span>}
           {entry.added_at > 0 && <span>{fmtTs(entry.added_at)}</span>}
-          <button
-            type="button"
-            onClick={onForget}
-            className="opacity-0 group-hover:opacity-100 transition-opacity hover:text-red"
-            title="Forget this. Aura will stop carrying it into sessions"
-          >
-            Forget
-          </button>
+          {!closed && !editing && (
+            <>
+              <button
+                type="button"
+                onClick={onShare}
+                className="opacity-0 group-hover:opacity-100 transition-opacity hover:text-text-1"
+                title={
+                  entry.shared_at
+                    ? `Already shared on ${fmtDate(entry.shared_at)} — sending again replaces your team's copy with this wording`
+                    : "Share this fact with your team — memory stays on this machine until you do"
+                }
+              >
+                {entry.shared_at ? "Share again" : "Share"}
+              </button>
+              {entry.shared_at && (
+                <button
+                  type="button"
+                  onClick={onUnshare}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity hover:text-text-1"
+                  title="Take this back from your team — Aura stops serving it. A copy someone already pulled isn't reached."
+                >
+                  Stop sharing
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={startEdit}
+                className="opacity-0 group-hover:opacity-100 transition-opacity hover:text-text-1"
+                title="Fix the wording — the old version is kept as history"
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                onClick={() => onForget(false)}
+                className="opacity-0 group-hover:opacity-100 transition-opacity hover:text-red"
+                title="Forget this — Aura stops carrying it into sessions; kept under Show history until erased"
+              >
+                Forget
+              </button>
+            </>
+          )}
+          {closed && (
+            <button
+              type="button"
+              onClick={() => onForget(true)}
+              className="opacity-0 group-hover:opacity-100 transition-opacity hover:text-red"
+              title="Erase completely — removes even the history copy. This is the privacy switch."
+            >
+              Erase
+            </button>
+          )}
         </span>
       </div>
-      {!hasProvenance && !who && entry.added_at === 0 && null}
     </div>
   );
+}
+
+/** Plain-language confidence from the CLI's importance weight in [0, 1].
+ *  0.3 is the engine default, so treat it as the quiet baseline. */
+function confidenceLabel(importance?: number): string | null {
+  if (typeof importance !== "number" || Number.isNaN(importance)) return null;
+  if (importance >= 0.7) return "high confidence";
+  if (importance > 0.35) return "medium confidence";
+  return null; // baseline/low — stay quiet rather than nag
+}
+
+/** One-line tooltip for the scope manifest (which repo/checkout/session the
+ *  fact was recorded in). Opaque fields; we only narrate what's present. */
+function scopeTooltip(scope?: Record<string, unknown>): string | null {
+  if (!scope) return null;
+  const parts: string[] = [];
+  if (typeof scope.checkout_id === "string" && scope.checkout_id) {
+    parts.push(`checkout ${String(scope.checkout_id).slice(0, 12)}`);
+  }
+  if (typeof scope.agent === "string" && scope.agent) {
+    parts.push(`by ${scope.agent}`);
+  }
+  if (typeof scope.session_id === "string" && scope.session_id) {
+    parts.push(`session ${String(scope.session_id).slice(0, 12)}`);
+  }
+  if (parts.length === 0) return "Recorded with a scope manifest.";
+  return `Recorded in ${parts.join(", ")} — this fact is bound to where it was written.`;
 }
 
 /** `src/auth.rs#verify_token` → `auth.rs#verify_token` for the chip;
@@ -739,13 +1198,21 @@ function NewEntryForm({
   onSubmit: (section: string, content: string, tags: string[]) => Promise<void>;
   onCancel: () => void;
 }) {
+  // Only entry-shaped sections are writable: `decisions` and `architecture`
+  // are maintained by Aura itself, and hand-written entries there used to
+  // corrupt the store.
   const [section, setSection] = useState(
-    SECTIONS[defaultSection] ? defaultSection : "decisions",
+    (WRITABLE_SECTIONS as readonly string[]).includes(defaultSection)
+      ? defaultSection
+      : "context",
   );
   const [content, setContent] = useState("");
   const [tagsRaw, setTagsRaw] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const sections = useMemo(() => Object.entries(SECTIONS), []);
+  const sections = useMemo(
+    () => WRITABLE_SECTIONS.map((id) => [id, SECTIONS[id]] as const),
+    [],
+  );
 
   const submit = async () => {
     if (!content.trim()) return;
@@ -825,17 +1292,23 @@ function SearchGlyph() {
   );
 }
 
+/** RFC3339 → a date a person reads. Empty for anything unparseable, so a
+ *  malformed stamp never renders as "Invalid Date" next to a real claim. */
+function fmtDate(rfc3339?: string): string {
+  if (!rfc3339) return "";
+  const d = new Date(rfc3339);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
 function fmtTs(unix: number): string {
-  // One ladder for the whole app — see lib/relativeTime.
-  //
-  // The hand-off past a day is this surface's own call — a memory older than
-  // that is better placed by its date than by its age. Only the rungs above
-  // it were a private copy.
   if (!unix) return "";
-  const ms = unix * 1000;
-  if (Number.isNaN(ms)) return "";
+  const d = new Date(unix * 1000);
+  if (Number.isNaN(d.getTime())) return "";
   const now = Date.now();
-  return now - ms < 86_400_000
-    ? relativeAge(ms, { now })
-    : shortDate(ms, { now });
+  const diffMs = now - d.getTime();
+  if (diffMs < 60_000) return "just now";
+  if (diffMs < 3_600_000) return `${Math.floor(diffMs / 60_000)}m ago`;
+  if (diffMs < 86_400_000) return `${Math.floor(diffMs / 3_600_000)}h ago`;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "2-digit" });
 }

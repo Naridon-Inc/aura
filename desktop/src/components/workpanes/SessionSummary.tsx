@@ -7,7 +7,12 @@
 //      the elaboration, not a repeat.
 //   2. Files changed — the files this run touched, each a shortcut into the
 //      Changes tab with its own +/− churn.
-//   3. Details — the facts a reader only wants on demand (exact time, signature
+//   3. What this does and doesn't tell you — the seal, the goal verdict and the
+//      commit are all drawn as a word and a tick, and read down the page they
+//      compound into a claim none of them makes. This says, per kind of result,
+//      what it establishes and what it doesn't, and marks anything measured
+//      against a different version of the code as out of date.
+//   4. Details — the facts a reader only wants on demand (exact time, signature
 //      provenance). Agent / type / file-count already sit as header chips, so we
 //      don't restate them here.
 //
@@ -17,8 +22,16 @@
 import type { ReactNode } from "react";
 import type { IntentRow, IntentChangesetFile } from "../../lib/api";
 import type { IntentProvenance } from "../../lib/sessionMeta";
-import { IntentProse } from "./IntentProse";
-import { SessionGoals } from "../goals/SessionGoals";
+import { IntentProse, splitIntent } from "./IntentProse";
+import { SessionGoals, runKeyForIntent } from "../goals/SessionGoals";
+import { SessionEvidence } from "./SessionEvidence";
+import { SessionOutstanding } from "./SessionOutstanding";
+import {
+  projectName,
+  versionWords,
+  whereItHappened,
+  type ReviewScope,
+} from "../../lib/reviewScope";
 import { LockGlyph, UnlockGlyph, TrustBadge, shortBlockId } from "./SessionAttestation";
 import { Button } from "../ui/button";
 
@@ -272,7 +285,9 @@ export function SessionSummary({
   provenance,
   whenAbsolute,
   rel,
+  alignment,
   onOpenFile,
+  onOpenMatch,
 }: {
   row: IntentRow;
   /** Repo root — threaded so the Goals section can prove against this repo. */
@@ -291,8 +306,17 @@ export function SessionSummary({
   provenance: IntentProvenance;
   whenAbsolute: string;
   rel: string;
+  /** Whether the asked-versus-changed comparison can be computed for this run,
+   *  and the plain reason when it can't. Decided by the pane, which owns the
+   *  rule (a committed change, derivable on this machine) — duplicating it here
+   *  is how one condition ends up with two answers. */
+  alignment: { available: boolean; unsupportedReason: string };
   /** Jump to Changes; with a path, open that file directly. */
   onOpenFile: (path?: string) => void;
+  /** Open the tab that compares what was asked with what changed — offered as
+   *  the action on the "these haven't been compared" item. Absent when the pane
+   *  has no such tab for this run. */
+  onOpenMatch?: () => void;
 }) {
   // A blocked/halted guard record reads as its own short "here's what was
   // stopped" report — not the asked→built→prove story (there is no build, no
@@ -307,6 +331,15 @@ export function SessionSummary({
   // the checked-out branch — the merged `files` also covers native-chat rows
   // that borrow a fetched changeset. Undefined for uncommitted/working-tree runs.
   const atCommit = files.find((f) => (f.commit ?? "").trim())?.commit?.trim() || undefined;
+  // What everything on this page is about — as distinct from the checkout the
+  // reader is standing in, which is where the buttons land. Every field comes
+  // from the record itself; the ones it doesn't carry stay missing.
+  const scope: ReviewScope = {
+    project: projectName(repoRoot),
+    branch: row.branch ?? null,
+    worktree: row.worktree ?? null,
+    revision: atCommit ?? null,
+  };
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-[720px] flex-col gap-5 px-4 py-4">
@@ -375,7 +408,40 @@ export function SessionSummary({
           atCommit={atCommit}
         />
 
-        {/* 4 · Details — facts on demand. */}
+        {/* 4 · What the run left owing. The agent stopping is a fact about a
+            process, and it was reading as a fact about the work: a failed
+            check, a check nobody ran and a test only a person can do all
+            disappeared the moment the session went grey. Each item here names
+            what it needs and carries the one action that settles it. */}
+        <SessionOutstanding
+          repoRoot={repoRoot}
+          runKey={runKeyForIntent(row)}
+          runLabel={splitIntent(row.intent).headline || row.intent}
+          agentId={row.agent_id}
+          signed={signed}
+          scope={scope}
+          codeChangedAt={row.timestamp * 1000}
+          fileCount={files.length}
+          alignment={alignment}
+          onOpenMatch={onOpenMatch}
+        />
+
+        {/* 5 · What each of the results above is actually worth. The seal, the
+            goal verdict and the commit are drawn alike and read as one claim
+            getting stronger; this says once, per kind, what each establishes
+            and what it doesn't — and marks any result measured against a
+            different version of the code as out of date. */}
+        <SessionEvidence
+          repoRoot={repoRoot}
+          runKey={runKeyForIntent(row)}
+          signed={signed}
+          scope={scope}
+          codeChangedAt={row.timestamp * 1000}
+          fileCount={files.length}
+          alignment={alignment}
+        />
+
+        {/* 6 · Details — facts on demand. */}
         <section>
           <div className="mb-2.5">
             <SectionLabel>Details</SectionLabel>
@@ -383,6 +449,35 @@ export function SessionSummary({
           <div className="overflow-hidden rounded-lg border border-line-soft bg-bg-1">
             <MetaRow label="When">
               {whenAbsolute} <span className="text-text-3">({rel})</span>
+            </MetaRow>
+            {/* Which work this page is about. Read weeks later, from another
+                branch or another machine, "where" and "which version" are the
+                difference between a fact about this run and a fact about
+                whatever happens to be checked out. A record that carries
+                neither says so — it is never filled in from the surroundings. */}
+            <MetaRow label="Where">
+              <span className="text-text-2">{whereItHappened(scope)}</span>
+              {!scope.branch && !scope.worktree ? (
+                <span className="ml-1.5 text-text-4">
+                  The branch and folder weren&apos;t recorded.
+                </span>
+              ) : null}
+            </MetaRow>
+            <MetaRow label="Version">
+              {scope.revision ? (
+                <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+                  <span className="font-mono text-xs text-text-2">
+                    {versionWords(scope.revision)}
+                  </span>
+                  <span className="text-text-3">
+                    Everything above is about the code at this version.
+                  </span>
+                </span>
+              ) : (
+                <span className="text-text-3">
+                  {versionWords(null)}, so there&apos;s no fixed version to check against.
+                </span>
+              )}
             </MetaRow>
             <MetaRow label="Record">
               {signed ? (

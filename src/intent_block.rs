@@ -1085,16 +1085,13 @@ fn push_rotation_to_cloud(
     use base64::{engine::general_purpose::STANDARD as B64STD, Engine};
 
     let cfg = crate::config::ConfigManager::load();
-    let cloud_url = match cfg.cloud_url {
-        Some(u) if !u.trim().is_empty() => u,
-        _ => return json!({ "status": "skipped", "reason": "no_cloud_url" }),
+    let cloud_url = match crate::cloud_endpoint::origin(cfg.cloud_url.as_deref()) {
+        Some(u) => u,
+        None => return json!({ "status": "skipped", "reason": "no_cloud_url" }),
     };
-    let token = match cfg
-        .cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
-    {
-        Some(t) if !t.trim().is_empty() => t,
-        _ => return json!({ "status": "skipped", "reason": "no_cloud_token" }),
+    let token = match crate::cloud_endpoint::token(cfg.cloud_api_token.as_deref()) {
+        Some(t) => t,
+        None => return json!({ "status": "skipped", "reason": "no_cloud_token" }),
     };
 
     // Re-load the signed block from disk so the canonical bytes the
@@ -1207,16 +1204,13 @@ pub fn pull_rotation_chain_from_cloud(agent_id: &str) -> serde_json::Value {
     use base64::{engine::general_purpose::STANDARD as B64STD, Engine};
 
     let cfg = crate::config::ConfigManager::load();
-    let cloud_url = match cfg.cloud_url {
-        Some(u) if !u.trim().is_empty() => u,
-        _ => return json!({ "status": "skipped", "reason": "no_cloud_url" }),
+    let cloud_url = match crate::cloud_endpoint::origin(cfg.cloud_url.as_deref()) {
+        Some(u) => u,
+        None => return json!({ "status": "skipped", "reason": "no_cloud_url" }),
     };
-    let token = match cfg
-        .cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
-    {
-        Some(t) if !t.trim().is_empty() => t,
-        _ => return json!({ "status": "skipped", "reason": "no_cloud_token" }),
+    let token = match crate::cloud_endpoint::token(cfg.cloud_api_token.as_deref()) {
+        Some(t) => t,
+        None => return json!({ "status": "skipped", "reason": "no_cloud_token" }),
     };
 
     let client = match reqwest::blocking::Client::builder()
@@ -1469,16 +1463,13 @@ pub fn rotate_signing_key_cli(json: bool) -> Result<(), String> {
 /// so a clean drift report means walk_chain has the same view as the cloud.
 pub fn cloud_rotation_chain_drift(agent_id: &str) -> serde_json::Value {
     let cfg = crate::config::ConfigManager::load();
-    let cloud_url = match cfg.cloud_url {
-        Some(u) if !u.trim().is_empty() => u,
-        _ => return json!({ "status": "skipped", "reason": "no_cloud_url" }),
+    let cloud_url = match crate::cloud_endpoint::origin(cfg.cloud_url.as_deref()) {
+        Some(u) => u,
+        None => return json!({ "status": "skipped", "reason": "no_cloud_url" }),
     };
-    let token = match cfg
-        .cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
-    {
-        Some(t) if !t.trim().is_empty() => t,
-        _ => return json!({ "status": "skipped", "reason": "no_cloud_token" }),
+    let token = match crate::cloud_endpoint::token(cfg.cloud_api_token.as_deref()) {
+        Some(t) => t,
+        None => return json!({ "status": "skipped", "reason": "no_cloud_token" }),
     };
 
     // Scan local .aura/blocks/ for rotation blocks. Mirrors the

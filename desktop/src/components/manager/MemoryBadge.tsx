@@ -11,6 +11,7 @@
 // loaded. This indicator is the proof.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api, type MemoryView } from "../../lib/api";
 import { Select } from "../ui/select";
 import { useDismiss } from "../../lib/useDismiss";
@@ -108,6 +109,19 @@ export function MemoryBadge({ repoRoot, headless = false }: Props) {
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  // Stay live: every memory mutation emits `memory:changed` with the repo
+  // root (see cmd_memory.rs), whether it came from this badge, the Memory
+  // dialog, or an agent writing over the CLI. Without this the pill kept
+  // claiming whatever it read when the pane mounted.
+  useEffect(() => {
+    const un = listen<string>("memory:changed", (e) => {
+      if (!repoRoot || !e.payload || e.payload === repoRoot) void reload();
+    });
+    return () => {
+      un.then((u) => u()).catch(() => {});
+    };
+  }, [repoRoot, reload]);
 
   // Headless mode opens from the chat-tab right-click menu, which fires this
   // event (the surface carries no own pill to click).

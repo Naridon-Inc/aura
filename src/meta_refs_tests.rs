@@ -26,6 +26,11 @@ fn row(ts: u64, agent: &str, intent: &str) -> IntentRow {
         signed_block_id: Some(format!("blk_{}", ts)),
         key_id: Some("k1".to_string()),
         source: None,
+        file: None,
+        session_id: None,
+        stated_at: None,
+        change: None,
+        tool: None,
     }
 }
 
@@ -105,6 +110,11 @@ fn note_line_omits_absent_optionals() {
         signed_block_id: None,
         key_id: None,
         source: None,
+        file: None,
+        session_id: None,
+        stated_at: None,
+        change: None,
+        tool: None,
     };
     let line = render_note_line(&NoteLine::from(&r));
     assert_eq!(line, r#"{"ts":5,"agent_id":"a","intent":"x"}"#);
@@ -783,4 +793,80 @@ fn proof_pull_resolves_newest_at_wins() {
     sh_git(&b_dir, &["fetch", "origin", &refspec]);
     let pull2 = merge_incoming_proof(&repo_b).unwrap();
     assert_eq!(pull2.commits_updated, 0);
+}
+
+// ---------- unit: two-plane push ordering + failure reporting (GRF) ----------
+
+#[test]
+fn a_rejected_intent_push_does_not_strand_the_proof_push() {
+    // The intent-notes push fails (a non-fast-forward), the proof push
+    // succeeds. Before the fix the proof push was guarded on the intent push
+    // succeeding, so it was skipped entirely — stranding the proof plane
+    // locally exactly when the pull-then-push remediation was needed. Both
+    // refs must be *attempted*, and the proof must land.
+    let mut attempted: Vec<String> = Vec::new();
+    let outcome = super::push_note_planes(true, true, |r| {
+        attempted.push(r.to_string());
+        if r == NOTES_REF {
+            Err("! [rejected] (non-fast-forward)".to_string())
+        } else {
+            Ok(())
+        }
+    });
+    assert_eq!(
+        attempted,
+        vec![NOTES_REF.to_string(), PROOF_REF.to_string()],
+        "both planes must be attempted even when the intent push fails"
+    );
+    assert!(!outcome.pushed);
+    assert!(outcome.notes_error.is_some());
+    assert!(
+        outcome.proof_pushed,
+        "the proof push must not be stranded by an intent-push failure"
+    );
+    assert!(outcome.proof_error.is_none());
+}
+
+#[test]
+fn push_note_planes_skips_a_ref_that_does_not_exist() {
+    // No proof ref locally → the proof push is never attempted, and that is
+    // not an error.
+    let mut attempted = 0usize;
+    let outcome = super::push_note_planes(true, false, |_| {
+        attempted += 1;
+        Ok(())
+    });
+    assert_eq!(attempted, 1, "only the intent ref exists to push");
+    assert!(outcome.pushed);
+    assert!(!outcome.proof_pushed);
+    assert!(outcome.proof_error.is_none());
+}
+
+#[test]
+fn a_proof_push_failure_is_named_against_the_proof_ref() {
+    // Only the proof push failed. The message must name refs/notes/aura-proof,
+    // NOT the intent ref — the old hardcoded message always blamed aura-intent
+    // and pasted the proof stderr after it.
+    let msg =
+        super::push_failure_message("origin", None, Some("! [rejected] (non-fast-forward)"))
+            .expect("a failure yields a message");
+    assert!(msg.contains(PROOF_REF), "must name the proof ref: {msg}");
+    assert!(
+        !msg.contains(NOTES_REF),
+        "must not blame the intent ref for a proof-only failure: {msg}"
+    );
+    assert!(msg.contains("aura meta pull"), "keeps the remediation hint");
+}
+
+#[test]
+fn both_planes_failing_are_both_named() {
+    let msg = super::push_failure_message("origin", Some("intent boom"), Some("proof boom"))
+        .expect("a failure yields a message");
+    assert!(msg.contains(NOTES_REF) && msg.contains("intent boom"));
+    assert!(msg.contains(PROOF_REF) && msg.contains("proof boom"));
+}
+
+#[test]
+fn no_push_failure_yields_no_message() {
+    assert!(super::push_failure_message("origin", None, None).is_none());
 }

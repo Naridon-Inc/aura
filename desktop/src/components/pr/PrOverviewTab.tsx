@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type PrComment, type PrDetail, type PrLabel } from "../../lib/api";
+import { prWhoami } from "../../lib/prApi";
 import { fetchPrList } from "../../lib/prsCache";
 import {
   fetchPrComments,
@@ -85,7 +86,7 @@ export function PrOverviewTab({
 
   useEffect(() => {
     let cancelled = false;
-    api.prWhoami(repoRoot).then((who) => {
+    prWhoami(repoRoot).then((who) => {
       if (!cancelled) setViewer(who);
     }).catch(() => {});
     return () => {

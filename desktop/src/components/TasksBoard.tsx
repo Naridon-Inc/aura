@@ -50,6 +50,7 @@ import { Button } from "./ui/button";
 import { CreateTaskWizard } from "./tasks/CreateTaskWizard";
 import { TaskDetailPane, TASK_EDIT_EVENT } from "./tasks/TaskDetailPane";
 import { BoardEmpty, BoardFilteredEmpty } from "./board";
+import { ErrorState } from "./ui/state";
 import {
   goToWork,
   isCrewLens,
@@ -81,7 +82,9 @@ import { SurfaceHeader } from "./ui/SurfaceHeader";
 import { askConfirm } from "./ui/ask";
 import { ShortcutsDialog } from "./dialogs/ShortcutsDialog";
 import {
-  loadTasksForRoots,
+  mergeRootReads,
+  readTasksForRoots,
+  unreadProjectsMessage,
   rootsForScope,
   rootsKeyOf,
   useKnownProjects,
@@ -288,6 +291,17 @@ export function TasksBoard({
     [primaryRoot],
   );
   const [tasks, setTasks] = useState<Task[]>([]);
+  /** The rows on screen, readable from `refresh` without making it depend on
+   *  them — a dependency there would rebuild the callback on every load and
+   *  restart the poll that calls it. */
+  const tasksRef = useRef<Task[]>([]);
+  useEffect(() => {
+    tasksRef.current = tasks;
+  }, [tasks]);
+  /** Projects the last read could not reach. Not an error to throw the board
+   *  away over — the other projects still answered, and this one's last rows
+   *  are still the best thing we know. */
+  const [unread, setUnread] = useState<string[]>([]);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [sprints, setSprints] = useState<Sprint[]>([]);
   // OO.3 — per-repo state + label catalogs. Loaded alongside tasks so
@@ -501,9 +515,9 @@ export function TasksBoard({
       // projects can each have a "Sprint 3", and a merged list would offer you
       // a sprint that can't hold the task you'd drag into it. The rail says as
       // much where it lists them.
-      const [rows, teams, sprintRows, stateSets, labelSets, cycleRows, moduleRows] =
+      const [reads, teams, sprintRows, stateSets, labelSets, cycleRows, moduleRows] =
         await Promise.all([
-          loadTasksForRoots(roots),
+          readTasksForRoots(roots),
           Promise.all(roots.map((r) => fetchTeam(r).catch(() => null))),
           multiRoot
             ? Promise.resolve([] as Sprint[])
@@ -521,6 +535,12 @@ export function TasksBoard({
             ? Promise.resolve([] as Module[])
             : fetchModules(primaryRoot).catch(() => [] as Module[]),
         ]);
+      // A project we could not read keeps the rows it last showed. Replacing
+      // them with nothing is how a populated board turns into "No tasks yet"
+      // while the rail beside it goes on counting the work — see
+      // lib/projectRoots::mergeRootReads.
+      const { tasks: rows, failed } = mergeRootReads(tasksRef.current, reads);
+      setUnread(failed);
       const memberRows = dedupeBy(
         teams.flatMap((t) => t?.members ?? []),
         (m) => m.handle,
@@ -643,6 +663,13 @@ export function TasksBoard({
   const editingTask = useMemo(
     () => (editingId ? tasks.find((t) => t.id === editingId) ?? null : null),
     [editingId, tasks],
+  );
+
+  /** Which projects didn't answer, in words, naming them rather than counting
+   *  them. `null` when every project in scope answered. */
+  const unreadMessage = useMemo(
+    () => unreadProjectsMessage(unread, projects),
+    [unread, projects],
   );
 
   /** Deduped labels across all tasks — drives the label filter
@@ -932,6 +959,7 @@ export function TasksBoard({
       const next = await api.tasksCreate(primaryRoot, { title: t, status });
       taskRootRef.current.set(next.id, primaryRoot);
       setTasks((prev) => [...prev, { ...next, __root: primaryRoot }]);
+      trackFeature("task_create", { quick: true });
     } catch (e) {
       setError(String(e));
     }
@@ -940,6 +968,7 @@ export function TasksBoard({
   async function deleteTask(id: string) {
     try {
       await api.tasksDelete(rootOf(id), id);
+      trackFeature("task_delete");
       setTasks((prev) => prev.filter((t) => t.id !== id));
       if (selectedId === id) setSelectedId(null);
     } catch (e) {
@@ -962,6 +991,9 @@ export function TasksBoard({
     try {
       const root = rootOf(id);
       const next = await api.tasksUpdate(root, { id, status: targetStatus });
+      // The lane it landed in is a fixed token (backlog/in_progress/in_review/done), not
+      // anything a person typed — safe as a property.
+      trackFeature("task_move", { status: targetStatus });
       setTasks((prev) =>
         prev.map((x) => (x.id === next.id ? { ...next, __root: root } : x)),
       );
@@ -1098,6 +1130,18 @@ export function TasksBoard({
           narrows by goal, sprint, module and person, Filters narrows by
           anything else, and both survive a reload. */}
 
+      {/* A project that didn't answer. Said once, above the work, rather than
+          replacing it — the rows from every other project are still true. */}
+      {unreadMessage && tasks.length > 0 && (
+        <div className="flex items-center gap-2 px-4 py-1.5 text-xs text-text-4">
+          <AlertTriangle className="size-3.5 shrink-0 text-amber-500" aria-hidden />
+          <span className="min-w-0 flex-1 truncate">{unreadMessage}</span>
+          <Button size="xs" variant="ghost" onClick={() => void refresh()}>
+            Try again
+          </Button>
+        </div>
+      )}
+
       {/* Why you aren't seeing everything — absent when you are. */}
       <TasksAppliedFilters
         filters={filters}
@@ -1115,7 +1159,19 @@ export function TasksBoard({
          *  `selectedCycleId` / `selectedModuleId` via the effect
          *  near the top of this component. */}
         <div className="flex-1 min-h-0 overflow-hidden">
-          {!loading && tasks.length === 0 ? (
+          {!loading && tasks.length === 0 && unread.length > 0 ? (
+            /* Nothing to show and a project we couldn't read: say that, and
+               offer the read again. Drawing the "add your first task" hero
+               here tells someone their work is gone when it is only
+               unreachable. */
+            <div className="flex h-full w-full items-center justify-center">
+              <ErrorState
+                title="Couldn’t read the board"
+                message={unreadMessage ?? "The task board could not be read."}
+                onRetry={() => void refresh()}
+              />
+            </div>
+          ) : !loading && tasks.length === 0 ? (
             <TasksEmptyHero
               onBlank={() => {
                 setCreateInitial(null);

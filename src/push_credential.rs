@@ -117,10 +117,13 @@ fn runner_token() -> Option<String> {
 /// laptop against a place.
 fn cloud_credentials() -> Result<(String, String), String> {
     if let Some(token) = runner_token() {
-        let base = crate::recall_cloud_creds()
-            .map(|(url, _)| url)
-            .or_else(|_| std::env::var("AURA_CLOUD_URL"))
-            .unwrap_or_else(|_| "https://api.auravcs.com".to_string());
+        // A runner has its own token, so `recall_cloud_creds` failing for want
+        // of a human one must not send it to production by default.
+        let base = crate::recall_cloud_creds().map(|(url, _)| url).unwrap_or_else(|_| {
+            crate::cloud_endpoint::origin_or_public(
+                crate::config::ConfigManager::load().cloud_url.as_deref(),
+            )
+        });
         return Ok((base.trim_end_matches('/').to_string(), token));
     }
     crate::recall_cloud_creds().map(|(url, token)| (url.trim_end_matches('/').to_string(), token))

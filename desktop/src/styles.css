@@ -12,6 +12,29 @@
  * generating. */
 @config "../tailwind.config.cjs";
 
+/* WebKit on macOS 26 (Tahoe) paints form controls with the OS's native
+ * capsule — a border-radius of half the control's height that OVERRIDES the
+ * authored one. Chromium drops native appearance once a control is
+ * decorated; WebKit no longer does, so every square-cornered button and
+ * input turns into a pill in Safari and in this app's own WKWebView.
+ * Opting out of native appearance is the only reliable fix; Tailwind's
+ * preflight leaves `appearance: button` in place, so it happens here.
+ * Checkbox / radio / range / file / color are excluded — a native one
+ * stripped bare turns invisible, and the custom ones already reset
+ * themselves. Native <select> keeps its arrow for the same reason. */
+button,
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]):not([type="date"]):not([type="time"]):not([type="datetime-local"]):not([type="month"]):not([type="week"]),
+textarea {
+  -webkit-appearance: none;
+  appearance: none;
+}
+input::-webkit-search-decoration,
+input::-webkit-search-cancel-button,
+input::-webkit-search-results-button,
+input::-webkit-search-results-decoration {
+  -webkit-appearance: none;
+}
+
 /* ── Mixrank Monaco — the product typeface ────────────────────────────
  * Local assets only: the Tauri CSP blocks external hosts, so every face
  * is bundled and resolved by Vite from this file's directory
@@ -400,6 +423,14 @@
     0 0 0 1px var(--color-line-soft),
     0 1px 2px 0 rgba(0, 0, 0, 0.40);
 
+  /* A pressable control at rest — the hairline a button, chip or field-sized
+   * surface stands on. One step firmer than --shadow-card (line, not
+   * line-soft) because a button has to read as liftable against a card that
+   * is only a surface. */
+  --shadow-button:
+    0 0 0 1px var(--color-line),
+    0 1px 1px 0 rgba(0, 0, 0, 0.24);
+
   /* ── shadcn token aliases ──────────────────────────────────────────
    * Names follow the shadcn/ui convention so primitives copied from
    * upstream (Button/Dialog/Popover/etc.) compose against our existing
@@ -521,6 +552,13 @@
   --color-accent:            #059669;
   --color-accent-soft:       #e4f5ec;
   --color-accent-foreground: #ffffff;
+  /* Flyouts (Select/menu/popover). The dark base pins these to #1a1c22; left
+     unoverridden, light mode drew a near-black panel and then inked its rows
+     with light-mode's near-black text-1 — an unreadable black-on-black menu.
+     Every popover token a scheme touches must flip with the scheme. */
+  --color-popover-bg:        #ffffff;
+  --color-popover-border:    #e1e1e6;
+  --color-popover-row-hover: #f2f2f4;
 }
 
 /* Modal-inspired variant — homage to modal.com's notebook/dashboard
@@ -999,6 +1037,11 @@
   --color-amber:        #8a5a08;  /* dirty/modified + warning, 5.73:1 on bg-0 */
   --color-accent-green: #0a7346;  /* success / verified — vivid, 5.72:1 on bg-0 */
   --color-red:          #b3283f;  /* failure, 6.17:1 on bg-0 */
+  /* Flyouts flip with the scheme (same fix as `.light` above) — paper panel,
+     paper lines, one tone deeper on a hovered row. */
+  --color-popover-bg:        #fdfbf7;
+  --color-popover-border:    #e3ddd2;
+  --color-popover-row-hover: #f0ebe4;
 }
 
 /* ── Metallic 3D buttons ──────────────────────────────────────────────
@@ -1699,6 +1742,51 @@ textarea:focus-visible,
   --borders-interactive-with-focus: var(--shadow-field-focus);
   --borders-interactive-with-shadow: var(--shadow-field-focus);
   --borders-error: var(--shadow-field-error);
+
+  /* Elevations. Medusa draws every raised surface as a box-shadow stack with
+   * a white hairline baked in — `0 0 0 1px rgba(255,255,255,0.06)` over a
+   * literal zinc ring `rgba(39,39,42,1)` — so a Container, a Popover or a
+   * Button carried a bright edge belonging to another palette. On the dark
+   * app that edge read as white piping around every card; on a light theme
+   * the same stack is invisible in the wrong direction. We already own this
+   * ladder (--shadow-card / --shadow-flyout / --shadow-modal, all built from
+   * --color-line{,-soft} and re-resolved per theme), so Medusa's names point
+   * at ours rather than restating a second one. */
+  --elevation-card-rest:  var(--shadow-card);
+  --elevation-card-hover: var(--shadow-card);
+  --elevation-code-block: var(--shadow-card);
+  --elevation-flyout:     var(--shadow-flyout);
+  --elevation-tooltip:    var(--shadow-flyout);
+  --elevation-modal:      var(--shadow-modal);
+  --elevation-commandbar: var(--shadow-modal);
+
+  /* Buttons. Same story one level down: Medusa's button rings are the white
+   * hairline again, and its fills are literal zinc (`rgba(82,82,91,1)` for
+   * the primary) rather than anything the theme can move. A Medusa Button is
+   * the web console's button, so it wears the app's ring, the app's primary
+   * and the app's hover ladder — the metallic btn3d skin stays a desktop
+   * thing, but the two must at least agree on colour. */
+  --buttons-neutral:         var(--shadow-button);
+  --buttons-neutral-focus:   var(--shadow-field-focus);
+  --buttons-inverted:        var(--shadow-button);
+  --buttons-inverted-focus:  var(--shadow-field-focus);
+  --buttons-danger:          var(--shadow-button);
+  --buttons-danger-focus:    var(--shadow-field-error);
+
+  --button-neutral:            var(--color-bg-2);
+  --button-neutral-hover:      var(--color-bg-3);
+  --button-neutral-pressed:    var(--color-bg-3);
+  --button-inverted:           var(--color-primary);
+  --button-inverted-hover:     color-mix(in srgb, var(--color-primary) 90%, var(--color-bg-0));
+  --button-inverted-pressed:   color-mix(in srgb, var(--color-primary) 80%, var(--color-bg-0));
+  --button-transparent:        transparent;
+  --button-transparent-hover:  var(--color-state-hover);
+  --button-transparent-pressed: var(--color-state-selected);
+  --button-danger:             var(--color-red);
+  --button-danger-hover:       color-mix(in srgb, var(--color-red) 88%, black);
+  --button-danger-pressed:     color-mix(in srgb, var(--color-red) 78%, black);
+  --contrast-fg-primary:       var(--color-primary-foreground);
+  --fg-on-color:               var(--color-primary-foreground);
 }
 
 /* Medusa's type ramp, re-pointed at our typeface.
@@ -1744,6 +1832,97 @@ textarea:focus-visible,
 }
 .font-mono[class*="txt-"] {
   font-family: var(--font-mono);
+}
+
+/* …and the same ramp's sizes, onto the same ladder.
+ *
+ * Taking only the family left the window with two type ramps. Medusa's is a
+ * second ladder with its own idea of leading: `compact` is a flat 20px at
+ * every size — right at 13px, two pixels loose at 12px and four tight at
+ * 16px — and the plain ramp is 1.6x unrounded, which lands text on 19.2px,
+ * 20.8px, 25.6px. So `text-sm` and `<Text size="xsmall">` were both 12px and
+ * 18 vs 20 apart; `text-base` and `<Text size="small">` agreed; a Medusa
+ * Heading and an `.h2-core` at 16px did not. Same pixel size, three leadings,
+ * depending on which component you happened to be inside — which is exactly
+ * the drift you can see and cannot name.
+ *
+ * Medusa's five steps are the app's five rungs (12/13/14/16 -> sm/base/md/lg,
+ * and its 18px top step -> `xl`, the rung the app actually has there), so the
+ * ramp is re-pointed whole rather than approximated. What survives from
+ * Medusa is the part that is Medusa's business — which size each component
+ * reaches for, and its 400/500 weights, which are our body/ui pair already.
+ * `compact` and plain now resolve alike, deliberately: the app has one
+ * leading per size, and a second one hiding behind a prop is the thing being
+ * removed.
+ *
+ * Same specificity (0,1,0) and later in the sheet than the preset, so this
+ * wins on order — the same way the family rule above does. */
+.txt-compact-xsmall,
+.txt-compact-xsmall-plus,
+.txt-xsmall,
+.txt-xsmall-plus {
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-sm);
+}
+.txt-compact-small,
+.txt-compact-small-plus,
+.txt-small,
+.txt-small-plus {
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+}
+.txt-compact-medium,
+.txt-compact-medium-plus,
+.txt-medium,
+.txt-medium-plus {
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-md);
+}
+.txt-compact-large,
+.txt-compact-large-plus,
+.txt-large,
+.txt-large-plus {
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-lg);
+}
+.txt-compact-xlarge,
+.txt-compact-xlarge-plus,
+.txt-xlarge,
+.txt-xlarge-plus {
+  font-size: var(--font-size-xl);
+  line-height: var(--line-height-xl);
+}
+
+/* …and Medusa's headings, which the two rules above do not reach.
+ *
+ * `Heading` does not use the `txt-*` ramp at all. It applies `.h1-core` /
+ * `.h2-core` / `.h3-core`, three classes that carry their own hardcoded
+ * `font-family: Inter, …` and their own 18/16/14px sizes on Medusa's leading.
+ * So every section title in the console, every stat on a card and every
+ * dialog title was set in a different typeface from the sentence underneath
+ * it — and because Inter is not bundled here it fell through to the platform
+ * UI face, which is close enough to pass a glance and wrong enough to notice
+ * without being able to name it. That is precisely the failure the ramp above
+ * was written to end, and it was left half-finished.
+ *
+ * Same treatment, same reasoning: the family becomes ours, the sizes land on
+ * the app's rungs (18 -> xl, 16 -> lg, 14 -> md, matching where the `txt-*`
+ * bridge sends Medusa's own five steps), and the 500 weight survives because
+ * that is Medusa's business and already our ui weight. */
+.h1-core {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xl);
+  line-height: var(--line-height-xl);
+}
+.h2-core {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-lg);
+}
+.h3-core {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-md);
 }
 
 /* Keyboard focus, everywhere, once.
@@ -4490,12 +4669,19 @@ textarea:focus-visible,
   height: 100%;
   min-height: 0;
   background: var(--color-bg-1);
-  /* 13px, not the 12px `--font-size-sm` step. The rail is a reading
+  /* `base`, not the 12px `--font-size-sm` step. The rail is a reading
      surface — eight to twenty destination names, read at a glance, all day
      — and 12px is a caption size being asked to do a body job. Scoped to
      this panel rather than moved on the global token, which 565 other call
-     sites share. */
-  font-size: 13px;
+     sites share.
+
+     The rung is named rather than typed. As a literal 13px it also inherited
+     the document's unitless 1.5, so every row in the rail came out 13/19.5
+     while the identical 13px text in the body came out 13/20 — half a pixel
+     of leading between two surfaces that sit side by side, from the one
+     place the ladder was spelled as a number. */
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
 }
 
 /* The place rail — Tasks' buckets, Pages' index, Team's conversations — is
@@ -4599,6 +4785,7 @@ textarea:focus-visible,
   padding: 0 5px;
   border-radius: 9px;
   font-size: var(--font-size-xs);
+  line-height: var(--line-height-xs);
   font-weight: var(--font-weight-accent);
   display: grid;
   place-items: center;
@@ -4888,10 +5075,10 @@ textarea:focus-visible,
   border-radius: var(--radius-sm, 4px);
   background: var(--color-bg-2);
   color: var(--color-text-3);
-  font-size: 9.5px;
-  font-weight: 600;
+  font-size: var(--font-size-2xs);
+  line-height: var(--line-height-2xs);
+  font-weight: var(--font-weight-heading);
   letter-spacing: 0.06em;
-  line-height: 15px;
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -4906,7 +5093,8 @@ textarea:focus-visible,
   color: var(--color-text-3);
 }
 .ade-foot-plan-who {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-xs);
   color: var(--color-text-4);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5134,6 +5322,7 @@ textarea:focus-visible,
   align-items: center;
   min-height: 24px;
   font-size: var(--font-size-xs);
+  line-height: var(--line-height-xs);
   font-weight: var(--font-weight-ui);
   color: var(--color-text-4);
   padding: 6px 8px 2px;
@@ -7605,7 +7794,15 @@ textarea:focus-visible,
   border-left: 1px solid var(--color-line-soft);
   background: transparent;
   color: var(--color-text-3);
-  font-size: var(--font-size-2xs);
+  /* `sm`, not `2xs`. At 10px the strip was the smallest text on the page —
+   * smaller than the row it labelled, smaller than a table caption, and three
+   * rungs below the sidebar rail it shares a corner with. Two navigations at
+   * the same level of the hierarchy, one at 13px and one at 10px, is the
+   * inconsistency you feel before you can name it. 12px is the app's chrome
+   * size and the one Medusa's own compact ramp starts at, so the header now
+   * agrees with both the rail beside it and the table under it. */
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-sm);
   font-weight: var(--font-weight-ui);
   white-space: nowrap;
   transition: var(--motion-fast) background, var(--motion-fast) color;
@@ -10364,4 +10561,24 @@ textarea:focus-visible,
     transform: none;
     animation: none;
   }
+}
+
+/* ── the piece you clicked, in the code ────────────────────────────────
+   Clicking a changed piece in the split header highlights its lines in the
+   diff below. The treatment has to survive the diff's OWN add/remove wash
+   sitting underneath it, so it is a translucent tint plus a solid rail in
+   Aura's green rather than a flat background — a flat one would repaint the
+   add/remove colour away and cost more information than it gives.
+
+   These are Monaco decoration classes, for the split view. The hand-rolled
+   unified table paints the same reading inline (see UnifiedDiff.rowStyle),
+   because its rows already carry an inline wash that a class could not win
+   against. Both read from the same accent token so the two views of one file
+   still match. */
+.aura-focus-lines {
+  background: color-mix(in oklab, var(--color-accent) 14%, transparent);
+}
+
+.aura-focus-margin {
+  box-shadow: inset 2px 0 0 var(--color-accent);
 }

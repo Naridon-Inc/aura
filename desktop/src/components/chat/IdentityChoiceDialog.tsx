@@ -135,8 +135,11 @@ export function IdentityChoiceDialog({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-[460px] max-w-[92vw] rounded-md border border-line bg-bg-1 shadow-xl">
-        <header className="flex items-center justify-between border-b border-line-soft px-4 py-2.5">
+      {/* Capped and scrolling: the list of names you could be is however long
+          it is, and an uncapped card pushes "Use this name" below the bottom
+          of a 900×600 window with nothing to scroll. */}
+      <div className="flex max-h-[80vh] w-[460px] max-w-[92vw] flex-col overflow-hidden rounded-md border border-line bg-bg-1 shadow-xl">
+        <header className="flex shrink-0 items-center justify-between border-b border-line-soft px-4 py-2.5">
           <h2
             id="identity-choice-title"
             className="text-base font-semibold text-text-1"
@@ -157,6 +160,7 @@ export function IdentityChoiceDialog({
 
         {canChoose ? (
           <>
+            <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="px-4 py-3 text-sm text-text-2 leading-snug">
               You go by more than one name on this project. Pick the one your
               teammates should see on your messages here. Aura only lists names
@@ -222,6 +226,7 @@ export function IdentityChoiceDialog({
               />
               Remember this choice for this project
             </label>
+            </div>
 
             {err && (
               <div className="mx-4 mb-2 rounded border border-red/30 bg-red/10 px-2 py-1 text-xs text-red">
@@ -229,7 +234,7 @@ export function IdentityChoiceDialog({
               </div>
             )}
 
-            <footer className="flex items-center justify-end gap-2 border-t border-line-soft px-4 py-2.5">
+            <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-line-soft px-4 py-2.5">
               <Button
                 type="button"
                 variant="secondary"

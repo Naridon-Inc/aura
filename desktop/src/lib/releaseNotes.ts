@@ -41,6 +41,19 @@ export type ReleaseCta = "mobile-waitlist";
 // one shown after an update.
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: "0.19.44",
+    date: "September 2026",
+    title: "A lock the locked-out could open, and the rest of what an audit found",
+    highlights: [
+      "The lock an agent could not open, and did. You can seal your project's rules with a passcode so an agent cannot lift them. When an agent was refused something, it wrote down why it wanted to do it — and Aura read that note as the permission and let the second attempt through. A note somebody writes about themselves can never be what unlocks a lock set against them. A refused action now goes to you, with what the agent said shown as its argument.",
+      "Aura was saying “nothing depends on this” about files it had never opened. A whole kind of file was being skipped rather than reported as unread, so a project written that way was told it was protected when it was not. Being told nothing would have been better.",
+      "Everyone on a shared machine now pushes as themselves. Work done on a machine several people use was signed by whoever set the machine up. Each person gets their own credential, which they can be given and can have taken away.",
+      "You can see what your team actually spent. The per-person figure was reading zero for everybody, because nothing had ever been writing it down.",
+      "Two people can be in the same session. And several copies of one project can now see each other's work in progress, while each keeps its own sessions to itself.",
+      "The phone app looks like the desktop one. Same dark blocks, same mark, rather than a second design that had drifted.",
+    ],
+  },
+  {
     version: "0.19.39",
     date: "August 2026",
     title: "Your project can say no to an agent, and stop asking about the rest",

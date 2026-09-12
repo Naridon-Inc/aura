@@ -50,6 +50,30 @@ pub struct RepoWorktreeSettings {
     /// `[scripts]` without changing the CLI's legacy setup/run contract.
     #[serde(default)]
     pub named_scripts: Vec<NamedScript>,
+    /// `[copy] include_binaries` — copy binary-looking files too (off by
+    /// default). Serializes as `copyFilesIncludeBinaries`.
+    #[serde(default)]
+    pub copy_files_include_binaries: bool,
+    /// `[instructions] review` — how the agent should review this repo.
+    #[serde(default)]
+    pub review_instructions: Option<String>,
+    /// `[instructions] pr` — how pull requests are written here.
+    #[serde(default)]
+    pub pr_instructions: Option<String>,
+    /// `[instructions] conflicts` — how merge conflicts get resolved here.
+    #[serde(default)]
+    pub conflict_instructions: Option<String>,
+    /// `[github] host` — GitHub Enterprise hostname handed to `gh` as
+    /// `GH_HOST` for this repo. None means github.com.
+    #[serde(default)]
+    pub gh_host: Option<String>,
+}
+
+/// The `[github] host` of a repo, for callers that shell out to `gh` and need
+/// to point it at a GitHub Enterprise instance. Cheap: one small TOML read.
+pub fn gh_host_for(repo_root: &str) -> Option<String> {
+    let text = std::fs::read_to_string(settings_path(Path::new(repo_root))).ok()?;
+    parse(&text).gh_host
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -122,6 +146,10 @@ fn parse(text: &str) -> RepoWorktreeSettings {
     s.run = str_at("worktree", "run");
     s.archive = str_at("worktree", "archive");
     s.base = str_at("git", "base");
+    s.review_instructions = str_at("instructions", "review");
+    s.pr_instructions = str_at("instructions", "pr");
+    s.conflict_instructions = str_at("instructions", "conflicts");
+    s.gh_host = str_at("github", "host");
 
     if let Some(arr) = doc
         .get("copy")
@@ -138,6 +166,12 @@ fn parse(text: &str) -> RepoWorktreeSettings {
             }
         }
     }
+    s.copy_files_include_binaries = doc
+        .get("copy")
+        .and_then(|t| t.as_table())
+        .and_then(|t| t.get("include_binaries"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     if let Some(table) = doc.get("scripts").and_then(|item| item.as_table()) {
         for (name, item) in table.iter() {
@@ -169,6 +203,22 @@ fn render(existing: &str, settings: &RepoWorktreeSettings) -> Result<String, Str
     set_or_clear_str(&mut doc, "worktree", "run", settings.run.as_deref());
     set_or_clear_str(&mut doc, "worktree", "archive", settings.archive.as_deref());
     set_or_clear_str(&mut doc, "git", "base", settings.base.as_deref());
+    set_or_clear_str(&mut doc, "instructions", "review", settings.review_instructions.as_deref());
+    set_or_clear_str(&mut doc, "instructions", "pr", settings.pr_instructions.as_deref());
+    set_or_clear_str(
+        &mut doc,
+        "instructions",
+        "conflicts",
+        settings.conflict_instructions.as_deref(),
+    );
+    set_or_clear_str(&mut doc, "github", "host", settings.gh_host.as_deref());
+    // The default (off) is the absent key, so an untouched file stays untouched.
+    if settings.copy_files_include_binaries {
+        let table = ensure_table(&mut doc, "copy");
+        table["include_binaries"] = toml_edit::value(true);
+    } else {
+        clear_key(&mut doc, "copy", "include_binaries");
+    }
 
     let files: Vec<&str> = settings
         .copy_files
@@ -245,7 +295,7 @@ fn clear_key(doc: &mut toml_edit::DocumentMut, table: &str, key: &str) {
 
 /// Drop only OUR tables once we've emptied them; foreign tables are never touched.
 fn prune_empty_owned_tables(doc: &mut toml_edit::DocumentMut) {
-    for table in ["worktree", "git", "copy", "scripts"] {
+    for table in ["worktree", "git", "copy", "scripts", "instructions", "github"] {
         let empty = doc
             .get(table)
             .and_then(|t| t.as_table())
@@ -344,6 +394,43 @@ mod tests {
         let out = render(existing, &s).unwrap();
         assert!(!out.contains("[worktree]"));
         assert!(out.contains("[editor]"));
+    }
+
+    #[test]
+    fn instructions_host_and_binaries_round_trip_and_stay_optional() {
+        let s = RepoWorktreeSettings {
+            review_instructions: Some("Check migrations first.".into()),
+            pr_instructions: Some("Title carries the ticket id.".into()),
+            conflict_instructions: Some("Prefer the incoming schema.".into()),
+            gh_host: Some("github.example.com".into()),
+            copy_files: vec![".env".into()],
+            copy_files_include_binaries: true,
+            ..Default::default()
+        };
+        let out = render("", &s).unwrap();
+        assert!(out.contains("[instructions]") && out.contains("[github]"));
+        assert!(out.contains("include_binaries = true"));
+        let re = parse(&out);
+        assert_eq!(re.review_instructions.as_deref(), Some("Check migrations first."));
+        assert_eq!(re.pr_instructions.as_deref(), Some("Title carries the ticket id."));
+        assert_eq!(re.conflict_instructions.as_deref(), Some("Prefer the incoming schema."));
+        assert_eq!(re.gh_host.as_deref(), Some("github.example.com"));
+        assert!(re.copy_files_include_binaries);
+
+        // The frontend contract is camelCase, and an old payload without the
+        // new keys still deserializes.
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"reviewInstructions\"") && json.contains("\"ghHost\""));
+        assert!(json.contains("\"copyFilesIncludeBinaries\":true"));
+        let old: RepoWorktreeSettings =
+            serde_json::from_str(r#"{"setup":null,"run":null,"archive":null,"base":null,"copyFiles":[]}"#)
+                .unwrap();
+        assert!(old.gh_host.is_none() && !old.copy_files_include_binaries);
+
+        // Clearing prunes only the tables we own.
+        let cleared = render(&out, &RepoWorktreeSettings::default()).unwrap();
+        assert!(!cleared.contains("[instructions]") && !cleared.contains("[github]"));
+        assert!(!cleared.contains("include_binaries"));
     }
 
     #[test]

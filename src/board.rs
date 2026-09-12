@@ -6,10 +6,19 @@
 //! the SAME on-disk schema — `serde_json::Value` for tasks, the
 //! frontmatter-sandwich markdown for pages — so a CLI agent (Claude Code,
 //! Codex, Gemini, …) and a human share ONE board and ONE wiki. We
-//! deliberately do NOT stand up a second task store: there is already a
-//! separate `task.rs` (`T-<uuid>` per-file model) in this crate used by the
-//! older `aura task` CLI, and pointing agents at that would split the board
-//! the user sees in the app from the one agents write.
+//! deliberately do NOT stand up a second task store.
+//!
+//! There is a second *shape*, though, and for a while that was as bad. The
+//! older `aura task` CLI and the crew write one `T-xxxxxxxx.json` file per
+//! task into the very same directory, and this module read only the
+//! aggregate document beside them. Move that document aside — as happened on
+//! 2 September — and the board answered "no tasks" while `aura task list`
+//! printed eighty-three. Nothing errored, because a reader that knows one
+//! filename cannot tell an empty board from work in the other shape.
+//!
+//! So the directory is the board. `aura_loop::board_card` holds the one
+//! projection between the two shapes; a card is read as a row and written
+//! back as a card, so neither store loses what it exists for.
 //!
 //! Scope is intentionally narrow: read everything, and patch only the few
 //! fields an agent needs — status / assignee / priority for a task; title /
@@ -21,31 +30,37 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use aura_loop::board_card;
 use serde_json::{json, Value};
 
 // ─── Tasks ──────────────────────────────────────────────────────────────
 
 fn tasks_file(root: &Path) -> PathBuf {
-    root.join(".aura").join("tasks").join("tasks.json")
+    board_card::board_file(root)
 }
 
-/// Read the raw `{ "tasks": [...] }` document. A missing file is an empty
-/// board, not an error — the app writes it lazily on first task create.
+/// Read the board: the aggregate `{ "tasks": [...] }` document AND every
+/// per-file card sitting in the same directory.
+///
+/// A missing document is an empty *document*, not an empty board — the app
+/// writes it lazily on first task create, and the cards beside it are work
+/// either way.
 fn read_doc(root: &Path) -> Result<Value, String> {
-    let p = tasks_file(root);
-    if !p.exists() {
-        return Ok(json!({ "tasks": [] }));
-    }
-    let bytes = fs::read(&p).map_err(|e| format!("read {}: {e}", p.display()))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", p.display()))
+    Ok(json!({ "tasks": board_card::read_board(root) }))
 }
 
+/// Write the board back, each row to the store it came from — a card to its
+/// own file, everything else to the aggregate document.
+///
+/// A row dropped from the list is deleted from whichever store held it, so
+/// every caller reads the whole board, edits it, and writes it back.
 fn write_doc(root: &Path, doc: &Value) -> Result<(), String> {
-    let p = tasks_file(root);
-    if let Some(parent) = p.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    }
-    atomic_write(&p, serde_json::to_string_pretty(doc).unwrap_or_default().as_bytes())
+    let rows: Vec<Value> = doc
+        .get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    board_card::write_board(root, &rows)
 }
 
 /// Legacy `status` → canonical `state_id`, mirroring aura-shell's
@@ -182,12 +197,58 @@ pub fn list_tasks(root: &Path, status: Option<&str>, limit: usize) -> Result<Vec
     Ok(out)
 }
 
+/// Resolve a needle (`id` / `AURA-{n}` / bare sequence number) to exactly one
+/// task index.
+///
+/// `Ok(None)` = nothing matched; `Ok(Some(i))` = one unambiguous match;
+/// `Err` = the needle matched more than one task. That last case is real:
+/// `sequence_id` is minted from a per-device counter, and once the task-sync
+/// rail carries a peer's row verbatim two tasks can end up sharing a number.
+/// Resolving an `AURA-{n}` by taking `.find()`'s first hit then silently
+/// mutates whichever row happens to be earlier in the array — closing the
+/// wrong ticket. An exact `id` is a unique key, so it wins immediately and is
+/// never ambiguous; only the sequence match can collide, and there we refuse
+/// and name the candidates instead of guessing.
+fn resolve_task_index(tasks: &[Value], needle: &str) -> Result<Option<usize>, String> {
+    let needle = needle.trim();
+    if let Some(i) = tasks
+        .iter()
+        .position(|t| t.get("id").and_then(Value::as_str) == Some(needle))
+    {
+        return Ok(Some(i));
+    }
+    let matches: Vec<usize> = tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| task_matches(t, needle))
+        .map(|(i, _)| i)
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [i] => Ok(Some(*i)),
+        many => {
+            let ids: Vec<&str> = many
+                .iter()
+                .map(|&i| tasks[i].get("id").and_then(Value::as_str).unwrap_or("?"))
+                .collect();
+            Err(format!(
+                "'{needle}' is ambiguous — it matches {} tasks ({}). Two tasks share that AURA number; address the one you mean by its full id.",
+                many.len(),
+                ids.join(", ")
+            ))
+        }
+    }
+}
+
 /// Fetch one task in full by id / `AURA-{n}` ref / bare sequence number.
 pub fn get_task(root: &Path, id: &str) -> Result<Option<Value>, String> {
     let doc = read_doc(root)?;
     let empty = vec![];
     let tasks = doc.get("tasks").and_then(Value::as_array).unwrap_or(&empty);
-    Ok(tasks.iter().find(|t| task_matches(t, id)).cloned())
+    match resolve_task_index(tasks, id)? {
+        Some(i) => Ok(Some(tasks[i].clone())),
+        None => Ok(None),
+    }
 }
 
 /// A single field patch for `update_task`. `None` ⇒ leave untouched;
@@ -235,11 +296,10 @@ pub fn update_task(root: &Path, id: &str, patch: TaskPatch) -> Result<Value, Str
         .get_mut("tasks")
         .and_then(Value::as_array_mut)
         .ok_or("tasks.json has no `tasks` array")?;
-    let task = tasks
-        .iter_mut()
-        .find(|t| task_matches(t, id))
-        .ok_or_else(|| format!("No task matching '{id}'"))?;
-    let obj = task
+    // Resolve to exactly one row up front — an ambiguous `AURA-{n}` is an
+    // error, never a silent write to the first match.
+    let idx = resolve_task_index(tasks, id)?.ok_or_else(|| format!("No task matching '{id}'"))?;
+    let obj = tasks[idx]
         .as_object_mut()
         .ok_or("task row is not an object")?;
 
@@ -274,7 +334,7 @@ pub fn update_task(root: &Path, id: &str, patch: TaskPatch) -> Result<Value, Str
     }
     obj.insert("updated_at".into(), json!(now_iso()));
 
-    let updated = task.clone();
+    let updated = tasks[idx].clone();
     write_doc(root, &doc)?;
     Ok(updated)
 }
@@ -874,6 +934,111 @@ mod tests {
         assert_eq!(list_tasks(&root, Some("backlog"), 0).unwrap().len(), 1);
     }
 
+    fn seed_card(root: &Path, id: &str, status: &str) {
+        board_card::write_card(
+            root,
+            &board_card::Card {
+                id: id.into(),
+                title: format!("card {id}"),
+                body: "filed by the crew".into(),
+                status: status.into(),
+                priority: "high".into(),
+                author: "codex".into(),
+                assignee: None,
+                claimed_by: Some("claude".into()),
+                labels: vec!["audit".into()],
+                created_at: 1_767_225_600,
+                updated_at: 1_767_225_600,
+                comments: vec![json!({ "body": "picked it up" })],
+                linked_pr: None,
+                linked_branch: Some("post-audit".into()),
+                sequence_id: 0,
+                rest: Default::default(),
+            },
+        )
+        .unwrap();
+    }
+
+    // The reported failure, from the agent's side: the app's document was
+    // renamed aside and `aura_tasks_list` answered "0 tasks" over MCP while
+    // eighty-three cards sat in the same directory.
+    #[test]
+    fn the_board_is_the_directory_and_a_missing_document_is_not_an_empty_board() {
+        let root = scratch();
+        seed_card(&root, "T-aaaaaaaa", "open");
+        seed_card(&root, "T-bbbbbbbb", "done");
+        assert!(!tasks_file(&root).exists(), "this test needs no document");
+
+        let all = list_tasks(&root, None, 0).unwrap();
+        assert_eq!(all.len(), 2, "cards are the board when the document is gone");
+        assert_eq!(list_tasks(&root, Some("done"), 0).unwrap().len(), 1);
+
+        // And a document beside them adds to the board rather than replacing it.
+        // Written as bytes, the way the desktop app writes it.
+        fs::write(
+            tasks_file(&root),
+            serde_json::to_vec(&json!({ "tasks": [{
+                "id": "task_from_the_app",
+                "sequence_id": 5,
+                "title": "Wire fallback",
+                "status": "backlog",
+                "state_id": "backlog",
+                "priority": "medium",
+                "created_at": "2026-06-07T00:00:00Z",
+                "updated_at": "2026-06-07T00:00:00Z"
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(list_tasks(&root, None, 0).unwrap().len(), 3);
+    }
+
+    // Both stores have always read "absent from the list" as "deleted". Say so
+    // out loud, because it is the sharp edge of writing the whole board at
+    // once: every writer here reads first, mutates, and writes back.
+    #[test]
+    fn a_row_dropped_from_the_board_is_deleted_from_whichever_store_held_it() {
+        let root = scratch();
+        seed_task(&root);
+        seed_card(&root, "T-dddddddd", "open");
+        assert_eq!(list_tasks(&root, None, 0).unwrap().len(), 2);
+
+        let mut doc = read_doc(&root).unwrap();
+        doc["tasks"] = json!([]);
+        write_doc(&root, &doc).unwrap();
+        assert!(board_card::read_cards(&root).is_empty());
+        assert!(list_tasks(&root, None, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_agent_patching_a_card_writes_it_back_as_a_card() {
+        let root = scratch();
+        seed_card(&root, "T-cccccccc", "open");
+
+        let updated = update_task(
+            &root,
+            "T-cccccccc",
+            TaskPatch {
+                status: Some("in_progress".into()),
+                priority: None,
+                assignee: None,
+                agent_assignee: None,
+                worktree: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(updated["state_id"], "started");
+
+        let cards = board_card::read_cards(&root);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].status, "in_progress", "`aura task` still reads this file");
+        assert_eq!(cards[0].comments.len(), 1, "the card's discussion survived");
+        assert_eq!(cards[0].linked_branch.as_deref(), Some("post-audit"));
+        // The card must not be copied into the document, or it lands twice.
+        let doc: Value = serde_json::from_slice(&fs::read(tasks_file(&root)).unwrap()).unwrap();
+        assert_eq!(doc["tasks"].as_array().map(Vec::len), Some(0));
+    }
+
     #[test]
     fn task_get_by_id_ref_and_seq() {
         let root = scratch();
@@ -910,6 +1075,60 @@ mod tests {
         // Bad status is rejected, not written.
         let bad = update_task(&root, "t1", TaskPatch { status: Some("nope".into()), ..Default::default() });
         assert!(bad.is_err());
+    }
+
+    fn seed_two_with_same_seq(root: &Path) {
+        // Two tasks carrying the SAME sequence_id — the state the per-device
+        // counter + sync rail can produce.
+        let row = |id: &str, title: &str| json!({
+            "id": id, "sequence_id": 6, "title": title,
+            "description": "", "status": "backlog", "state_id": "backlog",
+            "priority": "medium", "assignee": null, "assignee_ids": [],
+            "created_at": "2026-06-07T00:00:00Z", "updated_at": "2026-06-07T00:00:00Z"
+        });
+        write_doc(root, &json!({ "tasks": [row("task_a", "A"), row("task_b", "B")] })).unwrap();
+    }
+
+    #[test]
+    fn get_task_refuses_an_ambiguous_aura_ref() {
+        let root = scratch();
+        seed_two_with_same_seq(&root);
+        // AURA-6 resolves to two rows → an error that names both, not a
+        // silent first pick.
+        let amb = get_task(&root, "AURA-6");
+        assert!(amb.is_err(), "ambiguous ref must error, got {amb:?}");
+        let msg = amb.unwrap_err();
+        assert!(msg.contains("task_a") && msg.contains("task_b"), "error must name both: {msg}");
+        // The bare sequence number is equally ambiguous.
+        assert!(get_task(&root, "6").is_err());
+        // An exact id is a unique key → still resolves.
+        assert_eq!(get_task(&root, "task_b").unwrap().unwrap()["title"], "B");
+        // A number nobody carries → not found (Ok(None)), not an error.
+        assert!(get_task(&root, "AURA-99").unwrap().is_none());
+    }
+
+    #[test]
+    fn update_task_refuses_an_ambiguous_aura_ref_and_writes_nothing() {
+        let root = scratch();
+        seed_two_with_same_seq(&root);
+        let r = update_task(
+            &root,
+            "AURA-6",
+            TaskPatch { status: Some("done".into()), ..Default::default() },
+        );
+        assert!(r.is_err(), "ambiguous update must error, not close the wrong ticket");
+        // Neither row was mutated.
+        assert_eq!(get_task(&root, "task_a").unwrap().unwrap()["status"], "backlog");
+        assert_eq!(get_task(&root, "task_b").unwrap().unwrap()["status"], "backlog");
+        // Addressing by exact id disambiguates and lands on exactly that row.
+        let updated = update_task(
+            &root,
+            "task_a",
+            TaskPatch { status: Some("done".into()), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(updated["status"], "done");
+        assert_eq!(get_task(&root, "task_b").unwrap().unwrap()["status"], "backlog");
     }
 
     #[test]

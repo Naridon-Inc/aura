@@ -87,10 +87,18 @@ describe("loadProjectAt", () => {
     // Hoisting leavePages() into loadProjectAt looks like the tidier fix and
     // is not: it would yank the view on app start and whenever an agent's
     // worktree is auto-followed. Deciding where to stand belongs to callers.
+    //
+    // The closing line is matched by its shape, `}, [<anything>]);`, not by
+    // today's dependency list. Pinning the list meant that adding one dep ran
+    // the non-greedy capture on to the next callback that happened to close
+    // the same way — half of App.tsx, read as if it were this function.
     const body = app.match(
-      /const loadProjectAt = useCallback\(([\s\S]*?)\n {2}\}, \[editor\]\);/,
+      /const loadProjectAt = useCallback\(([\s\S]*?)\n {2}\}, \[[^\]]*\]\);/,
     )?.[1];
     expect(body).toBeTruthy();
+    // If the capture ever runs past the end of the callback again, say so
+    // here rather than in whichever assertion below trips on the surplus.
+    expect(body).not.toContain("useCallback(");
     expect(body).not.toContain("leavePages()");
     expect(body).not.toContain("setPlace(");
     expect(body).not.toContain("setWsOpen(");

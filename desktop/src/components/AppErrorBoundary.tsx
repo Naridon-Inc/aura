@@ -18,7 +18,34 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 import { isBenignRuntimeNoise, isCancellation } from "../lib/runtimeNoise";
 import { errorKind, trackError } from "../lib/track";
 
-type Props = { children: ReactNode };
+type Props = {
+  children: ReactNode;
+  /**
+   * What to call the product in the recovery copy — "Aura" in the desktop app,
+   * "the console" in a browser tab. The screen says "Reload {product}", and a
+   * console that offered to reload Aura would be pointing at the wrong window.
+   */
+  product?: string;
+  /**
+   * The localStorage keys "Reset appearance" clears. The desktop's editor
+   * themes and the console's single theme key are different sets, and a button
+   * that clears keys the product does not use is a button that does nothing —
+   * so each product names its own rather than inheriting the other's.
+   */
+  appearanceKeys?: readonly string[];
+  /**
+   * The sentence under the title. The desktop's names a colour theme as the
+   * usual cause, because on the desktop it is; a browser tab that repeated
+   * that would be guessing at the reader's expense. Defaults to the desktop's.
+   */
+  lede?: ReactNode;
+  /**
+   * Which of the two repairs is offered first. "reset" leads with clearing the
+   * appearance, which is right where a theme is the likely cause; "reload"
+   * leads with a plain reload, which is right where it is not.
+   */
+  primaryAction?: "reset" | "reload";
+};
 type State = {
   error: Error | null;
   info: string | null;
@@ -106,7 +133,8 @@ export class AppErrorBoundary extends Component<Props, State> {
 
   private resetAppearanceAndReload = () => {
     try {
-      for (const k of APPEARANCE_KEYS) localStorage.removeItem(k);
+      for (const k of this.props.appearanceKeys ?? APPEARANCE_KEYS)
+        localStorage.removeItem(k);
     } catch {
       /* private mode — best-effort */
     }
@@ -158,9 +186,13 @@ export class AppErrorBoundary extends Component<Props, State> {
 
           <h1 style={S.title}>Something went wrong on screen</h1>
           <p style={S.lede}>
-            None of your work is lost. This is just the screen failing to draw.
-            The most common cause is a color theme that doesn’t fit. You can put
-            the look back to normal, or reload and carry on.
+            {this.props.lede ?? (
+              <>
+                None of your work is lost. This is just the screen failing to
+                draw. The most common cause is a color theme that doesn’t fit.
+                You can put the look back to normal, or reload and carry on.
+              </>
+            )}
           </p>
 
           <div style={S.whatBox}>
@@ -169,12 +201,25 @@ export class AppErrorBoundary extends Component<Props, State> {
           </div>
 
           <div style={S.actions}>
-            <button style={S.primaryBtn} onClick={this.resetAppearanceAndReload}>
-              Reset appearance &amp; reload
-            </button>
-            <button style={S.btn} onClick={this.reload}>
-              Reload Aura
-            </button>
+            {this.props.primaryAction === "reload" ? (
+              <>
+                <button style={S.primaryBtn} onClick={this.reload}>
+                  Reload {this.props.product ?? "Aura"}
+                </button>
+                <button style={S.btn} onClick={this.resetAppearanceAndReload}>
+                  Reset appearance &amp; reload
+                </button>
+              </>
+            ) : (
+              <>
+                <button style={S.primaryBtn} onClick={this.resetAppearanceAndReload}>
+                  Reset appearance &amp; reload
+                </button>
+                <button style={S.btn} onClick={this.reload}>
+                  Reload {this.props.product ?? "Aura"}
+                </button>
+              </>
+            )}
             <button style={S.btn} onClick={this.tryAgain}>
               Try again
             </button>

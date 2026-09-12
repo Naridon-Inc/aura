@@ -8,7 +8,9 @@ import { Dialog } from "../Dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
-import { api, type GitBranchRich } from "../../lib/api";
+import type { GitBranchRich } from "../../lib/api";
+import { gitBranchesRich } from "../../lib/place/workApi";
+import { prCreate, prEdit } from "../../lib/prApi";
 import { invalidatePrDetail } from "../../lib/prDetailCache";
 import { invalidatePrList } from "../../lib/prsCache";
 import { useEditorStore } from "../../lib/editorStore";
@@ -70,8 +72,7 @@ export function PrAuthoringDialogHost() {
   useEffect(() => {
     if (!request) return;
     let alive = true;
-    api
-      .gitBranchesRich(request.repoRoot)
+    gitBranchesRich(request.repoRoot)
       .then((rows) => {
         if (alive) setBranches(rows);
       })
@@ -102,7 +103,7 @@ export function PrAuthoringDialogHost() {
     setError(null);
     try {
       if (request.mode === "create") {
-        const created = await api.prCreate({
+        const created = await prCreate({
           repoRoot: request.repoRoot,
           headBranch: request.headBranch,
           title: title.trim(),
@@ -113,7 +114,7 @@ export function PrAuthoringDialogHost() {
         await invalidatePrList(request.repoRoot).catch(() => []);
         editor.openPrDetail(request.repoRoot, created.number, created.title);
       } else {
-        await api.prEdit({
+        await prEdit({
           repoRoot: request.repoRoot,
           prNumber: request.number,
           title: title.trim(),

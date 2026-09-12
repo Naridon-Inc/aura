@@ -44,7 +44,17 @@ export type AppActionId =
   | "tasks_board"
   | "notes"
   | "open_prs"
-  | "mobile_waitlist";
+  | "mobile_waitlist"
+  // AURA-1296 — keyboard + chat ergonomics. Tab walking across every pane,
+  // "the next tab that needs me", fork-in-place, the uncommitted-changes
+  // pane, and the composer's effort ladder — each one chord, none of them
+  // reachable by keyboard before.
+  | "next_tab"
+  | "prev_tab"
+  | "next_attention"
+  | "fork_chat"
+  | "toggle_changes"
+  | "cycle_effort";
 
 export type Dispatch = (id: AppActionId) => void;
 
@@ -157,7 +167,11 @@ export function useAppActions(dispatch: Dispatch) {
         return;
       }
       const id = resolveShortcut({
-        key: e.key,
+        // AURA-1296 — with ⌥ held, macOS composes a different character
+        // (⌥L → "¬", ⌥U → a dead key) and whether ⌘ suppresses that varies by
+        // WebKit version, so a lettered ⌘⌥ chord is matched on the physical
+        // key. Same fix App.tsx applies to ⌘⌥A.
+        key: e.altKey && /^Key[A-Z]$/.test(e.code) ? e.code.slice(3) : e.key,
         meta: true,
         shift: e.shiftKey,
         alt: e.altKey,
@@ -271,6 +285,24 @@ export function resolveShortcut(c: Chord): AppActionId | null {
     case "z":
       if (c.shift) return null; // ⌘⇧Z = redo, leave alone
       return c.editable ? null : "aura_undo";
+    // AURA-1296 — every chord below needs ⌥ (or ⇧ for the effort ladder),
+    // so the plain keys stay with whoever had them: ⌘L jumps to the message
+    // box, ⌘⇧U opens the standup, ⌘/ opens this list, ⌘Enter sends.
+    case "arrowright":
+      return c.alt && !c.shift ? "next_tab" : null;
+    case "arrowleft":
+      return c.alt && !c.shift ? "prev_tab" : null;
+    case "l":
+      return c.alt && !c.shift ? "next_attention" : null;
+    case "u":
+      return c.alt && !c.shift ? "toggle_changes" : null;
+    case "enter":
+      return c.alt && !c.shift ? "fork_chat" : null;
+    // ⌘⇧/ arrives as "?" on a US layout and as "/" on layouts where the
+    // slash key has no shifted glyph; both mean the ladder.
+    case "/":
+    case "?":
+      return c.shift && !c.alt ? "cycle_effort" : null;
     default:
       return null;
   }

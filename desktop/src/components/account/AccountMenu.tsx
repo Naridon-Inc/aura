@@ -1,39 +1,41 @@
-// Account menu — the popover behind the plan chip at the foot of the sidebar
+// Account menu — the panel behind the plan chip at the foot of the sidebar
 // (and behind the wide identity row / bare avatar where those are still used).
 // Signed out it offers a single "Sign in" button that opens the full-screen
 // welcome surface (the SignInWizard — the same aura-cloud device-code flow,
 // just roomier and more inviting than a cramped popover); signed in it shows
-// who you are plus Account settings and Sign out. The popover stays tiny; the
-// welcome does the work.
+// who you are, which org you are acting as, and the few things you can do.
 //
-// It opens on the SAME primitive as every other menu in the app — the shared
-// DropdownMenu. It used to be a Medusa Popover, which is a different component
-// with a different panel: its own `w-72 p-4` shell, its own elevation, its own
-// open animation. Borrowing menuSurface's row classes onto it got the rows
-// looking right but left the surface underneath them belonging to a second
-// menu family, so the one flyout you open from the foot of the rail was the
-// one flyout that didn't match. A popover is for arbitrary content; this is a
-// list of things you can do, which is a menu.
+// It opens on the SAME panel as every drop-out in the web console's sidebar:
+// Popover + FinderMenu from aura-shared — one header band (you), rows in
+// groups with a hairline between them, a footer band. The desktop's Radix
+// menus wear the same row recipe (menuSurface.ts), so this is not a second
+// family; it is the one panel the sidebar has, here as well as there.
 //
-// It is deliberately short. The compaction came out of the content, not out of
-// the metrics: the rows are still the shared 36px at the shared size, because a
-// menu that shrinks its own rows to feel tidy is exactly the drift this file
-// just stopped doing. What went instead was everything saying the same thing
-// twice — the ORGANIZATION caption and its ✓ row (now a subtitle under your
-// name), a separator between every pair of rows, and two lines of prose above
-// the Sign in button explaining what the button does.
+// ## The org is a group, not a submenu
+//
+// The org used to live in a submenu off a "Switch org" row (OrgSwitcher),
+// which cost a hover and a second panel to see the one word that decides what
+// every list in the app shows. Here it is a captioned group of rows with the
+// accent check on the current one — the shape the console's org picker has —
+// and it is fetched only when the menu opens, so a closed menu asks the
+// network nothing. Loading, error and empty are each one quiet row that keeps
+// the menu open when pressed (the error row is the retry).
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Bot, LogOut, Smartphone, UserCog } from "lucide-react";
+
 import { api, type CloudAuthStatus } from "../../lib/api";
-import { onOrgChanged } from "../../lib/cloudOrgs";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "../ui/dropdown-menu";
-import { OrgSwitcher } from "./OrgSwitcher";
+  messageOf,
+  onOrgChanged,
+  orgLabel,
+  orgSubtitle,
+  switchOrg,
+  useCloudOrgs,
+} from "../../lib/cloudOrgs";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { FinderMenu, type FinderMenuGroup, type FinderMenuItem } from "@shared/ui/FinderList";
 
 export function AccountMenu({
   userInitial,
@@ -156,9 +158,32 @@ export function AccountMenu({
       : "Aura Cloud"
     : "Sign in to sync";
 
+  const orgGroup = useOrgGroup(open && connected);
+
+  const fire = (name: string, detail?: unknown) => {
+    window.dispatchEvent(new CustomEvent(name, detail === undefined ? undefined : { detail }));
+  };
+
+  // Shaping how the AI works on this project isn't tied to being signed in,
+  // so it sits in the actions group either way.
+  const actions: FinderMenuItem[] = [
+    { id: "customize", icon: <Bot />, label: "Customize agent", onSelect: () => fire("aura:open-agent-customizations") },
+  ];
+  if (connected) {
+    actions.push({ id: "pair", icon: <Smartphone />, label: "Pair phone", onSelect: () => fire("aura:open-pair-phone") });
+    if (onOpenProfile) actions.push({ id: "settings", icon: <UserCog />, label: "Account settings", onSelect: onOpenProfile });
+  }
+
+  const groups: FinderMenuGroup[] = [];
+  if (orgGroup) groups.push(orgGroup);
+  groups.push({ items: actions });
+  if (connected) {
+    groups.push({ items: [{ id: "signout", icon: <LogOut />, label: "Sign out", tone: "danger", onSelect: () => void signOut() }] });
+  }
+
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
-      <DropdownMenuTrigger asChild>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
         {trigger ? (
           trigger
         ) : wide ? (
@@ -213,104 +238,119 @@ export function AccountMenu({
             {initial}
           </button>
         )}
-      </DropdownMenuTrigger>
+      </PopoverTrigger>
       {/* Both the wide row and the foot's plan chip are left-edge controls in
           the leftmost column of the window, so the panel hangs from their left
           edge; only the bare titlebar avatar, which sits at the right end of a
-          strip, hangs from its right. */}
-      <DropdownMenuContent
+          strip, hangs from its right. The foot's chip opens upward. */}
+      <PopoverContent
         align={wide || trigger ? "start" : "end"}
+        side={trigger ? "top" : "bottom"}
         sideOffset={6}
-        className="w-52"
+        className="w-[264px] p-0"
       >
-        {/* Identity — a two-line caption, not a row. The rows below it are
-            things you can do; this is the one thing here that is only a fact,
-            so it doesn't take a row's height or a row's hover.
-            `orgLine` carries the org, which used to cost a separator, an
-            ORGANIZATION caption and a full row with a ✓ on it — three elements
-            and ~70px to say a word that fits under your name. It stays a
-            subtitle: the switching happens in the row right below, which costs
-            one line no matter how many orgs you are in. */}
-        <div className="px-2 pt-0.5 pb-1.5">
-          <div className="truncate text-sm leading-4 text-text-1">
-            {connected ? who ?? "Signed in" : "Not signed in"}
-          </div>
-          <div className="truncate text-2xs leading-4 text-text-4">
-            {orgLine}
-          </div>
-        </div>
-
-        {/* Directly under the line that names the org, because it is the
-            control for that line. Signed out there is no org to be in, so
-            there is nothing here to offer. */}
-        {connected && (
-          <>
-            <DropdownMenuSeparator />
-            <OrgSwitcher />
-          </>
-        )}
-
-        <DropdownMenuSeparator />
-
-        {/* Shaping how the AI works on this project isn't tied to being
-            signed in, so it sits above the auth-specific rows either way. */}
-        <DropdownMenuItem
-          onSelect={() =>
-            window.dispatchEvent(
-              new CustomEvent("aura:open-agent-customizations"),
+        <FinderMenu
+          onClose={() => setOpen(false)}
+          header={
+            <>
+              <span className="flex size-[26px] shrink-0 items-center justify-center rounded-md bg-bg-3 text-[11px] font-medium text-text-2" aria-hidden>
+                {initial}
+              </span>
+              <span className="flex min-w-0 flex-col leading-tight">
+                <span className="truncate text-[12.5px] font-medium text-text-1">
+                  {connected ? who ?? "Signed in" : "Not signed in"}
+                </span>
+                <span className="truncate text-[10.5px] text-text-4">{orgLine}</span>
+              </span>
+            </>
+          }
+          groups={groups}
+          footer={
+            connected ? undefined : (
+              // Just the button. The header already reads "Sign in to sync",
+              // so the panel's whole job below it is one click.
+              <button
+                type="button"
+                onClick={openSignIn}
+                className="h-7 w-full inline-flex items-center justify-center rounded-md text-sm font-medium outline-none hover:brightness-110 transition-[filter]"
+                style={{
+                  background: "var(--color-accent)",
+                  color: "var(--color-accent-foreground)",
+                }}
+              >
+                Sign in
+              </button>
             )
           }
-        >
-          Customize agent
-        </DropdownMenuItem>
-
-        {connected ? (
-          <>
-            {/* Account actions. No separator ahead of them — "Customize agent"
-                already sits above under one, and a four-row menu that rules
-                itself off after every row is mostly rules. */}
-            <DropdownMenuItem
-              onSelect={() =>
-                window.dispatchEvent(new CustomEvent("aura:open-pair-phone"))
-              }
-            >
-              Pair phone
-            </DropdownMenuItem>
-            {onOpenProfile && (
-              <DropdownMenuItem onSelect={onOpenProfile}>
-                Account settings
-              </DropdownMenuItem>
-            )}
-            {/* Sign out is a plain row, not a red one. Red is how this app says
-                something went wrong; signing out is something you meant to do,
-                and it takes one click to undo. The rule it sits under is a
-                separator, which is what actually marks it as the last thing. */}
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => void signOut()}>
-              Sign out
-            </DropdownMenuItem>
-          </>
-        ) : (
-          <>
-            {/* Just the button. It used to sit under two lines of prose about
-                syncing and avatars — but the caption at the top of this menu
-                already reads "Sign in to sync", so the paragraph was the same
-                sentence a second time, in a panel whose whole job here is one
-                click. */}
-            <button
-              type="button"
-              onClick={openSignIn}
-              className="mt-1 h-7 w-full inline-flex items-center justify-center rounded-md text-sm font-medium outline-none hover:brightness-110 transition-[filter]"
-              style={{
-                background: "var(--color-accent)",
-                color: "var(--color-accent-foreground)",
-              }}
-            >
-              Sign in
-            </button>
-          </>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+        />
+      </PopoverContent>
+    </Popover>
   );
+}
+
+/** The org group's rows — the list, or the one line that stands in for it.
+ *  Nothing is fetched until `active`: the list costs a round trip to
+ *  `/api/v2/repos`, and it is only ever looked at from in here. */
+function useOrgGroup(active: boolean): FinderMenuGroup | null {
+  const { orgs, loading, error, loaded, reload } = useCloudOrgs(active);
+  // Which slug is being switched to, while the write is in flight. Held rather
+  // than derived so the row you clicked is the one that shows the spinner —
+  // "something is happening somewhere" is not feedback.
+  const [pending, setPending] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const current = orgs.find((o) => o.current);
+
+  const pick = useCallback(
+    async (slug: string) => {
+      if (slug === current?.slug || pending) return;
+      setPending(slug);
+      setFailed(null);
+      try {
+        await switchOrg(slug);
+        // `switchOrg` broadcasts, and `useCloudOrgs` reloads on that — so the
+        // ticked row moves on its own without this having to hold a copy.
+      } catch (e) {
+        setFailed(messageOf(e));
+      } finally {
+        setPending(null);
+      }
+    },
+    [current?.slug, pending],
+  );
+
+  if (!active) return null;
+  const stay = () => false as const;
+  const retry = () => {
+    reload();
+    return false as const;
+  };
+  const problem = error ?? failed;
+
+  let items: FinderMenuItem[];
+  if (loading && !loaded) {
+    // The first read, before anything has come back. A reload behind a list
+    // we already have stays silent — the rows are still true.
+    items = [{ id: "loading", label: <span className="inline-flex items-center gap-1.5"><AsciiSpinner size={11} /> Loading your orgs…</span>, onSelect: stay }];
+  } else if (problem) {
+    // Says what went wrong and IS the retry — a menu you have to close and
+    // reopen to retry is a menu that looks broken twice.
+    items = [{ id: "error", label: problem, hint: "Try again", onSelect: retry }];
+  } else if (loaded && orgs.length === 0) {
+    // Not a real state: every signup owns an org, so an empty list means the
+    // server answered something we didn't understand. Say that.
+    items = [{ id: "empty", label: "No orgs came back.", hint: "Try again", onSelect: retry }];
+  } else {
+    items = orgs.map((org) => ({
+      id: org.slug,
+      label: orgLabel(org),
+      selected: !!org.current,
+      trailing: pending === org.slug ? <AsciiSpinner size={11} /> : orgSubtitle(org),
+      // Held open so the tick lands where you can see it.
+      onSelect: () => {
+        void pick(org.slug);
+        return false;
+      },
+    }));
+  }
+  return { label: "Organization", items };
 }

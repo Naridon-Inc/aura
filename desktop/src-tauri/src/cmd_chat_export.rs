@@ -840,13 +840,12 @@ mod tests {
     use super::*;
     use crate::manager::{ChatRole, ChatTurn, PersistedToolCall};
     use serde_json::Value;
-    use std::sync::Mutex;
 
     /// These tests re-home `HOME` to a tempdir so the writers land under a
-    /// throwaway `~/.claude` / `~/.codex` / `~/.aura`. `set_var` mutates a
-    /// process-global, so they must not run concurrently — serialize them
-    /// behind one lock (the rest of the test binary keeps running in parallel).
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
+    /// throwaway `~/.claude` / `~/.codex` / `~/.aura`. `crate::test_home::borrow`
+    /// serializes them against every other HOME-moving test in the binary and
+    /// restores `HOME` when the borrow drops (the rest of the suite keeps
+    /// running in parallel).
 
     fn user_turn(text: &str) -> ChatTurn {
         ChatTurn {
@@ -910,10 +909,8 @@ mod tests {
     /// original Claude-only suite.)
     #[test]
     fn synthetic_transcript_is_valid_chained_jsonl() {
-        let _guard = HOME_LOCK.lock().unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HOME", tmp.path()) };
-        let cwd = tmp.path().to_string_lossy().into_owned();
+        let home = crate::test_home::borrow();
+        let cwd = home.path().to_string_lossy().into_owned();
 
         let path = write_synthetic_transcript("sess-1", &cwd, &sample_chat()).unwrap();
         assert!(path.is_file());
@@ -977,10 +974,8 @@ mod tests {
     /// gemini records, and lands under Aura's handoff dir.
     #[test]
     fn gemini_session_is_valid_and_well_shaped() {
-        let _guard = HOME_LOCK.lock().unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HOME", tmp.path()) };
-        let cwd = tmp.path().to_string_lossy().into_owned();
+        let home = crate::test_home::borrow();
+        let cwd = home.path().to_string_lossy().into_owned();
 
         let (path, written) = write_gemini_session(&cwd, &sample_chat()).unwrap();
         assert!(written);
@@ -1025,10 +1020,8 @@ mod tests {
     /// ~/.codex/sessions/<Y>/<M>/<D>/ store with a uuid-bearing name.
     #[test]
     fn codex_rollout_is_valid_and_resumable_by_uuid() {
-        let _guard = HOME_LOCK.lock().unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HOME", tmp.path()) };
-        let cwd = tmp.path().to_string_lossy().into_owned();
+        let home = crate::test_home::borrow();
+        let cwd = home.path().to_string_lossy().into_owned();
 
         let (uuid, path) = write_codex_rollout(&cwd, &sample_chat()).unwrap();
         assert!(path.is_file());
@@ -1150,18 +1143,12 @@ mod tests {
 
     #[test]
     fn is_resumable_dir_rejects_home_even_when_it_is_a_repo() {
-        let _g = HOME_LOCK.lock().unwrap();
-        let home = fresh_dir("home");
-        git_init(&home); // HOME is a git tree, yet must still be rejected
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", &home);
-        let rejected = !is_resumable_dir(home.to_str().unwrap());
-        match prev {
-            Some(p) => std::env::set_var("HOME", p),
-            None => std::env::remove_var("HOME"),
-        }
-        assert!(rejected, "HOME must never be a resume cwd, even if it is a repo");
-        let _ = std::fs::remove_dir_all(&home);
+        let home = crate::test_home::borrow();
+        git_init(home.path()); // HOME is a git tree, yet must still be rejected
+        assert!(
+            !is_resumable_dir(&home.path().to_string_lossy()),
+            "HOME must never be a resume cwd, even if it is a repo"
+        );
     }
 
     #[test]

@@ -1233,22 +1233,65 @@ pub struct FunctionHistoryRow {
     pub intent: Option<String>,
     pub username: String,
     pub pushed_at: String,
+    /// The recorded source of the function.
+    ///
+    /// `function_body_history` has stored this since the table was created,
+    /// and no read ever returned it — so the one thing a caller needs in
+    /// order to *restore* a function was the one column the history API
+    /// would not hand over. It is opt-in ([`HistoryFilter::with_body`])
+    /// because a listing of fifty entries is a listing, not fifty function
+    /// bodies, and the surfaces that only draw a timeline should not pay for
+    /// the code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
 }
 
-pub fn query_function_history(conn: &Connection, repo_id: &str, file_path: Option<&str>, limit: i64) -> SqlResult<Vec<FunctionHistoryRow>> {
-    let mut sql = String::from(
-        "SELECT h.id, h.file_path, h.function_name, h.function_kind, h.content_hash, h.intent, u.username, h.pushed_at
+/// What a caller wants out of the recorded function history.
+pub struct HistoryFilter<'a> {
+    /// Only this file's entries.
+    pub file_path: Option<&'a str>,
+    /// Only this function's entries — the filter that makes the history
+    /// answer "what did this function used to be", which is the question a
+    /// rewind asks.
+    pub function_name: Option<&'a str>,
+    pub limit: i64,
+    /// Return the recorded source, not just its hash.
+    pub with_body: bool,
+}
+
+impl Default for HistoryFilter<'_> {
+    fn default() -> Self {
+        Self { file_path: None, function_name: None, limit: 50, with_body: false }
+    }
+}
+
+pub fn query_function_history(
+    conn: &Connection,
+    repo_id: &str,
+    filter: &HistoryFilter<'_>,
+) -> SqlResult<Vec<FunctionHistoryRow>> {
+    // `h.body` is always selected so the column indices below are fixed;
+    // when the caller did not ask for it, NULL is selected in its place and
+    // the row comes back with `body: None`. That keeps one statement and one
+    // mapping rather than two that can drift apart.
+    let body_column = if filter.with_body { "h.body" } else { "NULL" };
+    let mut sql = format!(
+        "SELECT h.id, h.file_path, h.function_name, h.function_kind, h.content_hash, h.intent, u.username, h.pushed_at, {body_column}
          FROM function_body_history h JOIN users u ON h.pushed_by = u.id
-         WHERE h.repo_id = ?1"
+         WHERE h.repo_id = ?"
     );
     let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(repo_id.to_string())];
 
-    if let Some(fp) = file_path {
-        sql.push_str(" AND h.file_path = ?2");
+    if let Some(fp) = filter.file_path {
+        sql.push_str(" AND h.file_path = ?");
         params_vec.push(Box::new(fp.to_string()));
     }
+    if let Some(name) = filter.function_name {
+        sql.push_str(" AND h.function_name = ?");
+        params_vec.push(Box::new(name.to_string()));
+    }
     sql.push_str(" ORDER BY h.pushed_at DESC LIMIT ?");
-    params_vec.push(Box::new(limit));
+    params_vec.push(Box::new(filter.limit));
 
     let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
@@ -1262,31 +1305,186 @@ pub fn query_function_history(conn: &Connection, repo_id: &str, file_path: Optio
             intent: row.get(5)?,
             username: row.get(6)?,
             pushed_at: row.get(7)?,
+            body: row.get(8)?,
         })
     })?;
     rows.collect()
 }
 
-pub fn trace_function(conn: &Connection, repo_id: &str, function_name: &str) -> SqlResult<Vec<FunctionHistoryRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT h.id, h.file_path, h.function_name, h.function_kind, h.content_hash, h.intent, u.username, h.pushed_at
-         FROM function_body_history h JOIN users u ON h.pushed_by = u.id
-         WHERE h.repo_id = ?1 AND h.function_name = ?2
-         ORDER BY h.pushed_at DESC LIMIT 50"
-    )?;
-    let rows = stmt.query_map(params![repo_id, function_name], |row| {
-        Ok(FunctionHistoryRow {
-            id: row.get(0)?,
-            file_path: row.get(1)?,
-            function_name: row.get(2)?,
-            function_kind: row.get(3)?,
-            content_hash: row.get(4)?,
-            intent: row.get(5)?,
-            username: row.get(6)?,
-            pushed_at: row.get(7)?,
-        })
-    })?;
-    rows.collect()
+/// Every recorded state of one function across the repo, newest first.
+///
+/// One filtered read of the same history rather than a second statement:
+/// the two used to be near-identical SQL, and only one of them ever grew a
+/// column.
+pub fn trace_function(
+    conn: &Connection,
+    repo_id: &str,
+    function_name: &str,
+    with_body: bool,
+) -> SqlResult<Vec<FunctionHistoryRow>> {
+    query_function_history(
+        conn,
+        repo_id,
+        &HistoryFilter { function_name: Some(function_name), with_body, ..Default::default() },
+    )
+}
+
+#[cfg(test)]
+mod function_history_tests {
+    use super::*;
+
+    fn db() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(SCHEMA).expect("schema");
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, created_at, updated_at)
+             VALUES ('u1', 'ashiq', 'x', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("a user to have pushed");
+        conn
+    }
+
+    fn push(conn: &Connection, file: &str, name: &str, hash: &str, body: &str) {
+        upsert_function_body(conn, "r1", "main", file, name, "function", hash, body, "u1")
+            .expect("push");
+    }
+
+    #[test]
+    fn a_timeline_is_a_timeline_and_does_not_carry_the_code() {
+        let conn = db();
+        push(&conn, "src/auth.rs", "verify", "h1", "fn verify() { old() }");
+
+        let rows =
+            query_function_history(&conn, "r1", &HistoryFilter::default()).expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content_hash, "h1");
+        assert_eq!(rows[0].username, "ashiq");
+        assert!(rows[0].body.is_none(), "a listing does not ship every function's source");
+    }
+
+    #[test]
+    fn the_history_hands_over_the_code_when_a_caller_means_to_restore_something() {
+        let conn = db();
+        push(&conn, "src/auth.rs", "verify", "h1", "fn verify() { old() }");
+
+        let rows = query_function_history(
+            &conn,
+            "r1",
+            &HistoryFilter { with_body: true, ..Default::default() },
+        )
+        .expect("query");
+        assert_eq!(rows[0].body.as_deref(), Some("fn verify() { old() }"));
+    }
+
+    #[test]
+    fn one_functions_history_can_be_asked_for_on_its_own() {
+        let conn = db();
+        push(&conn, "src/auth.rs", "verify", "h1", "fn verify() {}");
+        push(&conn, "src/auth.rs", "sign", "h2", "fn sign() {}");
+
+        let rows = query_function_history(
+            &conn,
+            "r1",
+            &HistoryFilter { function_name: Some("verify"), ..Default::default() },
+        )
+        .expect("query");
+        assert_eq!(rows.len(), 1, "the question was about one function");
+        assert_eq!(rows[0].function_name, "verify");
+    }
+
+    #[test]
+    fn a_file_and_a_function_narrow_together() {
+        let conn = db();
+        push(&conn, "src/auth.rs", "verify", "h1", "fn verify() { auth }");
+        push(&conn, "src/session.rs", "verify", "h2", "fn verify() { session }");
+
+        let rows = query_function_history(
+            &conn,
+            "r1",
+            &HistoryFilter {
+                file_path: Some("src/session.rs"),
+                function_name: Some("verify"),
+                with_body: true,
+                ..Default::default()
+            },
+        )
+        .expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].body.as_deref(), Some("fn verify() { session }"));
+    }
+
+    #[test]
+    fn trace_follows_one_function_across_every_file_it_lives_in() {
+        let conn = db();
+        push(&conn, "src/auth.rs", "verify", "h1", "fn verify() { auth }");
+        push(&conn, "src/session.rs", "verify", "h2", "fn verify() { session }");
+        push(&conn, "src/auth.rs", "sign", "h3", "fn sign() {}");
+
+        let rows = trace_function(&conn, "r1", "verify", true).expect("trace");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.function_name == "verify"));
+        assert!(rows.iter().all(|r| r.body.is_some()), "trace can carry the code too");
+    }
+
+    #[test]
+    fn a_repo_only_ever_sees_its_own_history() {
+        let conn = db();
+        push(&conn, "src/auth.rs", "verify", "h1", "fn verify() {}");
+        upsert_function_body(
+            &conn, "r2", "main", "src/auth.rs", "verify", "function", "h9", "someone else", "u1",
+        )
+        .expect("push");
+
+        let rows =
+            query_function_history(&conn, "r1", &HistoryFilter::default()).expect("query");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content_hash, "h1");
+    }
+
+    #[test]
+    fn the_limit_is_honoured() {
+        let conn = db();
+        for i in 0..5 {
+            push(&conn, "src/auth.rs", "verify", &format!("h{i}"), "fn verify() {}");
+        }
+        let rows = query_function_history(
+            &conn,
+            "r1",
+            &HistoryFilter { limit: 2, ..Default::default() },
+        )
+        .expect("query");
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn the_newest_state_of_a_function_is_the_first_one_back() {
+        let conn = db();
+        for (i, hash) in ["h1", "h2", "h3"].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO function_body_history
+                   (id, repo_id, branch, file_path, function_name, function_kind,
+                    content_hash, body, intent, pushed_by, pushed_at)
+                 VALUES (?1, 'r1', 'main', 'src/auth.rs', 'verify', 'function', ?2, ?3, NULL, 'u1', ?4)",
+                params![
+                    format!("id{i}"),
+                    hash,
+                    format!("fn verify() {{ {hash} }}"),
+                    format!("2026-01-0{}T00:00:00Z", i + 1)
+                ],
+            )
+            .expect("insert");
+        }
+
+        let rows = query_function_history(
+            &conn,
+            "r1",
+            &HistoryFilter { function_name: Some("verify"), with_body: true, ..Default::default() },
+        )
+        .expect("query");
+        assert_eq!(rows[0].content_hash, "h3", "a rewind wants the last state first");
+        assert_eq!(rows[0].body.as_deref(), Some("fn verify() { h3 }"));
+    }
 }
 
 pub fn upvote_knowledge(conn: &Connection, knowledge_id: &str) -> SqlResult<bool> {

@@ -125,6 +125,75 @@ pub(crate) fn git_transport(dir: &PathBuf, args: &[&str]) -> Result<String, Stri
     }
 }
 
+/// Outcome of pushing the two notes planes (intent + proof). Kept as plain
+/// data so the ordering rule below is testable without a live remote.
+#[derive(Default)]
+struct PushOutcome {
+    pushed: bool,
+    proof_pushed: bool,
+    notes_error: Option<String>,
+    proof_error: Option<String>,
+}
+
+/// Push the intent-notes and proof-notes planes, each independently.
+///
+/// The proof push is attempted whether or not the intent push succeeded: the
+/// two refs are separate planes, and a rejected intent push — a non-fast-
+/// forward is the common case, the very reason the pull hint exists — must
+/// never strand the proof plane unpushed on the local repo. Each plane records
+/// its own error so a failure is reported against the ref that actually failed.
+/// `push` runs the transport (real git in production, a fake in tests) once per
+/// ref that exists locally.
+fn push_note_planes(
+    ref_exists: bool,
+    proof_ref_exists: bool,
+    mut push: impl FnMut(&str) -> Result<(), String>,
+) -> PushOutcome {
+    let mut out = PushOutcome::default();
+    if ref_exists {
+        match push(NOTES_REF) {
+            Ok(()) => out.pushed = true,
+            Err(e) => out.notes_error = Some(e),
+        }
+    }
+    if proof_ref_exists {
+        match push(PROOF_REF) {
+            Ok(()) => out.proof_pushed = true,
+            Err(e) => out.proof_error = Some(e),
+        }
+    }
+    out
+}
+
+/// Build the `aura meta push` failure message, naming exactly the plane(s)
+/// whose push failed. The old message hardcoded refs/notes/aura-intent, so a
+/// proof-plane failure was reported against the wrong ref, with the proof
+/// stderr pasted after the intent ref's name. Returns None when nothing
+/// failed. `aura meta pull` reconciles both planes, so the hint stays valid
+/// whichever plane failed.
+fn push_failure_message(
+    remote: &str,
+    notes_error: Option<&str>,
+    proof_error: Option<&str>,
+) -> Option<String> {
+    if notes_error.is_none() && proof_error.is_none() {
+        return None;
+    }
+    let mut planes = Vec::new();
+    if let Some(e) = notes_error {
+        planes.push(format!("{}: {}", NOTES_REF, e));
+    }
+    if let Some(e) = proof_error {
+        planes.push(format!("{}: {}", PROOF_REF, e));
+    }
+    Some(format!(
+        "push to '{}' failed — {}\nhint: run `aura meta pull --remote {}` to merge the remote's notes first, then push again",
+        remote,
+        planes.join("; "),
+        remote
+    ))
+}
+
 fn run_push(
     remote: &str,
     range: Option<&str>,
@@ -139,26 +208,19 @@ fn run_push(
 
     let ref_exists = repo.find_reference(NOTES_REF).is_ok();
     let proof_ref_exists = repo.find_reference(PROOF_REF).is_ok();
-    let mut pushed = false;
-    let mut proof_pushed = false;
-    let mut push_error: Option<String> = None;
-    if !no_push {
+    let PushOutcome {
+        pushed,
+        proof_pushed,
+        notes_error,
+        proof_error,
+    } = if no_push {
+        PushOutcome::default()
+    } else {
         let dir = repo_dir(&repo);
-        if ref_exists {
-            match git_transport(&dir, &["push", remote, NOTES_REF]) {
-                Ok(_) => pushed = true,
-                Err(e) => push_error = Some(e),
-            }
-        }
-        // Push proof independently: a proof ref can exist even when no new
-        // intent landed, and an intent push failure shouldn't strand proof.
-        if proof_ref_exists && push_error.is_none() {
-            match git_transport(&dir, &["push", remote, PROOF_REF]) {
-                Ok(_) => proof_pushed = true,
-                Err(e) => push_error = Some(e),
-            }
-        }
-    }
+        push_note_planes(ref_exists, proof_ref_exists, |r| {
+            git_transport(&dir, &["push", remote, r]).map(|_| ())
+        })
+    };
 
     if json {
         let mut v = serde_json::to_value(&report)?;
@@ -168,8 +230,11 @@ fn run_push(
         v["proof"] = serde_json::to_value(&proof_report)?;
         v["proof_pushed"] = serde_json::json!(proof_pushed);
         v["proof_ref"] = serde_json::json!(PROOF_REF);
-        if let Some(e) = &push_error {
+        if let Some(e) = &notes_error {
             v["push_error"] = serde_json::json!(e);
+        }
+        if let Some(e) = &proof_error {
+            v["proof_push_error"] = serde_json::json!(e);
         }
         println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
@@ -194,6 +259,8 @@ fn run_push(
         } else {
             if pushed {
                 println!("  {} pushed {} → {}", "✓".green(), NOTES_REF, remote);
+            } else if let Some(e) = &notes_error {
+                println!("  {} push of {} failed: {}", "✗".red(), NOTES_REF, e);
             } else if !ref_exists {
                 println!(
                     "  {} nothing to push — no {} ref yet",
@@ -203,6 +270,8 @@ fn run_push(
             }
             if proof_pushed {
                 println!("  {} pushed {} → {}", "✓".green(), PROOF_REF, remote);
+            } else if let Some(e) = &proof_error {
+                println!("  {} push of {} failed: {}", "✗".red(), PROOF_REF, e);
             } else if !proof_ref_exists {
                 println!(
                     "  {} nothing to push — no {} ref yet",
@@ -213,12 +282,10 @@ fn run_push(
         }
     }
 
-    if let Some(e) = push_error {
-        return Err(format!(
-            "push of {} to '{}' failed: {}\nhint: run `aura meta pull --remote {}` to merge the remote's notes first, then push again",
-            NOTES_REF, remote, e, remote
-        )
-        .into());
+    if let Some(msg) =
+        push_failure_message(remote, notes_error.as_deref(), proof_error.as_deref())
+    {
+        return Err(msg.into());
     }
     Ok(())
 }

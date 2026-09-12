@@ -39,7 +39,7 @@
 //! them; enable/disable routes to the plugin registry's .state.json.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -93,6 +93,13 @@ pub struct McpServerConfig {
     /// unset (inherit the app's cwd, as before).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// AUDIT-UI-04 — repo roots this server is attached to. Empty means
+    /// inherited by every project, which is both the pre-scoping
+    /// behaviour and what every existing on-disk config deserializes
+    /// to. Non-empty means the server is visible/spawnable only when
+    /// the caller's project matches one of these roots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
 }
 
 fn default_enabled() -> bool {
@@ -100,9 +107,11 @@ fn default_enabled() -> bool {
 }
 
 /// Renderer-facing row. Mirrors the on-disk config but adds a `status`
-/// field the UI can colour ("unknown" until the first `tools/list`
-/// succeeds, "ok" / "error: <msg>" thereafter — populated lazily by
-/// `mcp_tools_list`).
+/// field the UI can colour. `status` is computed at list time from
+/// cheap synchronous checks ("disabled", or "error: command not found:
+/// …" when the executable can't exist); "unknown" means only "awaiting
+/// the first `mcp_tools_list` probe" — the probe result is the live
+/// health signal, this field is the pre-spawn reason.
 #[derive(Debug, Clone, Serialize)]
 pub struct McpServerEntry {
     pub name: String,
@@ -111,8 +120,11 @@ pub struct McpServerEntry {
     pub env: HashMap<String, String>,
     pub enabled: bool,
     pub description: Option<String>,
-    /// "unknown" | "ok" | "disabled" | "error: <msg>"
+    /// "unknown" (awaiting probe) | "disabled" | "error: <reason>"
     pub status: String,
+    /// Mirrors `McpServerConfig::projects` — empty = inherited by every
+    /// project; non-empty = attached to those repo roots only.
+    pub projects: Vec<String>,
     // Wave C — mirrored remote-transport fields so the renderer can
     // surface "(remote)" / "(authenticated)" badges without re-reading
     // the config from disk.
@@ -131,7 +143,17 @@ pub struct McpServerEntry {
 
 impl From<McpServerConfig> for McpServerEntry {
     fn from(c: McpServerConfig) -> Self {
-        let status = if c.enabled { "unknown" } else { "disabled" }.to_string();
+        // AUDIT-UI-04: an enabled row used to be born "unknown" and
+        // nothing ever wrote the field again — a misconfigured command
+        // read identically to a healthy server awaiting its probe. The
+        // cheap pre-spawn check gives broken rows a reason immediately.
+        let status = if !c.enabled {
+            "disabled".to_string()
+        } else if let Err(reason) = command_available(&c) {
+            format!("error: {reason}")
+        } else {
+            "unknown".to_string()
+        };
         let has_oauth_token = crate::mcp_oauth::keychain_load(&c.name)
             .ok()
             .flatten()
@@ -144,6 +166,7 @@ impl From<McpServerConfig> for McpServerEntry {
             enabled: c.enabled,
             description: c.description,
             status,
+            projects: c.projects,
             server_url: c.server_url,
             oauth_client_id: c.oauth_client_id,
             oauth_scope: c.oauth_scope,
@@ -229,6 +252,79 @@ fn write_config(cfg: &McpServerConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// AUDIT-UI-04 — true when a config should be shown to / spawned for
+/// `repo_root`. Empty `projects` = inherited everywhere (every
+/// pre-scoping config on disk deserializes to this). A project-scoped
+/// server is invisible without a matching project context — the old
+/// behaviour, where every project saw every server, was the
+/// cross-project leakage.
+fn visible_to(cfg: &McpServerConfig, repo_root: Option<&str>) -> bool {
+    if cfg.projects.is_empty() {
+        return true;
+    }
+    let Some(root) = repo_root.map(str::trim).filter(|r| !r.is_empty()) else {
+        return false;
+    };
+    cfg.projects.iter().any(|p| same_root(p, root))
+}
+
+/// Path equality that tolerates symlinks/`..` when both sides still
+/// resolve; plain string equality keeps working for roots that no
+/// longer exist on disk.
+fn same_root(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// AUDIT-UI-04 — cheap pre-spawn check that the configured executable
+/// can exist at all. Remote servers (`server_url` set) talk HTTP and
+/// skip it. This is what lets a broken row name its reason instantly
+/// instead of burning the 20s spawn timeout and reading "unknown".
+fn command_available(cfg: &McpServerConfig) -> Result<(), String> {
+    if cfg.server_url.is_some() {
+        return Ok(());
+    }
+    let cmd = cfg.command.trim();
+    if cmd.is_empty() {
+        return Err("no command configured".into());
+    }
+    let looks_executable = |p: &Path| -> bool {
+        let Ok(meta) = std::fs::metadata(p) else {
+            return false;
+        };
+        if !meta.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    };
+    if cmd.contains('/') || cmd.contains(std::path::MAIN_SEPARATOR) {
+        if looks_executable(Path::new(cmd)) {
+            return Ok(());
+        }
+        return Err(format!("command not found: {cmd}"));
+    }
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path_var) {
+        if looks_executable(&dir.join(cmd)) {
+            return Ok(());
+        }
+    }
+    Err(format!("command not found on PATH: {cmd}"))
+}
+
 fn list_configs() -> Result<Vec<McpServerConfig>, String> {
     let dir = mcp_dir()?;
     let mut out = Vec::new();
@@ -291,6 +387,7 @@ fn plugin_mcp_configs(state: &PluginHostState) -> Vec<(McpServerConfig, String)>
                     oauth_client_id: None,
                     oauth_scope: None,
                     cwd: Some(e.install_dir.display().to_string()),
+                    projects: Vec::new(),
                 },
                 e.id.clone(),
             )),
@@ -330,6 +427,7 @@ fn resolve_plugin_mcp(state: &PluginHostState, name: &str) -> Result<McpServerCo
         // Spawn from the bundle dir so manifest-relative script args
         // (`node server.js`) resolve without absolute paths.
         cwd: Some(entry.install_dir.display().to_string()),
+        projects: Vec::new(),
     })
 }
 
@@ -338,9 +436,16 @@ fn resolve_plugin_mcp(state: &PluginHostState, name: &str) -> Result<McpServerCo
 #[tauri::command]
 pub fn mcp_servers_list(
     plugin_state: State<'_, PluginHostState>,
+    repo_root: Option<String>,
 ) -> Result<Vec<McpServerEntry>, String> {
-    let mut out: Vec<McpServerEntry> =
-        list_configs()?.into_iter().map(Into::into).collect();
+    let root = repo_root.as_deref();
+    let mut out: Vec<McpServerEntry> = list_configs()?
+        .into_iter()
+        .filter(|c| visible_to(c, root))
+        .map(Into::into)
+        .collect();
+    // Plugin-bundled servers are managed through the plugin lifecycle
+    // and remain machine-global by design.
     for (cfg, plugin_id) in plugin_mcp_configs(&plugin_state) {
         let mut entry: McpServerEntry = cfg.into();
         entry.plugin_id = Some(plugin_id);
@@ -362,6 +467,9 @@ pub fn mcp_servers_add(
     server_url: Option<String>,
     oauth_client_id: Option<String>,
     oauth_scope: Option<String>,
+    // AUDIT-UI-04 — when set, the new server is attached to this
+    // project only instead of leaking into every project.
+    project_root: Option<String>,
 ) -> Result<McpServerEntry, String> {
     let trimmed = name.trim().to_string();
     if trimmed.is_empty() {
@@ -398,7 +506,13 @@ pub fn mcp_servers_add(
         oauth_client_id: normalise(oauth_client_id),
         oauth_scope: normalise(oauth_scope),
         cwd: None,
+        projects: normalise(project_root).map(|r| vec![r]).unwrap_or_default(),
     };
+    // AUDIT-UI-04 — refuse a stdio command that can't exist, at the
+    // moment the user can still fix it, instead of storing a config
+    // whose only symptom is a row stuck on "unknown".
+    command_available(&cfg)
+        .map_err(|e| format!("{e} — install it or use an absolute path"))?;
     write_config(&cfg)?;
     Ok(cfg.into())
 }
@@ -447,6 +561,15 @@ pub struct DiscoveredMcp {
     /// entries — the import path will fall back to scanning args.
     #[serde(default)]
     pub server_url: Option<String>,
+    /// AUDIT-UI-04 — the repo root this entry was discovered under,
+    /// when the source config is project-local (`.mcp.json`,
+    /// `.cursor/mcp.json`, Claude Code's per-project scope, …).
+    /// `None` for user-level sources. Import uses it to attach the
+    /// server to that project instead of making it global — importing
+    /// project A's `.mcp.json` used to make its servers visible and
+    /// invocable in every other project.
+    #[serde(default)]
+    pub source_root: Option<String>,
 }
 
 #[tauri::command]
@@ -580,6 +703,17 @@ pub fn mcp_servers_discover_agents(
         if !path.exists() {
             continue;
         }
+        // Project-local sources: either the shape itself names the
+        // project (Claude Code's nested scope) or the config file
+        // lives under the repo root. User-level sources get None.
+        let source_root = if let ConfigShape::NestedProjectMcpServers { project } = &shape {
+            Some(project.clone())
+        } else {
+            repo_root
+                .as_ref()
+                .filter(|r| !r.trim().is_empty() && path.starts_with(r.as_str()))
+                .cloned()
+        };
         let body = match std::fs::read_to_string(&path) {
             Ok(b) => b,
             Err(_) => continue,
@@ -685,6 +819,7 @@ pub fn mcp_servers_discover_agents(
                 env,
                 already_imported: existing.contains(&name),
                 server_url,
+                source_root: source_root.clone(),
             });
         }
     }
@@ -743,6 +878,10 @@ pub fn mcp_servers_import_discovered(
             oauth_client_id: None,
             oauth_scope: None,
             cwd: None,
+            // AUDIT-UI-04 — a server discovered in a project-local
+            // config stays attached to that project; only user-level
+            // sources import as global.
+            projects: entry.source_root.into_iter().collect(),
         };
         write_config(&cfg)?;
         out.push(cfg.into());
@@ -947,12 +1086,8 @@ pub async fn mcp_servers_auth_run(
     name: String,
 ) -> Result<McpAuthRunResult, String> {
     use tauri::Emitter;
-    let config_name = name.clone();
-    let cfg = crate::blocking::run(move || {
-        let path = server_path(&config_name)?;
-        read_config(&path)
-    })
-    .await?;
+    let path = server_path(&name)?;
+    let cfg = read_config(&path)?;
 
     let mut cmd = Command::new(&cfg.command);
     cmd.args(&cfg.args)
@@ -1068,9 +1203,19 @@ fn extract_https_url(line: &str) -> Option<String> {
 #[tauri::command]
 pub async fn mcp_tools_list(
     plugin_state: State<'_, PluginHostState>,
+    repo_root: Option<String>,
 ) -> Result<Vec<McpServerToolList>, String> {
-    let mut cfgs: Vec<McpServerConfig> = crate::blocking::run(|| {
-        list_configs().map(|configs| configs.into_iter().filter(|c| c.enabled).collect())
+    // Reading every server config is disk work — keep it off the async
+    // runtime so a slow home dir never stalls the UI thread.
+    let scope = repo_root.clone();
+    let mut cfgs: Vec<McpServerConfig> = crate::blocking::run(move || {
+        let root = scope.as_deref();
+        list_configs().map(|configs| {
+            configs
+                .into_iter()
+                .filter(|c| c.enabled && visible_to(c, root))
+                .collect()
+        })
     })
     .await?;
     // Plugin-bundled servers: resolve secrets BEFORE any await (the
@@ -1092,23 +1237,51 @@ pub async fn mcp_tools_list(
             }),
         }
     }
-    for cfg in cfgs {
-        let name = cfg.name.clone();
-        match fetch_tools(&cfg).await {
-            Ok(tools) => out.push(McpServerToolList {
-                server: name,
-                ok: true,
-                error: None,
-                tools,
-            }),
-            Err(e) => out.push(McpServerToolList {
-                server: name,
-                ok: false,
-                error: Some(e),
-                tools: Vec::new(),
-            }),
+    // AUDIT-UI-04 — a missing executable is reported instantly, by
+    // name, instead of burning the 20s spawn timeout first.
+    let (ready, broken): (Vec<_>, Vec<_>) = cfgs
+        .into_iter()
+        .partition(|c| command_available(c).is_ok());
+    for cfg in broken {
+        let reason = command_available(&cfg)
+            .err()
+            .unwrap_or_else(|| "command unavailable".into());
+        out.push(McpServerToolList {
+            server: cfg.name,
+            ok: false,
+            error: Some(reason),
+            tools: Vec::new(),
+        });
+    }
+    // AUDIT-UI-04 — probe concurrently. The old sequential loop made
+    // four cold servers cost four timeouts back to back, during which
+    // every row read "unknown".
+    let mut join = tokio::task::JoinSet::new();
+    for cfg in ready {
+        join.spawn(async move {
+            let name = cfg.name.clone();
+            match fetch_tools(&cfg).await {
+                Ok(tools) => McpServerToolList {
+                    server: name,
+                    ok: true,
+                    error: None,
+                    tools,
+                },
+                Err(e) => McpServerToolList {
+                    server: name,
+                    ok: false,
+                    error: Some(e),
+                    tools: Vec::new(),
+                },
+            }
+        });
+    }
+    while let Some(res) = join.join_next().await {
+        if let Ok(row) = res {
+            out.push(row);
         }
     }
+    out.sort_by(|a, b| a.server.cmp(&b.server));
     Ok(out)
 }
 
@@ -1118,6 +1291,7 @@ pub async fn mcp_tool_invoke(
     server: String,
     tool: String,
     args: Value,
+    repo_root: Option<String>,
 ) -> Result<McpToolInvokeResult, String> {
     // Plugin-bundled servers resolve through the registry + secrets
     // broker (synchronously, before the await); file-based ones read
@@ -1129,6 +1303,11 @@ pub async fn mcp_tool_invoke(
         let cfg = read_config(&path)?;
         if !cfg.enabled {
             return Err(format!("server '{server}' is disabled"));
+        }
+        // AUDIT-UI-04 — listing is scoped, so invoking must be too, or
+        // a stale composer catalog could still call across projects.
+        if !visible_to(&cfg, repo_root.as_deref()) {
+            return Err(format!("server '{server}' isn't attached to this project"));
         }
         cfg
     };
@@ -1545,4 +1724,164 @@ pub async fn mcp_servers_oauth_start(
 #[tauri::command]
 pub fn mcp_servers_oauth_clear(name: String) -> Result<(), String> {
     crate::mcp_oauth::keychain_delete(&name)
+}
+
+// ─── AUDIT-UI-04 tests — project scoping + command validation ────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_home;
+
+    fn cfg(name: &str, command: &str, projects: Vec<String>) -> McpServerConfig {
+        McpServerConfig {
+            name: name.into(),
+            command: command.into(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            enabled: true,
+            description: None,
+            server_url: None,
+            oauth_client_id: None,
+            oauth_scope: None,
+            cwd: None,
+            projects,
+        }
+    }
+
+    #[test]
+    fn global_config_is_visible_everywhere() {
+        let c = cfg("s", "sh", Vec::new());
+        assert!(visible_to(&c, None));
+        assert!(visible_to(&c, Some("/some/repo")));
+    }
+
+    #[test]
+    fn project_scoped_config_is_only_visible_to_its_project() {
+        let c = cfg("s", "sh", vec!["/repo/a".into()]);
+        assert!(visible_to(&c, Some("/repo/a")));
+        // The leakage this ticket removes: a different project must NOT
+        // see a project-attached server.
+        assert!(!visible_to(&c, Some("/repo/b")));
+        // …and no project context at all sees it either.
+        assert!(!visible_to(&c, None));
+        assert!(!visible_to(&c, Some("  ")));
+    }
+
+    #[test]
+    fn legacy_config_without_projects_field_parses_as_global() {
+        let json = r#"{"name":"old","command":"sh"}"#;
+        let c: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert!(c.projects.is_empty());
+        assert!(visible_to(&c, Some("/anywhere")));
+    }
+
+    #[test]
+    fn command_available_names_the_missing_executable() {
+        let missing = cfg("s", "definitely-not-a-real-binary-ui04", Vec::new());
+        let err = command_available(&missing).unwrap_err();
+        assert!(err.contains("definitely-not-a-real-binary-ui04"), "{err}");
+
+        let abs = cfg("s", "/no/such/dir/tool", Vec::new());
+        let err = command_available(&abs).unwrap_err();
+        assert!(err.contains("/no/such/dir/tool"), "{err}");
+
+        // A real PATH executable passes.
+        assert!(command_available(&cfg("s", "sh", Vec::new())).is_ok());
+
+        // Remote servers talk HTTP — the local command is a proxy
+        // detail and must not fail the row.
+        let mut remote = cfg("s", "definitely-not-a-real-binary-ui04", Vec::new());
+        remote.server_url = Some("https://example.com/mcp".into());
+        assert!(command_available(&remote).is_ok());
+    }
+
+    #[test]
+    fn entry_status_carries_the_reason_not_unknown() {
+        let broken: McpServerEntry = cfg("s", "/no/such/dir/tool", Vec::new()).into();
+        assert!(broken.status.starts_with("error: "), "{}", broken.status);
+        assert!(broken.status.contains("/no/such/dir/tool"));
+
+        let ok: McpServerEntry = cfg("s", "sh", Vec::new()).into();
+        assert_eq!(ok.status, "unknown");
+
+        let mut off = cfg("s", "sh", Vec::new());
+        off.enabled = false;
+        let off: McpServerEntry = off.into();
+        assert_eq!(off.status, "disabled");
+    }
+
+    #[test]
+    fn add_rejects_a_command_that_cannot_exist() {
+        let _home = test_home::borrow();
+        let err = mcp_servers_add(
+            "bad".into(),
+            "definitely-not-a-real-binary-ui04".into(),
+            Vec::new(),
+            HashMap::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("definitely-not-a-real-binary-ui04"), "{err}");
+        // Nothing was written for the rejected config.
+        assert!(list_configs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn add_with_project_root_scopes_and_roundtrips() {
+        let _home = test_home::borrow();
+        let entry = mcp_servers_add(
+            "scoped".into(),
+            "sh".into(),
+            Vec::new(),
+            HashMap::new(),
+            None,
+            None,
+            None,
+            None,
+            Some("/repo/a".into()),
+        )
+        .unwrap();
+        assert_eq!(entry.projects, vec!["/repo/a".to_string()]);
+        // Round-trips through disk with the scope intact.
+        let on_disk = list_configs().unwrap();
+        assert_eq!(on_disk.len(), 1);
+        assert_eq!(on_disk[0].projects, vec!["/repo/a".to_string()]);
+        assert!(!visible_to(&on_disk[0], Some("/repo/b")));
+    }
+
+    #[test]
+    fn import_attaches_project_local_discoveries_to_their_project() {
+        let _home = test_home::borrow();
+        let rows = mcp_servers_import_discovered(vec![
+            DiscoveredMcp {
+                name: "from-project".into(),
+                source: "Project .mcp.json".into(),
+                command: "sh".into(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                already_imported: false,
+                server_url: None,
+                source_root: Some("/repo/a".into()),
+            },
+            DiscoveredMcp {
+                name: "from-user".into(),
+                source: "Claude Code".into(),
+                command: "sh".into(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                already_imported: false,
+                server_url: None,
+                source_root: None,
+            },
+        ])
+        .unwrap();
+        let by_name = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        assert_eq!(by_name("from-project").projects, vec!["/repo/a".to_string()]);
+        assert!(by_name("from-user").projects.is_empty());
+    }
 }

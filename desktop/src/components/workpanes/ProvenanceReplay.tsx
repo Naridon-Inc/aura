@@ -14,16 +14,34 @@
 // Backend: `api.gitRecentCommits` + `api.gitShowCommit` for commit
 // data, `api.readFile` for manifest probes, `api.auraCli(["keys",
 // "sigstore-verify", ...])` for verification. No new Tauri commands.
+//
+// Everything here is read through `resourceCache` and probed lazily: the
+// commit list, the change_id stripe, each commit's diff and each manifest
+// survive a tab switch (which unmounts the pane outright), and a manifest is
+// only read off disk once its pin is actually on screen.
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type CommitEntry } from "../../lib/api";
-import { shortDateFromSecs } from "../../lib/calendarDate";
+import { peekCache, writeCache } from "../../lib/resourceCache";
 import { Button } from "../ui/button";
 import { IntentMatchChip } from "../IntentMatchChip";
+import { shortDateFromSecs } from "../../lib/calendarDate";
 
 type Props = { repoRoot: string; onClose: () => void };
 
-type ManifestStatus = "signed" | "unsigned" | "verifying" | "ok" | "fail";
+/** How far back the scrubber reads. Baked into the cache key so changing it
+ *  can't silently read a shorter bundle. */
+const COMMIT_DEPTH = 80;
+
+// "checking" is the honest gap the lazy probe opens up: we haven't read this
+// commit's evidence off disk yet, which is NOT the same claim as "unsigned".
+type ManifestStatus =
+  | "checking"
+  | "signed"
+  | "unsigned"
+  | "verifying"
+  | "ok"
+  | "fail";
 
 type ManifestRecord = {
   status: ManifestStatus;
@@ -43,38 +61,115 @@ const EMPTY: ManifestRecord = {
   detail: null,
 };
 
+// ── resourceCache keys ────────────────────────────────────────────────
+// All repo-scoped, all process-lifetime. Nothing here rewrites itself once
+// written (a commit's diff and its manifest are immutable), so a cache hit is
+// as true as a fresh read — only the commit LIST can grow, and that refreshes
+// on every mount.
+
+function commitsKey(repoRoot: string): string {
+  return `commits:recent:${repoRoot}:${COMMIT_DEPTH}`;
+}
+
+function changeIdsKey(repoRoot: string): string {
+  return `changeIds:${repoRoot}:${COMMIT_DEPTH}`;
+}
+
+function manifestKey(repoRoot: string, sha: string): string {
+  return `manifest:${repoRoot}:${sha}`;
+}
+
+function diffKey(repoRoot: string, sha: string): string {
+  return `commitDiff:${repoRoot}:${sha}`;
+}
+
 export function ProvenanceReplay({ repoRoot, onClose }: Props) {
-  const [commits, setCommits] = useState<CommitEntry[]>([]);
+  // Seeded from the process-lifetime cache so re-opening the pane paints the
+  // last scrubber immediately rather than re-walking git.
+  const [commits, setCommits] = useState<CommitEntry[]>(
+    () => peekCache<CommitEntry[]>(commitsKey(repoRoot)) ?? [],
+  );
   const [manifests, setManifests] = useState<Record<string, ManifestRecord>>({});
   // jj-style change_id stripe — sha → stable change_id derived from
   // intent + tree hash. Commits sharing a change_id are the same
   // logical change re-signed (amend, sign, re-sign).
-  const [changeIds, setChangeIds] = useState<Record<string, string>>({});
-  const [selected, setSelected] = useState<string | null>(null);
+  const [changeIds, setChangeIds] = useState<Record<string, string>>(
+    () => peekCache<Record<string, string>>(changeIdsKey(repoRoot)) ?? {},
+  );
+  const [selected, setSelected] = useState<string | null>(
+    () => peekCache<CommitEntry[]>(commitsKey(repoRoot))?.[0]?.sha ?? null,
+  );
   const [diff, setDiff] = useState<string>("");
   const [diffLoading, setDiffLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [loadingList, setLoadingList] = useState(true);
+  const [loadingList, setLoadingList] = useState(
+    () => peekCache<CommitEntry[]>(commitsKey(repoRoot)) == null,
+  );
+  const aliveRef = useRef(true);
+  // Which shas we've already read (or started reading) a manifest for. Guards
+  // the lazy probe against re-reading, and against clobbering a `verify`
+  // verdict the user just produced.
+  const probedRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  // Read one commit's manifest, at most once per repo per session. Probing all
+  // COMMIT_DEPTH commits up front cost up to 3 fs reads each — ~240 IPC round
+  // trips on every single mount — for evidence the user mostly never looks at.
+  const ensureManifest = useCallback(
+    (sha: string) => {
+      if (!sha || probedRef.current.has(sha)) return;
+      probedRef.current.add(sha);
+      const key = manifestKey(repoRoot, sha);
+      const cached = peekCache<ManifestRecord>(key);
+      if (cached) {
+        setManifests((prev) => ({ ...prev, [sha]: cached }));
+        return;
+      }
+      // Claim the slot as "checking" so the panel says it is still looking
+      // rather than asserting "no signed evidence" it hasn't earned yet.
+      setManifests((prev) => ({ ...prev, [sha]: { ...EMPTY, status: "checking" } }));
+      void probeManifest(repoRoot, sha).then((rec) => {
+        // Cache only a FOUND manifest: it's immutable, whereas "no evidence"
+        // is a fact that can change the moment the commit gets signed, so we
+        // re-probe those. Verify verdicts are never cached either — a remount
+        // always says "not checked" until the user checks again.
+        if (rec.status === "signed") writeCache(key, rec);
+        if (!aliveRef.current) return;
+        setManifests((prev) => ({ ...prev, [sha]: rec }));
+      });
+    },
+    [repoRoot],
+  );
 
   useEffect(() => {
     let cancelled = false;
-    setLoadingList(true);
+    // Stale-while-revalidate: paint the cached commit list (already seeded into
+    // state) and refresh underneath. Manifests belong to the repo, not to this
+    // mount, so the probe ledger resets only when the root changes.
+    probedRef.current = new Set();
+    setManifests({});
+    const cachedCommits = peekCache<CommitEntry[]>(commitsKey(repoRoot));
+    if (cachedCommits) setCommits(cachedCommits);
+    setLoadingList(cachedCommits == null);
     setError(null);
     api
-      .gitRecentCommits(repoRoot, 80)
-      .then(async (list) => {
+      .gitRecentCommits(repoRoot, COMMIT_DEPTH)
+      .then((list) => {
+        writeCache(commitsKey(repoRoot), list);
         if (cancelled) return;
         setCommits(list);
-        if (list.length > 0 && selected === null) setSelected(list[0].sha);
-        // Probe in parallel — manifest reads are cheap fs hits and we
-        // don't want a 80-deep serial chain blocking the scrubber.
-        const entries = await Promise.all(
-          list.map(async (c) => [c.sha, await probeManifest(repoRoot, c.sha)] as const),
-        );
-        if (cancelled) return;
-        const next: Record<string, ManifestRecord> = {};
-        for (const [sha, rec] of entries) next[sha] = rec;
-        setManifests(next);
+        if (list.length > 0) {
+          // Keep the user on their commit across a refresh; fall back to newest.
+          setSelected((prev) =>
+            prev && list.some((c) => c.sha === prev) ? prev : list[0].sha,
+          );
+        }
         // change_id derivation runs on the same commit list — single
         // backend call, group commits by change_id for the stripe.
         api
@@ -83,9 +178,10 @@ export function ProvenanceReplay({ repoRoot, onClose }: Props) {
             list.map((c) => c.sha),
           )
           .then((rows) => {
-            if (cancelled) return;
             const map: Record<string, string> = {};
             for (const r of rows) map[r.commit_sha] = r.change_id;
+            writeCache(changeIdsKey(repoRoot), map);
+            if (cancelled) return;
             setChangeIds(map);
           })
           .catch(() => {
@@ -94,7 +190,9 @@ export function ProvenanceReplay({ repoRoot, onClose }: Props) {
       })
       .catch((e) => {
         if (cancelled) return;
-        setError(String(e));
+        // A failed refresh keeps the cached scrubber; commits don't rewrite
+        // themselves, so what's on screen is still true.
+        if (!cachedCommits) setError(String(e));
       })
       .finally(() => {
         if (!cancelled) setLoadingList(false);
@@ -102,7 +200,6 @@ export function ProvenanceReplay({ repoRoot, onClose }: Props) {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repoRoot]);
 
   useEffect(() => {
@@ -110,15 +207,22 @@ export function ProvenanceReplay({ repoRoot, onClose }: Props) {
       setDiff("");
       return;
     }
+    // The signature panel is about to show this commit, so its evidence is
+    // wanted whether or not the pin ever scrolled into view.
+    ensureManifest(selected);
     let cancelled = false;
-    setDiffLoading(true);
+    const key = diffKey(repoRoot, selected);
+    const cached = peekCache<string>(key);
+    if (cached != null) setDiff(cached);
+    setDiffLoading(cached == null);
     api
       .gitShowCommit(repoRoot, selected)
       .then((body) => {
+        writeCache(key, body);
         if (!cancelled) setDiff(body);
       })
       .catch(() => {
-        if (!cancelled) setDiff("");
+        if (!cancelled && cached == null) setDiff("");
       })
       .finally(() => {
         if (!cancelled) setDiffLoading(false);
@@ -126,7 +230,7 @@ export function ProvenanceReplay({ repoRoot, onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [selected, repoRoot]);
+  }, [selected, repoRoot, ensureManifest]);
 
   const verify = async (sha: string) => {
     const m = manifests[sha];
@@ -160,17 +264,23 @@ export function ProvenanceReplay({ repoRoot, onClose }: Props) {
   const sel = selected ? commits.find((c) => c.sha === selected) ?? null : null;
   const selManifest = selected ? manifests[selected] ?? EMPTY : EMPTY;
 
+  // Manifests arrive as pins scroll into view, so the headline counts what we
+  // have actually looked at — claiming "N/80 signed" off a partial probe would
+  // under-report evidence we simply haven't read yet.
   const summary = useMemo(() => {
     let signed = 0;
     let verified = 0;
     let failed = 0;
+    let checked = 0;
     for (const m of Object.values(manifests)) {
+      if (m.status === "checking") continue;
+      checked++;
       if (m.status === "signed" || m.status === "ok" || m.status === "verifying")
         signed++;
       if (m.status === "ok") verified++;
       if (m.status === "fail") failed++;
     }
-    return { signed, verified, failed, total: commits.length };
+    return { signed, verified, failed, checked, total: commits.length };
   }, [manifests, commits.length]);
 
   return (
@@ -183,7 +293,9 @@ export function ProvenanceReplay({ repoRoot, onClose }: Props) {
           every change, with proof it's genuine
         </span>
         <span className="text-text-4 text-xs tabular-nums ml-3">
-          {summary.signed}/{summary.total} signed
+          {summary.signed}/{summary.checked} signed
+          {summary.checked < summary.total &&
+            ` · ${summary.total - summary.checked} still to check`}
           {summary.verified > 0 && ` · ${summary.verified} verified`}
           {summary.failed > 0 && (
             <>
@@ -236,6 +348,7 @@ export function ProvenanceReplay({ repoRoot, onClose }: Props) {
             changeIds={changeIds}
             selected={selected}
             onSelect={setSelected}
+            onPinVisible={ensureManifest}
             repoRoot={repoRoot}
           />
         )}
@@ -258,6 +371,7 @@ function Scrubber({
   changeIds,
   selected,
   onSelect,
+  onPinVisible,
   repoRoot,
 }: {
   commits: CommitEntry[];
@@ -265,8 +379,39 @@ function Scrubber({
   changeIds: Record<string, string>;
   selected: string | null;
   onSelect: (sha: string) => void;
+  /** Called the first time a pin scrolls into the rail — the cue to read
+   *  that commit's manifest off disk instead of probing all of them up front. */
+  onPinVisible: (sha: string) => void;
   repoRoot: string;
 }) {
+  const listRef = useRef<HTMLOListElement | null>(null);
+  // Held in a ref so re-renders (which happen on every arriving manifest)
+  // don't tear down and rebuild the observer.
+  const notifyRef = useRef(onPinVisible);
+  notifyRef.current = onPinVisible;
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          const sha = (e.target as HTMLElement).dataset.sha;
+          if (sha) notifyRef.current(sha);
+        }
+      },
+      {
+        // The rail is the horizontally scrolling parent. A generous margin
+        // warms the pins just off either edge so scrubbing never waits.
+        root: list.parentElement,
+        rootMargin: "0px 400px",
+      },
+    );
+    for (const li of Array.from(list.children)) io.observe(li);
+    return () => io.disconnect();
+  }, [commits]);
+
   // Stable color per change_id so the stripe under each pin reads as
   // "this group of commits is one logical change." Hash → 12 hue
   // buckets so adjacent groups stay distinct.
@@ -280,20 +425,20 @@ function Scrubber({
     return `hsl(${hue} 60% 55%)`;
   };
   return (
-    <ol className="flex items-center gap-1 min-w-max">
+    <ol ref={listRef} className="flex items-center gap-1 min-w-max">
       {commits.map((c) => {
         const m = manifests[c.sha] ?? EMPTY;
         const tone = pinTone(m.status);
         const active = selected === c.sha;
         const cid = changeIds[c.sha];
         return (
-          <li key={c.sha} className="shrink-0">
+          <li key={c.sha} data-sha={c.sha} className="shrink-0">
             <button
               type="button"
               onClick={() => onSelect(c.sha)}
               title={`${c.sha.slice(0, 8)} · ${c.subject}${cid ? ` · change ${cid}` : ""}`}
               className={`flex flex-col items-center gap-1 px-2 py-1.5 rounded transition-colors ${
-                active ? "bg-state-selected" : "hover:bg-state-hover"
+                active ? "bg-bg-2" : "hover:bg-bg-2"
               }`}
               style={{ width: 64 }}
             >
@@ -427,6 +572,10 @@ function SignaturePanel({
                 : "Verify evidence"}
             </Button>
           </>
+        ) : record.status === "checking" ? (
+          <div className="text-xs text-text-3">
+            Looking for this commit&rsquo;s evidence…
+          </div>
         ) : (
           <div className="text-xs text-text-3">
             No signed evidence found for this commit. You can still review the
@@ -462,11 +611,6 @@ function KV({
   );
 }
 
-// Verified / in-flight / broken, in the pack's own slots. `--color-accent-blue`
-// was defined by no theme, so "verifying" drew an invisible foreground on a
-// hard-coded blue chip; it is the in-flight state, which is the amber slot. The
-// backgrounds were literal rgba() of hues the palette does not contain — mixed
-// off their own foreground instead so a chip can never drift from its ink.
 function pinTone(status: ManifestStatus): { fg: string; bg: string } {
   switch (status) {
     case "ok":
@@ -485,6 +629,9 @@ function pinTone(status: ManifestStatus): { fg: string; bg: string } {
         fg: "var(--color-red)",
         bg: "color-mix(in srgb, var(--color-red) 20%, transparent)",
       };
+    // A pin we haven't read yet looks the same as one with nothing to show —
+    // neutral. The copy in the panel is what draws the distinction.
+    case "checking":
     case "unsigned":
     default:
       return { fg: "var(--color-text-4)", bg: "var(--color-bg-1)" };
@@ -501,6 +648,8 @@ function statusHint(s: ManifestStatus): string {
       return "Checking evidence…";
     case "fail":
       return "Evidence check failed";
+    case "checking":
+      return "Looking for evidence…";
     case "unsigned":
     default:
       return "No signed evidence";
@@ -522,7 +671,6 @@ function colorizeDiff(diff: string) {
     );
   });
 }
-
 
 // Probe `.aura/manifest/<sha>.json` first, then `manifests/`, then
 // `.aura/blocks/<sha>.json`. All three layouts are tolerated since

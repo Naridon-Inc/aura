@@ -12,6 +12,12 @@
 // existing "hand to agent" seam, and the plain-language prompts it seeds.
 
 import { openExternal } from "./openExternal";
+import {
+  appendConflictInstructions,
+  appendPrInstructions,
+  type RepoInstructions,
+} from "./repoInstructions";
+import { activeRepoInstructions } from "./repoInstructionsStore";
 
 /** The real git facts a copy's primary action is derived from. `dirty` =
  *  uncommitted working-tree changes; `ahead`/`behind` are vs the upstream
@@ -103,12 +109,18 @@ export function pullPrompt(branch: string): string {
 // user would otherwise have had to do by hand first: look at what's actually
 // changed (including work that isn't committed yet), run the checks, then open
 // the PR. It ends at a real PR URL, not a half-done branch.
+//
+// `instructions` is the repo's own rules (Settings → Copies & scripts →
+// "How to write pull requests here"). Callers that don't know the repo root
+// leave it out and get the active workspace's rules from the store.
 export function createPrPrompt(
   branch: string,
   title: string,
   draft = false,
+  instructions: RepoInstructions | null = null,
 ): string {
-  return [
+  const repo = instructions ?? activeRepoInstructions();
+  return appendPrInstructions([
     `Open a${draft ? " draft" : ""} pull request for the current branch \`${branch}\`${title ? ` ("${title}")` : ""}. Do the whole job yourself. Don't stop to ask me to confirm the steps.`,
     ``,
     `Look at what actually changed first. Don't just list files:`,
@@ -125,7 +137,7 @@ export function createPrPrompt(
     `- If the checks surfaced real problems, list them first under "⚠ Issues to resolve" and say whether they should block the PR. Real problems don't stop you opening it. They go in the description where a reviewer will see them.`,
     `- Push the branch (set the upstream if it has none), then create the PR with \`gh pr create\`${draft ? " --draft" : ""}. If a PR already exists for this branch, update it instead of opening a second one.`,
     `- Finish with the PR URL and two or three lines on what you did.`,
-  ].join("\n");
+  ].join("\n"), repo);
 }
 
 /**
@@ -218,11 +230,19 @@ export function attestPrompt(): string {
   ].join("\n");
 }
 
-/** Ask Aura to resolve the current merge conflicts, in chat. */
-export function resolveConflictsPrompt(): string {
-  return [
-    `Resolve the current merge conflicts on this branch using Aura's conflict tools.`,
-    `Go file by file, choosing ours / theirs / a merged result as appropriate. Ask me first if a choice looks risky or loses work.`,
-    `Then continue the merge and walk me through what you did, here in chat.`,
-  ].join("\n");
+/** Ask Aura to resolve the current merge conflicts, in chat. The repo's own
+ *  conflict rules ("How to resolve conflicts here") ride along; callers that
+ *  don't know the repo root get the active workspace's. */
+export function resolveConflictsPrompt(
+  instructions: RepoInstructions | null = null,
+): string {
+  const repo = instructions ?? activeRepoInstructions();
+  return appendConflictInstructions(
+    [
+      `Resolve the current merge conflicts on this branch using Aura's conflict tools.`,
+      `Go file by file, choosing ours / theirs / a merged result as appropriate. Ask me first if a choice looks risky or loses work.`,
+      `Then continue the merge and walk me through what you did, here in chat.`,
+    ].join("\n"),
+    repo,
+  );
 }

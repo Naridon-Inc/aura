@@ -536,6 +536,14 @@ fn conflict_rows_appended_for_aura_repo() {
     let _lk = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (_g, dir) = enter_tmp();
     git_init_here();
+    // Say what went wrong if the ground moves. The cwd is process-global, and
+    // a `.aura` that already exists here means another thread chdir'd us into
+    // its own tempdir — a scaffolding bug, which "File exists" does not name.
+    assert_eq!(
+        std::env::current_dir().expect("cwd").canonicalize().ok(),
+        dir.path().canonicalize().ok(),
+        "another test moved the working directory out from under this one"
+    );
     std::fs::create_dir(".aura").expect("mk .aura");
     let _author = EnvGuard::set("GIT_AUTHOR_NAME", "Agent Smith");
     let _githead = EnvGuard::set(
@@ -653,4 +661,91 @@ fn fallback_path_emits_no_rows() {
         !std::path::Path::new(".aura/conflicts.jsonl").exists(),
         "fallback merges must not write conflict rows"
     );
+}
+
+// ─── Driver: the fallback and the conflict both say so ─────────────────────
+//
+// The audit finding these pin: a merge went through the driver, ordinary
+// `<<<<<<<` markers appeared, and nothing anywhere said whether Aura's AST
+// merge had produced them or had never run. Both readings were available and
+// only one was true, so the driver now states which.
+
+use super::engine::NodeConflict;
+use super::{fallback_message, semantic_conflict_message};
+
+fn conflict(name: &str) -> NodeConflict {
+    NodeConflict {
+        identifier: name.to_string(),
+        base_hash: "0".repeat(16),
+        ours: "ours body".to_string(),
+        theirs: "theirs body".to_string(),
+    }
+}
+
+#[test]
+fn a_fallback_that_leaves_markers_says_whose_markers_they_are() {
+    let msg = fallback_message("src/lib.rs", "ours: syntax errors in source", 1);
+    assert!(msg.contains("src/lib.rs"), "must name the file: {}", msg);
+    assert!(msg.contains("syntax errors in source"), "must give the reason: {}", msg);
+    assert!(
+        msg.contains("git's line merge, not Aura's"),
+        "must disown the markers: {}",
+        msg
+    );
+}
+
+#[test]
+fn a_clean_fallback_still_admits_no_semantic_merge_happened() {
+    let msg = fallback_message("README.md", "unsupported extension .md", 0);
+    assert!(msg.contains("README.md"), "must name the file: {}", msg);
+    assert!(msg.contains("unsupported extension .md"), "must give the reason: {}", msg);
+    assert!(msg.contains("no semantic merge here"), "must not imply Aura merged it: {}", msg);
+    // Nothing needs a human here, so it must not send one looking for markers.
+    assert!(!msg.contains("need a human"), "no markers to resolve: {}", msg);
+}
+
+#[test]
+fn a_failed_fallback_does_not_promise_a_merged_file() {
+    let msg = fallback_message("src/lib.rs", "unreadable or non-UTF8 input", 255);
+    assert!(
+        msg.contains("could not merge it either"),
+        "255 is git failing, not git conflicting: {}",
+        msg
+    );
+}
+
+#[test]
+fn a_semantic_conflict_is_named_and_credited_to_the_ast_merge() {
+    let msg = semantic_conflict_message("src/lib.rs", 1, &[conflict("alpha")]);
+    assert!(msg.contains("merged at the AST level"), "must claim the work it did: {}", msg);
+    assert!(msg.contains("alpha"), "must name the node in dispute: {}", msg);
+    assert!(msg.contains("1 conflict left"), "singular, and counted: {}", msg);
+    // This is Aura's own verdict, so it must not blame git for the markers.
+    assert!(!msg.contains("not Aura's"), "wrong attribution: {}", msg);
+}
+
+#[test]
+fn many_conflicting_nodes_are_summarised_rather_than_listed() {
+    let details: Vec<NodeConflict> =
+        ["a", "b", "c", "d", "e"].iter().map(|n| conflict(n)).collect();
+    let msg = semantic_conflict_message("src/lib.rs", 5, &details);
+    assert!(msg.contains("a, b, c"), "first few named: {}", msg);
+    assert!(msg.contains("and 2 more"), "the rest counted: {}", msg);
+    assert!(!msg.contains(", d"), "must not list everything: {}", msg);
+}
+
+#[test]
+fn an_unnameable_conflict_is_reported_without_inventing_a_name() {
+    let msg = semantic_conflict_message("src/lib.rs", 2, &[]);
+    assert!(msg.contains("merged at the AST level"), "still Aura's merge: {}", msg);
+    assert!(msg.contains("2 conflicts left"), "plural, and counted: {}", msg);
+    assert!(!msg.contains("both sides changed"), "no node to name: {}", msg);
+}
+
+#[test]
+fn a_file_with_no_path_hint_is_still_described() {
+    // `%P` can be missing on a hand-rolled driver line; the message must stay
+    // a sentence rather than degrade into a dangling em-dash.
+    let msg = fallback_message(super::file_label(None), "no --path extension to detect language", 1);
+    assert!(msg.contains("this file"), "needs a subject: {}", msg);
 }

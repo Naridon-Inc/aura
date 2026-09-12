@@ -122,6 +122,46 @@ pub async fn codex_latest_session(repo_root: String) -> Result<Option<String>, S
     Ok(found)
 }
 
+/// The prompt that opened the newest Codex rollout authored in `repo_root` —
+/// the one sentence that names what the session is about.
+///
+/// The first typed message, not the last, for the same reason as the Claude
+/// path: this becomes a session's title, and a title that rewrites itself on
+/// every turn moves the row out from under whoever was reading it.
+///
+/// Codex replays context to itself on the `user` role wearing an XML-ish
+/// envelope (`<environment_context>`, `<user_instructions>`), exactly as the
+/// frontend adapter documents — those are the harness talking, not the person,
+/// so they are skipped rather than mistaken for a request.
+pub fn opening_prompt_for_repo(repo_root: &str) -> Option<String> {
+    let (path, _id) = newest_rollout(sessions_dir()?, repo_root)?;
+    let file = fs::File::open(path).ok()?;
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(rec) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let payload = rec.get("payload").unwrap_or(&rec);
+        let kind = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .or_else(|| rec.get("type").and_then(Value::as_str))
+            .unwrap_or("");
+        if kind != "user_message" {
+            continue;
+        }
+        let text = payload
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if text.is_empty() || text.starts_with('<') {
+            continue;
+        }
+        return Some(text.to_string());
+    }
+    None
+}
+
 /// `~/.codex/sessions`, or None when Codex has never run on this machine.
 fn sessions_dir() -> Option<PathBuf> {
     let dir = dirs::home_dir()?.join(".codex").join("sessions");

@@ -70,6 +70,10 @@ export function TraceSurface({
           <OverviewPane
             repoRoot={repoRoot}
             onOpenSessions={() => onOpenView("sessions")}
+            // A run named on Overview opens the SAME wizard the Sessions list
+            // opens, layered over Overview rather than switching tabs — so Esc
+            // puts the reader back exactly where they were reading.
+            onOpenSession={setSelected}
             onOpenWrapped={() => setWrapped(true)}
             onOpenCostUsage={() => onOpenView("usage")}
           />

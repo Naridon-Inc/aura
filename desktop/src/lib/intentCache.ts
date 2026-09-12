@@ -97,21 +97,63 @@ export function refreshIntentRows(
   const pending = inflight.get(repoRoot);
   if (pending) return pending.then((rows) => take(rows, limit));
 
-  const promise = api
+  return startRead(repoRoot, limit);
+}
+
+/** Whether a read for this repo is running right now.
+ *
+ *  A surface offering the reader a retry needs this: while a read is in flight,
+ *  {@link refreshIntentRows} joins it rather than starting one, so a button
+ *  wired to that would do nothing at all. */
+export function isIntentReadInFlight(repoRoot: string): boolean {
+  return inflight.has(repoRoot);
+}
+
+/** Abandon whatever read is running for this repo and start a new one.
+ *
+ *  For the one case the sharing above gets wrong: a person looking at a pane
+ *  that has not come back, pressing the button that says it will try again.
+ *  Joining the stuck read is what made that button a placebo — the pane
+ *  appeared to recover only because the *original* read eventually landed.
+ *
+ *  Starting a second read is deliberate. It costs one more pass, and the
+ *  second pass is much cheaper than the first: the backend's branch-tip union
+ *  and its per-commit line counts are both cached from the read still running.
+ *  The abandoned read is not cancelled — nothing can cancel it — but its rows
+ *  are still valid and still populate the cache when they arrive. */
+export function restartIntentRead(
+  repoRoot: string,
+  limit?: number,
+): Promise<IntentRow[]> {
+  inflight.delete(repoRoot);
+  return startRead(repoRoot, limit);
+}
+
+function startRead(repoRoot: string, limit?: number): Promise<IntentRow[]> {
+  const promise: Promise<IntentRow[]> = api
     .auraIntentRecent(repoRoot, INTENT_READ_LIMIT)
     .then((rows) => {
       // The log is append-only, so a fresh read is a superset of the prior
       // tail — replacing outright is safe.
       cache.set(repoRoot, { rows, readAt: Date.now() });
-      inflight.delete(repoRoot);
+      settle(repoRoot, promise);
       return rows;
     })
     .catch((e) => {
-      inflight.delete(repoRoot);
+      settle(repoRoot, promise);
       throw e;
     });
   inflight.set(repoRoot, promise);
   return promise.then((rows) => take(rows, limit));
+}
+
+/** Clear the in-flight slot, but only if it still belongs to this read.
+ *
+ *  An abandoned read outlives its replacement's start, so an unconditional
+ *  delete here would evict the read that is actually current and let the next
+ *  caller start a third one. */
+function settle(repoRoot: string, promise: Promise<IntentRow[]>): void {
+  if (inflight.get(repoRoot) === promise) inflight.delete(repoRoot);
 }
 
 /** Drop a repo's cached history so the next read goes cold (e.g. after a

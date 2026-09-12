@@ -638,6 +638,17 @@ pub enum RefsSubcommands {
         ref_name: Option<String>,
         #[arg(long)]
         json: bool,
+        /// Additionally require the delegate quorum from .aura/quorum.json
+        /// (k-of-n maintainer endorsements) to be met.
+        #[arg(long)]
+        quorum: bool,
+    },
+    /// Delegate quorum for canonical refs — who owns main. A signed,
+    /// chained policy names the maintainers and the k-of-n threshold
+    /// their endorsements must meet.
+    Quorum {
+        #[command(subcommand)]
+        sub: crate::refs_quorum::QuorumSubcommands,
     },
     /// Push refs/notes/aura-sigs to the remote.
     Push {
@@ -659,7 +670,18 @@ pub enum RefsSubcommands {
 pub fn run(sub: &RefsSubcommands) -> Result<(), Box<dyn std::error::Error>> {
     match sub {
         RefsSubcommands::Sign { ref_name } => run_sign(ref_name.as_deref()),
-        RefsSubcommands::Verify { ref_name, json } => run_verify(ref_name.as_deref(), *json),
+        RefsSubcommands::Verify {
+            ref_name,
+            json,
+            quorum,
+        } => {
+            if *quorum {
+                crate::refs_quorum::run_verify(ref_name.as_deref(), *json)
+            } else {
+                run_verify(ref_name.as_deref(), *json)
+            }
+        }
+        RefsSubcommands::Quorum { sub } => crate::refs_quorum::run(sub),
         RefsSubcommands::Push { remote, json } => run_push(remote, *json),
         RefsSubcommands::Pull { remote, json } => run_pull(remote, *json),
     }

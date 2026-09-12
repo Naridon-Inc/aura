@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI8, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 
 use tauri::{
     AppHandle, LogicalPosition, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
@@ -294,17 +294,58 @@ fn pos_file() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".aura").join("hud-pos.json"))
 }
 
+/// Set when a Moved frame lands; cleared by the writer thread once the
+/// latest position is on disk.
+static POS_DIRTY: AtomicBool = AtomicBool::new(false);
+static POS_WRITER: Once = Once::new();
+
+/// Called for EVERY frame of a HUD drag (`on_hud_moved` ← `on_window_event`,
+/// which runs on the main thread). The in-memory update is the only work
+/// done inline; the fs write is debounced onto its own thread — a drag
+/// used to issue ~60 synchronous `fs::write`s a second on the UI thread,
+/// which is exactly the class of main-thread blocking UI-01 removes. The
+/// last position wins and lands once the drag goes quiet.
 fn remember_save(x: f64, y: f64) {
     if let Ok(mut g) = SAVED_POS.lock() {
         *g = Some((x, y));
     }
-    if let Some(path) = pos_file() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+    POS_DIRTY.store(true, Ordering::Release);
+    POS_WRITER.call_once(|| {
+        let spawned = std::thread::Builder::new()
+            .name("aura-hud-pos-writer".into())
+            .spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                if !POS_DIRTY.swap(false, Ordering::AcqRel) {
+                    continue;
+                }
+                let Some((x, y)) = SAVED_POS.lock().ok().and_then(|g| *g) else {
+                    continue;
+                };
+                if let Some(path) = pos_file() {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(path, format!("{{\"x\":{x},\"y\":{y}}}"));
+                }
+            });
+        if spawned.is_err() {
+            // No writer thread → fall back to writing inline next save
+            // rather than silently never persisting. Rare enough (thread
+            // exhaustion) that the main-thread cost is acceptable.
+            POS_WRITER_FALLBACK.store(true, Ordering::Release);
         }
-        let _ = std::fs::write(path, format!("{{\"x\":{x},\"y\":{y}}}"));
+    });
+    if POS_WRITER_FALLBACK.load(Ordering::Acquire) {
+        if let Some(path) = pos_file() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, format!("{{\"x\":{x},\"y\":{y}}}"));
+        }
     }
 }
+
+static POS_WRITER_FALLBACK: AtomicBool = AtomicBool::new(false);
 
 fn load_saved_pos() -> Option<(f64, f64)> {
     if let Some(p) = SAVED_POS.lock().ok().and_then(|g| *g) {
@@ -548,15 +589,21 @@ mod overlay {
 
     /// Spawn (once) the background loop that re-samples the backdrop every ~600ms
     /// while the HUD is visible, so the glass tracks a changing scene in realtime
-    /// rather than only at summon. The Cocoa work hops to the main thread.
+    /// rather than only at summon.
+    ///
+    /// UI-01: the loop used to hop the ENTIRE cycle — window-server
+    /// screenshot, pixel walk and all — onto the main thread every 600ms,
+    /// turning the runloop into a metronome of capture-sized stalls for as
+    /// long as the HUD was up. Now the cycle runs here on the sampler
+    /// thread and only two tiny Cocoa touches (geometry read, theme apply)
+    /// hop over; see `adapt_cycle`.
     #[cfg(target_os = "macos")]
     fn ensure_adaptive_thread(win: &WebviewWindow<Wry>) {
         let win = win.clone();
         ADAPT_THREAD.call_once(move || {
             std::thread::spawn(move || loop {
                 if HUD_VISIBLE.load(Ordering::Relaxed) {
-                    let w = win.clone();
-                    let _ = win.run_on_main_thread(move || adapt_to_backdrop(&w));
+                    adapt_cycle(&win);
                     std::thread::sleep(Duration::from_millis(600));
                 } else {
                     std::thread::sleep(Duration::from_millis(250));
@@ -565,33 +612,122 @@ mod overlay {
         });
     }
 
+    /// The HUD's frame in CoreGraphics global coordinates plus its window
+    /// number — the only facts the capture needs, and all of them plain
+    /// numbers so the sampler thread can carry them off-main.
+    #[cfg(target_os = "macos")]
+    struct BackdropRect {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        win_num: i64,
+    }
+
+    /// Cocoa-side geometry read — must run on the main thread, and is the
+    /// only part of a sampling cycle that does. Cheap: two window property
+    /// reads and a screen-frame flip.
+    #[cfg(target_os = "macos")]
+    fn read_backdrop_rect(win: &WebviewWindow<Wry>) -> Option<BackdropRect> {
+        let w = ns(win)?;
+        unsafe {
+            let frame: NSRect = msg_send![w, frame];
+            let win_num: i64 = msg_send![w, windowNumber];
+            // Flip to CoreGraphics global coords (top-left origin). The flip
+            // reference is the PRIMARY display height (the screen at the
+            // global origin / index 0).
+            let screens: id = msg_send![class!(NSScreen), screens];
+            if screens.is_null() {
+                return None;
+            }
+            let primary: id = msg_send![screens, objectAtIndex: 0u64];
+            if primary.is_null() {
+                return None;
+            }
+            let pf: NSRect = msg_send![primary, frame];
+            let cg_y = pf.size.height - (frame.origin.y + frame.size.height);
+            Some(BackdropRect {
+                x: frame.origin.x,
+                y: cg_y,
+                w: frame.size.width,
+                h: frame.size.height,
+                win_num,
+            })
+        }
+    }
+
+    /// One realtime sampling cycle, run on the sampler thread. Main-thread
+    /// hops are limited to the two cheap Cocoa touches; the window-server
+    /// capture and the luminance walk stay here. A busy main thread makes
+    /// the cycle skip (recv_timeout) rather than queue behind it — dropped
+    /// samples cost nothing, a stacked-up runloop costs UI-01.
+    #[cfg(target_os = "macos")]
+    fn adapt_cycle(win: &WebviewWindow<Wry>) {
+        ensure_capture_access();
+        let (tx, rx) = std::sync::mpsc::channel::<Option<BackdropRect>>();
+        let w_geom = win.clone();
+        if win
+            .run_on_main_thread(move || {
+                let _ = tx.send(read_backdrop_rect(&w_geom));
+            })
+            .is_err()
+        {
+            return;
+        }
+        let Ok(Some(rect)) = rx.recv_timeout(Duration::from_millis(300)) else {
+            return;
+        };
+        let avg = sample_backdrop_luminance(&rect);
+        let prev = LAST_THEME.load(Ordering::Relaxed);
+        let code = theme_verdict(prev, avg);
+        if code == prev {
+            return;
+        }
+        LAST_THEME.store(code, Ordering::Relaxed);
+        eprintln!("[HUD] adapt: avg={avg:?} → theme={code} (was {prev})");
+        let w_apply = win.clone();
+        let _ = win.run_on_main_thread(move || {
+            if let Some(w) = ns(&w_apply) {
+                unsafe { apply_theme(w, code) };
+            }
+        });
+    }
+
+    /// Light/dark verdict with hysteresis: once light, hold light until
+    /// clearly dark (<111); once dark, hold dark until clearly bright
+    /// (>145); from cold, split at the midpoint. Keeps a near-threshold
+    /// scene from strobing. `None` (couldn't sample) → follow the system.
+    /// Pure — see the tests at the bottom of this file.
+    pub(crate) fn theme_verdict(prev: i8, avg: Option<f64>) -> i8 {
+        match avg {
+            None => -1,
+            Some(v) => {
+                let light = match prev {
+                    1 => v > 111.0,
+                    0 => v > 145.0,
+                    _ => v > 128.0,
+                };
+                if light {
+                    1
+                } else {
+                    0
+                }
+            }
+        }
+    }
+
     /// Sample the backdrop's brightness and, IF the light/dark verdict changed
     /// (with hysteresis), pin the window appearance + frost material to match.
-    /// Must run on the main thread (it touches Cocoa); both callers honour that.
+    /// Must run on the main thread (it touches Cocoa) — this is the instant
+    /// first-paint path `set_visible` runs once per summon; the realtime
+    /// follow-up work happens off-main in `adapt_cycle`.
     pub fn adapt_to_backdrop(win: &WebviewWindow<Wry>) {
         #[cfg(target_os = "macos")]
         if let Some(w) = ns(win) {
             ensure_capture_access();
-            let avg = unsafe { sample_backdrop_luminance(w) };
+            let avg = read_backdrop_rect(win).and_then(|r| sample_backdrop_luminance(&r));
             let prev = LAST_THEME.load(Ordering::Relaxed);
-            // Verdict with hysteresis: once light, hold light until clearly dark
-            // (<111); once dark, hold dark until clearly bright (>145); from cold,
-            // split at the midpoint. Keeps a near-threshold scene from strobing.
-            let code: i8 = match avg {
-                None => -1, // couldn't sample → follow the system
-                Some(v) => {
-                    let light = match prev {
-                        1 => v > 111.0,
-                        0 => v > 145.0,
-                        _ => v > 128.0,
-                    };
-                    if light {
-                        1
-                    } else {
-                        0
-                    }
-                }
-            };
+            let code = theme_verdict(prev, avg);
             if code != prev {
                 unsafe { apply_theme(w, code) };
                 LAST_THEME.store(code, Ordering::Relaxed);
@@ -641,34 +777,24 @@ mod overlay {
     /// average luminance reads as "light". `None` when the capture is
     /// unavailable (no permission yet, off-screen, empty) so the caller can fall
     /// back to the system appearance.
+    ///
+    /// Deliberately takes the pre-read `BackdropRect` rather than the
+    /// window: the window-server capture and the pixel walk are the
+    /// expensive part of a sampling cycle, and with no Cocoa touches in
+    /// here the whole thing is safe to run on the sampler thread.
     #[cfg(target_os = "macos")]
-    unsafe fn sample_backdrop_luminance(w: id) -> Option<f64> {
+    fn sample_backdrop_luminance(rect: &BackdropRect) -> Option<f64> {
         use core_graphics::display::CGDisplay;
         use core_graphics::geometry::{CGPoint, CGRect, CGSize};
         use core_graphics::window::{
             kCGWindowImageNominalResolution, kCGWindowListOptionOnScreenBelowWindow,
         };
 
-        // HUD frame in Cocoa global points (bottom-left origin) + its window id.
-        let frame: NSRect = msg_send![w, frame];
-        let win_num: i64 = msg_send![w, windowNumber];
-        // Flip to CoreGraphics global coords (top-left origin). The flip
-        // reference is the PRIMARY display height (the screen at the global
-        // origin / index 0).
-        let screens: id = msg_send![class!(NSScreen), screens];
-        if screens.is_null() {
-            return None;
-        }
-        let primary: id = msg_send![screens, objectAtIndex: 0u64];
-        if primary.is_null() {
-            return None;
-        }
-        let pf: NSRect = msg_send![primary, frame];
-        let cg_y = pf.size.height - (frame.origin.y + frame.size.height);
         let bounds = CGRect::new(
-            &CGPoint::new(frame.origin.x, cg_y),
-            &CGSize::new(frame.size.width, frame.size.height),
+            &CGPoint::new(rect.x, rect.y),
+            &CGSize::new(rect.w, rect.h),
         );
+        let win_num = rect.win_num;
         // Composite ONLY the windows below the HUD in that rect → never the HUD
         // itself. Nominal resolution keeps the image small (1× points) — plenty
         // for a brightness read and fast.
@@ -875,8 +1001,9 @@ mod overlay {
     /// **sidebar** instead keeps its right edge + vertical centre as the content
     /// size changes. The frost is re-fitted per mode (or hidden, in minimal).
     ///
-    /// Cocoa must be touched on the main thread; `#[tauri::command]`s run off
-    /// it, so this hops over via `run_on_main_thread`.
+    /// Cocoa must be touched on the main thread. Sync `#[tauri::command]`s
+    /// already run there on macOS, but this is also called from off-main
+    /// paths, so it always hops via `run_on_main_thread` to be safe either way.
     pub fn resize(win: &WebviewWindow<Wry>, win_h: f64, capsule_h: f64, req_width: Option<f64>) {
         #[cfg(target_os = "macos")]
         {
@@ -1274,8 +1401,9 @@ pub fn hud_workspace_menu(app: AppHandle<Wry>, projects: Vec<HudMenuProject>, x:
     let Some(win) = app.get_webview_window(HUD_LABEL) else {
         return;
     };
-    // NSMenu construction + popup must run on the main thread; commands run off
-    // it, so hop over and build there.
+    // NSMenu construction + popup must run on the main thread. A sync command
+    // is already there on macOS, but hop via run_on_main_thread anyway so this
+    // stays correct if ever called from another thread.
     let win_main = win.clone();
     let _ = win.run_on_main_thread(move || {
         if let Err(e) = build_workspace_menu(&win_main, &projects, x, y) {
@@ -1553,4 +1681,38 @@ fn build_generic_menu(
     _y: f64,
 ) -> tauri::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overlay::theme_verdict;
+
+    // The hysteresis contract, pinned now that the verdict is a pure
+    // function the off-main sampler and the instant reveal path share:
+    // once light, hold light until clearly dark (<111); once dark, hold
+    // dark until clearly bright (>145); from cold, split at 128.
+    #[test]
+    fn verdict_hysteresis_holds_the_current_theme_near_the_threshold() {
+        // From cold (uninit -2 / system -1): midpoint split.
+        assert_eq!(theme_verdict(-2, Some(129.0)), 1);
+        assert_eq!(theme_verdict(-2, Some(128.0)), 0);
+        assert_eq!(theme_verdict(-1, Some(200.0)), 1);
+        // Currently light: a mid backdrop (128) stays light; only a
+        // clearly dark one (≤111) flips.
+        assert_eq!(theme_verdict(1, Some(128.0)), 1);
+        assert_eq!(theme_verdict(1, Some(112.0)), 1);
+        assert_eq!(theme_verdict(1, Some(111.0)), 0);
+        // Currently dark: a mid backdrop stays dark; only clearly bright
+        // (>145) flips.
+        assert_eq!(theme_verdict(0, Some(128.0)), 0);
+        assert_eq!(theme_verdict(0, Some(145.0)), 0);
+        assert_eq!(theme_verdict(0, Some(146.0)), 1);
+    }
+
+    #[test]
+    fn verdict_falls_back_to_system_when_capture_fails() {
+        for prev in [-2i8, -1, 0, 1] {
+            assert_eq!(theme_verdict(prev, None), -1);
+        }
+    }
 }

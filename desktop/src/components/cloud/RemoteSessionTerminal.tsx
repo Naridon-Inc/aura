@@ -20,6 +20,7 @@ import { useEffect, useState } from "react";
 import { askBoot, openAttach, type Place } from "../../lib/place";
 import { Terminal } from "../Terminal";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { SessionCatchUp } from "./SessionCatchUp";
 
 export function RemoteSessionTerminal({
   place,
@@ -83,12 +84,28 @@ export function RemoteSessionTerminal({
     );
   }
 
+  // The terminal shows the session from the moment you sat down. What it did
+  // before that — the part a person coming back actually wants — is read off
+  // the machine and shown above it, when it has been long enough to matter
+  // (AURA-1308). A machine id is what the capture is keyed by; a session on
+  // this laptop is watched live and has nothing to catch up on.
   return (
-    <Terminal
-      instanceId={instanceId}
-      cwd={cwd}
-      repoRoot={repoRoot}
-      bootCommand={boot}
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      {place.machineId && (
+        <SessionCatchUp
+          key={`${place.machineId}:${session}`}
+          machineId={place.machineId}
+          session={session}
+        />
+      )}
+      <div className="min-h-0 flex-1">
+        <Terminal
+          instanceId={instanceId}
+          cwd={cwd}
+          repoRoot={repoRoot}
+          bootCommand={boot}
+        />
+      </div>
+    </div>
   );
 }

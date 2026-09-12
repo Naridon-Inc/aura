@@ -13,7 +13,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, type ClaudeSession } from "../../lib/api";
-import { fetchSessions } from "../../lib/sessionsCache";
+import { fetchSessions, peekSessions } from "../../lib/sessionsCache";
+import { peekCache, writeCache } from "../../lib/resourceCache";
 import { IntentStory, useIntentReport, formatRelative } from "./IntentStory";
 import { Button } from "../ui/button";
 
@@ -28,15 +29,32 @@ type CommitListEntry = {
 
 type Props = { repoRoot: string; onClose: () => void };
 
+/** Cache key for this page's commit timeline — `-n 50` is baked into it so a
+ *  future depth change can't silently read the wrong bundle. */
+function timelineKey(repoRoot: string): string {
+  return `intentVsActual:list:${repoRoot}:50`;
+}
+
 export function IntentInspector({ repoRoot, onClose }: Props) {
-  const [commits, setCommits] = useState<CommitListEntry[]>([]);
-  const [listLoading, setListLoading] = useState(true);
+  // Seeded from the process-lifetime cache: a tab switch unmounts this page,
+  // so without it every visit re-shells `aura intent-vs-actual list` behind a
+  // "loading…" rail. `refreshList` revalidates underneath.
+  const [commits, setCommits] = useState<CommitListEntry[]>(
+    () => peekCache<CommitListEntry[]>(timelineKey(repoRoot)) ?? [],
+  );
+  const [listLoading, setListLoading] = useState(
+    () => peekCache<CommitListEntry[]>(timelineKey(repoRoot)) == null,
+  );
   const [listError, setListError] = useState<string | null>(null);
-  const [selectedSha, setSelectedSha] = useState<string | null>(null);
+  const [selectedSha, setSelectedSha] = useState<string | null>(
+    () => peekCache<CommitListEntry[]>(timelineKey(repoRoot))?.[0]?.commit_sha ?? null,
+  );
   // Real Claude sessions — used to surface the agent's actual prompt as the
   // "Asked" beat instead of the earliest logged intent (which is what the AI
   // *said*, not what the user *asked*). Best-effort; absence is fine.
-  const [sessions, setSessions] = useState<ClaudeSession[]>([]);
+  const [sessions, setSessions] = useState<ClaudeSession[]>(
+    () => peekSessions(repoRoot) ?? [],
+  );
 
   // The selected commit's full alignment report (asked/said/did/verdict),
   // loaded by the shared hook so this page and the Alignment tab match.
@@ -47,12 +65,15 @@ export function IntentInspector({ repoRoot, onClose }: Props) {
 
   useEffect(() => {
     let alive = true;
+    // The roster comes off the cache the other Trace panes fill, so whichever
+    // loaded first warms this one. A failed refresh keeps what we already have.
+    const cached = peekSessions(repoRoot);
     fetchSessions(repoRoot)
       .then((s) => {
         if (alive) setSessions(Array.isArray(s) ? s : []);
       })
       .catch(() => {
-        if (alive) setSessions([]);
+        if (alive && !cached) setSessions([]);
       });
     return () => {
       alive = false;
@@ -60,7 +81,13 @@ export function IntentInspector({ repoRoot, onClose }: Props) {
   }, [repoRoot]);
 
   const refreshList = useCallback(async () => {
-    setListLoading(true);
+    // Stale-while-revalidate: with a cached timeline already painted, the
+    // refresh runs underneath — flipping to "loading…" would blank rows we
+    // can still show truthfully (each carries its own commit time).
+    const key = timelineKey(repoRoot);
+    const cached = peekCache<CommitListEntry[]>(key);
+    if (cached) setCommits(cached);
+    setListLoading(cached == null);
     setListError(null);
     try {
       const r = await api.auraCli(repoRoot, [
@@ -74,12 +101,15 @@ export function IntentInspector({ repoRoot, onClose }: Props) {
         throw new Error(r.stderr.trim() || `aura exit ${r.status}`);
       const text = r.stdout.trim();
       const parsed = text ? (JSON.parse(text) as CommitListEntry[]) : [];
+      writeCache(key, parsed);
       setCommits(parsed);
       if (parsed.length > 0 && selectedSha === null) {
         setSelectedSha(parsed[0].commit_sha);
       }
     } catch (e) {
-      setListError(e instanceof Error ? e.message : String(e));
+      // Only surface the failure when there's no cached timeline to keep —
+      // the error state replaces the whole rail.
+      if (!cached) setListError(e instanceof Error ? e.message : String(e));
     } finally {
       setListLoading(false);
     }

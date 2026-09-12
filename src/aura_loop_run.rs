@@ -112,7 +112,75 @@ enum Outcome {
     Failed { reason: String },
 }
 
+/// Renews the runner's lease on a node while its agent works, so a lane that
+/// outlives `--lease-secs` is never reclaimed — and re-dispatched to a second
+/// agent — out from under a live worker. Dropping it stops the renewal thread.
+///
+/// Renewal targets the MAIN repo's graph store (lease sidecars live under the
+/// main `.aura/a2a/`, never inside a throwaway worktree). If a renewal is
+/// refused the lease is already lost — the thread stops and the runner's
+/// terminal `*_as` write reports the loss honestly.
+struct LeaseHeartbeat {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LeaseHeartbeat {
+    fn start(repo_root: &Path, task_id: &str, holder: &str, lease_secs: i64) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let root = repo_root.to_path_buf();
+        let id = task_id.to_string();
+        let holder = holder.to_string();
+        // Renew well before expiry (a third of the lease), but never busier
+        // than every 10s nor lazier than every 5 minutes.
+        let interval = (lease_secs / 3).clamp(10, 300) as u64;
+        let handle = std::thread::spawn(move || {
+            let graph = LoopGraph::at(&root);
+            let mut elapsed = 0u64;
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(1));
+                elapsed += 1;
+                if elapsed >= interval {
+                    elapsed = 0;
+                    if graph.renew(&id, &holder, lease_secs).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        LeaseHeartbeat { stop, handle: Some(handle) }
+    }
+}
+
+impl Drop for LeaseHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 /// Drive the loop to completion (or to `max`, or forever under `--watch`).
+/// Mirror a node to the cloud when this scope ends, however it ends.
+///
+/// A node's terminal write happens in one of half a dozen branches — merged,
+/// failed its gate, wouldn't merge back, lease lost — and an early `?` can
+/// leave through any of them. A drop guard mirrors exactly once from all of
+/// them, so the console never keeps showing a node as working because the run
+/// took an unusual exit.
+struct MirrorOnDrop {
+    root: std::path::PathBuf,
+    id: String,
+}
+
+impl Drop for MirrorOnDrop {
+    fn drop(&mut self) {
+        crate::crew_push::mirror_one(&self.root, &self.id);
+    }
+}
+
 pub fn run(repo_root: &Path, opts: &RunOpts) -> Result<(), Box<dyn std::error::Error>> {
     let graph = LoopGraph::at(repo_root);
 
@@ -219,6 +287,10 @@ pub fn run(repo_root: &Path, opts: &RunOpts) -> Result<(), Box<dyn std::error::E
             Ok(t) => t,
             Err(_) => continue,
         };
+        // Tell the console the node is in flight, and again when it lands.
+        // Without this a run only reached the web if a person remembered to
+        // type `aura crew push` afterwards.
+        crate::crew_push::mirror_one(repo_root, &claimed.id);
         if !opts.json {
             eprintln!(
                 "{} {} {}",
@@ -230,6 +302,10 @@ pub fn run(repo_root: &Path, opts: &RunOpts) -> Result<(), Box<dyn std::error::E
 
         // 4. Dispatch through the harness.
         let outcome = dispatch(repo_root, &claimed, opts);
+        let _mirror = MirrorOnDrop {
+            root: repo_root.to_path_buf(),
+            id: claimed.id.clone(),
+        };
         let entry = match outcome {
             Outcome::Completed { commit } => {
                 graph
@@ -347,7 +423,9 @@ struct WorkerResult {
 }
 
 /// Parallel loop runner. Each ready node builds in its own throwaway git
-/// worktree on branch `loop/<id>`; up to `opts.jobs` run at once. Only the
+/// worktree on branch `loop/<what-the-task-is>`, named off the node's title so
+/// the crew's copies are told apart by their work; up to `opts.jobs` run at
+/// once. Only the
 /// main thread ever claims/completes/fails nodes or touches the repo index —
 /// worktree creation, merge-back, and discard are all serialized here — so the
 /// agents run concurrently without racing on the git lock. Work that passes the
@@ -423,6 +501,7 @@ fn run_parallel(
         let hit_max = opts.max > 0 && (done + in_flight) >= opts.max;
         if !hit_max {
             while in_flight < opts.jobs && !(opts.max > 0 && (done + in_flight) >= opts.max) {
+
                 let reclaimed = graph.reclaim_stale_in(scope);
                 if !reclaimed.is_empty() && !opts.json {
                     eprintln!("{} reclaimed {} stale node(s)", "↻".yellow(), reclaimed.len());
@@ -437,11 +516,17 @@ fn run_parallel(
                     Ok(t) => t,
                     Err(_) => continue,
                 };
+                crate::crew_push::mirror_one(repo_root, &claimed.id);
 
                 // Branch the worktree off the repo's CURRENT head so it inherits
                 // every node merged back so far (dependents build on their deps).
                 let base = head_sha(repo_root);
-                let wt = match loop_worktree::create(repo_root, &claimed.id, base.as_deref()) {
+                let wt = match loop_worktree::create(
+                    repo_root,
+                    &claimed.id,
+                    Some(claimed.title.as_str()),
+                    base.as_deref(),
+                ) {
                     Ok(w) => w,
                     Err(e) => {
                         let reason = format!("couldn't set up an isolated workspace: {}", first_line(&e));
@@ -477,7 +562,18 @@ fn run_parallel(
                 let tx = tx.clone();
                 let opts_for_worker = opts.clone();
                 let root_for_worker = repo_root.to_path_buf();
+                // The lease is renewed from inside the worker, so it needs
+                // its own copy of the holder id rather than a borrow that
+                // dies with this iteration.
+                let runner_for_worker = runner.to_string();
                 std::thread::spawn(move || {
+                    // Whichever way this worker exits — merged, failed its
+                    // gate, wouldn't merge back — the console hears about it
+                    // once, before the thread ends.
+                    let _mirror = MirrorOnDrop {
+                        root: root_for_worker.clone(),
+                        id: claimed.id.clone(),
+                    };
                     // The worker only ever touches its own worktree dir — never
                     // the repo index — so this is safe to run off the main thread.
                     // Bring the worktree to the project's declared environment
@@ -509,7 +605,14 @@ fn run_parallel(
                             );
                         }
                     }
+                    let heartbeat = LeaseHeartbeat::start(
+                        &root_for_worker,
+                        &claimed.id,
+                        &runner_for_worker,
+                        opts_for_worker.lease_secs,
+                    );
                     let outcome = dispatch(&wt.path, &claimed, &opts_for_worker);
+                    drop(heartbeat);
                     let _ = tx.send(WorkerResult { task: claimed, wt, outcome });
                 });
                 in_flight += 1;
@@ -534,7 +637,7 @@ fn run_parallel(
         // blocks until that worker reports rather than erroring.
         let Ok(res) = rx.recv() else { break };
         in_flight -= 1;
-        let (entry, node) = finish_worker(repo_root, opts, graph, res)?;
+        let (entry, node) = finish_worker(repo_root, opts, graph, runner, res)?;
         record.push(node);
         log.push(entry);
         done += 1;
@@ -557,19 +660,53 @@ fn finish_worker(
     repo_root: &Path,
     opts: &RunOpts,
     graph: &LoopGraph,
+    runner: &str,
     res: WorkerResult,
 ) -> Result<(serde_json::Value, RunNode), Box<dyn std::error::Error>> {
     let WorkerResult { task, wt, outcome } = res;
     match outcome {
         Outcome::Completed { commit } => {
+            // Before any merge: is this still our node? If the lease lapsed
+            // and the node was reclaimed (possibly already re-dispatched),
+            // merging the stale worker's branch would land the same work
+            // twice. Renewing both verifies ownership and extends the lease
+            // across the merge window.
+            if let Err(e) = graph.renew(&task.id, runner, opts.lease_secs) {
+                let _ = loop_worktree::discard(repo_root, &wt);
+                let detail = format!("lease lost — work discarded to avoid a duplicate merge: {}", e);
+                if !opts.json {
+                    eprintln!("  {} {} {}", "⚠ lease lost".yellow(), task.short_id().yellow(), detail.dimmed());
+                }
+                let node = RunNode {
+                    id: task.id.clone(),
+                    title: task.title.clone(),
+                    outcome: "lease-lost".into(),
+                    commit: None,
+                    detail: Some(detail.clone()),
+                };
+                return Ok((serde_json::json!({"id": task.id, "status": "lease-lost", "error": detail}), node));
+            }
             // The agent's work passed its gate in the worktree — bring the
             // branch into the main line, then tear the worktree down.
             match loop_worktree::merge_back(repo_root, &wt) {
                 Ok(()) => {
                     let _ = loop_worktree::discard(repo_root, &wt);
-                    graph
-                        .complete(&task.id, commit.clone(), None)
-                        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                    if let Err(e) = graph.complete_as(&task.id, runner, commit.clone(), None) {
+                        // The merge landed but the board moved in the tiny
+                        // window since the renewal — report it, don't stomp.
+                        let detail = format!("merged, but the board wasn't ours anymore: {}", e);
+                        if !opts.json {
+                            eprintln!("  {} {} {}", "⚠ lease lost".yellow(), task.short_id().yellow(), detail.dimmed());
+                        }
+                        let node = RunNode {
+                            id: task.id.clone(),
+                            title: task.title.clone(),
+                            outcome: "lease-lost".into(),
+                            commit: commit.clone(),
+                            detail: Some(detail.clone()),
+                        };
+                        return Ok((serde_json::json!({"id": task.id, "status": "lease-lost", "commit": commit, "error": detail}), node));
+                    }
                     if !opts.json {
                         let c = commit.as_deref().unwrap_or("(no new commit)");
                         eprintln!("  {} {} {}", "✓ merged".green(), task.short_id().yellow(), c.dimmed());
@@ -589,10 +726,11 @@ fn finish_worker(
                     // on the new base.
                     let _ = loop_worktree::discard(repo_root, &wt);
                     let reason = format!("work was good but it wouldn't merge back cleanly: {}", first_line(&e));
-                    graph
-                        .fail(&task.id, reason.clone())
-                        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-                    if !opts.json {
+                    if let Err(e) = graph.fail_as(&task.id, runner, reason.clone()) {
+                        if !opts.json {
+                            eprintln!("  {} {} {}", "⚠ lease lost".yellow(), task.short_id().yellow(), e.dimmed());
+                        }
+                    } else if !opts.json {
                         eprintln!("  {} {} {}", "✗ merge".red(), task.short_id().yellow(), reason.dimmed());
                     }
                     let node = RunNode {
@@ -610,10 +748,12 @@ fn finish_worker(
             // Failed the gate: the bad commit lives only on the throwaway branch,
             // so discarding the worktree IS the rollback — nothing reaches main.
             let _ = loop_worktree::discard(repo_root, &wt);
-            graph
-                .fail(&task.id, reason.clone())
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            if !opts.json {
+            if let Err(e) = graph.fail_as(&task.id, runner, reason.clone()) {
+                // The node isn't ours anymore — someone else's outcome stands.
+                if !opts.json {
+                    eprintln!("  {} {} {}", "⚠ lease lost".yellow(), task.short_id().yellow(), e.dimmed());
+                }
+            } else if !opts.json {
                 eprintln!("  {} {} {}", "✗ failed".red(), task.short_id().yellow(), reason.dimmed());
             }
             let node = RunNode {
@@ -802,6 +942,20 @@ fn dispatch(work_dir: &Path, task: &LoopTask, opts: &RunOpts) -> Outcome {
     // echo stdout at all, so without this a non-zero exit is reported as a bare
     // "exited 1" with no cause. The ring is capped so a chatty agent can't grow
     // it without bound.
+    //
+    // stderr is drained on its OWN thread, concurrently with the stdout loop
+    // below. Reading the two pipes sequentially deadlocked the runner: an
+    // agent that filled the stderr pipe buffer (~64KB) before closing stdout
+    // blocked on its stderr write, so its stdout never reached EOF, so we
+    // never got to the stderr read — both processes waiting on each other
+    // forever.
+    let stderr_drain = child.stderr.take().map(|mut err| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = err.read_to_string(&mut buf);
+            buf
+        })
+    });
     let mut stdout_tail: Vec<String> = Vec::new();
     const STDOUT_TAIL_MAX: usize = 8;
     if let Some(out) = child.stdout.take() {
@@ -838,10 +992,9 @@ fn dispatch(work_dir: &Path, task: &LoopTask, opts: &RunOpts) -> Outcome {
             }
         }
     }
-    let mut stderr_buf = String::new();
-    if let Some(mut err) = child.stderr.take() {
-        let _ = err.read_to_string(&mut stderr_buf);
-    }
+    let stderr_buf = stderr_drain
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
 
     let exit = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
     if exit != 0 {
@@ -1063,13 +1216,23 @@ pub fn seed_from_plan(
     let mut prev: Option<String> = None;
     for (title, body) in waves {
         let deps = prev.iter().cloned().collect::<Vec<_>>();
+        // A seeded wave is directly executable, and the execution gate
+        // (WRK-02) requires acceptance on wave-kind nodes. The wave's own
+        // section text IS its checklist — the plan author wrote what done
+        // looks like right there — so it doubles as the acceptance the
+        // verify gate proves against. Empty sections fall back to the title.
+        let acceptance = if body.trim().is_empty() {
+            title.clone()
+        } else {
+            body.clone()
+        };
         let task = graph.create(
             title.clone(),
             body,
             "medium".to_string(),
             aura_loop::KIND_WAVE.to_string(),
             deps,
-            None,
+            Some(acceptance),
             Some(agent.to_string()),
             vec!["seed".to_string()],
         )?;

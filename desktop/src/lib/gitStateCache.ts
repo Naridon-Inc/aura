@@ -24,7 +24,13 @@
 // It must never resolve with a zeroed struct or a stale value dressed as
 // current, or it would defeat every one of those catches at once.
 
-import { api, type AheadBehind, type DiffStats } from "./api";
+import type { AheadBehind, DiffStats } from "./api";
+import {
+  gitAheadBehind,
+  gitDiffStats,
+  placeScope,
+  rootOfScope,
+} from "./place/workApi";
 import { dropShared, readShared, sharedReader } from "./sharedRead";
 
 /** How long a read stays good enough to hand to the next caller.
@@ -38,24 +44,29 @@ const FRESH_MS = 5_000;
 
 // One shared reader per command. Keeping them separate matters: a caller that
 // wants only ahead/behind must not be made to pay for the diff stats too.
+//
+// Keyed by `placeScope(repoRoot)`, not the root: a project the window is
+// standing in on a machine answers these off that machine's checkout, and an
+// answer read there must not be served to a caller asking about the copy on
+// this laptop, or the other way round (AURA-1306).
 const aheadBehind = sharedReader(
-  (repoRoot: string) => api.gitAheadBehind(repoRoot),
+  (scope: string) => gitAheadBehind(rootOfScope(scope)),
   FRESH_MS,
 );
 const diffStats = sharedReader(
-  (repoRoot: string) => api.gitDiffStats(repoRoot),
+  (scope: string) => gitDiffStats(rootOfScope(scope)),
   FRESH_MS,
 );
 
 /** Branch ahead/behind, shared across the surfaces polling for it. Rejects if
  *  git could not be read — never resolves to a zeroed struct. */
 export function fetchAheadBehind(repoRoot: string): Promise<AheadBehind> {
-  return readShared(aheadBehind, repoRoot);
+  return readShared(aheadBehind, placeScope(repoRoot));
 }
 
 /** Working-tree diff stats vs HEAD, shared the same way. */
 export function fetchDiffStats(repoRoot: string): Promise<DiffStats> {
-  return readShared(diffStats, repoRoot);
+  return readShared(diffStats, placeScope(repoRoot));
 }
 
 /** Throw away everything known about the working tree, so the next read is

@@ -270,14 +270,20 @@ fn decide(
     let verify_passed = verify_ok == Some(true);
 
     match verdict {
-        // Nothing the goal needs got built. For code work that's a failure; for
-        // a non-code node (#4) the build-proof simply can't judge it — keep it.
+        // Nothing the goal needs got built — according to the free build-proof.
+        // That proof scores GUESSED symbol names against the AST (two
+        // decompositions of one goal routinely invent different names), so a
+        // zero is weak evidence on its own. When a real verify command ran and
+        // passed, that's the stronger signal: keep the work and name the
+        // disagreement. The proof only blocks when it is the ONLY evidence
+        // there is (no verify command ran) — and never for non-code nodes
+        // (#4), whose "not built" verdict is expected.
         Some("not_wired") => {
             if proof_blocks && !verify_passed {
                 (
                     false,
                     format!(
-                        "The goal isn't built yet ({ok} of {total} checks) — {}.",
+                        "The goal isn't built yet ({ok} of {total} checks) and no check command vouches for this work — {}.",
                         outcome_phrase(rollback_enabled)
                     ),
                 )
@@ -383,17 +389,52 @@ fn verdict_rank(v: Verdict) -> u8 {
     }
 }
 
-/// Run the verify command through `sh -c`, inheriting stdio, return its code.
-/// Mirrors `aura_loop_run::run_verify`.
+/// Run the verify command through `sh -c` and return its exit code. Both of
+/// the command's output streams are pumped to OUR stderr (the human log
+/// channel): inheriting stdout let a `cargo test` run print straight into the
+/// runner's `--json` stdout, corrupting the machine-readable output the
+/// desktop parses. The pumping is live (thread per pipe), so a human watching
+/// a long test run still sees progress as it happens.
 fn run_verify(repo_root: &Path, cmd_str: &str) -> i32 {
-    Command::new("sh")
+    let mut child = match Command::new("sh")
         .arg("-c")
         .arg(cmd_str)
         .current_dir(repo_root)
-        .status()
-        .ok()
-        .and_then(|s| s.code())
-        .unwrap_or(1)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return 1,
+    };
+    let pumps: Vec<_> = [
+        child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+        child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|mut pipe| {
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let mut buf = [0u8; 8192];
+            loop {
+                match std::io::Read::read(&mut pipe, &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut err = std::io::stderr();
+                        let _ = err.write_all(&buf[..n]);
+                        let _ = err.flush();
+                    }
+                }
+            }
+        })
+    })
+    .collect();
+    for p in pumps {
+        let _ = p.join();
+    }
+    child.wait().ok().and_then(|s| s.code()).unwrap_or(1)
 }
 
 /// Current `git HEAD` sha (full), or `None` outside a repo / on error.
@@ -612,6 +653,19 @@ mod tests {
         ];
         let s = strongest_proof(&proofs).unwrap();
         assert_eq!(s.verdict, Verdict::NotWired);
+    }
+
+    #[test]
+    fn run_verify_survives_a_pipe_flooding_command_and_keeps_its_exit_code() {
+        // Far more than a pipe buffer on BOTH streams: draining them
+        // sequentially would deadlock the runner; the per-pipe pumps must
+        // drain concurrently and still surface the command's real exit code.
+        let dir = std::env::temp_dir();
+        let code = run_verify(
+            &dir,
+            "yes x | head -c 200000; yes e | head -c 200000 >&2; exit 7",
+        );
+        assert_eq!(code, 7);
     }
 
     #[test]

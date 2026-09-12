@@ -112,6 +112,14 @@ impl BundleIntent {
             signed_block_id: self.signed_block_id.clone(),
             key_id: self.key_id.clone(),
             source: self.source.clone(),
+            file: None,
+            session_id: None,
+            // A bundle carries the reason itself, so there is no separate
+            // mechanical description to distinguish it from, and no tool
+            // call it was composed about.
+            stated_at: None,
+            change: None,
+            tool: None,
         };
         // serde_json on a serde_json::Value is deterministic for object
         // key order (it preserves insertion order via the map impl used

@@ -5,14 +5,18 @@
 
 /** Code Map (the semantic graph pane, `SemanticGraphPane`).
  *
- *  Disabled: opening it freezes the app on real-world repos — the pane builds
- *  the full project graph eagerly with no virtualization. Gating this flag
- *  hides the sidebar row, the menu item, and the `/graph` command, and short
- *  -circuits every store opener + the WorkSurface render so a stale persisted
- *  "graph was open" snapshot can't re-mount it on launch.
+ *  Enabled: the pane is incremental now. The full graph never crosses IPC —
+ *  the backend serves bounded, ranked views (`aura_kg_view`, capped at 350
+ *  nodes / 900 edges per response) plus on-demand `aura_kg_explain` /
+ *  `aura_kg_path`, all cached in-process behind an `aura_kg_ensure`
+ *  handshake that returns stats only. Stress-tested against a synthetic
+ *  20k-node / 78k-edge graph (`cmd_kg.rs::view_tests`) — selection, search,
+ *  focus, path and explain all stay well inside the budget.
  *
- *  Flip to `true` to re-enable once the pane is made incremental. */
-export const CODE_MAP_ENABLED = false;
+ *  Flip to `false` to hide the sidebar row, the menu item, and the `/graph`
+ *  command, and short-circuit every store opener + the WorkSurface render so
+ *  a stale persisted "graph was open" snapshot can't re-mount it on launch. */
+export const CODE_MAP_ENABLED = true;
 
 /** Trace v2 — the calm, entire.io-style Trace surface.
  *
@@ -49,13 +53,33 @@ export const TEAM_ACTIVITY_ENABLED = true;
 
 /** Memory surface (`MemoryDialog` — Aura's project-memory store).
  *
- *  Disabled: adding a fact is wired to `auraMemoryWriteEntry` but the surface
- *  doesn't reflect the write back, so it reads as a no-op. Hidden until it
- *  either works end to end or is folded into the agent-customizations surface
- *  where per-agent memory already lives.
+ *  Enabled (AUDIT-CTX-05). The defects that kept it dark are fixed:
+ *  - adds/edits/forgets reflect immediately — every mutation shells the
+ *    CLI's reconciled write path and the backend emits `memory:changed`,
+ *    which the dialog, badge, and Customize panes all listen for (no
+ *    restart, no stale surface);
+ *  - the add composer renders on an empty store (the old "Add the first
+ *    fact" button opened nothing);
+ *  - writes can no longer corrupt the store (the composer offers only
+ *    entry-shaped sections; `decisions`/`architecture` are rejected with a
+ *    plain-language explanation);
+ *  - worktree projects read/write the same memory file the CLI uses;
+ *  - entries are Ed25519-signed at mint and verified at view time, carry a
+ *    scope manifest and a confidence weight, sharing is explicit
+ *    (memory-cloud push of a signed envelope), and forget is soft by
+ *    default with a separate hard "Erase" privacy path.
+ *
+ *  Performance validation (the flip gate): `aura-cli
+ *  src/memory/mod.rs::stress_tests::stress_large_memory_stays_bounded_and_fast`
+ *  drives a large-repository store — 4 sections × 300 entries with
+ *  256-dim embeddings, 100 architecture components, 200 timeline rows —
+ *  through ranked search, candidate scans, full serde and prune inside a
+ *  5s ceiling, with live facts surviving prune. Keep that test green
+ *  before touching memory internals; flip this back off only to remove
+ *  the surface entirely.
  *
  *  Gates: the "Memory" rail row (v2 + legacy) and the TopBar overflow item. */
-export const MEMORY_SURFACE_ENABLED = false;
+export const MEMORY_SURFACE_ENABLED = true;
 
 /** Aura Manager — the native in-app orchestrator chat ("Aura" agent).
  *

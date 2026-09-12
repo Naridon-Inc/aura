@@ -15,7 +15,7 @@
 // and unit-testable, and keeps the components thin.
 
 import type { IntentRow } from "./api";
-import { isToolMetadataPath } from "./categorizeChange";
+import { isToolMetadataPath } from "@shared/categorizeChange";
 import { relativeAgeFromDelta } from "./relativeTime";
 
 /** A new session starts when an agent's work has a gap larger than this and the

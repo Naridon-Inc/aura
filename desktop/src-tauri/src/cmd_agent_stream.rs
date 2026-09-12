@@ -33,8 +33,12 @@ use crate::cmd_aurawatch::WatchRegistry;
 /// Tracks the live child process per channel so the React side can
 /// kill a turn mid-flight when the user clicks Stop. We hold the OS
 /// pid (not the tokio Child handle directly) because the tokio Child
-/// is owned by the spawned reader task; sending a SIGTERM by pid is
-/// the lightest cross-thread mechanism.
+/// is owned by the spawned reader task; signalling by pid is the
+/// lightest cross-thread mechanism.
+///
+/// The pid recorded here is a *process group* leader — see
+/// [`crate::child_reaper::own_process_group`] — so stopping a turn reaches
+/// whatever the agent itself started, not just the agent.
 #[derive(Default)]
 pub struct ChildRegistry {
     pub by_channel: Mutex<HashMap<String, u32>>,
@@ -59,6 +63,34 @@ impl ChildRegistry {
 
     fn get(&self, channel: &str) -> Option<u32> {
         self.by_channel.lock().ok().and_then(|g| g.get(channel).copied())
+    }
+
+    /// Every channel that still has a live pid, and forget them all.
+    ///
+    /// Called on app exit. Nothing else runs at that point — `kill_on_drop`
+    /// fires when a tokio `Child` is dropped, and process exit drops nothing,
+    /// so an agent left registered here outlives Aura as an orphan reparented
+    /// to init. That is how a `claude -p …` turn was still running, and still
+    /// costing money, after the app was quit.
+    pub fn take_all(&self) -> Vec<(String, u32)> {
+        match self.by_channel.lock() {
+            Ok(mut g) => g.drain().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Stop every registered child, escalating to SIGKILL where needed.
+    pub fn kill_all(&self) {
+        for (channel, pid) in self.take_all() {
+            let outcome = crate::child_reaper::terminate_tree(pid);
+            if outcome == crate::child_reaper::Outcome::Survived {
+                tracing::warn!(
+                    channel = %channel,
+                    pid,
+                    "agent child outlived SIGKILL at shutdown"
+                );
+            }
+        }
     }
 }
 
@@ -280,6 +312,12 @@ pub async fn agent_stream_send(
         cmd.stdin(Stdio::piped());
     }
 
+    // Its own process group, so Stop and shutdown can signal the agent *and*
+    // everything it starts. Without this the only reachable process is the
+    // CLI itself, and the shells and servers it spawned as tool calls keep
+    // running after the turn is cancelled.
+    crate::child_reaper::own_process_group(&mut cmd);
+
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("spawn {bin}: {e}"))?;
@@ -438,11 +476,19 @@ struct ExitInfo {
     exit_code: i32,
 }
 
-/// Kill the live child for `channel`. Returns true if a process was
-/// signaled, false if nothing was running. We send SIGTERM (Unix) /
-/// TerminateProcess (Windows) — claude handles the signal cleanly,
-/// flushing partial stdout before exit so the bubble feed doesn't
-/// truncate mid-message.
+/// Kill the live child for `channel`, and everything it started. Returns
+/// true if a process was signalled, false if nothing was running.
+///
+/// SIGTERM first — claude handles it cleanly, flushing partial stdout so the
+/// bubble feed doesn't truncate mid-message — then SIGKILL if it does not go
+/// within the grace period. Both go to the process *group*, so a shell or
+/// server the agent started as a tool call dies with it.
+///
+/// A pid is forgotten only once the process is actually gone. The previous
+/// version cleared the registry the instant it signalled, so a child that
+/// ignored SIGTERM left the surface reporting "Cancelled" while the agent
+/// kept working, and a second Stop answered "nothing was running" with no way
+/// left to escalate.
 #[tauri::command]
 pub fn agent_stream_interrupt(
     registry: State<'_, ChildRegistry>,
@@ -451,26 +497,18 @@ pub fn agent_stream_interrupt(
     let Some(pid) = registry.get(&channel) else {
         return Ok(false);
     };
-    #[cfg(unix)]
-    {
-        // SAFETY: kill(2) is signal-safe and pid comes from our own spawn.
-        // Failure here is fine — the child may have just exited.
-        unsafe {
-            libc::kill(pid as i32, libc::SIGTERM);
-        }
+
+    let outcome = crate::child_reaper::terminate_tree(pid);
+    if outcome.may_forget() {
+        registry.clear(&channel);
+    } else {
+        tracing::warn!(
+            channel = %channel,
+            pid,
+            "agent child survived SIGKILL; keeping the pid so Stop can retry"
+        );
     }
-    #[cfg(windows)]
-    {
-        // Best-effort on Windows: spawn taskkill /F /PID. Not perfect,
-        // but avoids pulling winapi just for this single call.
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
-    registry.clear(&channel);
-    Ok(true)
+    Ok(outcome.signalled())
 }
 
 /// Replace every char Tauri's event-name parser rejects with `_`.

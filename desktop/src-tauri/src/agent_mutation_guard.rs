@@ -101,9 +101,12 @@ const EVENT_DEBOUNCE_MS: u64 = 1_500;
 /// These are by definition *human-initiated* — the user clicked Save
 /// in Monaco or clicked Delete in the file tree — so any FS event for
 /// the same path within `EDITOR_GRACE_MS` is filtered out of the guard.
-#[derive(Default)]
+/// Cloning is cheap and every clone shares one map — the guard command that
+/// runs its disk work off the async runtime needs an owned handle to stamp
+/// with, and it must be the *same* window the watcher reads.
+#[derive(Default, Clone)]
 pub struct EditorWriteTracker {
-    inner: Mutex<HashMap<PathBuf, Instant>>,
+    inner: Arc<Mutex<HashMap<PathBuf, Instant>>>,
 }
 
 impl EditorWriteTracker {
@@ -266,86 +269,102 @@ pub async fn agent_guard_stop(
 pub async fn agent_guard_revert_from_snapshot(
     repo_root: String,
     file_path: String,
+    tracker: State<'_, EditorWriteTracker>,
 ) -> Result<String, String> {
-    crate::blocking::run(move || {
-        let abs = if PathBuf::from(&file_path).is_absolute() {
-            PathBuf::from(&file_path)
-        } else {
-            PathBuf::from(&repo_root).join(&file_path)
-        };
-        let abs_str = abs.to_string_lossy().into_owned();
+    // Scanning the snapshot store is disk work — off the async runtime so a
+    // large store never stalls the UI thread. The tracker is a cheap handle
+    // on shared state, so the blocking half stamps for itself.
+    let tracker = tracker.inner().clone();
+    crate::blocking::run(move || revert_from_snapshot_inner(&repo_root, &file_path, &tracker)).await
+}
 
-        let snap_dir = PathBuf::from(&repo_root).join(".aura").join("snapshots");
-        if !snap_dir.is_dir() {
-            return Err("no .aura/snapshots directory — nothing to restore".into());
+/// The revert itself is a UI-initiated write, so it must stamp the
+/// [`EditorWriteTracker`] exactly like every `cmd_files` writer does —
+/// otherwise the guard's own watcher sees this `fs::write`, finds no
+/// covering intent (the revert logs none), spots the still-live agent,
+/// and fires a *fresh* unattributed-mutation banner for the revert. The
+/// user clicks Revert and is handed the same banner back. Stamping the
+/// path opens the editor-grace window so `evaluate_event` skips it.
+///
+/// Split out from the command so the stamp-then-write ordering is
+/// testable without a Tauri runtime.
+fn revert_from_snapshot_inner(
+    repo_root: &str,
+    file_path: &str,
+    tracker: &EditorWriteTracker,
+) -> Result<String, String> {
+    let abs = if PathBuf::from(file_path).is_absolute() {
+        PathBuf::from(file_path)
+    } else {
+        PathBuf::from(repo_root).join(file_path)
+    };
+    let abs_str = abs.to_string_lossy().into_owned();
+
+    let snap_dir = PathBuf::from(repo_root).join(".aura").join("snapshots");
+    if !snap_dir.is_dir() {
+        return Err("no .aura/snapshots directory — nothing to restore".into());
+    }
+
+    let mut best: Option<(i64, PathBuf, String)> = None;
+    let entries = std::fs::read_dir(&snap_dir).map_err(|e| e.to_string())?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
         }
-
-        let mut best: Option<(i64, PathBuf, String)> = None;
-        let entries = std::fs::read_dir(&snap_dir).map_err(|e| e.to_string())?;
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("json") {
-                continue;
-            }
-            let body = match std::fs::read_to_string(&p) {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-            let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
-                continue;
-            };
-            let Some(fp) = json.get("file_path").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if fp != abs_str {
-                continue;
-            }
-            let Some(content) = json.get("content").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let mtime = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            if best.as_ref().map(|(t, _, _)| mtime > *t).unwrap_or(true) {
-                best = Some((mtime, p.clone(), content.to_string()));
-            }
-        }
-
-        let Some((_, snap_path, content)) = best else {
-            return Err(format!("no snapshot found for {abs_str}"));
+        let body = match std::fs::read_to_string(&p) {
+            Ok(b) => b,
+            Err(_) => continue,
         };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
+            continue;
+        };
+        let Some(fp) = json.get("file_path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if fp != abs_str {
+            continue;
+        }
+        let Some(content) = json.get("content").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if best.as_ref().map(|(t, _, _)| mtime > *t).unwrap_or(true) {
+            best = Some((mtime, p.clone(), content.to_string()));
+        }
+    }
 
-        // Stamp the editor-write tracker so the watcher doesn't re-fire
-        // on the restore as another unattributed mutation.
-        // The state is a process-global resource managed by Tauri — we use
-        // the convention also followed elsewhere in this module: fetch via
-        // app state passed through commands; here the call site already
-        // knows it's a UI-initiated restore so we stamp from the frontend
-        // via `markEditorWrite` (auto-called inside `writeFile`).
-        std::fs::write(&abs, content).map_err(|e| format!("restore write failed: {e}"))?;
+    let Some((_, snap_path, content)) = best else {
+        return Err(format!("no snapshot found for {abs_str}"));
+    };
 
-        let _ = crate::op_log::record_op(
-            &repo_root,
-            "guard_revert",
-            &format!("Reverted {abs_str} from snapshot"),
-            "aura-shell-guard",
-            serde_json::json!({
-                "snapshot_path": snap_path.to_string_lossy(),
-                "file": abs_str,
-            }),
-        );
+    // Stamp BEFORE the write so the FS event this write triggers already
+    // finds the path inside the editor-grace window.
+    tracker.stamp(abs.clone());
+    std::fs::write(&abs, content).map_err(|e| format!("restore write failed: {e}"))?;
 
-        Ok(snap_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string())
-    })
-    .await
+    let _ = crate::op_log::record_op(
+        repo_root,
+        "guard_revert",
+        &format!("Reverted {abs_str} from snapshot"),
+        "aura-shell-guard",
+        serde_json::json!({
+            "snapshot_path": snap_path.to_string_lossy(),
+            "file": abs_str,
+        }),
+    );
+
+    Ok(snap_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string())
 }
 
 /// Frontend "Accept" flow calls this after the user types a one-line
@@ -936,6 +955,7 @@ async fn brain_infer_intent(repo_root: &str, rels: &[String]) -> Option<String> 
         model: None,
         long_context: false,
         approval: None,
+        output_style: None, // AURA-1296
         // Deliberately NOT the repo: this turn is Aura talking to itself, and
         // a CLI-wrapper brain spawned inside the user's project writes its own
         // session transcript into that project's directory. The guard then
@@ -946,6 +966,7 @@ async fn brain_infer_intent(repo_root: &str, rels: &[String]) -> Option<String> 
         // Mismatch and halts the commit on. The diff travels inline, so the
         // brain has no need of the repo as a working directory.
         cwd: String::new(),
+        machine_id: None,
     };
 
     let text = match tokio::time::timeout(
@@ -1158,6 +1179,60 @@ mod tests {
         // A real source file that merely has "tmp" in its name must pass.
         assert!(!is_ignored(std::path::Path::new("/Users/me/repo/src/tmpfile.rs"), repo));
         assert!(!is_ignored(std::path::Path::new("/Users/me/repo/src/template.ts"), repo));
+    }
+
+    #[test]
+    fn revert_restores_content_and_stamps_the_tracker() {
+        // The revert is a UI write; if it doesn't stamp the tracker, the
+        // guard re-fires a banner on the restore itself. Prove the restore
+        // lands AND the path is inside the editor-grace window afterward.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_string_lossy().into_owned();
+        let snap_dir = dir.path().join(".aura").join("snapshots");
+        std::fs::create_dir_all(&snap_dir).unwrap();
+
+        let target = dir.path().join("src").join("lib.rs");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "ROGUE AGENT EDIT").unwrap();
+
+        let snap = serde_json::json!({
+            "file_path": target.to_string_lossy(),
+            "content": "the original good content\n",
+        });
+        std::fs::write(
+            snap_dir.join("snap-abc.json"),
+            serde_json::to_vec(&snap).unwrap(),
+        )
+        .unwrap();
+
+        let tracker = EditorWriteTracker::new();
+        let id = revert_from_snapshot_inner(
+            &repo,
+            &target.to_string_lossy(),
+            &tracker,
+        )
+        .expect("revert should succeed");
+
+        assert_eq!(id, "snap-abc");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "the original good content\n"
+        );
+        assert!(
+            tracker.was_recent(&target),
+            "revert must stamp the tracker so evaluate_event skips the restore"
+        );
+    }
+
+    #[test]
+    fn revert_without_a_matching_snapshot_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_string_lossy().into_owned();
+        std::fs::create_dir_all(dir.path().join(".aura").join("snapshots")).unwrap();
+        let tracker = EditorWriteTracker::new();
+        let err = revert_from_snapshot_inner(&repo, "src/never-snapshotted.rs", &tracker)
+            .unwrap_err();
+        assert!(err.contains("no snapshot found"), "{err}");
     }
 
     #[test]

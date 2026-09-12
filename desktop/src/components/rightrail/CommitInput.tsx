@@ -19,7 +19,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type AheadBehind, type RadarCollision } from "../../lib/api";
 import { fetchAheadBehind } from "../../lib/gitStateCache";
+// Through the place seam: a workspace standing in a machine commits and
+// pushes the box's checkout, not the laptop's copy (AURA-1306).
+import {
+  gitCommit,
+  gitFetch,
+  gitPull,
+  gitPush,
+  gitSync,
+} from "../../lib/place/workApi";
 import { useDocumentVisibility } from "../../lib/useDocumentVisibility";
+import { usePanelActive } from "../../lib/panelActive";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -78,6 +88,10 @@ export function CommitInput({
   // forever after a failed read.
   const [aheadRead, setAheadRead] = useState(false);
   const visible = useDocumentVisibility();
+  // Parked: the rail keeps this panel mounted behind another tab so a
+  // half-typed message survives the trip. Mounted is not on screen, and a
+  // panel nobody can see has no reason to keep asking git anything.
+  const panelActive = usePanelActive();
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   // AURA-19 — awareness card state. `radarWarnings` non-null renders the
   // card; the ref remembers which action the user was attempting so
@@ -115,15 +129,16 @@ export function CommitInput({
       }
     }
     void tick();
-    if (!visible) return () => {
-      cancelled = true;
-    };
+    if (!visible || !panelActive)
+      return () => {
+        cancelled = true;
+      };
     const id = window.setInterval(tick, POLL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [repoRoot, visible, refreshTick]);
+  }, [repoRoot, visible, panelActive, refreshTick]);
 
   const canCommit = hasStagedChanges && msg.trim().length > 0;
   const isPending = pending !== null;
@@ -198,7 +213,7 @@ export function CommitInput({
     if (onBeforeCommit && !(await onBeforeCommit())) return;
     setPending("commit");
     try {
-      await api.gitCommit(repoRoot, msg.trim());
+      await gitCommit(repoRoot, msg.trim());
       setMsg("");
       setInfo("Committed");
       runAfter();
@@ -213,7 +228,7 @@ export function CommitInput({
     async (setUpstream = false) => {
       setPending("push");
       try {
-        await api.gitPush(repoRoot, setUpstream || !ahead.has_upstream);
+        await gitPush(repoRoot, setUpstream || !ahead.has_upstream);
         setInfo(setUpstream || !ahead.has_upstream ? "Published" : "Pushed");
         runAfter();
       } catch (e) {
@@ -228,7 +243,7 @@ export function CommitInput({
   const doPull = useCallback(async () => {
     setPending("pull");
     try {
-      await api.gitPull(repoRoot);
+      await gitPull(repoRoot);
       setInfo("Pulled");
       runAfter();
     } catch (e) {
@@ -241,7 +256,7 @@ export function CommitInput({
   const doSync = useCallback(async () => {
     setPending("sync");
     try {
-      await api.gitSync(repoRoot);
+      await gitSync(repoRoot);
       setInfo("Synced");
       runAfter();
     } catch (e) {
@@ -254,7 +269,7 @@ export function CommitInput({
   const doFetch = useCallback(async () => {
     setPending("fetch");
     try {
-      await api.gitFetch(repoRoot);
+      await gitFetch(repoRoot);
       setInfo("Checked");
       runAfter();
     } catch (e) {
@@ -281,11 +296,11 @@ export function CommitInput({
     if (onBeforeCommit && !(await onBeforeCommit())) return;
     setPending("commit");
     try {
-      await api.gitCommit(repoRoot, msg.trim());
+      await gitCommit(repoRoot, msg.trim());
       setMsg("");
       setInfo("Committed");
       // Don't await refresh tick — push directly.
-      await api.gitPush(repoRoot, !ahead.has_upstream);
+      await gitPush(repoRoot, !ahead.has_upstream);
       setInfo("Committed & pushed");
       runAfter();
     } catch (e) {

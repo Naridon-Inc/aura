@@ -32,6 +32,15 @@ export type RemotePlace = {
    *  identity, not decoration: one box is a copy of many projects, and two
    *  projects on one box are two places you can be in at once. */
   repoRoot?: string;
+  /** Where the checkout is ON THE MACHINE, when it is not the folder the
+   *  machine's row records. A workspace launched onto a box gets a sibling
+   *  worktree (`<project>-<branch>`) beside the project, and the agent works
+   *  in it; every file, change and git question this place asks has to be
+   *  run there rather than in the machine's main checkout, which would
+   *  answer about a different branch while looking identical. Absent means
+   *  the row's own folder, as before. Two worktrees of one project on one
+   *  box are two places — this is part of the identity too. */
+  remoteRoot?: string;
 };
 
 /** Every place the window is in, least- to most-recently focused, and which one
@@ -76,11 +85,16 @@ export function remotePlaceKey(place: RemotePlace): string {
   const machine = place.machineId?.trim() ?? "";
   const thread = place.threadKey?.trim() ?? "";
   const root = normalizeRoot(place.repoRoot);
-  if (machine) return `machine${SEP}${machine}${SEP}${root}`;
+  // A worktree on the box is a fourth part, present only when named: a place
+  // opened on the machine's own checkout keeps the key it always had, so its
+  // tabs and its row are where they were before worktrees existed.
+  const there = normalizeRoot(place.remoteRoot);
+  const at = there ? `${SEP}${there}` : "";
+  if (machine) return `machine${SEP}${machine}${SEP}${root}${at}`;
   if (thread) return `thread${SEP}${thread}`;
   // Names neither — "open my machine", from the fleet page. Still a place, and
   // still one per project, so a second such click doesn't stack a duplicate.
-  return `machine${SEP}*${SEP}${root}`;
+  return `machine${SEP}*${SEP}${root}${at}`;
 }
 
 /** Walk into a place, and look at it.

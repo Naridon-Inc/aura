@@ -11,7 +11,7 @@
 // fetches. Still opened via editor.openTaskDetail (kind: "task"); the
 // overlay portals out of that pane to cover the window.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type JSX } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
 import { taskStatusLabel } from "../../lib/taskStatus";
 import { Pencil, Plus, ArrowUpRight, SquareArrowOutUpRight } from "lucide-react";
@@ -181,14 +181,22 @@ export function TaskDetailPane({
   // Tick one line of the plan off (or back on) by position. Distinct from
   // onPatch's whole-list replace: a step toggle addresses a single row so a
   // concurrent plan edit can't overwrite it (cmd_tasks.rs::tasks_step_set).
-  const onStepSet = useCallback(
-    async (index: number, done: boolean) => {
-      const next = await api.tasksStepSet(repoRoot, taskId, index, done);
-      setTask(next);
+  // Ticking a step off, for whichever task is being read — the parent, or a
+  // sub-task open in the sub-tasks tab. It used to close over `taskId`, so a
+  // sub-task's plan could only ever have ticked the parent's steps; that is
+  // also why the sub-task column showed no plan at all.
+  const setStep = useCallback(
+    async (id: string, index: number, done: boolean) => {
+      const next = await api.tasksStepSet(repoRoot, id, index, done);
       setAllTasks((prev) => prev.map((t) => (t.id === next.id ? next : t)));
+      setTask((prev) => (prev && prev.id === next.id ? next : prev));
       window.dispatchEvent(new CustomEvent("aura:tasks:mutated"));
     },
-    [repoRoot, taskId],
+    [repoRoot],
+  );
+  const onStepSet = useCallback(
+    (index: number, done: boolean) => setStep(taskId, index, done),
+    [setStep, taskId],
   );
 
   const onDelete = useCallback(async () => {
@@ -355,6 +363,7 @@ export function TaskDetailPane({
             modules={modules}
             onPatch={onPatch}
             onCreateChild={onCreateChild}
+            onStepSet={setStep}
             selectedId={subSel}
             onSelect={setSubSel}
           />
@@ -403,6 +412,7 @@ export function TaskDetailPane({
               )}
             </div>
             <TitleBlock task={task} onPatch={onPatch} />
+            <ObjectiveBlock task={task} />
             <div className="mt-7">
               <DescriptionCard
                 task={task}
@@ -584,6 +594,7 @@ function SubTasksTab({
   modules,
   onPatch,
   onCreateChild,
+  onStepSet,
   selectedId: selProp,
   onSelect,
 }: {
@@ -597,6 +608,8 @@ function SubTasksTab({
   modules: Module[];
   onPatch: (input: UpdateTaskInput) => Promise<void>;
   onCreateChild: (parentId: string, title: string) => Promise<void>;
+  /** Tick a step off — on the child being read, not on the parent. */
+  onStepSet: (id: string, index: number, done: boolean) => Promise<void>;
   /** Selected child id (lifted to TaskDetailPane so the Overview table can
    *  route a click into this tab) and its setter. */
   selectedId: string | null;
@@ -756,6 +769,7 @@ function SubTasksTab({
                 {/* Re-mount the editable surfaces per child so their internal
                     draft state resets when the selection changes. */}
                 <TitleBlock key={`t-${selected.id}`} task={selected} onPatch={onPatch} />
+                <ObjectiveBlock task={selected} />
                 <div className="mt-7">
                   <DescriptionCard
                     key={`d-${selected.id}`}
@@ -765,6 +779,16 @@ function SubTasksTab({
                     variant="page"
                   />
                 </div>
+                {selected.steps && selected.steps.length > 0 && (
+                  <>
+                    <div className="h-px bg-line-soft/60 my-7" aria-hidden />
+                    <TaskPlan
+                      key={`p-${selected.id}`}
+                      task={selected}
+                      onStepSet={(index, done) => onStepSet(selected.id, index, done)}
+                    />
+                  </>
+                )}
               </div>
             </div>
 
@@ -888,3 +912,25 @@ function SubTaskListRow({
     </button>
   );
 }
+
+/**
+ * What is true when this task is done.
+ *
+ * Every task an agent files here carries one — it is the statement the work
+ * gets checked against — and the read surface showed the title, the
+ * description and the steps but never this, so the one line that says what
+ * "done" means was readable only over MCP or by opening the task file
+ * (AURA-270). It sits above the description because it is the shorter,
+ * sharper statement of the same subject.
+ */
+function ObjectiveBlock({ task }: { task: Task }): JSX.Element | null {
+  const text = task.objective?.trim();
+  if (!text) return null;
+  return (
+    <div className="mt-7">
+      <h3 className="text-sm font-medium text-text-2">Objective</h3>
+      <p className="mt-2 text-base leading-relaxed text-text-1">{text}</p>
+    </div>
+  );
+}
+

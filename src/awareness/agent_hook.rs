@@ -25,8 +25,12 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-/// The shell command the PreToolUse hook runs. Bare `aura` is assumed on PATH —
-/// true the moment `aura enable` runs, since `aura` is the binary running it.
+/// The shell command the PreToolUse hook runs. Bare `aura` is deliberate
+/// (REL-04 scope rule): this settings file is repo-shared — checked into git so
+/// the whole team inherits the hook — and baking one machine's absolute binary
+/// path into it would break every teammate who pulls. Machine-local artifacts
+/// (`.git/hooks/*`, `~/.gemini/settings.json`, `~/.claude/*`) are the ones that
+/// get the verified absolute path — see `agent_integrations::verified_aura_binary`.
 const HOOK_COMMAND: &str = "aura validate-tool";
 
 /// Tools the hook fires on. The first four are what `auto_emit_editing`

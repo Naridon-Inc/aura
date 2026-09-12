@@ -48,7 +48,34 @@ fn is_skippable(path: &str) -> bool {
         || path.contains(".output/")
 }
 
-/// Parse the staged index into `CiNode`s — the same node set the pre-commit
+/// The paths a commit would actually carry: HEAD's tree against the index.
+///
+/// Not `index.iter()`. An index entry exists for every *tracked* file in the
+/// repository, so iterating it is a list of the whole checkout — which is why
+/// the gate answered a three-file commit with "829 pieces of code look
+/// half-finished" and why the honest response to it became `AURA_SKIP=1`. A
+/// gate that reports the repository when asked about a change is not strict,
+/// it is uninformative, and people switch those off.
+///
+/// A repository with no commits yet has no HEAD tree, and there `None` is the
+/// right base: everything staged is genuinely new.
+fn staged_paths(repo: &Repository) -> Result<Vec<String>, git2::Error> {
+    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+    let diff = repo.diff_tree_to_index(head_tree.as_ref(), None, None)?;
+    let mut paths = Vec::new();
+    for delta in diff.deltas() {
+        // The new path, so a rename is checked where it landed. A delete has
+        // no new file worth parsing and is skipped by the read below.
+        if let Some(p) = delta.new_file().path() {
+            paths.push(p.to_string_lossy().to_string());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// Parse the staged change into `CiNode`s — the same node set the pre-commit
 /// gate inspects, projected to the dependency-free shape `aura-ci` reads.
 fn staged_nodes(repo: &Repository) -> Vec<CiNode> {
     let mut parser = match SemanticParser::new() {
@@ -59,10 +86,13 @@ fn staged_nodes(repo: &Repository) -> Vec<CiNode> {
         Ok(i) => i,
         Err(_) => return Vec::new(),
     };
+    let changed = match staged_paths(repo) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
 
     let mut out = Vec::new();
-    for entry in index.iter() {
-        let path = String::from_utf8_lossy(&entry.path).to_string();
+    for path in changed {
         if is_skippable(&path) {
             continue;
         }
@@ -70,18 +100,30 @@ fn staged_nodes(repo: &Repository) -> Vec<CiNode> {
         if ext.is_empty() {
             continue;
         }
-        if let Ok(source) = std::fs::read_to_string(&path) {
-            if let Ok(nodes) = parser.parse_file_with_path(&source, &ext, &path) {
-                for n in nodes {
-                    out.push(CiNode {
-                        identifier: n.identifier,
-                        kind: n.kind,
-                        file_path: n.file_path,
-                        start_line: n.start_line,
-                        contains_secret: n.contains_secret,
-                        is_stub: n.is_stub,
-                    });
-                }
+        // The staged blob, not the file on disk. `verify_intent::scan` says the
+        // same thing about the same question: an unstaged edit must not be able
+        // to change the verdict on a commit that does not contain it — in
+        // either direction. Reading the working tree meant a secret still open
+        // in the editor could fail a commit that had already dropped it, and a
+        // secret staged and then wiped from the buffer could pass one that
+        // carried it.
+        //
+        // An entry is absent for a staged deletion, which is the other half of
+        // why this is keyed on the index rather than the path: there is nothing
+        // to parse in a file the commit removes.
+        let Some(entry) = index.get_path(Path::new(&path), 0) else { continue };
+        let Ok(blob) = repo.find_blob(entry.id) else { continue };
+        let Ok(source) = std::str::from_utf8(blob.content()) else { continue };
+        if let Ok(nodes) = parser.parse_file_with_path(source, &ext, &path) {
+            for n in nodes {
+                out.push(CiNode {
+                    identifier: n.identifier,
+                    kind: n.kind,
+                    file_path: n.file_path,
+                    start_line: n.start_line,
+                    contains_secret: n.contains_secret,
+                    is_stub: n.is_stub,
+                });
             }
         }
     }
@@ -486,13 +528,19 @@ pub fn project_nodes(nodes: &[crate::models::AstNode]) -> Vec<CiNode> {
 /// `AstNode`s the hook already parsed (no second parse of the staged tree).
 ///
 /// The inline pre-commit gates (secret guard, taste) already own blocking with
-/// their exact strict-mode / dev-mode / dialoguer semantics — we do NOT
-/// re-block here, or a secret would be flagged twice. Instead this records the
-/// named pipeline result and prints one calm summary line so the commit is now
-/// described as a Semantic CI run ("the pipeline IS the gate now") without
-/// changing whether the commit proceeds. Best-effort: any failure is swallowed.
+/// their exact strict-mode / dev-mode / dialoguer semantics — this function
+/// does not re-block those, or a secret would be flagged twice. It records the
+/// named pipeline result and prints one calm summary line, so the commit is now
+/// described as a Semantic CI run ("the pipeline IS the gate now").
 ///
-/// Returns the runs so a caller could persist/seal them later (Phase 5).
+/// It does not decide anything itself. Blocking is the caller's to enforce, via
+/// [`unenforced_blockers`] on the returned runs — for a long time nobody did,
+/// and a step declared `blocking` was inert while its own headline claimed it
+/// had stopped the commit. Best-effort: any failure to run is swallowed and
+/// reported as no runs, which blocks nothing.
+///
+/// Returns the runs so the caller can enforce them, and persist/seal them later
+/// (Phase 5).
 pub fn run_pre_commit_additive(
     repo: &Repository,
     root: &Path,
@@ -538,6 +586,60 @@ pub fn run_pre_commit_additive(
         );
     }
     runs
+}
+
+/// Gate ids the pre-commit hook enforces *inline*, before the pipeline runs,
+/// with their own strict-mode / allowlist / confirm semantics.
+///
+/// These are the only two. Everything else a pipeline can declare —
+/// `no-stubs`, `goal-aligned`, `intent-match`, `build`, and any `run:` shell
+/// step — has no other enforcer at pre-commit time, so if the pipeline does not
+/// act on it, nothing does.
+const INLINE_ENFORCED_GATES: [&str; 2] = ["gate:no-secrets", "gate:taste"];
+
+/// The failing blocking steps that nothing else has already stopped the commit
+/// over.
+///
+/// This closes the hole between what `.aura/pipelines` *says* and what the hook
+/// *does*. `PipelineRun::finalize` sets `blocked` whenever a step marked
+/// `blocking` fails, and the headline then reads "1 stopped the commit" — but
+/// the pre-commit path deliberately ran the pipeline additively and threw that
+/// verdict away, so the commit went through anyway. Declaring a step blocking
+/// did nothing, and the record claimed it had done everything.
+///
+/// Steps in `INLINE_ENFORCED_GATES` are excluded, not forgotten: the inline
+/// gates own those with semantics the pipeline does not know (strict mode,
+/// the secret allowlist, dev mode, the interactive confirm), and re-blocking
+/// here would flag one secret twice and override a decision the user already
+/// made at the prompt.
+pub fn unenforced_blockers(runs: &[PipelineRun]) -> Vec<&StepResult> {
+    runs.iter()
+        .flat_map(|run| run.steps.iter())
+        .filter(|step| step.blocking && step.status.is_failure())
+        .filter(|step| !INLINE_ENFORCED_GATES.contains(&step.kind.as_str()))
+        .collect()
+}
+
+/// Print the blocking failures the pipeline found and nothing else enforced.
+///
+/// Kept beside `unenforced_blockers` rather than inlined at the call site so
+/// the hook's own voice — one finding per line, then one line saying what to do
+/// — stays in the module that owns the wording.
+pub fn print_unenforced_blockers(blockers: &[&StepResult]) {
+    println!(
+        "{} Semantic CI: {} blocking {} failed. Commit halted!",
+        "🚨".red().bold(),
+        blockers.len(),
+        if blockers.len() == 1 { "check" } else { "checks" }
+    );
+    for step in blockers {
+        println!("  {} {}: {}", "✗".red(), step.name.yellow(), step.summary);
+    }
+    println!(
+        "  {} Fix the finding, or drop `blocking` for that step in {}.",
+        "💡".blue(),
+        ".aura/pipelines".italic()
+    );
 }
 
 /// Record the post-commit goal proofs as a named `goal-aligned` Semantic CI
@@ -623,11 +725,215 @@ fn print_runs(runs: &[PipelineRun]) {
             }
         }
         if run.blocked {
+            // Not "--force": `aura ci run` has no such flag, so the old line
+            // handed the reader an argument clap rejects outright. And not
+            // "the commit" unconditionally either — a `pr` or `manual` run has
+            // no commit in front of it to stop. Point at the declaration
+            // instead, which is the lever that actually exists.
+            let verb = match run.trigger {
+                Trigger::PreCommit => "stopped the commit",
+                Trigger::PrePush => "stopped the push",
+                Trigger::Pr | Trigger::Manual => "would stop a commit",
+            };
             println!(
-                "\n{} One of these stopped the commit. Fix it, or override with {}.",
+                "\n{} One of these {}. Fix it, or drop `blocking` for that step in {}.",
                 "✗".red().bold(),
-                "--force".italic()
+                verb,
+                ".aura/pipelines".italic()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod blocking_enforcement_tests {
+    use super::*;
+    use aura_ci::model::Status;
+
+    fn step(name: &str, kind: &str, blocking: bool, status: Status) -> StepResult {
+        StepResult {
+            name: name.into(),
+            kind: kind.into(),
+            status,
+            blocking,
+            summary: "…".into(),
+            detail: None,
+            duration_ms: 1,
+        }
+    }
+
+    fn run_of(steps: Vec<StepResult>) -> PipelineRun {
+        PipelineRun::finalize("default".into(), Trigger::PreCommit, steps, 1)
+    }
+
+    #[test]
+    fn a_failing_blocking_step_with_no_inline_enforcer_is_reported() {
+        // `no-stubs` has no inline gate in the pre-commit path, so if the
+        // pipeline does not stop the commit over it, nothing does.
+        let runs = vec![run_of(vec![step(
+            "no half-finished code",
+            "gate:no-stubs",
+            true,
+            Status::Fail,
+        )])];
+        let blockers = unenforced_blockers(&runs);
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].name, "no half-finished code");
+    }
+
+    #[test]
+    fn an_advisory_failure_never_blocks() {
+        let runs = vec![run_of(vec![step(
+            "goal",
+            "gate:goal-aligned",
+            false,
+            Status::Fail,
+        )])];
+        assert!(unenforced_blockers(&runs).is_empty());
+    }
+
+    #[test]
+    fn the_inline_gates_are_left_to_the_inline_gates() {
+        // Both already halted the commit above with strict-mode, allowlist and
+        // confirm semantics the pipeline does not know. Re-reporting them here
+        // would flag one secret twice and could override a "yes, continue" the
+        // user already gave at the prompt.
+        let runs = vec![run_of(vec![
+            step("secrets", "gate:no-secrets", true, Status::Fail),
+            step("taste", "gate:taste", true, Status::Fail),
+        ])];
+        assert!(unenforced_blockers(&runs).is_empty());
+    }
+
+    #[test]
+    fn a_blocking_shell_step_is_enforced() {
+        // A `run:` step is the case with the least excuse for being inert —
+        // the user wrote a command and said it must pass.
+        let runs = vec![run_of(vec![step("npm test", "run", true, Status::Fail)])];
+        assert_eq!(unenforced_blockers(&runs).len(), 1);
+    }
+
+    #[test]
+    fn a_timeout_counts_as_a_failure() {
+        // Status::Timeout is a failure for `blocked`; it must be one here too,
+        // or a step that hangs is a step that passes.
+        let runs = vec![run_of(vec![step(
+            "build",
+            "gate:build",
+            true,
+            Status::Timeout,
+        )])];
+        assert_eq!(unenforced_blockers(&runs).len(), 1);
+    }
+
+    #[test]
+    fn a_passing_pipeline_blocks_nothing() {
+        let runs = vec![run_of(vec![
+            step("secrets", "gate:no-secrets", true, Status::Pass),
+            step("no-stubs", "gate:no-stubs", true, Status::Pass),
+            step("skipped", "gate:build", true, Status::Skip),
+        ])];
+        assert!(unenforced_blockers(&runs).is_empty());
+    }
+
+    #[test]
+    fn blockers_are_collected_across_every_pipeline_that_ran() {
+        let runs = vec![
+            run_of(vec![step("a", "gate:no-stubs", true, Status::Fail)]),
+            run_of(vec![step("b", "run", true, Status::Fail)]),
+        ];
+        assert_eq!(unenforced_blockers(&runs).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod staged_scope_tests {
+    use super::*;
+    use std::fs;
+
+    /// A repository with one commit holding two files, and nothing staged.
+    fn repo_with_two_files() -> (tempfile::TempDir, Repository) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = Repository::init(dir.path()).expect("init");
+        fs::write(dir.path().join("touched.ts"), "export function a() { return 1; }\n").unwrap();
+        fs::write(dir.path().join("untouched.ts"), "export function b() { return 2; }\n").unwrap();
+
+        let oid = {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("touched.ts")).unwrap();
+            index.add_path(Path::new("untouched.ts")).unwrap();
+            index.write().unwrap();
+            index.write_tree().unwrap()
+        };
+        {
+            let tree = repo.find_tree(oid).unwrap();
+            let who = git2::Signature::now("t", "t@example.com").unwrap();
+            repo.commit(Some("HEAD"), &who, &who, "first", &tree, &[])
+                .unwrap();
+        }
+        (dir, repo)
+    }
+
+    fn stage(repo: &Repository, dir: &Path, path: &str, source: &str) {
+        fs::write(dir.join(path), source).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(path)).unwrap();
+        index.write().unwrap();
+    }
+
+    /// The bug this rule exists for. `index.iter()` is every *tracked* file, so
+    /// the gate used to answer a one-file commit with the whole repository —
+    /// 829 findings on a three-file change, in the real case that surfaced it.
+    #[test]
+    fn a_one_file_commit_is_one_file() {
+        let (dir, repo) = repo_with_two_files();
+        stage(&repo, dir.path(), "touched.ts", "export function a() { return 99; }\n");
+
+        assert_eq!(staged_paths(&repo).unwrap(), vec!["touched.ts".to_string()]);
+    }
+
+    /// Nothing staged is nothing to check — not "everything in the checkout".
+    #[test]
+    fn an_empty_commit_checks_nothing() {
+        let (_dir, repo) = repo_with_two_files();
+        assert!(staged_paths(&repo).unwrap().is_empty());
+    }
+
+    /// An edit sitting in the working tree is not part of the commit being
+    /// made, so it must not decide the verdict on it — in either direction. A
+    /// secret still open in the editor should not fail a commit that already
+    /// dropped it, and a secret staged and then wiped from the buffer should
+    /// not pass one that carries it.
+    #[test]
+    fn an_unstaged_edit_does_not_reach_the_verdict() {
+        let (dir, repo) = repo_with_two_files();
+        stage(&repo, dir.path(), "touched.ts", "export function a() { return 99; }\n");
+        // Written to disk only — never added to the index.
+        fs::write(dir.path().join("untouched.ts"), "export function leaked() {}\n").unwrap();
+
+        assert_eq!(staged_paths(&repo).unwrap(), vec!["touched.ts".to_string()]);
+        let nodes = staged_nodes(&repo);
+        assert!(
+            nodes.iter().all(|n| n.file_path.as_deref() == Some("touched.ts")),
+            "{nodes:?}"
+        );
+        assert!(
+            nodes.iter().all(|n| n.identifier.as_deref() != Some("leaked")),
+            "{nodes:?}"
+        );
+    }
+
+    /// A staged deletion has no content to parse, and the file it removes must
+    /// not be read off disk on the way past.
+    #[test]
+    fn a_staged_deletion_parses_nothing_and_does_not_panic() {
+        let (dir, repo) = repo_with_two_files();
+        fs::remove_file(dir.path().join("untouched.ts")).unwrap();
+        let mut index = repo.index().unwrap();
+        index.remove_path(Path::new("untouched.ts")).unwrap();
+        index.write().unwrap();
+
+        assert_eq!(staged_paths(&repo).unwrap(), vec!["untouched.ts".to_string()]);
+        assert!(staged_nodes(&repo).is_empty());
     }
 }

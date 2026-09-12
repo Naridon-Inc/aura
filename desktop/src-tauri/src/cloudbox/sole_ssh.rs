@@ -87,7 +87,7 @@ use std::path::{Path, PathBuf};
 /// a version that found its own machine would hand that permission to a box
 /// nobody checked was the one on screen — which is the same blast radius as
 /// sleeping, granted rather than spent.
-const MACHINE_COMMANDS: [(&str, &str); 25] = [
+const MACHINE_COMMANDS: [(&str, &str); 63] = [
     (THE_DOOR, "box_sessions"),
     (THE_DOOR, "box_projects"),
     (THE_DOOR, "place_capabilities"),
@@ -113,6 +113,57 @@ const MACHINE_COMMANDS: [(&str, &str); 25] = [
     (THE_QUARTERMASTER, "place_team_base_warm"),
     (THE_NOTARY, "place_grant_link"),
     (THE_NOTARY, "place_grant_unlink"),
+    // AURA-1294 — a listener on this Mac at the end of each of these; a
+    // version that found its own machine would open localhost onto the wrong box.
+    (THE_PORTER, "place_ports_list"),
+    (THE_PORTER, "place_port_forward"),
+    (THE_PORTER, "place_port_release"),
+    (THE_PORTER, "place_ports_forwarded"),
+    (THE_PORTER, "place_ports_policy"),
+    (THE_PORTER, "place_ports_policy_set"),
+    // end AURA-1294
+    // AURA-1308 — a session's scrollback, read back off the machine; a
+    // version that found its own machine would show one box's transcript
+    // under another box's name.
+    (THE_SCRIBE, "place_session_capture"),
+    // AURA-1306 — the file tree, the editor and the git panel of a workspace
+    // whose checkout is on the box. The widest family yet: every one of these
+    // reads or writes the user's code, and one that found its own machine
+    // would save a file, or commit, onto a box nobody checked was the one on
+    // screen.
+    (THE_CLERK, "place_fs_list"),
+    (THE_CLERK, "place_fs_read"),
+    (THE_CLERK, "place_fs_write"),
+    (THE_CLERK, "place_fs_create_file"),
+    (THE_CLERK, "place_fs_create_folder"),
+    (THE_CLERK, "place_fs_rename"),
+    (THE_CLERK, "place_fs_delete"),
+    (THE_CLERK, "place_fs_find_files"),
+    (THE_LEDGER, "place_git_status_v2"),
+    (THE_LEDGER, "place_git_diff"),
+    (THE_LEDGER, "place_git_diff_at_commit"),
+    (THE_LEDGER, "place_git_diff_base"),
+    (THE_LEDGER, "place_git_diff_stats_per_file"),
+    (THE_LEDGER, "place_git_branch"),
+    (THE_LEDGER, "place_git_branches"),
+    (THE_LEDGER, "place_git_branches_rich"),
+    (THE_LEDGER, "place_git_ahead_behind"),
+    (THE_LEDGER, "place_git_show_commit"),
+    (THE_LEDGER, "place_git_show_head"),
+    (THE_LEDGER, "place_git_remote_origin"),
+    (THE_TELLER, "place_git_stage"),
+    (THE_TELLER, "place_git_unstage"),
+    (THE_TELLER, "place_git_discard"),
+    (THE_TELLER, "place_git_commit"),
+    (THE_TELLER, "place_git_push"),
+    (THE_TELLER, "place_git_pull"),
+    (THE_TELLER, "place_git_fetch"),
+    (THE_TELLER, "place_git_checkout"),
+    (THE_TELLER, "place_git_create_branch"),
+    (THE_TELLER, "place_git_reset_files"),
+    // end AURA-1306
+    // AURA-1307
+    (THE_STARTER, "place_run_detect"),
 ];
 
 /// The three ways a command is allowed to find out which place it is talking
@@ -172,6 +223,30 @@ const THE_NOTARY: &str = "aura-shell/src-tauri/src/manager/brain/place_grant.rs"
 const THE_USHER: &str = "aura-shell/src-tauri/src/manager/brain/place_open.rs";
 /// Where a member's secrets are put into a place's environment at boot.
 const THE_BROKER: &str = "aura-shell/src-tauri/src/manager/brain/place_secrets.rs";
+
+// AURA-1294
+/// Where a port on a place is brought to `localhost` on this Mac.
+const THE_PORTER: &str = "aura-shell/src-tauri/src/manager/brain/place_ports/mod.rs";
+// end AURA-1294
+
+// AURA-1308
+/// Where what a session printed while nobody was watching is read back.
+const THE_SCRIBE: &str = "aura-shell/src-tauri/src/manager/brain/place_capture.rs";
+// end AURA-1308
+
+// AURA-1306
+/// Where the files of a workspace at a place are listed, read and saved.
+const THE_CLERK: &str = "aura-shell/src-tauri/src/manager/brain/place_work/fs.rs";
+/// Where git is *asked* about a workspace at a place — status, diffs, branches.
+const THE_LEDGER: &str = "aura-shell/src-tauri/src/manager/brain/place_work/git.rs";
+/// Where git is *told* to do something at a place — stage, commit, push.
+const THE_TELLER: &str = "aura-shell/src-tauri/src/manager/brain/place_work/git_ops.rs";
+// end AURA-1306
+
+// AURA-1307
+/// Where "how do I run this?" is asked of a checkout at a place.
+const THE_STARTER: &str = "aura-shell/src-tauri/src/manager/brain/place_work/run.rs";
+// end AURA-1307
 
 /// How `ssh` actually gets run, as it is spelled in [`super::dial`].
 const SPAWN: &str = r#"Command::new("ssh")"#;

@@ -219,9 +219,9 @@ impl ContinuousTracker {
                 // Identify language — support all tree-sitter languages
                 let ext = if path_str.ends_with(".rs") { "rs" }
                     else if path_str.ends_with(".py") { "py" }
-                    else if path_str.ends_with(".ts") { "ts" }
+                    else if path_str.ends_with(".ts") || path_str.ends_with(".mts") || path_str.ends_with(".cts") { "ts" }
                     else if path_str.ends_with(".tsx") { "tsx" }
-                    else if path_str.ends_with(".js") { "js" }
+                    else if path_str.ends_with(".js") || path_str.ends_with(".mjs") || path_str.ends_with(".cjs") { "js" }
                     else if path_str.ends_with(".jsx") { "jsx" }
                     else if path_str.ends_with(".go") { "go" }
                     else if path_str.ends_with(".java") { "java" }
@@ -399,6 +399,7 @@ impl ContinuousTracker {
             // purpose: an auto-save checkpoint simply doesn't seed the parse
             // cache, and the next real capture parses from source.
             file_oids: std::collections::HashMap::new(),
+            scope: crate::scope::scope_value(std::path::Path::new("."), "Aura Continuous Daemon", None),
         };
 
         if let Ok(repo) = Repository::open(".") {

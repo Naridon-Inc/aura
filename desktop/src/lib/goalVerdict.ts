@@ -53,7 +53,12 @@ export const VERDICT: Record<GoalVerdict, VerdictTone> = {
     label: "Done",
     glyph: "✓",
     color: "var(--color-accent-green)",
-    hint: "Everything this needs is built.",
+    // "Everything this needs is built" is what a test result sounds like, and
+    // this is not one: Aura read the code and found the parts, wired together.
+    // Nothing ran. Saying so here is the difference between a reader concluding
+    // the feature works and a reader concluding the code for it exists — and
+    // the second is the only one the check earns. See lib/evidence.
+    hint: "Aura read the code and found every part this needs, wired up. It didn't run anything.",
     past: "left it done",
   },
   partial: {
@@ -67,9 +72,11 @@ export const VERDICT: Record<GoalVerdict, VerdictTone> = {
     label: "Not yet",
     glyph: "○",
     color: "var(--color-red)",
+    // "Working" is a word about running code, and nothing was run. What the
+    // check found is that the parts aren't connected to each other.
     hint:
-      "None of what this needs is working yet. Parts may be built, but nothing's wired up.",
-    past: "left it not working yet",
+      "None of what this needs is connected up yet. Parts may be written, but nothing joins them.",
+    past: "left it not wired up",
   },
   unknown: {
     label: "Not checked",

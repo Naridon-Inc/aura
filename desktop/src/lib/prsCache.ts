@@ -22,8 +22,17 @@
 // takes the always-on background refresh to land, which beats a cold
 // spinner on every launch.
 
+//
+// AURA-1307: every entry is keyed by PLACE, not by root alone — the same
+// local root standing in a machine is a different repo's PR list (the box's
+// origin, possibly a fork) and must never paint over the laptop's. Public
+// signatures stay `repoRoot`-shaped; the scope is computed at the door.
+// `gh` runs here either way; on a machine it is told the repo by name.
+
 import { api, type PrSummary } from "./api";
 import { setCache } from "./localStore";
+import { placeScope } from "./place/workApi";
+import { remoteRepoFor } from "./prRepo";
 
 const STALE_MS = 30_000; // 30s: served fresh without refetch
 const EXPIRY_MS = 10 * 60_000; // 10m: beyond this, refetch blocking
@@ -52,13 +61,13 @@ type Entry = {
 const mem = new Map<string, Entry>();
 const subs = new Map<string, Set<(list: PrSummary[]) => void>>();
 
-function lsKey(repoRoot: string): string {
-  return `aura.pr.list.cache.${repoRoot}`;
+function lsKey(scope: string): string {
+  return `aura.pr.list.cache.${scope}`;
 }
 
-function loadPersisted(repoRoot: string): Entry | null {
+function loadPersisted(scope: string): Entry | null {
   try {
-    const raw = localStorage.getItem(lsKey(repoRoot));
+    const raw = localStorage.getItem(lsKey(scope));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { data: PrSummary[]; fetchedAt: number };
     if (!Array.isArray(parsed.data)) return null;
@@ -68,10 +77,10 @@ function loadPersisted(repoRoot: string): Entry | null {
   }
 }
 
-function savePersisted(repoRoot: string, entry: Entry): void {
+function savePersisted(scope: string, entry: Entry): void {
   try {
     setCache(
-      lsKey(repoRoot),
+      lsKey(scope),
       JSON.stringify({ data: entry.data, fetchedAt: entry.fetchedAt }),
     );
   } catch {
@@ -79,8 +88,8 @@ function savePersisted(repoRoot: string, entry: Entry): void {
   }
 }
 
-function notify(repoRoot: string, list: PrSummary[]): void {
-  const set = subs.get(repoRoot);
+function notify(scope: string, list: PrSummary[]): void {
+  const set = subs.get(scope);
   if (!set) return;
   for (const cb of set) {
     try {
@@ -92,7 +101,8 @@ function notify(repoRoot: string, list: PrSummary[]): void {
 }
 
 async function refreshNow(repoRoot: string): Promise<PrSummary[]> {
-  const existing = mem.get(repoRoot);
+  const scope = placeScope(repoRoot);
+  const existing = mem.get(scope);
   if (existing?.inflight) return existing.inflight;
 
   // Honour the backoff window from a recent failure: don't hit `gh` again
@@ -108,19 +118,19 @@ async function refreshNow(repoRoot: string): Promise<PrSummary[]> {
     }
   }
 
-  const p = api
-    .prList(repoRoot)
+  const p = remoteRepoFor(repoRoot)
+    .then((remoteRepo) => api.prList(repoRoot, remoteRepo))
     .then((list) => {
       // Success clears any prior failure/backoff state.
       const entry: Entry = { data: list, fetchedAt: Date.now() };
-      mem.set(repoRoot, entry);
-      savePersisted(repoRoot, entry);
-      notify(repoRoot, list);
+      mem.set(scope, entry);
+      savePersisted(scope, entry);
+      notify(scope, list);
       return list;
     })
     .catch((e) => {
-      const prev = mem.get(repoRoot) ?? { data: [], fetchedAt: 0 };
-      mem.set(repoRoot, {
+      const prev = mem.get(scope) ?? { data: [], fetchedAt: 0 };
+      mem.set(scope, {
         ...prev,
         failedAt: Date.now(),
         failCount: (prev.failCount ?? 0) + 1,
@@ -129,12 +139,12 @@ async function refreshNow(repoRoot: string): Promise<PrSummary[]> {
       throw e;
     })
     .finally(() => {
-      const e = mem.get(repoRoot);
+      const e = mem.get(scope);
       if (e) e.inflight = undefined;
     });
-  const cur = mem.get(repoRoot) ?? { data: [], fetchedAt: 0 };
+  const cur = mem.get(scope) ?? { data: [], fetchedAt: 0 };
   cur.inflight = p;
-  mem.set(repoRoot, cur);
+  mem.set(scope, cur);
   return p;
 }
 
@@ -145,11 +155,12 @@ async function refreshNow(repoRoot: string): Promise<PrSummary[]> {
  *  entry at all — i.e. the genuine first-ever load — so the loading
  *  spinner shows once, not on every restart or after a 10-minute idle. */
 export function getPrListCached(repoRoot: string): PrSummary[] | null {
-  let entry = mem.get(repoRoot);
+  const scope = placeScope(repoRoot);
+  let entry = mem.get(scope);
   if (!entry) {
-    const persisted = loadPersisted(repoRoot);
+    const persisted = loadPersisted(scope);
     if (persisted) {
-      mem.set(repoRoot, persisted);
+      mem.set(scope, persisted);
       entry = persisted;
     }
   }
@@ -162,11 +173,12 @@ export function getPrListCached(repoRoot: string): PrSummary[] | null {
  *  cached value exists, callers can pair this with `getPrListCached`
  *  for an instant first paint. */
 export async function fetchPrList(repoRoot: string): Promise<PrSummary[]> {
-  let entry = mem.get(repoRoot);
+  const scope = placeScope(repoRoot);
+  let entry = mem.get(scope);
   if (!entry) {
-    const ss = loadPersisted(repoRoot);
+    const ss = loadPersisted(scope);
     if (ss) {
-      mem.set(repoRoot, ss);
+      mem.set(scope, ss);
       entry = ss;
     }
   }
@@ -197,17 +209,18 @@ export function subscribePrList(
   repoRoot: string,
   cb: (list: PrSummary[]) => void,
 ): () => void {
-  let set = subs.get(repoRoot);
+  const scope = placeScope(repoRoot);
+  let set = subs.get(scope);
   if (!set) {
     set = new Set();
-    subs.set(repoRoot, set);
+    subs.set(scope, set);
   }
   set.add(cb);
   return () => {
-    const s = subs.get(repoRoot);
+    const s = subs.get(scope);
     if (!s) return;
     s.delete(cb);
-    if (s.size === 0) subs.delete(repoRoot);
+    if (s.size === 0) subs.delete(scope);
   };
 }
 
@@ -244,7 +257,8 @@ export function patchCachedPr(
   prNumber: number,
   patch: Partial<PrSummary>,
 ): void {
-  const entry = mem.get(repoRoot) ?? loadPersisted(repoRoot);
+  const scope = placeScope(repoRoot);
+  const entry = mem.get(scope) ?? loadPersisted(scope);
   if (!entry) return;
   let changed = false;
   const next = entry.data.map((p) => {
@@ -254,7 +268,7 @@ export function patchCachedPr(
   });
   if (!changed) return;
   const updated: Entry = { data: next, fetchedAt: entry.fetchedAt };
-  mem.set(repoRoot, updated);
-  savePersisted(repoRoot, updated);
-  notify(repoRoot, next);
+  mem.set(scope, updated);
+  savePersisted(scope, updated);
+  notify(scope, next);
 }

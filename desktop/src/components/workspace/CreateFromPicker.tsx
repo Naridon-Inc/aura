@@ -19,6 +19,7 @@ import {
   type PrSummary,
 } from "../../lib/api";
 import { fetchPrList, getPrListCached } from "../../lib/prsCache";
+import { prStartPoint } from "../../lib/prStartPoint";
 import { useDismiss } from "../../lib/useDismiss";
 
 /** What the picker resolves to — the worktree's start point plus a
@@ -169,8 +170,11 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
     });
   }, [branches, q]);
 
+  // A fork's PR has no branch in this repo, so its start point is the
+  // `pull/<n>/head:<local>` spelling the backend fetches before checkout
+  // (see lib/prStartPoint). Same-repo PRs keep starting from head_ref.
   function pickPr(pr: PrSummary) {
-    onPick({ kind: "pr", ref: pr.head_ref, label: `#${pr.number} ${pr.title}` });
+    onPick({ kind: "pr", ref: prStartPoint(pr), label: `#${pr.number} ${pr.title}` });
     onClose();
   }
 
@@ -254,12 +258,24 @@ export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
                         draft
                       </span>
                     )}
+                    {pr.is_cross_repository && (
+                      <span
+                        className="meta-tag"
+                        title={`This pull request comes from ${
+                          pr.head_repo_owner ? `${pr.head_repo_owner}'s` : "a"
+                        } fork. Aura fetches its branch for you.`}
+                      >
+                        fork
+                      </span>
+                    )}
                   </span>
                   <span className="truncate font-mono text-2xs text-text-4">
-                    {pr.head_ref}
+                    {pr.is_cross_repository && pr.head_repo_owner
+                      ? `${pr.head_repo_owner}:${pr.head_ref}`
+                      : pr.head_ref}
                   </span>
                 </span>
-                {isSelected("pr", pr.head_ref) && (
+                {isSelected("pr", prStartPoint(pr)) && (
                   <Check size={13} className="mt-0.5 shrink-0 text-accent" />
                 )}
               </button>

@@ -31,6 +31,23 @@ describe("what makes two entries the same place", () => {
     );
   });
 
+  test("two worktrees of one project on one box are two places", () => {
+    // A workspace launched onto the box works in a sibling checkout
+    // (`<project>-<branch>`), not the machine's main one. Its tabs, its
+    // files and its git are that checkout's, and entering it must not read
+    // as re-entering the main checkout — or the other way round.
+    const main = { machineId: BOX, repoRoot: "/src/aura" };
+    const featX = { ...main, remoteRoot: "/home/u/aura-feat-x" };
+    const featY = { ...main, remoteRoot: "/home/u/aura-feat-y" };
+    expect(remotePlaceKey(featX)).not.toBe(remotePlaceKey(main));
+    expect(remotePlaceKey(featX)).not.toBe(remotePlaceKey(featY));
+    expect(remotePlaceKey(featX)).toBe(
+      remotePlaceKey({ ...main, remoteRoot: "/home/u/aura-feat-x/" }),
+    );
+    // A blank worktree is no worktree — the key a main-checkout place always had.
+    expect(remotePlaceKey({ ...main, remoteRoot: "  " })).toBe(remotePlaceKey(main));
+  });
+
   test("a conversation with no box yet is keyed by the conversation", () => {
     expect(remotePlaceKey({ threadKey: "thread-7" })).toBe(
       remotePlaceKey({ threadKey: "thread-7", machineId: "  " }),

@@ -28,6 +28,10 @@ pub struct SymbolFacts {
 
 /// Build artifacts and dependency directories are never part of a semantic
 /// comparison. Mirrors the pre-commit capture loop's skip-list.
+pub(crate) fn is_skippable_path(path: &str) -> bool {
+    is_skippable(path)
+}
+
 fn is_skippable(path: &str) -> bool {
     path.contains("node_modules/")
         || path.contains(".next/")
@@ -48,9 +52,11 @@ pub fn lang_ext(path: &str) -> &'static str {
     if path.ends_with(".rs") { "rs" }
     else if path.ends_with(".py") { "py" }
     else if path.ends_with(".tsx") { "tsx" }
-    else if path.ends_with(".ts") { "ts" }
+    // .mts/.cts and .mjs/.cjs are the same grammars; a gate that skips them
+    // reports a clean verdict on a file it never parsed.
+    else if path.ends_with(".ts") || path.ends_with(".mts") || path.ends_with(".cts") { "ts" }
     else if path.ends_with(".jsx") { "jsx" }
-    else if path.ends_with(".js") { "js" }
+    else if path.ends_with(".js") || path.ends_with(".mjs") || path.ends_with(".cjs") { "js" }
     else if path.ends_with(".go") { "go" }
     else if path.ends_with(".java") { "java" }
     else if path.ends_with(".rb") { "rb" }
@@ -126,7 +132,7 @@ fn rust_exported(source: &str, ident: &str) -> bool {
 ///
 /// Nested closures and generated names are dropped — a gate that flags a
 /// vanished loop variable as a lost feature is a gate people turn off.
-fn symbols_in(
+pub(crate) fn symbols_in(
     parser: &mut SemanticParser,
     path: &str,
     source: &str,
@@ -234,6 +240,34 @@ pub fn nodes_in_tree(repo: &Repository, treeish: &str) -> Result<Vec<AstNode>, g
     Ok(out)
 }
 
+/// Every parsed node in the git index, for call-graph work on the staged tree.
+///
+/// `nodes_in_tree`'s sibling, and it exists for the same reason `scan_index`
+/// is not `scan_tree`: the index has no tree object until someone writes one,
+/// and writing one as a side effect of a read-only gate is not something a
+/// pre-commit hook should be doing to a person's repository.
+pub fn nodes_in_index(repo: &Repository) -> Result<Vec<AstNode>, git2::Error> {
+    let index = repo.index()?;
+    let mut parser = match SemanticParser::new() {
+        Ok(p) => p,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut out = Vec::new();
+
+    for entry in index.iter() {
+        let path = String::from_utf8_lossy(&entry.path).to_string();
+        if is_skippable(&path) || lang_ext(&path).is_empty() {
+            continue;
+        }
+        let Ok(blob) = repo.find_blob(entry.id) else { continue };
+        let Ok(source) = std::str::from_utf8(blob.content()) else { continue };
+        if let Ok(nodes) = parser.parse_file_with_path(source, lang_ext(&path), &path) {
+            out.extend(nodes);
+        }
+    }
+    Ok(out)
+}
+
 /// Every symbol in the git index — the exact content a commit would capture.
 pub fn scan_index(repo: &Repository) -> Result<BTreeMap<String, SymbolFacts>, git2::Error> {
     let index = repo.index()?;
@@ -260,6 +294,20 @@ pub fn scan_index(repo: &Repository) -> Result<BTreeMap<String, SymbolFacts>, gi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ESM and CommonJS suffixes are the same two grammars. Left out, they
+    /// were not "unsupported" in any visible way — an unmapped extension is
+    /// skipped, so the gate returned a clean verdict on a file it never read.
+    #[test]
+    fn module_suffixes_map_to_the_grammar_they_actually_are() {
+        assert_eq!(lang_ext("a/b.mjs"), "js");
+        assert_eq!(lang_ext("a/b.cjs"), "js");
+        assert_eq!(lang_ext("a/b.mts"), "ts");
+        assert_eq!(lang_ext("a/b.cts"), "ts");
+        // Still nothing for what we genuinely cannot parse.
+        assert_eq!(lang_ext("a/b.md"), "");
+        assert_eq!(lang_ext("a/b.mjsx"), "");
+    }
 
     #[test]
     fn ts_export_forms_all_read_as_exported() {

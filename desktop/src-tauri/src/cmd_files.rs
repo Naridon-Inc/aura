@@ -12,6 +12,13 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+// The pure readers of git's output live in `git_parse`, shared with the
+// remote twins of these commands (`manager::brain::place_work`), and the
+// structs go with them so both arms answer in one shape.
+pub use crate::git_parse::branches::{GitBranchInfo, GitBranchRich};
+pub use crate::git_parse::stats::AheadBehind;
+pub use crate::git_parse::status::StatusEntry;
+
 #[derive(Serialize)]
 pub struct DirEntry {
     pub name: String,
@@ -43,7 +50,7 @@ const MAX_FILE_BYTES: u64 = 2_000_000;
 /// OS metadata, VCS internals, and tooling caches that bloat the tree
 /// without ever being something the user edits. Dotfiles NOT in this
 /// list (`.env`, `.gitignore`, `.prettierrc`, …) stay visible.
-fn is_always_hidden(name: &str) -> bool {
+pub(crate) fn is_always_hidden(name: &str) -> bool {
     matches!(
         name,
         ".git"
@@ -345,28 +352,18 @@ pub async fn fs_delete(
     }
 }
 
-/// A gitignored file we still surface in the project index because it's a
-/// config file people open and edit, not build noise. The `.env` family is
-/// the canonical case (`.env`, `.env.local`, `.env.production`, …) — it lives
-/// in `.gitignore` by convention, so `--exclude-standard` drops it, yet it's
-/// one of the files users most want to reach from ⌘P or an `@`-mention.
-/// Mirrors the dotfile-visibility doctrine in [`is_always_hidden`], which
-/// keeps `.env` in the file tree.
-fn is_meaningful_ignored(base: &str) -> bool {
-    const ENV: &str = ".env";
-    base == ENV || base.starts_with(&format!("{ENV}."))
-}
-
 /// Project-wide file index for the command palette and the `@`-mention
 /// picker. Shells `git ls-files` against `repo_root`: the `--exclude-standard`
 /// pass keeps node_modules / build caches / `target` out for free. We then
 /// union the *ignored* set back in, but filtered to the meaningful config
-/// files ([`is_meaningful_ignored`]) so `.env` reappears without dragging
-/// node_modules along. Falls back to an empty list for non-git roots; returns
-/// repo-relative paths sorted lexically. The frontend filters + ranks; the
-/// backend just supplies the haystack.
+/// files (`git_parse::files::is_meaningful_ignored`) so `.env` reappears
+/// without dragging node_modules along. Falls back to an empty list for
+/// non-git roots; returns repo-relative paths sorted lexically. The frontend
+/// filters + ranks; the backend just supplies the haystack. The two listings
+/// and their merge are `git_parse::files`, shared with the remote twin.
 #[tauri::command]
 pub async fn fs_find_files(repo_root: String) -> Vec<String> {
+    use crate::git_parse::files;
     crate::blocking::run(move || {
         let cwd = PathBuf::from(&repo_root);
         let run = |args: &[&str]| -> Vec<String> {
@@ -380,53 +377,9 @@ pub async fn fs_find_files(repo_root: String) -> Vec<String> {
             if !out.status.success() {
                 return Vec::new();
             }
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .collect()
+            files::lines(&String::from_utf8_lossy(&out.stdout))
         };
-
-        // Tracked + untracked-but-not-ignored: the normal editable surface.
-        let mut paths = run(&["ls-files", "--cached", "--others", "--exclude-standard"]);
-
-        // …plus the few gitignored files worth opening — the `.env` family above
-        // all. `--ignored` (with an exclude flag) lists what the standard rules
-        // hide; we keep only the meaningful ones so caches stay out.
-        //
-        // `--directory` is load-bearing, not a tidy-up: without it git enumerates
-        // every ignored path individually, which on a repo carrying node_modules
-        // and Cargo's `target/` means ~470k lines and ~5s of wall clock — all of
-        // it allocated into a Vec and then thrown away, since only a handful of
-        // `.env` files survive the filter. With it git stops at the first wholly
-        // ignored directory and reports that one entry, taking the same listing
-        // to ~800 lines and ~40ms. The trade is deliberate: a `.env` buried
-        // *inside* a wholly ignored folder is no longer surfaced, which is the
-        // intent — those are caches and vendored trees, not files people edit.
-        for rel in run(&[
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--directory",
-        ]) {
-            // Collapsed directories arrive with a trailing slash. They are not
-            // files and must never reach the picker.
-            if rel.ends_with('/') {
-                continue;
-            }
-            let is_env = Path::new(&rel)
-                .file_name()
-                .map(|n| is_meaningful_ignored(&n.to_string_lossy()))
-                .unwrap_or(false);
-            if is_env {
-                paths.push(rel);
-            }
-        }
-
-        paths.sort();
-        paths.dedup();
-        paths
+        files::merge_index(run(&files::TRACKED_ARGS), run(&files::IGNORED_ARGS))
     })
     .await
 }
@@ -603,17 +556,25 @@ pub async fn git_branch(repo_root: String) -> String {
     .await
 }
 
-/// One branch row for the footer branch switcher.
-#[derive(Serialize)]
-pub struct GitBranchInfo {
-    /// Short name: `main`, `feat/x`, or `origin/feat/x` for remotes.
-    pub name: String,
-    pub is_current: bool,
-    pub is_remote: bool,
-    /// Short upstream ref (`origin/main`) when the local branch tracks one.
-    pub upstream: Option<String>,
-    /// Last commit subject — context in the dropdown.
-    pub subject: Option<String>,
+/// `git for-each-ref` with one of the two switcher formats, as text. Empty
+/// when git can't be run or isn't a repo — the parsers turn that into an
+/// empty list, which is what "not a repo" has always meant here.
+fn for_each_ref(cwd: &Path, format: &str) -> String {
+    use crate::git_parse::branches::FOR_EACH_REF_ARGS;
+    let Ok(out) = std::process::Command::new("git")
+        .arg("for-each-ref")
+        .arg(FOR_EACH_REF_ARGS[0])
+        .args(["--format", format])
+        .args(&FOR_EACH_REF_ARGS[1..])
+        .current_dir(cwd)
+        .output()
+    else {
+        return String::new();
+    };
+    if !out.status.success() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// Local + remote-tracking branches for the switcher, newest-commit first.
@@ -621,108 +582,11 @@ pub struct GitBranchInfo {
 /// skipped. Empty vec if not a repo.
 #[tauri::command]
 pub async fn git_branches(repo_root: String) -> Vec<GitBranchInfo> {
+    use crate::git_parse::branches::{parse_branches, BRANCH_FORMAT};
     crate::blocking::run(move || {
-        let cwd = PathBuf::from(&repo_root);
-        // One for-each-ref call gives every field in a stable, tab-delimited
-        // form. `%(HEAD)` marks the current branch with `*`. Full `%(refname)`
-        // lets us tell locals (refs/heads) from remotes (refs/remotes) since
-        // the short name alone is ambiguous (both can contain slashes).
-        let fmt = "%(refname)\t%(refname:short)\t%(HEAD)\t%(upstream:short)\t%(contents:subject)";
-        let Ok(out) = std::process::Command::new("git")
-            .args([
-                "for-each-ref",
-                "--sort=-committerdate",
-                "--format",
-                fmt,
-                "refs/heads",
-                "refs/remotes",
-            ])
-            .current_dir(&cwd)
-            .output()
-        else {
-            return Vec::new();
-        };
-        if !out.status.success() {
-            return Vec::new();
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut branches = Vec::new();
-        for line in text.lines() {
-            let mut cols = line.split('\t');
-            let full = cols.next().unwrap_or("").trim();
-            let short = cols.next().unwrap_or("").trim().to_string();
-            let head = cols.next().unwrap_or("").trim();
-            let upstream = cols.next().unwrap_or("").trim();
-            let subject = cols.next().unwrap_or("").trim();
-            if short.is_empty() {
-                continue;
-            }
-            // Skip the `origin/HEAD -> origin/main` symbolic pointer; it isn't a
-            // real branch and would show as a duplicate of the default.
-            if short.ends_with("/HEAD") {
-                continue;
-            }
-            branches.push(GitBranchInfo {
-                is_remote: full.starts_with("refs/remotes/"),
-                is_current: head == "*",
-                upstream: if upstream.is_empty() {
-                    None
-                } else {
-                    Some(upstream.to_string())
-                },
-                subject: if subject.is_empty() {
-                    None
-                } else {
-                    Some(subject.to_string())
-                },
-                name: short,
-            });
-        }
-        branches
+        parse_branches(&for_each_ref(Path::new(&repo_root), BRANCH_FORMAT))
     })
     .await
-}
-
-/// A richly-detailed branch row for the Cmd-K branch switcher. One
-/// `git for-each-ref` call (NOT N) fills every field so the modal can show
-/// per-branch context — author, when it last moved, the subject line, and how
-/// far ahead/behind its upstream — without a round-trip per branch.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GitBranchRich {
-    /// Short name: `main`, `feat/x`, or `origin/feat/x` for remotes.
-    pub name: String,
-    pub is_current: bool,
-    pub is_remote: bool,
-    /// Short upstream ref (`origin/main`) when the local branch tracks one.
-    pub upstream: Option<String>,
-    /// Commits this branch is ahead of its upstream (0 when no upstream).
-    pub ahead: u32,
-    /// Commits this branch is behind its upstream (0 when no upstream).
-    pub behind: u32,
-    /// Last-commit author name — who last moved this branch.
-    pub author: Option<String>,
-    /// Last-commit time, unix seconds — drives the "2h ago" relative label.
-    pub committed_at: Option<i64>,
-    /// Last commit subject — the one-line "what's on this branch".
-    pub subject: Option<String>,
-}
-
-/// Parse `%(upstream:track)` — git emits e.g. `[ahead 3, behind 1]`,
-/// `[ahead 2]`, `[behind 5]`, `[gone]`, or empty. Returns (ahead, behind).
-fn parse_track(track: &str) -> (u32, u32) {
-    let mut ahead = 0u32;
-    let mut behind = 0u32;
-    let inner = track.trim().trim_start_matches('[').trim_end_matches(']');
-    for part in inner.split(',') {
-        let part = part.trim();
-        if let Some(n) = part.strip_prefix("ahead ") {
-            ahead = n.trim().parse().unwrap_or(0);
-        } else if let Some(n) = part.strip_prefix("behind ") {
-            behind = n.trim().parse().unwrap_or(0);
-        }
-    }
-    (ahead, behind)
 }
 
 /// Local + remote branches with rich per-branch context for the Cmd-K
@@ -731,74 +595,9 @@ fn parse_track(track: &str) -> (u32, u32) {
 /// vec if not a repo.
 #[tauri::command]
 pub async fn git_branches_rich(repo_root: String) -> Vec<GitBranchRich> {
+    use crate::git_parse::branches::{parse_branches_rich, BRANCH_RICH_FORMAT};
     crate::blocking::run(move || {
-        let cwd = PathBuf::from(&repo_root);
-        // A unit-separator (\x1f, "US") between fields survives subjects and
-        // author names that themselves contain tabs; `%(upstream:track)` carries
-        // the ahead/behind summary so we never shell out per branch.
-        let fmt = "%(refname)\x1f%(refname:short)\x1f%(HEAD)\x1f%(upstream:short)\x1f%(upstream:track)\x1f%(authorname)\x1f%(committerdate:unix)\x1f%(contents:subject)";
-        let Ok(out) = std::process::Command::new("git")
-            .args([
-                "for-each-ref",
-                "--sort=-committerdate",
-                "--format",
-                fmt,
-                "refs/heads",
-                "refs/remotes",
-            ])
-            .current_dir(&cwd)
-            .output()
-        else {
-            return Vec::new();
-        };
-        if !out.status.success() {
-            return Vec::new();
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut branches = Vec::new();
-        for line in text.lines() {
-            let mut cols = line.split('\x1f');
-            let full = cols.next().unwrap_or("").trim();
-            let short = cols.next().unwrap_or("").trim().to_string();
-            let head = cols.next().unwrap_or("").trim();
-            let upstream = cols.next().unwrap_or("").trim();
-            let track = cols.next().unwrap_or("");
-            let author = cols.next().unwrap_or("").trim();
-            let committed = cols.next().unwrap_or("").trim();
-            let subject = cols.next().unwrap_or("").trim();
-            if short.is_empty() {
-                continue;
-            }
-            // Skip the `origin/HEAD -> origin/main` symbolic pointer.
-            if short.ends_with("/HEAD") {
-                continue;
-            }
-            let (ahead, behind) = parse_track(track);
-            branches.push(GitBranchRich {
-                is_remote: full.starts_with("refs/remotes/"),
-                is_current: head == "*",
-                upstream: if upstream.is_empty() {
-                    None
-                } else {
-                    Some(upstream.to_string())
-                },
-                ahead,
-                behind,
-                author: if author.is_empty() {
-                    None
-                } else {
-                    Some(author.to_string())
-                },
-                committed_at: committed.parse::<i64>().ok(),
-                subject: if subject.is_empty() {
-                    None
-                } else {
-                    Some(subject.to_string())
-                },
-                name: short,
-            });
-        }
-        branches
+        parse_branches_rich(&for_each_ref(Path::new(&repo_root), BRANCH_RICH_FORMAT))
     })
     .await
 }
@@ -937,6 +736,15 @@ pub struct WorktreeEntry {
     /// Earlier") the way Conductor does — real time, never invented. `None`
     /// when the branch tip can't be resolved (e.g. a detached or empty head).
     pub head_committed_at: Option<i64>,
+    /// Unix seconds of when this copy APPEARED — the birth time of the admin
+    /// directory git writes under `.git/worktrees/<id>` when the worktree is
+    /// added. Not derivable from the commit graph: a copy cut today off a
+    /// branch nobody has touched in a week carries a week-old HEAD, so a rail
+    /// that ranks copies by commit time buries the one you just made. Git
+    /// records no creation date of its own; that directory is the only fact on
+    /// disk that says when. `None` for the main worktree (it has no admin dir
+    /// — it IS the repo) and wherever the stamp can't be read.
+    pub created_at: Option<i64>,
 }
 
 /// `git worktree list --porcelain` parsed into structured rows. Used by the
@@ -989,6 +797,7 @@ fn git_worktree_list_blocking(repo_root: &str) -> Result<Vec<WorktreeEntry>, Str
                 is_main: false,
                 locked: false,
                 head_committed_at: None,
+                created_at: None,
             });
         } else if let Some(rest) = line.strip_prefix("HEAD ") {
             if let Some(e) = cur.as_mut() {
@@ -1049,8 +858,172 @@ fn git_worktree_list_blocking(repo_root: &str) -> Result<Vec<WorktreeEntry>, Str
                 }
             }
         }
+        // When each copy appeared. One listing of the repo's own
+        // `.git/worktrees/`, no per-worktree subprocess.
+        let born = worktree_birth_times(&cwd);
+        for e in entries.iter_mut() {
+            if !e.is_main {
+                e.created_at = born.get(e.path.as_str()).copied();
+            }
+        }
     }
     Ok(entries)
+}
+
+/// Worktree path → unix seconds it was created, read from the admin directory
+/// git writes per worktree under the repo's common git dir.
+///
+/// Each `.git/worktrees/<id>/gitdir` holds the absolute path of that
+/// worktree's own `.git` file, which is what keys the map back to the rows
+/// `git worktree list` printed. A worktree whose stamp can't be read is simply
+/// absent — the caller shows nothing rather than a guessed date.
+fn worktree_birth_times(repo_cwd: &Path) -> HashMap<String, i64> {
+    let mut out: HashMap<String, i64> = HashMap::new();
+    // `--git-common-dir` is the shared `.git` even when called from inside a
+    // linked worktree (where plain `--git-dir` is the per-worktree admin dir).
+    let Ok(res) = std::process::Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(repo_cwd)
+        .output()
+    else {
+        return out;
+    };
+    if !res.status.success() {
+        return out;
+    }
+    let raw = String::from_utf8_lossy(&res.stdout).trim().to_string();
+    if raw.is_empty() {
+        return out;
+    }
+    // Git answers relatively (`.git`) when the cwd is the repo itself.
+    let common = {
+        let p = PathBuf::from(&raw);
+        if p.is_absolute() {
+            p
+        } else {
+            repo_cwd.join(p)
+        }
+    };
+    let Ok(dirs) = fs::read_dir(common.join("worktrees")) else {
+        return out;
+    };
+    for admin in dirs.flatten() {
+        let dir = admin.path();
+        let Ok(gitdir) = fs::read_to_string(dir.join("gitdir")) else {
+            continue;
+        };
+        let wt = gitdir.trim().trim_end_matches("/.git").trim_end_matches('/');
+        if wt.is_empty() {
+            continue;
+        }
+        let Ok(meta) = fs::metadata(&dir) else {
+            continue;
+        };
+        // Birth time where the filesystem keeps one (APFS does); else the last
+        // time git rewrote the admin dir, which still bounds it from above.
+        let Ok(stamp) = meta.created().or_else(|_| meta.modified()) else {
+            continue;
+        };
+        if let Ok(since) = stamp.duration_since(std::time::UNIX_EPOCH) {
+            out.insert(wt.to_string(), since.as_secs() as i64);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod worktree_tests {
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repo with one linked worktree, so the birth stamp has something to
+    /// find. Returns (tempdir, main repo path, worktree path).
+    fn repo_with_copy() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let td = tempfile::tempdir().expect("tempdir");
+        // macOS hands out `/var/folders/…`, a symlink to `/private/var/…`, and
+        // git records the resolved path. Compare like with like.
+        let root = fs::canonicalize(td.path()).expect("canonical tempdir");
+        let main = root.join("main");
+        fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["config", "user.email", "t@example.com"]);
+        git(&main, &["config", "user.name", "t"]);
+        fs::write(main.join("a.txt"), "hello\n").unwrap();
+        git(&main, &["add", "."]);
+        git(&main, &["commit", "-qm", "first"]);
+        let copy = root.join("copy");
+        git(
+            &main,
+            &["worktree", "add", "-q", "-b", "side", copy.to_str().unwrap()],
+        );
+        (td, main, copy)
+    }
+
+    #[test]
+    fn birth_times_key_on_the_worktree_path() {
+        let (_td, main, copy) = repo_with_copy();
+        let born = worktree_birth_times(&main);
+        let stamp = born
+            .get(copy.to_str().unwrap())
+            .copied()
+            .expect("the linked copy has a birth stamp");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(
+            (now - stamp).abs() < 300,
+            "a copy made just now should read as made just now, got {stamp} vs {now}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_copy_carries_created_at_and_the_main_checkout_does_not() {
+        let (_td, main, copy) = repo_with_copy();
+        let rows = git_worktree_list_blocking(main.to_str().unwrap()).expect("lists");
+        assert_eq!(rows.len(), 2, "main + one copy");
+
+        let home = rows.iter().find(|e| e.is_main).expect("a main row");
+        assert_eq!(
+            home.created_at, None,
+            "the main checkout has no admin dir, so it has no creation date to report"
+        );
+
+        let side = rows
+            .iter()
+            .find(|e| e.path == copy.to_str().unwrap())
+            .expect("the copy is listed");
+        assert!(
+            side.created_at.is_some(),
+            "a linked copy reports when it was made"
+        );
+        assert_eq!(side.branch, "side");
+    }
+
+    #[test]
+    fn birth_times_survive_being_asked_from_inside_the_copy() {
+        // The rail lists a project's copies while the window itself sits in
+        // one of them, so the lookup must resolve the SHARED git dir, not the
+        // per-worktree admin dir `--git-dir` would hand back.
+        let (_td, _main, copy) = repo_with_copy();
+        let born = worktree_birth_times(&copy);
+        assert!(
+            born.contains_key(copy.to_str().unwrap()),
+            "asked from inside the copy, it still finds the copy"
+        );
+    }
 }
 
 /// Create a fresh worktree at `worktree_path` rooted at `repo_root`. If
@@ -1865,14 +1838,6 @@ pub async fn scaffold_template(
 /// upstream is `Ok(has_upstream: false)`, and anything that stopped us
 /// finding out is `Err` — which the TypeScript side surfaces as "couldn't
 /// check", never as a verdict about the branch.
-#[derive(Serialize)]
-pub struct AheadBehind {
-    pub ahead: u32,
-    pub behind: u32,
-    pub has_upstream: bool,
-    pub branch: Option<String>,
-}
-
 #[tauri::command]
 pub async fn git_ahead_behind(repo_root: String) -> Result<AheadBehind, String> {
     crate::blocking::run(move || {
@@ -1911,19 +1876,9 @@ pub async fn git_ahead_behind(repo_root: String) -> Result<AheadBehind, String> 
                 why.lines().next().unwrap_or(why).to_string()
             });
         }
-        // There IS an upstream and git answered, so a line we can't read is a
-        // broken answer, not a zero. Reporting it as 0/0 is what made "in sync"
-        // the resting state of every failure.
-        let s = String::from_utf8_lossy(&counts.stdout);
-        let mut parts = s.split_whitespace();
-        let mut count = |what: &str| -> Result<u32, String> {
-            parts
-                .next()
-                .and_then(|n| n.parse::<u32>().ok())
-                .ok_or_else(|| format!("git returned a {what} count we couldn't read: {:?}", s.trim()))
-        };
-        let behind = count("behind")?;
-        let ahead = count("ahead")?;
+        let (behind, ahead) = crate::git_parse::stats::parse_left_right_count(
+            &String::from_utf8_lossy(&counts.stdout),
+        )?;
         Ok(AheadBehind {
             ahead,
             behind,
@@ -1943,8 +1898,7 @@ fn current_branch(cwd: &Path) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if raw.is_empty() || raw == "HEAD" { None } else { Some(raw) }
+    crate::git_parse::branches::parse_current_branch(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// Discard local edits to a tracked file by checking out HEAD's version.
@@ -2181,13 +2135,6 @@ pub async fn git_commit_file_stats(repo_root: String, sha: String) -> Vec<GitCom
 /// (commit-bound), `worktree` the unstaged side. Untracked files come
 /// back as `("?", "?")`. The frontend uses this to render staged vs
 /// unstaged sections in the Source Control sidebar.
-#[derive(Serialize)]
-pub struct StatusEntry {
-    pub path: String,
-    pub index: String,
-    pub worktree: String,
-}
-
 #[tauri::command]
 pub async fn git_status_v2(repo_root: String) -> Vec<StatusEntry> {
     crate::blocking::run(move || {
@@ -2202,28 +2149,7 @@ pub async fn git_status_v2(repo_root: String) -> Vec<StatusEntry> {
         if !out.status.success() {
             return Vec::new();
         }
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut entries = Vec::new();
-        for chunk in text.split('\0') {
-            if chunk.len() < 4 {
-                continue;
-            }
-            let bytes = chunk.as_bytes();
-            let x = bytes[0] as char;
-            let y = bytes[1] as char;
-            let path_part = &chunk[3..];
-            let rel = if let Some(idx) = path_part.find(" -> ") {
-                &path_part[idx + 4..]
-            } else {
-                path_part
-            };
-            entries.push(StatusEntry {
-                path: rel.to_string(),
-                index: if x == ' ' { String::new() } else { x.to_string() },
-                worktree: if y == ' ' { String::new() } else { y.to_string() },
-            });
-        }
-        entries
+        crate::git_parse::status::parse_porcelain_z(&String::from_utf8_lossy(&out.stdout))
     })
     .await
 }
@@ -2282,55 +2208,15 @@ fn git_status_map(cwd: &Path) -> HashMap<PathBuf, char> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let root = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    for line in text.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let bytes = line.as_bytes();
-        let x = bytes[0] as char;
-        let y = bytes[1] as char;
-        let path_part = &line[3..];
-        if path_part.starts_with('"') {
-            continue;
-        }
-        let rel = if let Some(idx) = path_part.find(" -> ") {
-            &path_part[idx + 4..]
-        } else {
-            path_part
-        };
-        let full = root.join(rel);
-        // Order matters. A conflict has to be recognised BEFORE the A/D
-        // ladder, because git spells several of its unmerged states with the
-        // very letters that ladder is looking for. `AA` (both added) and `DD`
-        // (both deleted) are conflicts, not an add and a delete, and `UU`
-        // (both modified) used to fall past every arm into the `else` and
-        // come out as an ordinary modified file — so a file with conflict
-        // markers sitting in it looked exactly like one you had just edited.
-        //
-        // The unmerged set, in full, is: DD AU UD UA DU AA UU — which is
-        // "either side is U, or both sides carry the same letter".
-        let unmerged = x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D');
-        let ch = if x == '?' || y == '?' {
-            '?'
-        } else if unmerged {
-            'U'
-        } else if x == 'R' || y == 'R' {
-            // A rename reported as "modified" sends you looking for an edit
-            // that was never made.
-            'R'
-        } else if x == 'A' || y == 'A' {
-            'A'
-        } else if x == 'D' || y == 'D' {
-            'D'
-        } else {
-            'M'
-        };
-        map.insert(full, ch);
+    // The letter ladder (conflict before add/delete, rename as its own letter)
+    // is `git_parse::status::status_letter`, shared with the remote tree.
+    for (rel, ch) in crate::git_parse::status::parse_porcelain_lines(&text) {
+        map.insert(root.join(rel), ch);
     }
     map
 }
 
-fn language_for(path: &Path) -> String {
+pub(crate) fn language_for(path: &Path) -> String {
     let ext = path
         .extension()
         .and_then(|s| s.to_str())

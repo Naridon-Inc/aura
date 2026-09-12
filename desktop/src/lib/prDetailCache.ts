@@ -14,8 +14,15 @@
 // while SWR refreshes in the background. Same timing constants
 // (30s fresh / 10m expiry) still gate the blocking-refetch path.
 
+//
+// AURA-1307: keyed by PLACE (`placeScope`), not by root alone — the same
+// local root standing in a machine is a different repo's PR. `gh` still runs
+// here; on a machine it is told the repo by name (`remoteRepoFor`).
+
 import { api, type PrDetail } from "./api";
 import { setCache } from "./localStore";
+import { placeScope } from "./place/workApi";
+import { remoteRepoFor } from "./prRepo";
 
 const STALE_MS = 30_000; // 30s: served fresh without refetch
 const EXPIRY_MS = 10 * 60_000; // 10m: beyond this, refetch blocking
@@ -30,7 +37,7 @@ const mem = new Map<string, Entry>();
 const subs = new Map<string, Set<(detail: PrDetail) => void>>();
 
 function key(repoRoot: string, prNumber: number): string {
-  return `${repoRoot}#${prNumber}`;
+  return `${placeScope(repoRoot)}#${prNumber}`;
 }
 
 function lsKey(k: string): string {
@@ -79,8 +86,8 @@ async function refreshNow(
   const k = key(repoRoot, prNumber);
   const existing = mem.get(k);
   if (existing?.inflight) return existing.inflight;
-  const p = api
-    .prDetail(repoRoot, prNumber)
+  const p = remoteRepoFor(repoRoot)
+    .then((remoteRepo) => api.prDetail(repoRoot, prNumber, remoteRepo))
     .then((detail) => {
       const entry: Entry = { data: detail, fetchedAt: Date.now() };
       mem.set(k, entry);

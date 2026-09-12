@@ -282,7 +282,9 @@ fn changed_source_paths(repo_root: &Path, base: &str) -> Vec<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| {
             s.ends_with(".rs") || s.ends_with(".ts") || s.ends_with(".tsx")
-                || s.ends_with(".js") || s.ends_with(".py")
+                || s.ends_with(".mts") || s.ends_with(".cts")
+                || s.ends_with(".js") || s.ends_with(".mjs") || s.ends_with(".cjs")
+                || s.ends_with(".py")
         })
         .collect()
 }

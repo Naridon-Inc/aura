@@ -28,6 +28,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FullscreenOverlay } from "../FullscreenOverlay";
 import { relativeAge } from "../../lib/relativeTime";
+import { loadCachedChecks, saveCachedChecks } from "../../lib/checksEvidence";
 import { Button } from "../ui/button";
 import {
   api,
@@ -84,32 +85,17 @@ const TRIGGER_FOR: Record<RunMode, CiTrigger> = {
   full: "pr",
 };
 
+// The cache moved to lib/checksEvidence: the session review reads this same
+// record as its only evidence of commands that actually executed, and a key
+// owned privately by one pane is a key the two surfaces drift apart on.
 type Cached = { runs: CiPipelineRun[]; ranAt: number; mode?: RunMode };
 
-function cacheKey(repoRoot: string): string {
-  return `aura.checks.${repoRoot}`;
-}
-
 function loadCached(repoRoot: string): Cached | null {
-  try {
-    const raw = localStorage.getItem(cacheKey(repoRoot));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Cached;
-    if (parsed && Array.isArray(parsed.runs) && typeof parsed.ranAt === "number") {
-      return parsed;
-    }
-  } catch {
-    /* private mode / parse error — treat as no cache */
-  }
-  return null;
+  return loadCachedChecks(repoRoot) as Cached | null;
 }
 
 function saveCached(repoRoot: string, value: Cached): void {
-  try {
-    localStorage.setItem(cacheKey(repoRoot), JSON.stringify(value));
-  } catch {
-    /* best-effort */
-  }
+  saveCachedChecks(repoRoot, value);
 }
 
 export function ChecksPane({ repoRoot, onClose }: ChecksPaneProps) {

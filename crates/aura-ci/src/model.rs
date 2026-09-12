@@ -238,7 +238,7 @@ impl PipelineRun {
         let failed = steps.iter().filter(|s| s.status.is_failure()).count();
         let status = if blocked { Status::Fail } else { Status::Pass };
 
-        let headline = headline_for(passed, failed, blocked);
+        let headline = headline_for(passed, failed, blocked, trigger);
 
         PipelineRun {
             pipeline,
@@ -254,7 +254,12 @@ impl PipelineRun {
 
 /// Plain-language headline — the ADE audience is non-engineers. We say what
 /// happened and whether it needs a look, never jargon.
-fn headline_for(passed: usize, failed: usize, blocked: bool) -> String {
+///
+/// `trigger` is load-bearing, not decoration: "stopped the commit" is a claim
+/// about an event, and a `pr` or `manual` run has no commit in front of it to
+/// stop. Reporting one anyway describes something that did not happen, which is
+/// worse than reporting nothing.
+fn headline_for(passed: usize, failed: usize, blocked: bool, trigger: Trigger) -> String {
     if passed == 0 && failed == 0 {
         return "No safety checks ran for this step.".to_string();
     }
@@ -263,7 +268,13 @@ fn headline_for(passed: usize, failed: usize, blocked: bool) -> String {
         return format!("Your safety checks ran — all {} {} passed.", passed, p);
     }
     let needs = if blocked {
-        format!("{} stopped the commit", failed)
+        match trigger {
+            Trigger::PreCommit => format!("{} stopped the commit", failed),
+            Trigger::PrePush => format!("{} stopped the push", failed),
+            Trigger::Pr | Trigger::Manual => {
+                format!("{} {} fixing first", failed, plural(failed, "needs", "need"))
+            }
+        }
     } else {
         format!("{} {} a look", failed, plural(failed, "needs", "need"))
     };
@@ -325,6 +336,46 @@ mod tests {
         // Pipeline fires on pre-commit, but the step pins itself to pre-push.
         assert!(!step.fires_on(Trigger::PreCommit, &[Trigger::PreCommit]));
         assert!(step.fires_on(Trigger::PrePush, &[Trigger::PreCommit]));
+    }
+
+    #[test]
+    fn a_headline_only_claims_the_outcome_its_trigger_can_produce() {
+        let blocking_failure = || {
+            vec![StepResult {
+                name: "no-stubs".into(),
+                kind: "gate:no-stubs".into(),
+                status: Status::Fail,
+                blocking: true,
+                summary: "a placeholder".into(),
+                detail: None,
+                duration_ms: 1,
+            }]
+        };
+
+        let commit = PipelineRun::finalize(
+            "default".into(),
+            Trigger::PreCommit,
+            blocking_failure(),
+            1,
+        );
+        assert!(commit.headline.contains("stopped the commit"));
+
+        let push =
+            PipelineRun::finalize("default".into(), Trigger::PrePush, blocking_failure(), 1);
+        assert!(push.headline.contains("stopped the push"));
+
+        // A `pr` or `manual` run has no commit or push in front of it. Saying
+        // one was stopped would describe an event that never happened.
+        for trigger in [Trigger::Pr, Trigger::Manual] {
+            let run = PipelineRun::finalize("default".into(), trigger, blocking_failure(), 1);
+            assert!(
+                !run.headline.contains("stopped"),
+                "{:?} claimed to have stopped something: {}",
+                trigger,
+                run.headline
+            );
+            assert!(run.headline.contains("needs fixing first"));
+        }
     }
 
     #[test]

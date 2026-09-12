@@ -197,21 +197,95 @@ export function useProjectScope(): ProjectScope {
   return current;
 }
 
-/** Every scoped project's tasks, tagged with the root each came from, so a
- *  merged surface can still route a change back to the file it came out of.
- *  One project failing to read is that project contributing nothing, never
- *  the whole list failing. */
+/** What one project answered when asked for its tasks. */
+export interface RootTasks {
+  root: string;
+  tasks: Array<Task & { __root: string }>;
+  /** Why this project contributed nothing — `null` when it genuinely has no
+   *  work. The distinction is the whole point of this type: a read that
+   *  failed and a board that is empty are not the same fact, and a surface
+   *  that flattens them tells someone with 261 tasks that they have none. */
+  error: string | null;
+}
+
+/** Every scoped project's tasks, tagged with the root each came from — so a
+ *  merged surface can route a change back to the file it came out of, and can
+ *  tell which projects it actually heard from.
+ *
+ *  One project failing to read is that project contributing nothing *and
+ *  saying so*; it is never the whole list failing. */
+export async function readTasksForRoots(roots: string[]): Promise<RootTasks[]> {
+  return Promise.all(
+    roots.map((root) =>
+      fetchTasks(root)
+        .then((ts) => ({
+          root,
+          tasks: ts.map((t) => ({ ...t, __root: root })),
+          error: null as string | null,
+        }))
+        .catch((e: unknown) => ({
+          root,
+          tasks: [] as Array<Task & { __root: string }>,
+          error: String(e),
+        })),
+    ),
+  );
+}
+
+/** The same read, flattened, for a surface that only wants the rows.
+ *
+ *  Callers that draw an empty state off the result should use
+ *  [`readTasksForRoots`] instead and check what failed — see [`mergeRootReads`]. */
 export async function loadTasksForRoots(
   roots: string[],
 ): Promise<Array<Task & { __root: string }>> {
-  const per = await Promise.all(
-    roots.map((root) =>
-      fetchTasks(root)
-        .then((ts) => ts.map((t) => ({ ...t, __root: root })))
-        .catch(() => [] as Array<Task & { __root: string }>),
-    ),
-  );
-  return per.flat();
+  const per = await readTasksForRoots(roots);
+  return per.flatMap((r) => r.tasks);
+}
+
+/** Fold a fresh read into what is already on screen.
+ *
+ *  A project that could not be read keeps whatever it last showed. Overwriting
+ *  it with nothing is how a board full of work becomes "No tasks yet": the
+ *  rail, which reads separately, went on counting 261 while the body claimed
+ *  the repo was empty — and "Clear filters" could not fix it, because filters
+ *  were never the reason.
+ *
+ *  Returns the rows to draw and the roots to say something about. */
+export function mergeRootReads(
+  previous: Array<Task & { __root?: string }>,
+  reads: RootTasks[],
+): { tasks: Array<Task & { __root: string }>; failed: string[] } {
+  const failed = reads.filter((r) => r.error !== null).map((r) => r.root);
+  const fresh = reads.flatMap((r) => r.tasks);
+  if (failed.length === 0) return { tasks: fresh, failed };
+
+  const stale = failed.length === reads.length
+    ? // Nothing was heard from at all: keep the whole previous board rather
+      // than deciding which half of it to believe.
+      previous
+    : previous.filter((t) => t.__root != null && failed.includes(t.__root));
+  const kept = stale
+    .filter((t): t is Task & { __root: string } => t.__root != null)
+    .filter((t) => !fresh.some((f) => f.id === t.id));
+  return { tasks: [...fresh, ...kept], failed };
+}
+
+/** What to tell someone whose board is missing a project.
+ *
+ *  Named projects, not paths and not a count: "Couldn't read 2 projects" makes
+ *  the reader go looking for which. */
+export function unreadProjectsMessage(
+  failed: string[],
+  known: KnownProject[],
+): string | null {
+  if (failed.length === 0) return null;
+  const names = failed.map((root) => placeProjectName(root, known));
+  const list =
+    names.length === 1
+      ? names[0]!
+      : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]!}`;
+  return `Couldn’t read tasks from ${list}. Showing what was last loaded.`;
 }
 
 /** The projects the app knows about, as a hook. Re-read when the open project

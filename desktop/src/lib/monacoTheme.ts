@@ -14,6 +14,7 @@
 // palette). Call `ensureAuraThemes(monaco)` in `beforeMount`, then set
 // `theme={isDark ? AURA_MONACO_DARK : AURA_MONACO_LIGHT}`.
 
+import { DIFF_WASH } from "@shared/ui/diff/wash";
 import type { Monaco } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 
@@ -168,9 +169,29 @@ export function auraThemeName(isDark: boolean): string {
 }
 
 /** Exact GitHub diff washes for non-Monaco diff renderers (e.g. the unified
- *  table fallback), so every diff surface matches. Values are the same line /
- *  word alphas Monaco uses, as `#rrggbbaa` for CSS. */
-export const AURA_DIFF_CSS = {
-  dark: { addLine: DARK.addLine, delLine: DARK.delLine, addFg: "#3fb950", delFg: "#f85149" },
-  light: { addLine: LIGHT.addLine, delLine: LIGHT.delLine, addFg: "#1a7f37", delFg: "#cf222e" },
-} as const;
+ *  table fallback), so every diff surface matches. Canonical values now live
+ *  in `@shared/ui/diff/wash` — the console draws the same diffs — and this
+ *  re-export keeps every desktop call site reading one set. The `DARK` /
+ *  `LIGHT` literals above must stay byte-equal to it (Monaco needs its own
+ *  concrete-hex palette); the assertions below fail the build if they drift. */
+export const AURA_DIFF_CSS = DIFF_WASH;
+
+// Drift guard: Monaco's palette and the shared wash describe the same washes;
+// if someone retunes one, the other must move with it. Dev-only so a
+// production bundle carries no assertion.
+if (import.meta.env?.DEV) {
+  const pairs: Array<[string, string]> = [
+    [DARK.addLine, DIFF_WASH.dark.addLine],
+    [DARK.delLine, DIFF_WASH.dark.delLine],
+    [LIGHT.addLine, DIFF_WASH.light.addLine],
+    [LIGHT.delLine, DIFF_WASH.light.delLine],
+  ];
+  for (const [monaco, shared] of pairs) {
+    if (monaco !== shared) {
+      throw new Error(
+        `Diff wash drift: Monaco paints ${monaco} where the shared wash says ${shared}. ` +
+          "Retune aura-shared/ui/diff/wash.ts and lib/monacoTheme.ts together.",
+      );
+    }
+  }
+}

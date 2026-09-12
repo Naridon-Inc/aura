@@ -246,11 +246,9 @@ pub struct CrdtUpdate {
 /// HTTP push of a CRDT update to the cloud.
 pub fn push_update(branch: &str, update: &CrdtUpdate) -> Result<(), String> {
     let cfg = ConfigManager::load();
-    let url = cfg.cloud_url.ok_or("not connected")?;
-    let token = cfg
-        .cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
-        .ok_or("no cloud token")?;
+    let url = crate::cloud_endpoint::origin(cfg.cloud_url.as_deref()).ok_or("not connected")?;
+    let token =
+        crate::cloud_endpoint::token(cfg.cloud_api_token.as_deref()).ok_or("no cloud token")?;
     let repo = crate::live_events::repo_name();
     let body = serde_json::json!({
         "repo": repo,
@@ -280,11 +278,9 @@ pub fn push_update(branch: &str, update: &CrdtUpdate) -> Result<(), String> {
 /// HTTP pull of new ops for a repo+branch (cursor-paginated).
 pub fn pull_ops(branch: &str, since: i64) -> Result<(Vec<PulledOp>, i64), String> {
     let cfg = ConfigManager::load();
-    let url = cfg.cloud_url.ok_or("not connected")?;
-    let token = cfg
-        .cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
-        .ok_or("no cloud token")?;
+    let url = crate::cloud_endpoint::origin(cfg.cloud_url.as_deref()).ok_or("not connected")?;
+    let token =
+        crate::cloud_endpoint::token(cfg.cloud_api_token.as_deref()).ok_or("no cloud token")?;
     let repo = crate::live_events::repo_name();
     let c = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(20))

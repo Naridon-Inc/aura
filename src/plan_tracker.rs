@@ -5,6 +5,7 @@
 //!   ~/.claude/projects/<project>/<session>.jsonl  — per-message token usage
 //!   ~/.claude/history.jsonl                       — session timestamps + project paths
 
+use crate::plugins::cost_reporter::{CACHE_READ_RATIO, CACHE_WRITE_RATIO};
 use colored::Colorize;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -96,6 +97,22 @@ pub struct DayTokens {
 }
 
 // ── Pricing (per 1K tokens, matches cost_reporter.rs) ───────────────────────
+
+/// One message's cost, cache traffic included.
+///
+/// Both loops below priced input and output and dropped the cache on the
+/// floor — the daily-spend loop did not even unpack it. On a transcript
+/// where cached reads outnumber fresh input by four orders of magnitude
+/// that is not a small omission, and it put this report and
+/// `aura usage` at two different answers for the same day. The ratios
+/// are the ones `cost_reporter` bills at, so the two now agree.
+fn message_cost(model: &str, input: u64, output: u64, cache_read: u64, cache_create: u64) -> f64 {
+    let (in_rate, out_rate) = model_cost_per_1k(model);
+    (input as f64 / 1000.0) * in_rate
+        + (output as f64 / 1000.0) * out_rate
+        + (cache_read as f64 / 1000.0) * in_rate * CACHE_READ_RATIO
+        + (cache_create as f64 / 1000.0) * in_rate * CACHE_WRITE_RATIO
+}
 
 fn model_cost_per_1k(model: &str) -> (f64, f64) {
     match model {
@@ -197,7 +214,7 @@ fn is_claude_peak_hour(ts_secs: u64) -> bool {
 }
 
 /// Parse a single .jsonl transcript file and extract token usage per message
-fn parse_transcript(
+pub(crate) fn parse_transcript(
     path: &std::path::Path,
     cutoff_secs: u64,
 ) -> Vec<(u64, String, u64, u64, u64, u64)> {
@@ -263,6 +280,105 @@ fn parse_transcript(
     results
 }
 
+/// One day's spend on one model, which is the smallest bucket that can be
+/// reported to the cloud honestly.
+///
+/// The spend ledger the server keeps is append-only and deduplicated on the
+/// reporter's own `external_id` (`ON CONFLICT DO NOTHING`), so a bucket may be
+/// pushed only once it can no longer change. A calendar day that has ended is
+/// exactly that; the day in progress is not, which is why
+/// [`daily_model_spend`] never returns today.
+#[derive(Debug, Clone)]
+pub struct DailyModelSpend {
+    /// `YYYY-MM-DD`, UTC — the same axis the server buckets months on.
+    pub date: String,
+    pub model: String,
+    pub messages: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// Unix seconds at the start of `date`, so a late flush still bills to the
+    /// month the work happened in rather than the month it was reported.
+    pub occurred_at: u64,
+    /// Priced with [`model_cost_per_1k`] — the same arithmetic
+    /// `aura usage --plan` prints, so the two surfaces never disagree about
+    /// what a day cost.
+    pub estimated_cost: f64,
+}
+
+/// Roll the Claude Code transcripts up into per-day, per-model spend.
+///
+/// Same source and same pricing as [`build_plan_report`]; the difference is
+/// only the bucket, because the cloud meter needs a key it can deduplicate on
+/// and a timestamp it can bill to. Today is excluded — see [`DailyModelSpend`].
+pub fn daily_model_spend(since_secs: u64) -> Vec<DailyModelSpend> {
+    let Some(projects_dir) = claude_projects_dir() else {
+        return Vec::new();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let cutoff = now.saturating_sub(since_secs);
+    let today = timestamp_to_date(now);
+
+    let mut buckets: HashMap<(String, String), DailyModelSpend> = HashMap::new();
+
+    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
+        return Vec::new();
+    };
+    for proj_entry in entries.flatten() {
+        let proj_path = proj_entry.path();
+        if !proj_path.is_dir() {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&proj_path) else {
+            continue;
+        };
+        for jsonl_entry in files.flatten() {
+            let path = jsonl_entry.path();
+            if path.extension().map(|x| x != "jsonl").unwrap_or(true) {
+                continue;
+            }
+            for (ts, model, input, output, cache_read, cache_create) in
+                parse_transcript(&path, cutoff)
+            {
+                if ts == 0 {
+                    continue;
+                }
+                let date = timestamp_to_date(ts);
+                if date == today {
+                    continue;
+                }
+                let msg_cost = message_cost(&model, input, output, cache_read, cache_create);
+                let bucket = buckets
+                    .entry((date.clone(), model.clone()))
+                    .or_insert_with(|| DailyModelSpend {
+                        date,
+                        model,
+                        messages: 0,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        occurred_at: day_start_secs(ts),
+                        estimated_cost: 0.0,
+                    });
+                bucket.messages += 1;
+                bucket.input_tokens += input;
+                bucket.output_tokens += output;
+                bucket.estimated_cost += msg_cost;
+            }
+        }
+    }
+
+    let mut out: Vec<DailyModelSpend> = buckets.into_values().collect();
+    out.sort_by(|a, b| a.date.cmp(&b.date).then_with(|| a.model.cmp(&b.model)));
+    out
+}
+
+/// Midnight UTC of the day `ts` falls in.
+fn day_start_secs(ts_secs: u64) -> u64 {
+    ts_secs - (ts_secs % 86_400)
+}
+
 /// Build a plan usage report by scanning ALL Claude Code transcripts
 pub fn build_plan_report(since_secs: u64, label: &str) -> Option<PlanReport> {
     let projects_dir = claude_projects_dir()?;
@@ -322,9 +438,7 @@ pub fn build_plan_report(since_secs: u64, label: &str) -> Option<PlanReport> {
                 total_cache_read += cache_read;
                 total_cache_create += cache_create;
 
-                let (in_rate, out_rate) = model_cost_per_1k(&model);
-                let msg_cost = (input as f64 / 1000.0) * in_rate
-                    + (output as f64 / 1000.0) * out_rate;
+                let msg_cost = message_cost(&model, input, output, cache_read, cache_create);
                 total_cost += msg_cost;
 
                 // By project
@@ -745,5 +859,32 @@ mod chrono_lite {
             let timestamp = days * 86400 + hh * 3600 + mm * 60 + ss;
             Ok(DateTime { timestamp })
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_cost_tests {
+    use super::message_cost;
+
+    #[test]
+    fn a_message_that_read_from_cache_did_not_cost_nothing() {
+        // What a turn in a long session actually looks like: a little
+        // fresh input, a lot of cached context. Pricing only the fresh
+        // part reported this turn at a twentieth of its real cost, and
+        // it is the shape of nearly every turn in a working day.
+        let fresh_only = message_cost("claude-opus-5", 1_000, 200, 0, 0);
+        let with_cache = message_cost("claude-opus-5", 1_000, 200, 400_000, 0);
+
+        assert!((fresh_only - 0.03).abs() < 1e-9);
+        // 400k opus reads at a tenth of .015 per 1k.
+        assert!((with_cache - (0.03 + 0.6)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn writing_to_the_cache_costs_more_than_sending_the_same_tokens_fresh() {
+        let written = message_cost("claude-sonnet-4", 0, 0, 0, 10_000);
+        let fresh = message_cost("claude-sonnet-4", 10_000, 0, 0, 0);
+        assert!(written > fresh);
+        assert!((written - fresh * 1.25).abs() < 1e-9);
     }
 }

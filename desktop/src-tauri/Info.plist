@@ -25,6 +25,23 @@
          empty drag region. -->
     <key>NSPrefersDisplaySafeAreaCompatibilityMode</key>
     <true/>
+    <!-- macOS asks before letting a non-sandboxed app into Documents, Desktop
+         or Downloads, and the string it shows is taken from here. Without the
+         key the panel is generic — "Aura would like to access files" with no
+         reason — which is a worse prompt to answer, and on the paths below it
+         is the difference between a person allowing it and dismissing it.
+
+         Aura needs these because a project is wherever the person keeps it,
+         and in practice that is Documents or the Desktop. The subtle case is a
+         linked worktree: the checkout can sit somewhere unprotected while the
+         Git directory it points at sits in Documents, so a folder that looks
+         fine still needs the grant. -->
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Aura reads and records the history of projects you keep in your Documents folder.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Aura reads and records the history of projects you keep on your Desktop.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Aura reads and records the history of projects you keep in your Downloads folder.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Aura uses your microphone for huddles — voice chat with teammates working in the same repo.</string>
     <key>NSCameraUsageDescription</key>

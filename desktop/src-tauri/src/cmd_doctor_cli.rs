@@ -15,6 +15,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::time::Duration;
 use tempfile::NamedTempFile;
 
 /// Expected aura CLI version the shell was built against.
@@ -32,10 +33,10 @@ use tempfile::NamedTempFile;
 /// red ("missing").
 pub const EXPECTED_AURA_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// An `aura` that comes FIRST on PATH but is older than this build needs —
-/// so the app steps over it (see `pick_runnable_aura`) while the user's own
-/// terminal still runs it. Two different binaries, two different truths; the
-/// chip has to be able to say both.
+/// An `aura` that comes FIRST on PATH but is not the version this build was
+/// tested against — so the app steps over it (see `pick_runnable_aura`) while
+/// the user's own terminal still runs it. Two different binaries, two
+/// different truths; the chip has to be able to say both.
 #[derive(Serialize, Clone, Debug)]
 pub struct ShadowedCli {
     /// Where `which aura` points.
@@ -149,6 +150,45 @@ fn major_minor_at_least(installed: &str, expected: &str) -> bool {
     }
 }
 
+/// Parse a semver-ish string down to `(major, minor, patch)`, tolerating a
+/// `-rc1`/`-beta` suffix and a missing patch — `0.19` reads as `0.19.0`.
+fn version_triple(v: &str) -> Option<(u32, u32, u32)> {
+    let head = v.split('-').next().unwrap_or(v);
+    let mut it = head.split('.');
+    let maj: u32 = it.next()?.parse().ok()?;
+    let min: u32 = it.next()?.parse().ok()?;
+    let patch: u32 = match it.next() {
+        Some(p) => p.parse().ok()?,
+        None => 0,
+    };
+    Some((maj, min, patch))
+}
+
+/// True when `installed` is the exact version this build was tested against,
+/// or a later one.
+///
+/// The patch is part of the answer here, and that is the entire point. Aura
+/// ships every behavioural change as a patch bump under `0.19.x`, so "same
+/// major.minor" is not evidence that two binaries agree about anything. A
+/// 0.19.35 left in `/usr/local/bin` and the 0.19.44 this build bundles
+/// returned *opposite* safety verdicts on the same checkout — one found
+/// nothing, the other 191 possible secrets — and because the old rule
+/// accepted the first candidate that merely shared a minor, the app ran the
+/// 0.19.35 while every surface in it said 0.19.44.
+///
+/// Deliberately NOT the rule behind the footer chip ([`major_minor_at_least`]).
+/// The two answer different questions. *Which binary do I run* has to be
+/// exact, because a wrong answer silently changes what the app does and says
+/// so nowhere. *Should I interrupt the user about their install* can afford
+/// to be tolerant, and a chip that turned amber on every patch skew would be
+/// noise the user learns to ignore.
+fn runs_this_build(installed: &str, expected: &str) -> bool {
+    match (version_triple(installed), version_triple(expected)) {
+        (Some(i), Some(e)) => i >= e,
+        _ => false,
+    }
+}
+
 /// Run `<bin> --version` and read the version out of it. `None` when the
 /// binary won't execute, or answers with something that has no version in it.
 ///
@@ -164,20 +204,26 @@ fn installed_version_of(bin: &str) -> Option<String> {
     parse_version_line(line)
 }
 
-/// The first candidate new enough to run, given `(path, version)` pairs in
-/// preference order. A candidate whose version we couldn't read loses to one
-/// we can vouch for — we have no way to tell a deliberate wrapper script from
-/// a binary too broken to answer, and only one of those is safe to run.
+/// The first candidate that is the version this build expects, or newer,
+/// given `(path, version)` pairs in preference order.
+///
+/// "Or newer" keeps PATH order meaningful: a developer who installed a later
+/// CLI globally still gets it, and is never quietly downgraded onto the
+/// bundled copy. What it will no longer do is accept an *older* patch of the
+/// same minor — that is how a 0.19.35 came to be the binary the app ran while
+/// shipping 0.19.44, with the two disagreeing about what the same repository
+/// contained.
+///
+/// A candidate whose version we couldn't read loses to one we can vouch for —
+/// we have no way to tell a deliberate wrapper script from a binary too broken
+/// to answer, and only one of those is safe to run.
 fn first_current<'a>(
     candidates: &'a [(String, Option<String>)],
     expected: &str,
 ) -> Option<&'a str> {
     candidates
         .iter()
-        .find(|(_, v)| {
-            v.as_deref()
-                .is_some_and(|v| major_minor_at_least(v, expected))
-        })
+        .find(|(_, v)| v.as_deref().is_some_and(|v| runs_this_build(v, expected)))
         .map(|(p, _)| p.as_str())
 }
 
@@ -305,6 +351,13 @@ pub(crate) fn stale_cli(bin: &str) -> Option<StaleCli> {
 /// The `aura` first on PATH, when it is a DIFFERENT binary from `running`
 /// and demonstrably older than this build needs.
 ///
+/// Judged by [`runs_this_build`] — the same rule the picker used — because
+/// this field exists to name the binary the picker stepped over. Judged any
+/// more loosely it goes silent in exactly the case worth reporting: a
+/// same-minor, older-patch copy first on PATH, which is what the user's own
+/// terminal runs and what makes their `aura` answer differently from the
+/// app's.
+///
 /// A version we can't read is not reported: a wrapper script that answers
 /// `--version` with something unparseable is a legitimate setup, and calling
 /// it stale on no evidence would put an amber chip in the footer of every
@@ -315,7 +368,7 @@ fn shadowing_cli(running: &str) -> Option<ShadowedCli> {
         return None;
     }
     let installed = installed_version_of(&path)?;
-    if major_minor_at_least(&installed, EXPECTED_AURA_CLI_VERSION) {
+    if runs_this_build(&installed, EXPECTED_AURA_CLI_VERSION) {
         return None;
     }
     Some(ShadowedCli { path, installed })
@@ -697,6 +750,39 @@ fn install_binary_escalated(_src: &Path, target: &Path) -> Result<(), String> {
 /// without a second round-trip. Errors (no bundled binary in a dev build,
 /// permission denied, codesign failure) propagate as `Err` for the frontend
 /// to surface or silently ignore.
+
+/// Put the `git-remote-aura` helper next to the CLI we just installed.
+///
+/// Git resolves a URL scheme by looking for `git-remote-<scheme>` on PATH, so
+/// without this an `aura://` remote fails with "Unable to find remote helper" —
+/// the sovereign-git substrate is shipped, installed, and unreachable. The
+/// helper is the same binary under a second name, so this costs a symlink.
+///
+/// Best-effort by design: the CLI install is what the user asked for and it has
+/// already succeeded by the time we get here. A machine where the link cannot
+/// be made still has a working `aura`, and `aura node install-helper` remains
+/// available to fix it by hand.
+fn install_git_remote_helper(target: &Path) {
+    let out = std::process::Command::new(target)
+        .args(["node", "install-helper", "--force"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            eprintln!(
+                "aura: installed the CLI but not the git-remote-aura helper ({}); \
+                 `aura://` remotes will not resolve until you run `aura node install-helper`",
+                err.trim()
+            );
+        }
+        Err(e) => eprintln!(
+            "aura: installed the CLI but could not run `aura node install-helper` ({e}); \
+             `aura://` remotes will not resolve until you run it yourself"
+        ),
+    }
+}
+
 #[tauri::command]
 pub async fn aura_cli_install_bundled(
     interactive: Option<bool>,
@@ -734,6 +820,7 @@ pub async fn aura_cli_install_bundled(
                 parent.display()
             ));
         }
+        install_git_remote_helper(&target);
         Ok(())
     })
     .await?;
@@ -757,8 +844,19 @@ pub async fn aura_cli_install_bundled(
 // schema lives in exactly one place (the engine). The frontend's
 // `DoctorReport` type in `lib/api.ts` mirrors the same shape.
 //
-// Uses tokio's async Command: on a large repo the shadow-checkpoint walk can
-// take a few seconds, so we must not block the IPC runtime thread.
+// Uses tokio's async Command so the IPC runtime thread is never blocked.
+//
+// The wait is bounded, and that bound is not decoration. `aura doctor` used to
+// load every archived checkpoint to count them, which on a repository with real
+// history meant parsing gigabytes of graph JSON; it grew past eight gigabytes
+// resident and the kernel killed it around twenty-six seconds in, having
+// written nothing at all. The engine no longer does that. But an unbounded
+// await here is a bug of its own shape: whatever the child does, the card is
+// the thing the person is looking at, and it owes them an answer. A backend
+// that never returns must become a sentence on screen, not a spinner that never
+// stops.
+const DOCTOR_TIMEOUT: Duration = Duration::from_secs(45);
+
 #[tauri::command]
 pub async fn aura_doctor_json(repo_root: String) -> Result<serde_json::Value, String> {
     let cwd = PathBuf::from(&repo_root);
@@ -766,20 +864,38 @@ pub async fn aura_doctor_json(repo_root: String) -> Result<serde_json::Value, St
         return Err(format!("repo root does not exist: {}", repo_root));
     }
 
-    let out = tokio::process::Command::new(crate::agent_event_listener::resolve_aura_bin())
-        .args(["doctor", "--json"])
-        .current_dir(&cwd)
-        .output()
-        .await
-        .map_err(|e| format!("failed to spawn aura doctor: {}", e))?;
+    let mut cmd = tokio::process::Command::new(crate::agent_event_listener::resolve_aura_bin());
+    cmd.args(["doctor", "--json"]).current_dir(&cwd);
+    // Abandoning the wait must also end the child. Without this a timed-out
+    // run keeps a doctor process alive on the machine, and repeated opens of
+    // the card stack them up.
+    cmd.kill_on_drop(true);
+
+    let out = match tokio::time::timeout(DOCTOR_TIMEOUT, cmd.output()).await {
+        Err(_) => {
+            return Err(format!(
+                "aura doctor did not answer within {}s",
+                DOCTOR_TIMEOUT.as_secs()
+            ))
+        }
+        Ok(r) => r.map_err(|e| format!("failed to spawn aura doctor: {}", e))?,
+    };
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!(
-            "aura doctor exited with {}: {}",
-            out.status.code().unwrap_or(-1),
-            stderr.trim()
-        ));
+        let stderr = stderr.trim();
+        // A process killed by a signal has no exit code, and printing `-1`
+        // for it hid exactly the failure that was happening here: the report
+        // was never written because the run was killed part-way through.
+        let how = match out.status.code() {
+            Some(code) => format!("exited with {}", code),
+            None => "was killed before it could answer".to_string(),
+        };
+        return Err(if stderr.is_empty() {
+            format!("aura doctor {}", how)
+        } else {
+            format!("aura doctor {}: {}", how, stderr)
+        });
     }
 
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -877,6 +993,62 @@ mod tests {
             ("/Users/x/.cargo/bin/aura", Some("0.19.34")),
         ]);
         assert_eq!(first_current(&c, "0.19.34"), Some("/usr/local/bin/aura"));
+    }
+
+    #[test]
+    fn a_missing_patch_reads_as_zero_and_a_prerelease_as_its_release() {
+        assert_eq!(version_triple("0.19"), Some((0, 19, 0)));
+        assert_eq!(version_triple("0.19.44"), Some((0, 19, 44)));
+        assert_eq!(version_triple("0.19.44-rc1"), Some((0, 19, 44)));
+        assert_eq!(version_triple("aura"), None);
+        assert_eq!(version_triple(""), None);
+    }
+
+    #[test]
+    fn the_two_rules_answer_two_different_questions() {
+        // Kept apart on purpose, and this is the pair that shows why: the
+        // footer chip stays quiet about a patch skew, and the picker still
+        // refuses to run it. Merging them would either nag every machine
+        // one patch behind or put us back on the wrong binary.
+        assert!(major_minor_at_least("0.19.35", "0.19.44"));
+        assert!(!runs_this_build("0.19.35", "0.19.44"));
+    }
+
+    #[test]
+    fn the_bundled_cli_beats_a_stale_patch_first_on_path() {
+        // The audit case, exactly. /usr/local/bin/aura at 0.19.35, the app
+        // shipping 0.19.44. Same major.minor, so the old rule ran the
+        // 0.19.35 — and the two returned opposite safety verdicts on this
+        // very checkout while every surface in the app said 0.19.44.
+        let c = cands(&[
+            ("/usr/local/bin/aura", Some("0.19.35")),
+            ("/Applications/Aura.app/Contents/MacOS/aura", Some("0.19.44")),
+        ]);
+        assert_eq!(
+            first_current(&c, "0.19.44"),
+            Some("/Applications/Aura.app/Contents/MacOS/aura")
+        );
+    }
+
+    #[test]
+    fn a_newer_patch_on_path_is_still_never_downgraded() {
+        // The other half of the same rule: exactness must not turn into
+        // "only ever run our own copy". A CLI ahead of this build is the
+        // developer's deliberate choice and PATH order still carries it.
+        let c = cands(&[
+            ("/usr/local/bin/aura", Some("0.19.45")),
+            ("/Applications/Aura.app/Contents/MacOS/aura", Some("0.19.44")),
+        ]);
+        assert_eq!(first_current(&c, "0.19.44"), Some("/usr/local/bin/aura"));
+    }
+
+    #[test]
+    fn an_exact_match_on_path_is_left_where_the_user_put_it() {
+        let c = cands(&[
+            ("/usr/local/bin/aura", Some("0.19.44")),
+            ("/Applications/Aura.app/Contents/MacOS/aura", Some("0.19.44")),
+        ]);
+        assert_eq!(first_current(&c, "0.19.44"), Some("/usr/local/bin/aura"));
     }
 
     #[test]

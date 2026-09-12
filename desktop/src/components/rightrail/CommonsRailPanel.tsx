@@ -11,10 +11,9 @@
 // (so Lounge presence works standalone); a failing read degrades to an
 // empty lounge, never a broken rail.
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
-import { type TeamMember } from "../../lib/api";
-import { fetchTeam } from "../../lib/teamCache";
+import { useTeamRoster } from "../../lib/useTeamRoster";
 import { LoungePanel } from "../team/presentation/LoungePanel";
 import { PluginBrowser } from "../team/presentation/PluginBrowser";
 import { AppsLauncher } from "../commons/AppsLauncher";
@@ -36,27 +35,10 @@ type Props = {
 
 export function CommonsRailPanel({ repoRoot, onExpand }: Props) {
   const [tab, setTab] = useState<CommonsTab>("lounge");
-  const [members, setMembers] = useState<TeamMember[]>([]);
-
-  // Roster for the Lounge presence rows, polled on the same calm cadence
-  // as the Team manifest (15s); every read degrades to the last-good list.
-  useEffect(() => {
-    let alive = true;
-    const load = () =>
-      fetchTeam(repoRoot)
-        .then((m) => {
-          if (alive) setMembers(m.members ?? []);
-        })
-        .catch(() => {
-          /* room-less repo → quiet lounge */
-        });
-    load();
-    const id = window.setInterval(load, 15_000);
-    return () => {
-      alive = false;
-      window.clearInterval(id);
-    };
-  }, [repoRoot]);
+  // Roster for the Lounge presence rows, on the shared 15s poll — expanding
+  // this panel into the full-width Commons mounts both at once, and they now
+  // read one answer rather than each polling the manifest.
+  const members = useTeamRoster(repoRoot);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg-1">
@@ -72,7 +54,7 @@ export function CommonsRailPanel({ repoRoot, onExpand }: Props) {
           onClick={onExpand}
           title="Open Commons in full width"
           aria-label="Open Commons in full width"
-          className="ml-auto flex items-center justify-center w-7 h-7 rounded-md text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
+          className="ml-auto flex items-center justify-center w-7 h-7 rounded-md text-text-3 hover:text-text-1 hover:bg-bg-3 transition-colors"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
             <path

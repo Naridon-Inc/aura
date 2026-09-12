@@ -19,6 +19,7 @@ pub mod modes;
 pub mod persist;
 pub mod prompt;
 pub mod scout;
+pub mod session_card;
 pub mod skill;
 pub mod team;
 pub mod tick;
@@ -979,6 +980,7 @@ impl ManagerSession {
         text: String,
         anchor: AnchorKind,
     ) {
+        self.seed_objective_from(role, &text);
         self.chat.push(ChatTurn {
             role,
             text,
@@ -1003,6 +1005,7 @@ impl ManagerSession {
     /// question text is stored on the turn so the chat timeline can show
     /// Q+A as one grouped element on reload (Cursor parity).
     pub fn push_answer(&mut self, answer: String, question: String) {
+        self.seed_objective_from(ChatRole::User, &answer);
         self.chat.push(ChatTurn {
             role: ChatRole::User,
             text: answer,
@@ -1155,6 +1158,53 @@ mod tests {
             line_count: 0,
             pending_skill: None,
         }
+    }
+
+    fn blank_chat() -> ManagerSession {
+        ManagerSession::new("sid".into(), String::new(), vec![], vec![])
+    }
+
+    #[test]
+    fn an_unnamed_chat_takes_its_name_from_what_the_person_said() {
+        let mut s = blank_chat();
+        s.push_chat(ChatRole::User, "fix the retry backoff on rate limits".into());
+        assert_eq!(s.objective, "fix the retry backoff on rate limits");
+    }
+
+    #[test]
+    fn the_name_comes_from_the_person_not_from_aura() {
+        let mut s = blank_chat();
+        s.push_chat(ChatRole::Manager, "Looking at the repo now".into());
+        s.push_chat(ChatRole::User, "why does the console show no intents".into());
+        assert_eq!(s.objective, "why does the console show no intents");
+    }
+
+    #[test]
+    fn a_chat_that_already_has_a_name_keeps_it() {
+        let mut s = ManagerSession::new("sid".into(), "Ship the release".into(), vec![], vec![]);
+        s.push_chat(ChatRole::User, "something else entirely".into());
+        assert_eq!(s.objective, "Ship the release");
+    }
+
+    /// The two turn kinds that carry a user's words but skipped the naming
+    /// step: a pinned turn and an answer to one of Aura's own questions. A
+    /// chat opened straight into a question was left nameless on the cloud.
+    #[test]
+    fn an_anchored_turn_names_the_chat_too() {
+        let mut s = blank_chat();
+        s.push_anchored(
+            ChatRole::User,
+            "use the signed ref-log for this".into(),
+            AnchorKind::UserPin,
+        );
+        assert_eq!(s.objective, "use the signed ref-log for this");
+    }
+
+    #[test]
+    fn answering_auras_first_question_names_the_chat() {
+        let mut s = blank_chat();
+        s.push_answer("the managed path, not BYOC".into(), "Which mode?".into());
+        assert_eq!(s.objective, "the managed path, not BYOC");
     }
 
     #[test]

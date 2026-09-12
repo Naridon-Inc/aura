@@ -86,6 +86,18 @@ fn wrote_last(id: &str, path: &Path) -> bool {
         .is_some_and(|ours| ours == stamp)
 }
 
+/// Where a session id's JSON lives. Exposed for the card sidecar, which has
+/// to stamp cards against the exact file they describe.
+pub fn session_path_of(id: &str) -> Option<PathBuf> {
+    session_path(id)
+}
+
+/// (mtime, len) of a path — the same stamp the load cache validates against,
+/// shared with the card sidecar so both agree on what "unchanged" means.
+pub fn stamp_of(path: &Path) -> Option<(u128, u64)> {
+    file_stamp(path)
+}
+
 pub fn save(session: &ManagerSession) -> Result<(), String> {
     let dir = sessions_dir().ok_or("HOME not set")?;
     fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
@@ -116,6 +128,9 @@ pub fn save(session: &ManagerSession) -> Result<(), String> {
     if let (Some(stamp), Ok(mut m)) = (file_stamp(&path), write_stamps().lock()) {
         m.insert(session.id.clone(), stamp);
     }
+    // Refresh the listing card in the same breath, so the chat list never has
+    // to open this file again — however large its transcript has grown.
+    super::session_card::write_beside(session, &path);
     Ok(())
 }
 
@@ -400,14 +415,11 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        // Re-point HOME at a tempdir so this test doesn't pollute the
-        // real `~/.aura/manager-sessions/`.
-        let tmp = tempfile::tempdir().unwrap();
-        // Note: set_var is process-global; tests in this module run
-        // sequentially under default cargo test, so this is OK in
-        // isolation but flaky under --test-threads=N. The `serial`
-        // marker would harden this; keeping it simple for now.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        // Re-point HOME at a tempdir so this test doesn't pollute the real
+        // `~/.aura/manager-sessions/`. The borrow serialises against every
+        // other HOME-moving test and puts HOME back afterwards — see
+        // `crate::test_home` for why leaving it moved used to cause flakes.
+        let _home = crate::test_home::borrow();
 
         let s = ManagerSession::new("abc".into(), "obj".into(), vec![], vec![task(1)]);
         save(&s).unwrap();

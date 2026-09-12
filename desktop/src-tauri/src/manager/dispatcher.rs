@@ -523,6 +523,7 @@ fn build_request(spec: &LaneSpec) -> ChatRequest {
             content: serde_json::Value::String(spec.objective.clone()),
         }],
         cwd: String::new(),
+        machine_id: None,
         system: system_prompt,
         tools: vec![],
         max_tokens: None,
@@ -532,6 +533,7 @@ fn build_request(spec: &LaneSpec) -> ChatRequest {
         model: None,
         long_context: false,
         approval: None,
+        output_style: None, // AURA-1296
     }
 }
 

@@ -197,91 +197,51 @@ pub fn stamp_symbol(symbol: &str) -> (Option<String>, Option<String>) {
     }
 }
 
-/// Read-time verdict for one provenance-bound entry.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Staleness {
-    /// True when the source symbol changed or disappeared since stamping.
-    pub stale: bool,
-    /// False when the check was inconclusive (no hash stamped, unparseable
-    /// file, malformed reference) — `stale` is then always false too.
-    pub verified: bool,
-    pub reason: Option<String>,
-}
-
-impl Staleness {
-    fn fresh() -> Self {
-        Self { stale: false, verified: true, reason: None }
-    }
-    fn stale_because(reason: String) -> Self {
-        Self { stale: true, verified: true, reason: Some(reason) }
-    }
-    fn unverifiable(reason: String) -> Self {
-        Self { stale: false, verified: false, reason: Some(reason) }
-    }
-}
-
-/// Verify one entry against the live tree, building a throwaway parser.
-/// Returns None when the entry carries no `source_symbol` (nothing to check).
-pub fn verify_entry(entry: &MemoryEntry) -> Option<Staleness> {
-    entry.source_symbol.as_deref()?;
-    match SemanticParser::new() {
-        Ok(mut parser) => verify_entry_with_parser(entry, &mut parser),
-        Err(e) => Some(Staleness::unverifiable(format!("parser unavailable: {}", e))),
-    }
-}
-
-/// Same as `verify_entry` but with a caller-owned parser so a search over
-/// many results builds the (13-grammar) parser once.
-pub fn verify_entry_with_parser(
-    entry: &MemoryEntry,
-    parser: &mut SemanticParser,
-) -> Option<Staleness> {
-    let sym = entry.source_symbol.as_deref()?;
-    Some(verify_symbol(
-        parser,
-        sym,
-        entry.source_symbol_hash.as_deref(),
-        entry.source_commit.as_deref(),
-    ))
-}
-
-/// The core check: resolve the reference, compare content hashes.
-pub fn verify_symbol(
-    parser: &mut SemanticParser,
-    symbol_ref: &str,
-    stamped_hash: Option<&str>,
-    source_commit: Option<&str>,
-) -> Staleness {
-    let Some((file, name)) = parse_symbol_ref(symbol_ref) else {
-        return Staleness::unverifiable(format!(
-            "symbol reference '{}' is not in <path>#<identifier> form",
-            symbol_ref
-        ));
-    };
-    let since = source_commit.unwrap_or("it was stamped");
-    match locate_symbol_text(parser, &file, &name) {
-        SymbolLookup::FileMissing => Staleness::stale_because(format!(
-            "symbol removed — {} no longer exists (stamped at {})",
-            file, since
-        )),
-        SymbolLookup::SymbolMissing => Staleness::stale_because(format!(
-            "symbol removed — '{}' is no longer defined in {} (stamped at {})",
-            name, file, since
-        )),
-        SymbolLookup::Unverifiable(why) => Staleness::unverifiable(why),
-        SymbolLookup::Found(text) => match stamped_hash {
-            None => Staleness::unverifiable(
-                "no content hash was stamped at write time".to_string(),
-            ),
-            Some(h) if h == hash_symbol_text(&text) => Staleness::fresh(),
-            Some(_) => Staleness::stale_because(format!("symbol changed since {}", since)),
-        },
-    }
-}
+// The read-time verdict (`Staleness { stale, verified }`) and its
+// `verify_entry`/`verify_symbol` family lived here until CTX-04. That pair
+// was overloaded — `verified: true` over an unchanged fingerprint rendered
+// as "this statement is true", which the fingerprint never established.
+// The replacement is `crate::memory::truth`: one exclusive evidence-based
+// state (supported / contradicted / stale / unverified / superseded) per
+// entry, built on this module's `parse_symbol_ref` / `locate_symbol_text` /
+// `hash_symbol_text` primitives.
 
 // ── `aura memory why <id>` ──
 
 /// Structured provenance report for one memory: the fact, its stamp, the
+/// AURA-1372 — reach: has this fact left the machine, and if it is a
+/// correction of one that had, does the team still hold the older wording?
+///
+/// The second question is the one nobody could answer before. Editing a
+/// shared fact changes it here and nowhere else: the copy your team pulls is
+/// still the sentence you just decided was wrong. Silence read as "local",
+/// which was true of this entry and misleading about the team's.
+///
+/// `replaced` is the entry this one supersedes, when there is one.
+pub fn stamp_reach(
+    v: &mut serde_json::Value,
+    entry: &MemoryEntry,
+    replaced: Option<&MemoryEntry>,
+) {
+    if let Some(when) = &entry.shared_at {
+        v["shared_at"] = serde_json::json!(when);
+        // The server's verdict, recorded at push time — not a claim we make
+        // now about a signature we would have to re-check to stand behind.
+        v["shared_signature"] =
+            serde_json::json!(entry.shared_signature.as_deref().unwrap_or("unsigned"));
+        return;
+    }
+    if let Some(when) = &entry.shared_retracted_at {
+        // Withdrawn is not the same as never shared: the fact was out
+        // there, and somebody may still be holding the copy they pulled.
+        v["shared_retracted_at"] = serde_json::json!(when);
+    }
+    if let Some(when) = replaced.and_then(|old| old.shared_at.as_ref()) {
+        v["supersedes_shared_at"] = serde_json::json!(when);
+        v["correction_unshared"] = serde_json::json!(true);
+    }
+}
+
 /// intent it was written under, and a live staleness check. JSON form —
 /// the prose renderer below builds from this so the two can't disagree.
 pub fn why_json(id: &str) -> Result<serde_json::Value, String> {
@@ -314,19 +274,28 @@ pub fn why_json(id: &str) -> Result<serde_json::Value, String> {
     }
     // W3 — supersession chain: what this entry replaced, who replaced it,
     // and the whole oldest→newest lineage when there is one.
-    {
+    let heir = {
         let mem = MemoryManager::load();
         if let Some(s) = &entry.supersedes {
             v["supersedes"] = serde_json::json!(s);
         }
-        if let Some(heir) = crate::memory::reconcile::superseded_by(&mem, &entry.id) {
-            v["superseded_by"] = serde_json::json!(heir);
+        let heir = crate::memory::reconcile::superseded_by(&mem, &entry.id);
+        if let Some(h) = &heir {
+            v["superseded_by"] = serde_json::json!(h);
         }
         let chain = crate::memory::reconcile::supersession_chain(&mem, &entry.id);
         if chain.len() > 1 {
             v["supersession_chain"] = serde_json::json!(chain);
         }
-    }
+        heir
+    };
+    // AURA-1372 — reach.
+    let replaced = entry
+        .supersedes
+        .as_deref()
+        .and_then(MemoryManager::find_entry)
+        .map(|(_, e)| e);
+    stamp_reach(&mut v, &entry, replaced.as_ref());
     if let Some(iid) = &entry.intent_id {
         v["intent_id"] = serde_json::json!(iid);
         if let Some(row) = lookup_intent(iid) {
@@ -337,11 +306,37 @@ pub fn why_json(id: &str) -> Result<serde_json::Value, String> {
             }
         }
     }
-    if let Some(staleness) = verify_entry(&entry) {
-        v["stale"] = serde_json::json!(staleness.stale);
-        v["verified"] = serde_json::json!(staleness.verified);
-        if let Some(r) = &staleness.reason {
-            v["stale_reason"] = serde_json::json!(r);
+    // AUDIT-CTX-05 — entry-signature verdict. `unsigned` is honest absence
+    // (pre-schema entry or a box without an identity); `invalid` means the
+    // fields are present but wrong — tampered content or a spoofed key.
+    {
+        use crate::memory::signing::{self, SigVerdict};
+        let verdict = signing::verify(&entry, section);
+        v["signature"] = serde_json::json!(verdict.as_str());
+        match &verdict {
+            SigVerdict::Valid(kid) => {
+                v["signature_key_id"] = serde_json::json!(kid);
+            }
+            SigVerdict::Invalid(reason) => {
+                v["signature_reason"] = serde_json::json!(reason);
+            }
+            SigVerdict::Unsigned => {}
+        }
+    }
+    // CTX-04 — one evidence-based truth state replaces the old
+    // stale/verified boolean pair. `stale` stays as a DERIVED compat bool;
+    // `verified` is gone: an unchanged anchor fingerprint never implied the
+    // claim was true, and the output no longer says it did.
+    {
+        let report = crate::memory::truth::evaluate_entry(&entry, heir.as_deref());
+        v["truth_state"] = serde_json::json!(report.state.as_str());
+        v["truth_reason"] = serde_json::json!(report.reason);
+        if !report.evidence.is_empty() {
+            v["truth_evidence"] = serde_json::json!(report.evidence);
+        }
+        v["stale"] = serde_json::json!(report.state == crate::memory::truth::TruthState::Stale);
+        if report.state == crate::memory::truth::TruthState::Stale {
+            v["stale_reason"] = serde_json::json!(report.reason);
         }
     }
     Ok(v)
@@ -430,21 +425,61 @@ pub fn why_report(id: &str) -> Result<String, String> {
         }
     }
 
-    match (v.get("stale").and_then(|s| s.as_bool()), v["stale_reason"].as_str()) {
-        (Some(true), reason) => out.push_str(&format!(
-            "    {:<8} ⚠ stale — {}\n",
-            "status:",
-            reason.unwrap_or("code moved")
-        )),
-        (Some(false), _) if v["verified"].as_bool() == Some(true) => {
-            out.push_str(&format!("    {:<8} ✓ verified — symbol unchanged\n", "status:"));
+    // AURA-1372 — reach. Local is the default and stays silent; the two
+    // things worth saying are that a fact left this machine, and that a
+    // correction did not follow the wording it replaced.
+    if let Some(when) = v["shared_at"].as_str() {
+        let sig = v["shared_signature"].as_str().unwrap_or("unsigned");
+        out.push_str("\n  reach\n");
+        out.push_str(&format!(
+            "    {:<8} shared with your team on {} ({})\n",
+            "shared:", when, sig
+        ));
+    } else {
+        let withdrawn = v["shared_retracted_at"].as_str();
+        let orphaned = v["correction_unshared"].as_bool() == Some(true);
+        if withdrawn.is_some() || orphaned {
+            out.push_str("\n  reach\n");
         }
-        (Some(false), reason) => out.push_str(&format!(
-            "    {:<8} ? unverified — {}\n",
+        if let Some(when) = withdrawn {
+            out.push_str(&format!(
+                "    {:<8} withdrawn from your team on {} — Aura no longer serves it, but a \
+                 copy someone already pulled is not reached\n",
+                "shared:", when
+            ));
+        }
+        if orphaned {
+            out.push_str(&format!(
+                "    {:<8} this correction is local; the wording it replaced was shared on {} \
+                 and is still what your team has\n",
+                if withdrawn.is_some() { "also:" } else { "shared:" },
+                v["supersedes_shared_at"].as_str().unwrap_or("?")
+            ));
+        }
+    }
+
+    // CTX-04 — the status line renders the truth state with its evidence,
+    // so a reader sees WHAT was checked, not a bare "verified".
+    if let Some(state) = v["truth_state"].as_str() {
+        let glyph = match state {
+            "supported" => "✓",
+            "contradicted" => "✗",
+            "stale" => "⚠",
+            "superseded" => "⏳",
+            _ => "?",
+        };
+        out.push_str(&format!(
+            "    {:<8} {} {} — {}\n",
             "status:",
-            reason.unwrap_or("inconclusive")
-        )),
-        (None, _) => {} // no source_symbol — nothing to verify
+            glyph,
+            state,
+            v["truth_reason"].as_str().unwrap_or("")
+        ));
+        if let Some(evidence) = v["truth_evidence"].as_array() {
+            for line in evidence.iter().filter_map(|l| l.as_str()) {
+                out.push_str(&format!("      {} {}\n", "·", line));
+            }
+        }
     }
 
     Ok(out)
@@ -521,6 +556,126 @@ mod tests {
     }
 
     #[test]
+    fn a_fact_that_never_left_the_machine_says_nothing_about_reach() {
+        let mut v = serde_json::json!({});
+        stamp_reach(&mut v, &stamped_entry(None, None), None);
+        assert!(v.get("shared_at").is_none());
+        assert!(v.get("correction_unshared").is_none());
+    }
+
+    #[test]
+    fn a_shared_fact_carries_the_day_and_the_servers_verdict() {
+        let mut e = stamped_entry(None, None);
+        e.shared_at = Some("2026-09-09T11:02:00+00:00".to_string());
+        e.shared_signature = Some("signed".to_string());
+        let mut v = serde_json::json!({});
+        stamp_reach(&mut v, &e, None);
+        assert_eq!(v["shared_at"], "2026-09-09T11:02:00+00:00");
+        assert_eq!(v["shared_signature"], "signed");
+
+        // Pushed before signing existed, or pushed unsigned: the field is
+        // still answered, because "we don't know" and "not signed" are the
+        // same thing to the team reading it.
+        e.shared_signature = None;
+        let mut v = serde_json::json!({});
+        stamp_reach(&mut v, &e, None);
+        assert_eq!(v["shared_signature"], "unsigned");
+    }
+
+    #[test]
+    fn correcting_a_shared_fact_says_the_team_still_has_the_old_wording() {
+        let mut old = stamped_entry(None, None);
+        old.id = "mem-old".to_string();
+        old.shared_at = Some("2026-09-09T11:02:00+00:00".to_string());
+
+        let mut fixed = stamped_entry(None, None);
+        fixed.id = "mem-new".to_string();
+        fixed.supersedes = Some("mem-old".to_string());
+
+        let mut v = serde_json::json!({});
+        stamp_reach(&mut v, &fixed, Some(&old));
+        assert_eq!(v["correction_unshared"], true);
+        assert_eq!(v["supersedes_shared_at"], "2026-09-09T11:02:00+00:00");
+
+        // Correcting something that never left the machine is just an edit.
+        old.shared_at = None;
+        let mut v = serde_json::json!({});
+        stamp_reach(&mut v, &fixed, Some(&old));
+        assert!(v.get("correction_unshared").is_none());
+
+        // And once the correction itself is shared, the warning is over —
+        // the team has this wording now, so the old one is only history.
+        old.shared_at = Some("2026-09-09T11:02:00+00:00".to_string());
+        fixed.shared_at = Some("2026-09-10T08:00:00+00:00".to_string());
+        let mut v = serde_json::json!({});
+        stamp_reach(&mut v, &fixed, Some(&old));
+        assert!(v.get("correction_unshared").is_none());
+        assert_eq!(v["shared_at"], "2026-09-10T08:00:00+00:00");
+    }
+
+    #[test]
+    fn a_withdrawn_fact_says_so_instead_of_reading_as_never_shared() {
+        let mut e = stamped_entry(None, None);
+        e.shared_retracted_at = Some("2026-09-10T09:30:00+00:00".to_string());
+        let mut v = serde_json::json!({});
+        stamp_reach(&mut v, &e, None);
+        assert!(v.get("shared_at").is_none());
+        assert_eq!(v["shared_retracted_at"], "2026-09-10T09:30:00+00:00");
+
+        // Shared again after a withdrawal: the current state wins, and the
+        // old retraction stops being the headline.
+        e.shared_at = Some("2026-09-11T09:00:00+00:00".to_string());
+        let mut v = serde_json::json!({});
+        stamp_reach(&mut v, &e, None);
+        assert_eq!(v["shared_at"], "2026-09-11T09:00:00+00:00");
+        assert!(v.get("shared_retracted_at").is_none());
+    }
+
+    #[test]
+    fn a_withdrawn_correction_of_a_shared_fact_reports_both() {
+        // The messy real case: you shared a fact, corrected it, shared the
+        // correction, then took the correction back. Your team has neither
+        // the correction nor an accurate original — both halves have to be
+        // said, because either one alone is misleading.
+        let mut old = stamped_entry(None, None);
+        old.id = "mem-old".to_string();
+        old.shared_at = Some("2026-09-09T11:02:00+00:00".to_string());
+
+        let mut fixed = stamped_entry(None, None);
+        fixed.id = "mem-new".to_string();
+        fixed.supersedes = Some("mem-old".to_string());
+        fixed.shared_retracted_at = Some("2026-09-10T09:30:00+00:00".to_string());
+
+        let mut v = serde_json::json!({});
+        stamp_reach(&mut v, &fixed, Some(&old));
+        assert_eq!(v["shared_retracted_at"], "2026-09-10T09:30:00+00:00");
+        assert_eq!(v["correction_unshared"], true);
+        assert_eq!(v["supersedes_shared_at"], "2026-09-09T11:02:00+00:00");
+    }
+
+    #[test]
+    fn reach_fields_survive_the_file_and_are_absent_from_one_never_shared() {
+        let mut mem = ProjectMemory::default();
+        let mut e = stamped_entry(None, None);
+        e.shared_at = Some("2026-09-09T11:02:00+00:00".to_string());
+        e.shared_signature = Some("signed".to_string());
+        mem.gotchas.push(e);
+        mem.context.push(stamped_entry(None, None));
+
+        let text = serde_json::to_string_pretty(&mem).unwrap();
+        let loaded: ProjectMemory = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            loaded.gotchas[0].shared_at.as_deref(),
+            Some("2026-09-09T11:02:00+00:00")
+        );
+        assert_eq!(loaded.gotchas[0].shared_signature.as_deref(), Some("signed"));
+        assert!(loaded.context[0].shared_at.is_none());
+        // A fact that never left stays out of the file entirely, so an older
+        // Aura reading this store sees no reach keys rather than empty ones.
+        assert_eq!(text.matches("\"shared_at\"").count(), 1);
+    }
+
+    #[test]
     fn parse_symbol_ref_accepts_path_hash_identifier() {
         assert_eq!(
             parse_symbol_ref("src/auth.rs#verify_token"),
@@ -536,81 +691,32 @@ mod tests {
         assert_eq!(parse_symbol_ref("path/only.rs#"), None);
     }
 
+    // The staleness-transition and inconclusive-check behaviors formerly
+    // tested here (via the removed `verify_symbol`/`verify_entry`) are now
+    // pinned by `crate::memory::truth::tests` on the replacement states.
+
     #[test]
-    fn staleness_flips_when_symbol_text_changes() {
+    fn symbol_lookup_reports_missing_symbol_and_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("vault.rs");
         let file_str = file.to_string_lossy().to_string();
-        std::fs::write(&file, "fn guard_gate() -> u32 {\n    let x = 41;\n    x + 1\n}\n")
-            .unwrap();
-
-        let mut parser = SemanticParser::new().expect("parser");
-
-        // Stamp: resolve + fingerprint the symbol as `stamp_symbol` does.
-        let text = match locate_symbol_text(&mut parser, &file_str, "guard_gate") {
-            SymbolLookup::Found(t) => t,
-            _ => panic!("symbol should resolve at stamp time"),
-        };
-        let stamped = hash_symbol_text(&text);
-        let sym_ref = format!("{}#guard_gate", file_str);
-
-        // Unchanged file → fresh.
-        let s = verify_symbol(&mut parser, &sym_ref, Some(&stamped), Some("abc1234"));
-        assert!(!s.stale, "unchanged symbol must not be stale: {:?}", s);
-        assert!(s.verified);
-        assert_eq!(s.reason, None);
-
-        // Mutate the symbol body → stale, "changed since <commit>".
-        std::fs::write(&file, "fn guard_gate() -> u32 {\n    let x = 100;\n    x + 1\n}\n")
-            .unwrap();
-        let s = verify_symbol(&mut parser, &sym_ref, Some(&stamped), Some("abc1234"));
-        assert!(s.stale, "mutated symbol must be stale");
-        assert!(s.verified);
-        assert!(
-            s.reason.as_deref().unwrap().contains("changed since abc1234"),
-            "reason: {:?}",
-            s.reason
-        );
-
-        // Remove the symbol (file still parses) → stale, "removed".
         std::fs::write(&file, "fn other_fn() -> u32 {\n    7\n}\n").unwrap();
-        let s = verify_symbol(&mut parser, &sym_ref, Some(&stamped), Some("abc1234"));
-        assert!(s.stale);
-        assert!(s.reason.as_deref().unwrap().contains("removed"));
+        let mut parser = SemanticParser::new().expect("parser");
 
-        // Delete the file entirely → stale, "removed — ... no longer exists".
+        match locate_symbol_text(&mut parser, &file_str, "guard_gate") {
+            SymbolLookup::SymbolMissing => {}
+            other => panic!("expected SymbolMissing, got {:?}", match other {
+                SymbolLookup::Found(_) => "Found",
+                SymbolLookup::FileMissing => "FileMissing",
+                SymbolLookup::SymbolMissing => "SymbolMissing",
+                SymbolLookup::Unverifiable(_) => "Unverifiable",
+            }),
+        }
         std::fs::remove_file(&file).unwrap();
-        let s = verify_symbol(&mut parser, &sym_ref, Some(&stamped), Some("abc1234"));
-        assert!(s.stale);
-        assert!(s.reason.as_deref().unwrap().contains("no longer exists"));
-    }
-
-    #[test]
-    fn verify_without_stamped_hash_is_inconclusive_not_stale() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("lib.rs");
-        std::fs::write(&file, "fn present() {}\n").unwrap();
-        let mut parser = SemanticParser::new().expect("parser");
-        let sym_ref = format!("{}#present", file.to_string_lossy());
-
-        let s = verify_symbol(&mut parser, &sym_ref, None, None);
-        assert!(!s.stale);
-        assert!(!s.verified);
-        assert!(s.reason.is_some());
-    }
-
-    #[test]
-    fn verify_entry_skips_entries_without_symbol() {
-        let entry = stamped_entry(None, None);
-        assert!(verify_entry(&entry).is_none());
-    }
-
-    #[test]
-    fn malformed_reference_is_unverifiable() {
-        let mut parser = SemanticParser::new().expect("parser");
-        let s = verify_symbol(&mut parser, "just_a_name", Some("hash"), None);
-        assert!(!s.stale);
-        assert!(!s.verified);
+        assert!(matches!(
+            locate_symbol_text(&mut parser, &file_str, "guard_gate"),
+            SymbolLookup::FileMissing
+        ));
     }
 
     #[test]
@@ -644,6 +750,11 @@ mod tests {
             signed_block_id: Some("blk_42".into()),
             key_id: Some("key-1".into()),
             source: None,
+            file: None,
+            session_id: None,
+            stated_at: None,
+            change: None,
+            tool: None,
         };
         assert_eq!(intent_row_id(&signed).as_deref(), Some("blk_42"));
 
@@ -655,6 +766,11 @@ mod tests {
             signed_block_id: None,
             key_id: None,
             source: None,
+            file: None,
+            session_id: None,
+            stated_at: None,
+            change: None,
+            tool: None,
         };
         assert_eq!(intent_row_id(&unsigned).as_deref(), Some("ts:100"));
 
@@ -666,6 +782,11 @@ mod tests {
             signed_block_id: None,
             key_id: None,
             source: None,
+            file: None,
+            session_id: None,
+            stated_at: None,
+            change: None,
+            tool: None,
         };
         assert_eq!(intent_row_id(&legacy), None);
     }

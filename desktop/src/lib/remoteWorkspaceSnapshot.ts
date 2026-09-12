@@ -48,8 +48,39 @@ const SCHEMA_VERSION = 1;
  *  box a single-project machine. Now the box names its own sessions and a tab
  *  only ever attaches to one, which is what lets the CLI, yesterday's laptop and
  *  a teammate all show up in the same list. */
+/** The work surfaces a remote workspace can open — the same five a local
+ *  workspace has beside its chat and terminals. One tab of each kind at most:
+ *  the files of a project are one thing, however many times you ask. */
+export type RemoteWorkKind = "files" | "changes" | "git" | "prs" | "run";
+
+export const REMOTE_WORK_KINDS: readonly RemoteWorkKind[] = [
+  "files",
+  "changes",
+  "git",
+  "prs",
+  "run",
+];
+
+function isWorkKind(v: unknown): v is RemoteWorkKind {
+  return typeof v === "string" && (REMOTE_WORK_KINDS as readonly string[]).includes(v);
+}
+
+/** The tab id for a work surface. Prefixed so a tmux session that happens to
+ *  be named `files` cannot be mistaken for the file tree. */
+export function workTabId(kind: RemoteWorkKind): string {
+  return `work:${kind}`;
+}
+
 export type RemoteTab =
   | { id: "cloud"; kind: "cloud"; label: string }
+  | {
+      /** `workTabId(work)`. */
+      id: string;
+      kind: "work";
+      /** Which surface: the local pane of that name, mounted on the project
+       *  where it stands — files, changes and git read off the machine. */
+      work: RemoteWorkKind;
+    }
   | {
       id: string;
       kind: "session";
@@ -94,8 +125,10 @@ export function emptyRemoteSnapshot(): RemoteWorkspaceSnapshot {
 // ---------------------------------------------------------------------------
 
 /** Which box, and which project on it. Both halves, because one box is a copy
- *  of several projects and each of them is somewhere you can stand. */
-export type RemoteSlot = { machineId: string; repoRoot: string };
+ *  of several projects and each of them is somewhere you can stand. A third
+ *  when the place works in a worktree on the box other than the machine's own
+ *  checkout: two worktrees of one project are two places, with two strips. */
+export type RemoteSlot = { machineId: string; repoRoot: string; remoteRoot?: string };
 
 /** The slot a workspace is standing in, or null when it hasn't resolved a box.
  *
@@ -112,10 +145,14 @@ export type RemoteSlot = { machineId: string; repoRoot: string };
 export function remoteSlotFor(
   machineId: string | null | undefined,
   repoRoot: string | null | undefined,
+  remoteRoot?: string | null,
 ): RemoteSlot | null {
   const id = machineId?.trim() ?? "";
   if (!id) return null;
-  return { machineId: id, repoRoot: normalizeRoot(repoRoot) };
+  const there = normalizeRoot(remoteRoot);
+  return there
+    ? { machineId: id, repoRoot: normalizeRoot(repoRoot), remoteRoot: there }
+    : { machineId: id, repoRoot: normalizeRoot(repoRoot) };
 }
 
 const SLOT_KEY_PREFIX = "aura.remoteWorkspaceSnapshot.";
@@ -127,6 +164,7 @@ export function remoteSlotKey(slot: RemoteSlot): string {
   return `${SLOT_KEY_PREFIX}${remotePlaceKey({
     machineId: slot.machineId,
     repoRoot: slot.repoRoot,
+    remoteRoot: slot.remoteRoot,
   })}`;
 }
 
@@ -150,11 +188,21 @@ export function sameRemoteSlot(
  *  list) is a worse outcome than a slot that reads as fresh. */
 function rehydrate(parsed: RemoteWorkspaceSnapshot): RemoteWorkspaceSnapshot {
   const tabs = Array.isArray(parsed.tabs) ? parsed.tabs : [];
-  const sessions = tabs.filter(
-    (t): t is Extract<RemoteTab, { kind: "session" }> =>
-      t?.kind === "session" && !!t.session?.name && typeof t.id === "string",
-  );
-  const out = [chatTab(), ...sessions];
+  const seenWork = new Set<RemoteWorkKind>();
+  const opened = tabs.flatMap((t): RemoteTab[] => {
+    if (t?.kind === "session") {
+      return !!t.session?.name && typeof t.id === "string" ? [t] : [];
+    }
+    if (t?.kind === "work" && isWorkKind(t.work) && !seenWork.has(t.work)) {
+      // One of each, and its id re-spelled here rather than trusted: the id
+      // is derived, and a blob that disagrees with the derivation is a blob
+      // whose focus would point at a tab that is not there.
+      seenWork.add(t.work);
+      return [{ id: workTabId(t.work), kind: "work", work: t.work }];
+    }
+    return [];
+  });
+  const out = [chatTab(), ...opened];
   const activeId = out.some((t) => t.id === parsed.activeId)
     ? parsed.activeId
     : CHAT_TAB_ID;
@@ -212,7 +260,12 @@ export function learnedItsProject(
   to: RemoteSlot | null,
 ): boolean {
   if (!from || !to) return false;
-  return from.machineId === to.machineId && !from.repoRoot && !!to.repoRoot;
+  return (
+    from.machineId === to.machineId &&
+    (from.remoteRoot ?? "") === (to.remoteRoot ?? "") &&
+    !from.repoRoot &&
+    !!to.repoRoot
+  );
 }
 
 /** Fold the tabs you are standing on into the ones the target slot already
@@ -293,6 +346,22 @@ export function openSessionTab(
       )
     : [...snap.tabs, { id, kind: "session" as const, session, readOnly }];
   return { v: SCHEMA_VERSION, tabs, activeId: id };
+}
+
+/** Open a work surface, and look at it. Already open is a focus: there is one
+ *  file tree of a project, and a second tab of it would be the same tree
+ *  drawn twice. */
+export function openWorkTab(
+  snap: RemoteWorkspaceSnapshot,
+  kind: RemoteWorkKind,
+): RemoteWorkspaceSnapshot {
+  const id = workTabId(kind);
+  if (snap.tabs.some((t) => t.id === id)) return focusRemoteTab(snap, id);
+  return {
+    v: SCHEMA_VERSION,
+    tabs: [...snap.tabs, { id, kind: "work", work: kind }],
+    activeId: id,
+  };
 }
 
 /** Close a *view*. The session keeps running on the box — that is the entire

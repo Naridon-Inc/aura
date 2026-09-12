@@ -10,7 +10,12 @@ use std::path::Path;
 
 /// The closed set of canonical intent types (doc 16, P3). Custom types
 /// are deferred to a Cedar-policy gate; for now any value not in this
-/// list is rejected at the aura_log_intent boundary.
+/// list is rejected at every capture boundary — `aura_log_intent` over
+/// MCP, and `aura log-intent --type` / `aura sign-intent --type` on the
+/// CLI. The CLI half of that sentence was untrue for a long time: it
+/// wrote whatever it was handed, which is how 13 `UXChange` and one
+/// `ProductFix` row came to sit in a field every reader treats as an
+/// enum, in buckets no histogram or `--type` filter can reach.
 pub const CANONICAL_INTENT_TYPES: &[&str] = &[
     "FeatureAdd",
     "BugFix",
@@ -24,6 +29,43 @@ pub const CANONICAL_INTENT_TYPES: &[&str] = &[
 pub fn is_canonical_intent_type(s: &str) -> bool {
     CANONICAL_INTENT_TYPES.iter().any(|t| *t == s)
 }
+
+/// The canonical spelling of what somebody typed, or `None` if it names
+/// no type at all.
+///
+/// Case and surrounding space are typos, not different classifications:
+/// `bugfix`, ` BugFix ` and `BUGFIX` all mean the one bucket, and a
+/// caller who reached for `--type` clearly meant to file the entry.
+/// Repairing those is the difference between an entry that appears in
+/// the histogram and one that silently does not. Anything genuinely
+/// outside the set still fails, because widening the enum here would
+/// fragment every query that reads it.
+pub fn canonicalize_intent_type(s: &str) -> Option<&'static str> {
+    let want = s.trim();
+    CANONICAL_INTENT_TYPES
+        .iter()
+        .copied()
+        .find(|t| t.eq_ignore_ascii_case(want))
+}
+
+/// The line to print when a caller states a type nothing can render.
+pub fn invalid_intent_type_message(got: &str) -> String {
+    format!(
+        "unknown intent type '{}' — dropped. Use one of: {}",
+        got.trim(),
+        CANONICAL_INTENT_TYPES.join(", "),
+    )
+}
+
+/// The line to print when a caller states no type at all.
+///
+/// Not an error: an untyped entry is still a logged intent, and the text
+/// is the part that binds to the AST. But 91 of 413 rows in this repo's
+/// own log carry a type, so every classification view is mostly dark —
+/// and the reason is that nothing ever said so at the point of writing.
+pub const UNTYPED_INTENT_HINT: &str =
+    "no --type given, so this entry joins no classification view. \
+One of: FeatureAdd, BugFix, Refactor, Revert, Performance, Docs, Deps";
 
 /// One row from the intent log, normalised to the fields we care about
 /// for querying. We keep the original `raw` so callers can surface fields
@@ -46,6 +88,115 @@ pub struct IntentRow {
     /// agrees with the diff by construction, and the check reported "aligned"
     /// with no way for a caller to know the two sides weren't independent.
     pub source: Option<String>,
+    /// Repo-relative path the mutation touched, when the row came from a hook
+    /// that knew which file was being edited. Written by `log-intent --file`.
+    ///
+    /// Modelled here because `aura why` answers *"why is this line the way it
+    /// is"* — a question that starts from a path. Without it every lookup has
+    /// to fall back to the commit's time window, which is a guess rather than
+    /// a statement.
+    pub file: Option<String>,
+    /// The agent conversation this intent was stated in — a Claude/Codex/Kimi
+    /// session id, written by `log-intent --session`.
+    ///
+    /// This is the join key from *what the agent said it was doing* to *what
+    /// the person actually asked for*, which lives in the agent's own
+    /// transcript (see `crate::history`). It is the whole reason the field is
+    /// carried through rather than left in the raw JSON.
+    pub session_id: Option<String>,
+    /// When the reason in `intent` was stated, if it was stated at all.
+    ///
+    /// The mutation guard writes a row for every edit, and it writes one
+    /// whether or not anybody said why. When somebody did — `aura
+    /// snapshot-file --why`, or a `log-intent` that preceded the edit — the
+    /// hook stamps the moment the sentence was written, and `intent` carries
+    /// that sentence. When nobody did, `intent` carries the hook's own
+    /// description of the edit and this is `None`.
+    ///
+    /// Both rows have the same `source`, so `source` alone cannot separate
+    /// them. Reading this field is the difference between "no reason was
+    /// written about this file" and finding the reason that was.
+    pub stated_at: Option<u64>,
+    /// The hook's mechanical description of the edit — *"running Edit on
+    /// build_verify.rs"*. Present alongside a stated reason, and equal to
+    /// `intent` when there was none to state.
+    pub change: Option<String>,
+    /// The tool call the hook was writing about — `Edit`, `Write`, `Bash`.
+    ///
+    /// Only a hook sets it, and it is what separates the two rows that
+    /// otherwise look alike: a row with a `tool` and no `change` is the
+    /// hook's own sentence about a tool call (*"Claude Edit on
+    /// intent_query.rs"*), while a row with both carries somebody's reason
+    /// with the mechanical description kept beside it. Modelled here
+    /// because `is_stated_reason` cannot tell them apart without it — the
+    /// desktop's reader has always had this field and answered correctly
+    /// where this one did not.
+    pub tool: Option<String>,
+}
+
+/// The stub a hook writes for a file edit nobody gave a reason for. It is a
+/// sentence about the absence of a reason, not a reason. In full the hook
+/// writes *"Automatic pre-Edit snapshot; no reason was stated by the agent."*
+///
+/// Named the same as `recorded_reason::NO_REASON_STUB` in the desktop shell,
+/// which reads the same log and has always rejected this text.
+const NO_REASON_STUB: &str = "no reason was stated";
+
+/// Is this intent text the hook's stub rather than somebody's sentence?
+///
+/// The phrase has to *end* the text. Matching it anywhere — which is what the
+/// shell does — throws out a real reason that quotes the stub while explaining
+/// it, and that is not hypothetical: the reason written for this very change
+/// quoted the sentence, was discarded, and the commit gate then reported the
+/// file as carrying no reason at all. A gate that rejects the explanation of
+/// itself is worse than no gate.
+fn is_no_reason_stub(intent: &str) -> bool {
+    let lowered = intent.trim().to_lowercase();
+    let tail = lowered
+        .trim_end_matches('.')
+        .trim_end()
+        .trim_end_matches("by the agent")
+        .trim_end();
+    tail.ends_with(NO_REASON_STUB)
+}
+
+impl IntentRow {
+    /// Did somebody state this reason, or is the text the change restated?
+    ///
+    /// A row that names a file perfectly and explains nothing is still a
+    /// record worth finding, but it must never be served ahead of the sentence
+    /// somebody actually wrote about that file.
+    pub fn is_stated_reason(&self) -> bool {
+        // Checked before `stated_at`, and this order is the whole point. The
+        // hook stamps `why_stated_at` on rows whose text is the stub itself,
+        // so trusting the timestamp first declared the absence of a reason to
+        // be a reason — and every caller here believed it while the shell,
+        // reading the same rows, did not.
+        if is_no_reason_stub(&self.intent) {
+            return false;
+        }
+        // A hook wrote this about a tool call and nothing displaced its
+        // sentence. Checked before `stated_at` for the same reason the stub
+        // is: the hook stamps a time on its own text too.
+        //
+        // This clause was missing, and it is the commonest row in the log —
+        // `{"intent": "Claude Edit on aura-cli/src/intent_query.rs", "tool":
+        // "Edit"}`, no `change`, no `why_stated_at`. It fell through to the
+        // final `None => true` and was served as a reason somebody wrote.
+        // The desktop's `recorded_reason::is_stated_reason` has always had
+        // this clause; the two readers of one log disagreed, and which
+        // answer you got depended on which surface you were looking at.
+        if self.tool.is_some() && self.change.is_none() {
+            return false;
+        }
+        if self.stated_at.is_some() {
+            return true;
+        }
+        match &self.change {
+            Some(c) => c.trim() != self.intent.trim(),
+            None => true,
+        }
+    }
 }
 
 impl IntentRow {
@@ -67,6 +218,22 @@ impl IntentRow {
         if let Some(src) = &self.source {
             v["source"] = json!(src);
         }
+        if let Some(f) = &self.file {
+            v["file"] = json!(f);
+        }
+        if let Some(sid) = &self.session_id {
+            v["session_id"] = json!(sid);
+        }
+        if let Some(at) = self.stated_at {
+            v["why_stated_at"] = json!(at);
+        }
+        if let Some(t) = &self.tool {
+            v["tool"] = json!(t);
+        }
+        if let Some(c) = &self.change {
+            v["change"] = json!(c);
+        }
+        v["stated_reason"] = json!(self.is_stated_reason());
         v
     }
 }
@@ -108,6 +275,30 @@ pub fn parse_intent_line(line: &str) -> Option<IntentRow> {
         .or_else(|| v.get("source"))
         .and_then(|t| t.as_str())
         .map(|s| s.to_string());
+    let file = v
+        .get("file")
+        .and_then(|f| f.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    let session_id = v
+        .get("session_id")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    let stated_at = v
+        .get("why_stated_at")
+        .and_then(|t| t.as_u64())
+        .filter(|t| *t > 0);
+    let change = v
+        .get("change")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+    let tool = v
+        .get("tool")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
     Some(IntentRow {
         timestamp,
         agent_id,
@@ -116,6 +307,11 @@ pub fn parse_intent_line(line: &str) -> Option<IntentRow> {
         signed_block_id,
         key_id,
         source,
+        file,
+        session_id,
+        stated_at,
+        change,
+        tool,
     })
 }
 
@@ -264,6 +460,20 @@ impl TypedIntentSummary {
     }
 }
 
+/// One sample line, capped at 80 bytes. The cut walks back to a char
+/// boundary — `truncate(77)` on a raw byte offset panics the moment byte 77
+/// lands inside a multi-byte character, and intents are free-form prose.
+fn sample_line(intent: &str) -> String {
+    if intent.len() <= 80 {
+        return intent.to_string();
+    }
+    let mut end = 77;
+    while end > 0 && !intent.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &intent[..end])
+}
+
 /// Compute the structured typed-intent summary for the given log path.
 /// Returns None on the same conditions as narrate_typed_intents_prose:
 /// missing/empty log, or zero typed rows in the window. Both renderers
@@ -313,14 +523,7 @@ pub fn build_typed_intent_summary(
             } else {
                 rows[..n]
                     .iter()
-                    .map(|r| {
-                        let mut s = r.intent.clone();
-                        if s.len() > 80 {
-                            s.truncate(77);
-                            s.push_str("...");
-                        }
-                        s
-                    })
+                    .map(|r| sample_line(&r.intent))
                     .collect()
             };
             TypedIntentBucket {
@@ -390,7 +593,61 @@ mod tests {
             signed_block_id: None,
             key_id: None,
             source: None,
+            file: None,
+            session_id: None,
+            stated_at: None,
+            change: None,
+            tool: None,
         }
+    }
+
+    #[test]
+    fn the_hooks_stub_is_not_a_reason_even_with_a_time_stamped_on_it() {
+        // The shape every real hook row has. Trusting `stated_at` first made
+        // the absence of a reason read as a reason, and every gate that asks
+        // "is this file explained" answered yes for a file nobody explained.
+        let mut r = row(200, None, "Automatic pre-Edit snapshot; no reason was stated by the agent.");
+        r.stated_at = Some(199);
+        r.change = Some("Claude Edit on a.rs".into());
+        assert!(!r.is_stated_reason());
+    }
+
+    #[test]
+    fn a_reason_that_quotes_the_stub_while_explaining_it_survives() {
+        // Caught on real data: the reason written for the fix above quoted
+        // the hook sentence, a `contains` test discarded it, and the commit
+        // gate then reported that file as carrying no reason at all.
+        let mut r = row(
+            200,
+            None,
+            "The hook writes 'no reason was stated by the agent' even when somebody did, \
+             so the reader believed the stub and hid the sentence underneath it.",
+        );
+        r.stated_at = Some(199);
+        assert!(r.is_stated_reason());
+    }
+
+    #[test]
+    fn the_hooks_own_sentence_about_a_tool_call_is_not_a_reason() {
+        // The commonest row in a real log: the hook naming the tool it ran
+        // and the file it ran on, with nobody's words anywhere in it. It
+        // has no `change` to be compared against and no stamped time, so
+        // it fell all the way through to the permissive tail and was
+        // served as a reason. The desktop reader, on the same row, said no.
+        let mut r = row(200, None, "Claude Edit on aura-cli/src/intent_query.rs");
+        r.tool = Some("Edit".into());
+        assert!(!r.is_stated_reason());
+    }
+
+    #[test]
+    fn a_reason_stated_over_a_tool_call_still_counts() {
+        // Same hook, but somebody said why first: the sentence is theirs and
+        // the mechanical description is kept beside it in `change`. Rejecting
+        // this would throw away every reason written the way Aura asks for.
+        let mut r = row(200, None, "switch retry to exponential backoff so we stop tripping the rate limit");
+        r.tool = Some("Edit".into());
+        r.change = Some("Claude Edit on retry.rs".into());
+        assert!(r.is_stated_reason());
     }
 
     #[test]
@@ -401,6 +658,40 @@ mod tests {
         assert!(!is_canonical_intent_type("BugFx"));
         assert!(!is_canonical_intent_type("bugfix"));
         assert!(!is_canonical_intent_type(""));
+    }
+
+    #[test]
+    fn case_and_space_are_typos_not_classifications() {
+        // Somebody who typed `--type bugfix` filed the entry. Refusing it
+        // would leave the row untyped, which is the state this whole change
+        // exists to reduce.
+        assert_eq!(canonicalize_intent_type("bugfix"), Some("BugFix"));
+        assert_eq!(canonicalize_intent_type("BUGFIX"), Some("BugFix"));
+        assert_eq!(canonicalize_intent_type("  Refactor \n"), Some("Refactor"));
+        for t in CANONICAL_INTENT_TYPES {
+            assert_eq!(canonicalize_intent_type(t), Some(*t));
+        }
+    }
+
+    #[test]
+    fn a_type_outside_the_set_stays_outside_it() {
+        // `UXChange` and `ProductFix` are the two that actually got into
+        // this repo's log through the unvalidated CLI path. Widening the
+        // enum to admit them would fragment every histogram that reads it.
+        for bad in ["UXChange", "ProductFix", "BugFx", "Chore", "Test", ""] {
+            assert_eq!(canonicalize_intent_type(bad), None, "{bad} should not canonicalize");
+        }
+    }
+
+    #[test]
+    fn the_rejection_message_names_the_alternatives() {
+        // A message that only says "invalid" leaves the caller guessing at
+        // a closed set of seven they cannot see.
+        let msg = invalid_intent_type_message(" UXChange ");
+        assert!(msg.contains("'UXChange'"), "{msg}");
+        for t in CANONICAL_INTENT_TYPES {
+            assert!(msg.contains(t), "{msg} should name {t}");
+        }
     }
 
     #[test]
@@ -457,6 +748,29 @@ mod tests {
         assert!(parse_intent_line("not json").is_none());
         // Missing required intent field
         assert!(parse_intent_line(r#"{"agent_id":"a","timestamp":1}"#).is_none());
+    }
+
+    #[test]
+    fn sample_line_survives_multibyte_at_the_cut() {
+        // 76 ascii bytes then a 4-byte emoji: byte 77 is mid-codepoint, so the
+        // old `truncate(77)` panicked here. The cut must walk back instead.
+        let intent = format!("{}🚀🚀", "a".repeat(76));
+        let s = sample_line(&intent);
+        assert!(s.ends_with("..."));
+        assert!(s.len() <= 80);
+
+        // Pure CJK: every byte offset except multiples of 3 is mid-codepoint.
+        let cjk = "语".repeat(40);
+        let s = sample_line(&cjk);
+        assert!(s.ends_with("..."));
+    }
+
+    #[test]
+    fn sample_line_leaves_short_intents_alone() {
+        assert_eq!(sample_line("héllo"), "héllo");
+        // Exactly 80 bytes: untouched, no ellipsis.
+        let exact = "a".repeat(80);
+        assert_eq!(sample_line(&exact), exact);
     }
 
     #[test]

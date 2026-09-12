@@ -8,6 +8,15 @@
 //! This IMPROVES git's merge, never replaces it: any doubt (parse failure,
 //! unsupported language, internal error) falls back to `git merge-file` on the
 //! original files and passes its exit semantics through.
+//!
+//! Every one of those fallbacks is announced on stderr, and that is a rule
+//! rather than a nicety. `--install` tells the reader that "rs / ts / tsx / py
+//! / go files now merge at the AST node level"; if the driver then quietly
+//! hands a file to `git merge-file` and the reader finds `<<<<<<<` in it, they
+//! draw the one conclusion that is both reasonable and wrong — that Aura's
+//! semantic merge produced those markers and is not worth much. Naming the
+//! file and the reason costs one line and removes the whole misreading, so the
+//! driver says which files it actually merged and which ones it declined.
 
 use colored::Colorize;
 use std::path::Path;
@@ -29,7 +38,7 @@ mod conflict_rows;
 #[path = "merge_driver_tests.rs"]
 mod tests;
 
-use engine::SemanticMerge;
+use engine::{NodeConflict, SemanticMerge};
 
 /// Patterns appended to `.git/info/attributes` by `--install` (repo-local,
 /// never a committed .gitattributes — installing the driver is a per-clone
@@ -114,37 +123,125 @@ fn run_driver(
             Ok(()) => 0,
             Err(e) => {
                 // Could not write the result — let git merge-file own the file.
-                eprintln!("aura merge-driver: write failed ({}), falling back", e);
-                git_merge_file_in_place(ours, base, theirs, marker_size)
+                fall_back(
+                    ours,
+                    base,
+                    theirs,
+                    marker_size,
+                    path_hint,
+                    &format!("the merged result could not be written: {}", e),
+                )
             }
         },
         SemanticMerge::Conflicted { content, conflicts, details } => {
-            if std::env::var("AURA_MERGE_DEBUG").is_ok() {
-                eprintln!("aura merge-driver: {} semantic conflict(s) left", conflicts);
-            }
             match std::fs::write(ours, content) {
                 Ok(()) => {
+                    report_semantic_conflicts(path_hint, conflicts, &details);
                     // Additive only — the markers are already on disk and the
                     // exit code is already decided. emit() swallows every
                     // failure (and skips repos without a `.aura/` dir).
                     conflict_rows::emit(path_hint, &details);
                     1
                 }
-                Err(e) => {
-                    eprintln!("aura merge-driver: write failed ({}), falling back", e);
-                    git_merge_file_in_place(ours, base, theirs, marker_size)
-                }
+                Err(e) => fall_back(
+                    ours,
+                    base,
+                    theirs,
+                    marker_size,
+                    path_hint,
+                    &format!("the merged result could not be written: {}", e),
+                ),
             }
         }
         SemanticMerge::Fallback(reason) => {
-            // Quiet by design: the fallback IS the normal git behavior. The
-            // reason only matters when debugging, so gate it on env.
-            if std::env::var("AURA_MERGE_DEBUG").is_ok() {
-                eprintln!("aura merge-driver: fallback → git merge-file ({})", reason);
-            }
-            git_merge_file_in_place(ours, base, theirs, marker_size)
+            fall_back(ours, base, theirs, marker_size, path_hint, &reason)
         }
     }
+}
+
+/// Hand the file to `git merge-file` and say, on stderr, that that is what
+/// happened. Returns git's exit code unchanged.
+///
+/// The announcement is not optional. See the module doc: an unannounced
+/// fallback is how a stock line merge ends up being read as Aura's semantic
+/// one, which is worse for the reader than no driver at all.
+fn fall_back(
+    ours: &Path,
+    base: &Path,
+    theirs: &Path,
+    marker_size: usize,
+    path_hint: Option<&str>,
+    reason: &str,
+) -> i32 {
+    let code = git_merge_file_in_place(ours, base, theirs, marker_size);
+    eprintln!("{}", fallback_message(file_label(path_hint), reason, code));
+    code
+}
+
+/// The sentence a fallback prints. Split out from the printing so a test can
+/// hold it to its job: name the file, name the reason, and — when markers are
+/// left behind — say whose merge left them.
+fn fallback_message(file: &str, reason: &str, code: i32) -> String {
+    match code {
+        0 => format!(
+            "aura merge-driver: {} — no semantic merge here ({}). git's line merge handled it cleanly.",
+            file, reason
+        ),
+        // `git merge-file` reports its own failures as 255, so there is no
+        // merged file to describe — only a file nothing could merge.
+        255 => format!(
+            "aura merge-driver: {} — no semantic merge here ({}), and git's line merge could not merge it either.",
+            file, reason
+        ),
+        _ => format!(
+            "aura merge-driver: {} — no semantic merge here ({}). The conflict markers in this file are git's line merge, not Aura's; they need a human.",
+            file, reason
+        ),
+    }
+}
+
+/// Say which nodes the AST merge could not decide for the reader.
+///
+/// This is the good outcome the driver is allowed to have: it DID merge
+/// semantically, and it is naming the handful of nodes where both sides
+/// changed the same thing and no rule can pick a winner without guessing.
+fn report_semantic_conflicts(path_hint: Option<&str>, conflicts: usize, details: &[NodeConflict]) {
+    eprintln!(
+        "{}",
+        semantic_conflict_message(file_label(path_hint), conflicts, details)
+    );
+}
+
+fn semantic_conflict_message(file: &str, conflicts: usize, details: &[NodeConflict]) -> String {
+    let plural = if conflicts == 1 { "" } else { "s" };
+    // Naming every node in a large conflict turns one useful line into a wall,
+    // so name a few and count the rest — the file itself has the full story.
+    let named: Vec<&str> = details.iter().take(3).map(|d| d.identifier.as_str()).collect();
+    if named.is_empty() {
+        // Pure-text or anonymous-node conflicts: the engine ran, but it cannot
+        // honestly put a name to what is in dispute, so it does not invent one.
+        return format!(
+            "aura merge-driver: {} — merged at the AST level; {} conflict{} left for a human.",
+            file, conflicts, plural
+        );
+    }
+    let more = details.len().saturating_sub(named.len());
+    let tail = if more > 0 { format!(" and {} more", more) } else { String::new() };
+    format!(
+        "aura merge-driver: {} — merged at the AST level; both sides changed {}{}, so {} conflict{} left for a human.",
+        file,
+        named.join(", "),
+        tail,
+        conflicts,
+        plural
+    )
+}
+
+/// What to call the file in a message. `%P` is the only thing that carries the
+/// real repo path — `%O`/`%A`/`%B` are git's temp names, which would name a
+/// file the reader has never heard of.
+fn file_label(path_hint: Option<&str>) -> &str {
+    path_hint.unwrap_or("this file")
 }
 
 fn read_utf8(path: &Path) -> Option<String> {

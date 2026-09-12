@@ -21,9 +21,72 @@
 import { describe, expect, test } from "bun:test";
 
 import { SHORTCUT_GROUPS, comboKeys } from "../src/lib/shortcuts";
+import { resolveShortcut, type AppActionId, type Chord } from "../src/lib/keymap";
 import { stripComments } from "./support/code";
 
 const SRC = `${import.meta.dir}/../src`;
+
+describe("the keymap chords are listed, and the listed chords resolve", () => {
+  // AURA-1296. Every chord `lib/keymap.ts` answers with one of these ids must
+  // be printed on the cheat-sheet, and every printed one must resolve to its
+  // id AND have a `case` in App.tsx's dispatcher — a chord that resolves to
+  // an id nothing handles is a key that does nothing, with a row that says
+  // it does. Add a chord to one side and this fails until it is on the other.
+  const BOUND: Array<{ keys: string; id: AppActionId; chord: Chord }> = [
+    { keys: "⌘⌥Enter", id: "fork_chat", chord: { key: "Enter", meta: true, shift: false, alt: true, editable: false } },
+    { keys: "⌘⇧/", id: "cycle_effort", chord: { key: "?", meta: true, shift: true, alt: false, editable: true } },
+    { keys: "⌘⌥→", id: "next_tab", chord: { key: "ArrowRight", meta: true, shift: false, alt: true, editable: false } },
+    { keys: "⌘⌥←", id: "prev_tab", chord: { key: "ArrowLeft", meta: true, shift: false, alt: true, editable: false } },
+    { keys: "⌘⌥L", id: "next_attention", chord: { key: "L", meta: true, shift: false, alt: true, editable: false } },
+    { keys: "⌘⌥U", id: "toggle_changes", chord: { key: "U", meta: true, shift: false, alt: true, editable: false } },
+  ];
+  const listed = new Map(
+    SHORTCUT_GROUPS.flatMap((g) => g.items).map((s) => [s.keys, s.label] as const),
+  );
+
+  test("every bound chord is on the sheet, under a global group", () => {
+    const missing = BOUND.filter((b) => !listed.has(b.keys)).map((b) => b.keys);
+    expect(missing).toEqual([]);
+  });
+
+  test("every listed chord resolves to its id", () => {
+    for (const b of BOUND) expect(resolveShortcut(b.chord)).toBe(b.id);
+  });
+
+  test("the ⌘⇧/ ladder also answers on layouts that send '/'", () => {
+    expect(
+      resolveShortcut({ key: "/", meta: true, shift: true, alt: false, editable: true }),
+    ).toBe("cycle_effort");
+  });
+
+  test("the plain keys stay with their old owners", () => {
+    // ⌘L (message box), ⌘⇧U (standup), ⌘/ (this sheet), ⌘Enter (send) are
+    // handled elsewhere and must NOT be answered here.
+    const plain: Chord[] = [
+      { key: "l", meta: true, shift: false, alt: false, editable: true },
+      { key: "U", meta: true, shift: true, alt: false, editable: false },
+      { key: "/", meta: true, shift: false, alt: false, editable: false },
+      { key: "Enter", meta: true, shift: false, alt: false, editable: true },
+      { key: "ArrowRight", meta: true, shift: false, alt: false, editable: false },
+    ];
+    for (const c of plain) expect(resolveShortcut(c)).toBeNull();
+  });
+
+  test("every id has a handler in App.tsx", async () => {
+    const app = stripComments(await Bun.file(`${SRC}/App.tsx`).text());
+    const unhandled = BOUND.filter((b) => !app.includes(`case "${b.id}":`)).map((b) => b.id);
+    expect(unhandled).toEqual([]);
+  });
+
+  test("every AURA-1296 id the keymap declares is in this table", async () => {
+    // The converse: an id added to the union and the switch but not here
+    // would be bound with no row on the sheet.
+    const keymap = stripComments(await Bun.file(`${SRC}/lib/keymap.ts`).text());
+    const block = keymap.slice(keymap.indexOf('| "next_tab"'), keymap.indexOf("export type Dispatch"));
+    const declared = [...block.matchAll(/\| "([a-z_]+)"/g)].map((m) => m[1]!);
+    expect(declared.sort()).toEqual(BOUND.map((b) => b.id).sort());
+  });
+});
 
 
 describe("comboKeys", () => {

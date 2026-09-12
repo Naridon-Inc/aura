@@ -265,9 +265,8 @@ pub fn maybe_spawn_sync() {
     }
     // No relay configured → nothing to spawn for.
     let cfg = crate::config::ConfigManager::load();
-    let has_token =
-        cfg.cloud_api_token.is_some() || std::env::var("AURA_CLOUD_TOKEN").is_ok();
-    if cfg.cloud_url.is_none() || !has_token {
+    let has_token = crate::cloud_endpoint::token(cfg.cloud_api_token.as_deref()).is_some();
+    if crate::cloud_endpoint::origin(cfg.cloud_url.as_deref()).is_none() || !has_token {
         return;
     }
     let Ok(exe) = std::env::current_exe() else {

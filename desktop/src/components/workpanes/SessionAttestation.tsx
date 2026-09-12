@@ -24,7 +24,8 @@ import { useCallback, useEffect, useState } from "react";
 import { onExternalAnchorClick } from "../../lib/openExternal";
 import type { ReactNode } from "react";
 import { api } from "../../lib/api";
-import { intentTypeSentence } from "../../lib/intentTypeLabels";
+import { intentTypeSentence } from "@shared/intentTypeLabels";
+import { invalidateCache, peekCache, writeCache } from "../../lib/resourceCache";
 import { Button } from "../ui/button";
 import { relativeAgeFromDelta } from "../../lib/relativeTime";
 
@@ -96,8 +97,20 @@ export function SessionAttestation({
   /** The run's logged `intent_type`, shown until verify confirms it. */
   intentType?: string | null;
 }) {
-  const [sig, setSig] = useState<SigPhase>({ kind: "loading" });
-  const [meta, setMeta] = useState<AttestListRow | null>(null);
+  // Seeded from the last verdict this session reached for the same block, so
+  // re-opening a run repaints instantly instead of shelling `aura attest` from
+  // scratch. The re-verify below still runs and its answer WINS — a signature
+  // verdict is never masked by a cached one, only pre-painted by it.
+  const [sig, setSig] = useState<SigPhase>(() => {
+    const cached = blockId
+      ? peekCache<VerifyResult>(`attest:verify:${repoRoot}:${blockId}`)
+      : undefined;
+    return cached ? { kind: "verified", result: cached } : { kind: "loading" };
+  });
+  const [meta, setMeta] = useState<AttestListRow | null>(() => {
+    const rows = peekCache<AttestListRow[]>(`attest:list:${repoRoot}`);
+    return rows?.find((r) => r.id === blockId) ?? null;
+  });
   const [incl, setIncl] = useState<InclusionPhase>({ kind: "idle" });
 
   // Signature verdict — offline-safe (--no-rekor). Errors surface verbatim.
@@ -106,7 +119,11 @@ export function SessionAttestation({
       setSig({ kind: "failed", message: "This run has no signed block id." });
       return;
     }
-    setSig({ kind: "loading" });
+    const key = `attest:verify:${repoRoot}:${blockId}`;
+    const cached = peekCache<VerifyResult>(key);
+    // Keep a previously verified result on screen while re-checking; a bare
+    // "loading" here would flicker the verdict hero on every remount.
+    setSig(cached ? { kind: "verified", result: cached } : { kind: "loading" });
     try {
       const res = await api.auraCli(repoRoot, [
         "attest",
@@ -117,6 +134,9 @@ export function SessionAttestation({
       ]);
       const trimmed = res.stdout.trim();
       if (res.status !== 0 || !trimmed) {
+        // Anything short of a clean pass drops the cached pass, so the next
+        // mount can't flash a green verdict this block no longer earns.
+        invalidateCache(key);
         setSig({
           kind: "failed",
           message: (res.stderr || trimmed || `exit ${res.status}`).trim(),
@@ -125,11 +145,14 @@ export function SessionAttestation({
       }
       const parsed = JSON.parse(trimmed) as VerifyResult;
       if (parsed.signature_verified) {
+        writeCache(key, parsed);
         setSig({ kind: "verified", result: parsed });
       } else {
+        invalidateCache(key);
         setSig({ kind: "failed", message: "Signature did not verify." });
       }
     } catch (e) {
+      invalidateCache(key);
       setSig({ kind: "failed", message: e instanceof Error ? e.message : String(e) });
     }
   }, [repoRoot, blockId]);
@@ -141,17 +164,22 @@ export function SessionAttestation({
     void verifySignature();
     setIncl({ kind: "idle" });
     (async () => {
+      // The ledger is one CLI call for the whole repo, so cache it per root:
+      // every run's panel reads the same list, and the seeded `meta` above
+      // means a remount shows "Sealed …" without waiting on it.
+      const listKey = `attest:list:${repoRoot}`;
       try {
         const res = await api.auraCli(repoRoot, ["attest", "list", "--json"]);
         const trimmed = res.stdout.trim();
         if (!trimmed) return;
         const rows = JSON.parse(trimmed) as AttestListRow[];
+        if (Array.isArray(rows)) writeCache(listKey, rows);
         const found = Array.isArray(rows)
           ? rows.find((r) => r.id === blockId) ?? null
           : null;
         if (alive) setMeta(found);
       } catch {
-        /* metadata is enrichment only */
+        /* metadata is enrichment only — keep whatever the cache seeded */
       }
     })();
     return () => {

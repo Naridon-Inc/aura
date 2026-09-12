@@ -134,6 +134,8 @@ export function TerminalTabsList({
       </div>
       <RunRow
         repoRoot={repoRoot}
+        // AURA-1294 — Run's pty, so the row can notice a localhost URL it prints
+        runPtyId={terminals.find((t) => t.termId === runTermId)?.daemonSessionId ?? null}
         active={runTermId !== null && runTermId === activeTermId}
         open={runTermId !== null}
         onRun={onRun}

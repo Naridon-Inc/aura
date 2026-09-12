@@ -119,6 +119,9 @@ pub fn to_markdown(c: &AuraCarryover) -> String {
         for f in &wt.files {
             s.push_str(&format!("  - {} {}\n", f.status, f.path));
         }
+        if wt.files_elided > 0 {
+            s.push_str(&format!("  - … +{} more files (elided)\n", wt.files_elided));
+        }
         s.push('\n');
     }
 
@@ -225,11 +228,17 @@ pub fn to_xml(c: &AuraCarryover) -> String {
     }
 
     let wt = &c.working_tree;
+    let elided_attr = if wt.files_elided > 0 {
+        format!(" elided=\"{}\"", wt.files_elided)
+    } else {
+        String::new()
+    };
     s.push_str(&format!(
-        "  <working_tree files=\"{}\" insertions=\"{}\" deletions=\"{}\">\n",
+        "  <working_tree files=\"{}\" insertions=\"{}\" deletions=\"{}\"{}>\n",
         wt.files_changed.max(wt.files.len()),
         wt.insertions,
-        wt.deletions
+        wt.deletions,
+        elided_attr
     ));
     for f in &wt.files {
         s.push_str(&format!(

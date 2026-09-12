@@ -6,7 +6,47 @@
 // prompt by correlating to the matching Claude Code session
 // (`claudeListSessions`, which exposes the actual first/last prompt).
 
-import { type ClaudeSession, type IntentRow } from "./api";
+import {
+  isMechanicalHookCapture,
+  type ClaudeSession,
+  type IntentRow,
+} from "./api";
+
+/** The preamble the Stop hook writes ahead of an agent's whole closing message
+ *  (`agent_event_listener.rs:723`), so what follows is a page of markdown
+ *  rather than a line of prose. The console strips the same thing in
+ *  `aura-console-next/src/data/adapt.ts`. */
+const TURN_REPORT = /^agent turn complete\s*(?::\s*|$)/i;
+
+/** Is this row the agent's own account of the turn it just finished?
+ *
+ *  It is not a reason anybody gave for a change, and it is not what the user
+ *  asked for. It is the agent saying what it believes it did — useful, and
+ *  worth reading, and the one thing a reviewer must not mistake for either of
+ *  the other two. */
+export function isAgentTurnReport(row: IntentRow): boolean {
+  return TURN_REPORT.test((row.intent ?? "").trim());
+}
+
+/** One scannable line out of something written as a page.
+ *
+ *  A closing message is markdown with headings, bullets and bold in it. Left
+ *  alone, a list row gets the machine preamble and nothing else, because the
+ *  preamble is the whole visible width. Mirrors the console's `oneLine`. */
+function firstLine(text: string): string {
+  const line = text
+    .replace(TURN_REPORT, "")
+    .split(/\r?\n/, 1)[0]
+    // Emphasis and inline code mean nothing on one unstyled line; the words
+    // inside them do. Underscore stays: it is part of an identifier about as
+    // often as it is emphasis, and `require_plan` losing its middle is worse
+    // than an italic surviving.
+    .replace(/[`*#>]+/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/(?:…|\.\.\.)\s*$/, "")
+    .trim();
+  return line || text.trim();
+}
 
 /** The guard's current placeholder, agent_mutation_guard.rs:516 —
  *  `"{agent_id} edited {n} file(s) — reason not captured yet"`. Pinned to the
@@ -52,12 +92,24 @@ export function isAutoStub(row: IntentRow): boolean {
 // by construction. An audit trail whose weakest rows are its most agreeable ones
 // is worse than one with holes in it, because you can see a hole.
 
-export type IntentProvenance = "stated" | "asked" | "inferred" | "uncaptured";
+export type IntentProvenance =
+  | "stated"
+  | "asked"
+  | "reported"
+  | "inferred"
+  | "uncaptured";
 
 /** Where this row's "why" came from — see the note above. A row with no
  *  `source` came through `aura_log_intent` proper: somebody stated it. */
 export function intentProvenance(row: IntentRow): IntentProvenance {
   if (isAutoStubText(row.intent)) return "uncaptured";
+  // A run whose whole record is tool calls. One of these is kept per session so
+  // the run is not silently absent, and the honest thing it can say is that
+  // nobody wrote down a request. The commands are still on the row.
+  if (isMechanicalHookCapture(row)) return "uncaptured";
+  // The agent's closing message. It arrives as prose in the same field a stated
+  // reason uses, so without this it reads as one.
+  if (isAgentTurnReport(row)) return "reported";
   switch (row.changeset?.source) {
     case "guard_auto_stub":
       return "uncaptured";
@@ -105,6 +157,8 @@ export function provenanceLabel(p: IntentProvenance, statedLabel = "Reason"): st
   switch (p) {
     case "asked":
       return "What you asked for";
+    case "reported":
+      return "What the agent said it did";
     case "inferred":
       return "Aura's read of the change";
     case "uncaptured":
@@ -117,14 +171,17 @@ export function provenanceLabel(p: IntentProvenance, statedLabel = "Reason"): st
 /** A one-or-two-word marker for a scan-list row, where there is no room to
  *  explain and no time to read.
  *
- *  Only the inferred case gets one, and the rule is one bit: *did a machine
- *  write this sentence?* A stated reason and a session prompt are both somebody's
- *  words. An uncaptured row already announces itself — its title is literally
- *  "Agent edited 3 files". Only the model's line arrives looking exactly like a
- *  reason a person gave, so only it needs marking, and a marker on every row
+ *  The rule is one bit: *did the person whose work this is write this
+ *  sentence?* A stated reason and a session prompt are both their words, so
+ *  neither is marked. An uncaptured row already announces itself — its title is
+ *  literally "Agent edited 3 files". The two that need marking both arrive
+ *  looking exactly like a reason a person gave: the line Aura's model wrote
+ *  from the diff, and the agent's own closing message. A marker on every row
  *  would be a marker nobody reads. */
 export function provenanceTag(p: IntentProvenance): string {
-  return p === "inferred" ? "Aura's summary" : "";
+  if (p === "inferred") return "Aura's summary";
+  if (p === "reported") return "Agent's account";
+  return "";
 }
 
 /** One line under the body saying who wrote it, where that isn't obvious.
@@ -133,6 +190,8 @@ export function provenanceNote(p: IntentProvenance): string {
   switch (p) {
     case "asked":
       return "Taken from what you typed at the start of this session. Nobody wrote a reason for the change itself.";
+    case "reported":
+      return "The agent's own account of the turn it just finished. It is what the agent says it did, which is not the same as what you asked for or what Aura checked.";
     case "inferred":
       return "Nobody said why, so Aura read the change and wrote this. It describes what happened. Treat it as a summary, not as the reason.";
     case "uncaptured":
@@ -156,6 +215,59 @@ const CORRELATE_WINDOW_S = 15 * 60;
 // best-effort relabeling, deliberately looser than the exact-id path above it.
 const REPAIR_WINDOW_S = 3 * 60 * 60;
 
+// ── Per-list indexes ─────────────────────────────────────────────────────────
+// Correlation used to scan the whole session list for every row, and the list
+// surfaces call it several times per row — once to collapse, once to title,
+// again on every render. With a few hundred rows against a few hundred
+// sessions that is six figures of comparisons on each keystroke-sized state
+// change, which is exactly the stall people feel when Sessions opens.
+//
+// So each session array gets an index built once, hung off the array itself in
+// a WeakMap: an id lookup, an mtime-sorted view for the nearest-in-time
+// search, and memo tables for the two derived values. `claudeListSessions`
+// hands back a fresh array whenever the data actually changes, so a new array
+// identity is precisely the signal that the index must be rebuilt — no manual
+// invalidation, and nothing retained once the array is dropped.
+
+type Timed = { session: ClaudeSession; order: number };
+
+type SessionIndex = {
+  /** The array this index was built from — held so helpers that take the raw
+   *  list can be reached without minting a new array (which would look like
+   *  new data and rebuild the index on every call). */
+  all: ClaudeSession[];
+  byId: Map<string, ClaudeSession>;
+  /** Ascending by mtime; `order` is the position in the original array, kept
+   *  so ties resolve exactly as the old linear scan resolved them. */
+  byTime: Timed[];
+  correlated: WeakMap<IntentRow, ClaudeSession | null>;
+  titles: WeakMap<IntentRow, string>;
+};
+
+const sessionIndexes = new WeakMap<ClaudeSession[], SessionIndex>();
+
+function indexFor(sessions: ClaudeSession[]): SessionIndex {
+  const hit = sessionIndexes.get(sessions);
+  if (hit) return hit;
+  const byId = new Map<string, ClaudeSession>();
+  for (const s of sessions) {
+    // First writer wins, matching `find`'s "first match" semantics.
+    if (s.session_id && !byId.has(s.session_id)) byId.set(s.session_id, s);
+  }
+  const byTime = sessions
+    .map((session, order) => ({ session, order }))
+    .sort((a, b) => a.session.mtime - b.session.mtime || a.order - b.order);
+  const built: SessionIndex = {
+    all: sessions,
+    byId,
+    byTime,
+    correlated: new WeakMap(),
+    titles: new WeakMap(),
+  };
+  sessionIndexes.set(sessions, built);
+  return built;
+}
+
 /** Nearest Claude session to an arbitrary unix-second timestamp, within the
  *  given window (default ±15min) — or null when nothing is close enough. Pure
  *  time match (no agent gate), for commit-level correlation where the caller
@@ -165,24 +277,71 @@ export function nearestSessionByTime(
   sessions: ClaudeSession[],
   windowS: number = CORRELATE_WINDOW_S,
 ): ClaudeSession | null {
-  let best: ClaudeSession | null = null;
+  const { byTime } = indexFor(sessions);
+  if (byTime.length === 0) return null;
+
+  // First entry whose mtime is >= ts. The nearest session is that one or the
+  // one before it — |mtime − ts| only grows as you walk away from the seam.
+  let lo = 0;
+  let hi = byTime.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (byTime[mid].session.mtime < ts) lo = mid + 1;
+    else hi = mid;
+  }
+
+  let best: Timed | null = null;
   let bestDelta = Infinity;
-  for (const s of sessions) {
-    const delta = Math.abs(s.mtime - ts);
-    if (delta < bestDelta) {
+  // Walk outward from the seam while the distance is still tied with the best
+  // seen. Repeated mtimes are common (sessions written in the same second), so
+  // this is what preserves the old scan's "earliest in the array wins" rule.
+  for (let i = lo - 1; i >= 0; i--) {
+    const delta = Math.abs(byTime[i].session.mtime - ts);
+    if (delta > bestDelta) break;
+    if (!best || delta < bestDelta || byTime[i].order < best.order) {
       bestDelta = delta;
-      best = s;
+      best = byTime[i];
     }
   }
-  return best && bestDelta <= windowS ? best : null;
+  for (let i = lo; i < byTime.length; i++) {
+    const delta = Math.abs(byTime[i].session.mtime - ts);
+    if (delta > bestDelta) break;
+    if (!best || delta < bestDelta || byTime[i].order < best.order) {
+      bestDelta = delta;
+      best = byTime[i];
+    }
+  }
+  return best && bestDelta <= windowS ? best.session : null;
+}
+
+/** The session id a row states about itself, whichever writer wrote it.
+ *
+ *  Two capture paths stamp the same fact under two names, and reading only one
+ *  of them was why the Transcript tab said "No live conversation recorded"
+ *  while a multi-megabyte JSONL sat on disk with that exact stem:
+ *
+ *  - `claude_session_id` — the desktop `aura_log_intent` command.
+ *  - `session_id` — `aura log-intent`, the hook / terminal path, which writes
+ *    the overwhelming majority of rows. It holds whatever the agent CLI put in
+ *    the environment (`CLAUDE_CODE_SESSION_ID`, `CODEX_SESSION_ID`, …), so it
+ *    is only a *candidate*: callers confirm it against the listed sessions
+ *    before trusting it, which is what keeps a Codex id from ever resolving to
+ *    a Claude transcript.
+ *
+ *  Empty string when the row states nothing. */
+export function statedSessionId(row: IntentRow): string {
+  const stamped = (row.claude_session_id ?? "").trim();
+  if (stamped) return stamped;
+  return (row.session_id ?? "").trim();
 }
 
 /** Resolve the Claude Code session for an intent row.
  *
- *  1. **Durable link** — when the row carries a `claude_session_id` (stamped at
- *     log-intent time), match it exactly. This is authoritative: no time
- *     guessing, no agent gate, immune to a session that ran for hours.
- *  2. **Heuristic repair** — older / backfilled rows have no stamp, so fall back
+ *  1. **Durable link** — when the row states a session id (see
+ *     {@link statedSessionId}), match it exactly against the listed sessions.
+ *     This is authoritative: no time guessing, no agent gate, immune to a
+ *     session that ran for hours.
+ *  2. **Heuristic repair** — older / backfilled rows state nothing, so fall back
  *     to the nearest claude session by mtime within the widened repair window.
  *     Gated so a row authored by a *different* agent never borrows a Claude
  *     transcript. Returns null when nothing is plausibly close. */
@@ -190,12 +349,31 @@ export function correlateClaudeSession(
   row: IntentRow,
   sessions: ClaudeSession[],
 ): ClaudeSession | null {
-  const sid = (row.claude_session_id ?? "").trim();
+  const index = indexFor(sessions);
+  const memo = index.correlated;
+  if (memo.has(row)) return memo.get(row) ?? null;
+  const answer = correlateUncached(row, index);
+  memo.set(row, answer);
+  return answer;
+}
+
+function correlateUncached(
+  row: IntentRow,
+  index: SessionIndex,
+): ClaudeSession | null {
+  const sessions = index.all;
+  const sid = statedSessionId(row);
   if (sid) {
-    const exact = sessions.find((s) => s.session_id === sid);
+    const exact = index.byId.get(sid);
     if (exact) return exact;
-    // Stamped but not in the listed set (file pruned / rotated). Fall through
-    // to the time heuristic rather than giving up on a transcript entirely.
+    // Stated, and we do not have it. Claude Code clears `~/.claude/projects`
+    // after a few weeks, so this is the ordinary fate of an older row. The
+    // heuristic below must NOT run here: this row told us which conversation it
+    // came from, so any other one is known to be the wrong answer, and the
+    // nearest-by-mtime neighbour is a stranger 62% of the time (measured over
+    // 5314 such rows in one worktree's log). Losing the transcript is honest;
+    // showing somebody else's under this run's name is not.
+    return null;
   }
   // The only transcripts we have are Claude Code sessions. So correlate every
   // row EXCEPT ones explicitly tagged as a different agent (codex, gemini, …),
@@ -232,17 +410,37 @@ export function isNonClaudeAgent(agentId: string | null | undefined): boolean {
 
 /** The human title for a session row: the agent's real prompt when we can
  *  correlate it, the logged intent for genuine intents, or a clean generic
- *  for an uncorrelated auto-stub. Never surfaces `[auto] … backfill pending`. */
+ *  for an uncorrelated auto-stub. Never surfaces `[auto] … backfill pending`,
+ *  and never a raw command line — see the two guards below. */
 export function sessionDisplayTitle(
   row: IntentRow,
   sessions: ClaudeSession[],
 ): string {
+  // A run whose entire record is tool calls. Its text is "running Bash on
+  // bash /private/tmp/…", which is a thing that happened, not a thing anybody
+  // set out to do — and putting it here is what made Trace list temp-file
+  // paths as sessions. The commands stay on the row as evidence; the headline
+  // says the true thing instead, which is that nobody wrote the request down.
+  if (isMechanicalHookCapture(row)) return "No request was recorded";
   if (!isAutoStub(row)) {
-    return row.intent || "(no prompt)";
+    const text = (row.intent ?? "").trim();
+    return text ? firstLine(text) : "(no prompt)";
   }
+  // Every row re-derives its title on every render, and the stub path below
+  // correlates to get there. Memoized per (session list, row) so a re-render
+  // that changed nothing about the data costs a map lookup.
+  const memo = indexFor(sessions).titles;
+  const cached = memo.get(row);
+  if (cached !== undefined) return cached;
+  const title = autoStubTitle(row, sessions);
+  memo.set(row, title);
+  return title;
+}
+
+function autoStubTitle(row: IntentRow, sessions: ClaudeSession[]): string {
   const s = correlateClaudeSession(row, sessions);
   const prompt = s ? s.last_prompt || s.first_prompt : "";
-  if (prompt) return prompt;
+  if (prompt) return firstLine(prompt);
   const n = row.changeset?.files?.length ?? 0;
   return n > 0 ? `Agent edited ${n} file${n === 1 ? "" : "s"}` : "Agent session";
 }
@@ -305,7 +503,7 @@ export type SessionDisplayRow = {
  *  the title as a last resort is deliberate — the visible symptom *is* the
  *  identical name, so two uncorrelated stubs that read the same still merge. */
 export function sessionKeyOf(row: IntentRow, sessions: ClaudeSession[]): string {
-  const stamped = (row.claude_session_id ?? "").trim();
+  const stamped = statedSessionId(row);
   if (stamped) return `sid:${stamped}`;
   const corr = correlateClaudeSession(row, sessions);
   if (corr?.session_id) return `sid:${corr.session_id}`;

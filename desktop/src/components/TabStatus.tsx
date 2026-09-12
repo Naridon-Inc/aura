@@ -11,8 +11,12 @@
 //
 // So it lives here, once, and both strips render it.
 
-import type { AgentTab } from "../lib/editorStore";
+import { useEffect, useRef } from "react";
+import { Pencil } from "lucide-react";
+import { useEditorStore, type AgentTab } from "../lib/editorStore";
 import { useAgentEvent } from "../lib/agentEventStore";
+import { useHasDraft } from "../lib/draftPresence";
+import { clearTabUnread, useTabUnread } from "../lib/tabUnread";
 import { streamChannel, useAllStreamStates } from "../lib/agentStreamStore";
 import { useManagerSession, useManagerTurnsTick } from "../lib/managerStore";
 import { isSessionWorking } from "../lib/useFleetActivity";
@@ -86,6 +90,25 @@ export function ManagerTabStatus({ sessionId }: { sessionId: string }) {
   // whatever else happens to re-render the tab. Same subscription the sidebar
   // uses.
   useManagerTurnsTick();
+  // AURA-1296 — "Mark as unread" from the tab menu. Wears the same amber dot
+  // as a pending question, and clears when the tab is RAISED — not while it
+  // is already up, because that's the tab you right-clicked to mark it.
+  const unread = useTabUnread(sessionId);
+  const active = useEditorStore().activeManagerId === sessionId;
+  const wasActive = useRef(active);
+  useEffect(() => {
+    if (active && !wasActive.current) clearTabUnread(sessionId);
+    wasActive.current = active;
+  }, [active, sessionId]);
+  if (unread && !active) {
+    return (
+      <span
+        title="Marked unread"
+        className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+        style={{ background: "var(--color-amber)" }}
+      />
+    );
+  }
   const awaiting = !!(session?.pending_question || session?.pending_plan);
   // A native-brain turn in flight is the Manager's equivalent of a CLI agent's
   // `in_progress`. `isSessionWorking` rather than the raw `running` flag: that
@@ -113,4 +136,18 @@ export function ManagerTabStatus({ sessionId }: { sessionId: string }) {
     );
   }
   return null;
+}
+
+/** AURA-1296 — a small pencil on a tab whose message box holds something
+ *  half-typed, so four open chats tell you which one you were in the
+ *  middle of writing to. `draftKey` is the storage key the tab's composer
+ *  files its draft under (see composerDrafts). */
+export function DraftMark({ draftKey }: { draftKey: string }) {
+  const has = useHasDraft(draftKey);
+  if (!has) return null;
+  return (
+    <span title="You have an unsent draft here" className="flex-shrink-0 text-text-4">
+      <Pencil size={10} aria-hidden />
+    </span>
+  );
 }

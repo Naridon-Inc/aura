@@ -339,6 +339,169 @@ fn walk_snapshots(dir: &PathBuf, out: &mut Vec<SnapshotEntry>) {
     }
 }
 
+/// One save point, opened.
+///
+/// The sidebar lists these and lets you click one. Clicking used to shell
+/// out to `aura snapshot show <id>` — a command that has never existed, so
+/// the panel filled with a command-line usage error. The save points are
+/// plain JSON files sitting in `.aura/snapshots/`; reading one needs no
+/// subprocess at all.
+#[derive(Serialize)]
+pub struct SnapshotDetail {
+    /// The file this save point was taken of.
+    pub file_path: String,
+    /// Its contents at that moment.
+    pub content: String,
+    /// When, in milliseconds.
+    pub timestamp: i64,
+    /// What caused it to be taken.
+    pub trigger: String,
+    /// Who was working at the time.
+    pub agent_id: String,
+    /// The reason the author gave for the edit this save point preceded,
+    /// when one was stated. Not in the snapshot file — see `reason_for`.
+    pub why: Option<String>,
+}
+
+/// The reason the author gave for the edit a save point was taken before.
+///
+/// The snapshot file holds no reason, and it never has: `aura snapshot-file
+/// --why` puts the sentence in the intent log, against the file it covers.
+/// So the two have to be put back together here, or the panel shows a
+/// mechanical trigger and nothing about why anyone touched the file.
+///
+/// The hook writes both within the same second, which is what makes the
+/// join safe: match on the file, take the nearest row inside a couple of
+/// minutes, and prefer the nearest of those. Rows carrying a `change` field
+/// are the per-file reason rows; everything else in the log is either a
+/// whole-commit intent or the hook narrating itself ("Claude Edit on …"),
+/// and neither answers the question being asked.
+fn reason_for(intent_log: &str, file_path: &str, timestamp_ms: i64) -> Option<String> {
+    const WINDOW_MS: i64 = 120_000;
+    let wanted = normalize_path(file_path);
+    let mut best: Option<(i64, String)> = None;
+    for line in intent_log.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if row.get("change").and_then(|v| v.as_str()).is_none() {
+            continue;
+        }
+        let Some(file) = row.get("file").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let logged = normalize_path(file);
+        if !(logged.ends_with(&wanted) || wanted.ends_with(&logged)) {
+            continue;
+        }
+        let Some(intent) = row.get("intent").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let intent = intent.trim();
+        // The hook logs a placeholder when the agent stated nothing. Showing
+        // it would be worse than showing nothing: it reads like a reason.
+        if intent.is_empty() || intent.contains("no reason was stated") {
+            continue;
+        }
+        let secs = row
+            .get("why_stated_at")
+            .or_else(|| row.get("timestamp"))
+            .and_then(json_i64)
+            .unwrap_or(0);
+        let delta = (secs * 1000 - timestamp_ms).abs();
+        if delta > WINDOW_MS {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(d, _)| delta < *d) {
+            best = Some((delta, intent.to_string()));
+        }
+    }
+    best.map(|(_, intent)| intent)
+}
+
+/// The log writes timestamps as a number in some rows and a string in
+/// others, and a row read the wrong way silently loses its reason.
+fn json_i64(v: &serde_json::Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_str()?.parse().ok())
+}
+
+/// Paths are logged absolute by some callers and repo-relative by others,
+/// so compare them with the shape stripped off.
+fn normalize_path(p: &str) -> String {
+    p.replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_string()
+}
+
+#[tauri::command]
+pub async fn aura_read_snapshot(
+    repo_root: String,
+    file: String,
+) -> Result<SnapshotDetail, String> {
+    crate::blocking::run(move || {
+        // `file` reaches us from the listing, but it still names a path on
+        // disk, so treat it as untrusted: a bare file name and nothing else.
+        if file.is_empty()
+            || file.contains('/')
+            || file.contains('\\')
+            || file.contains("..")
+        {
+            return Err("that is not a save point name".to_string());
+        }
+        let dir = PathBuf::from(&repo_root).join(".aura").join("snapshots");
+        let path = find_snapshot(&dir, &file)
+            .ok_or_else(|| "that save point is no longer on disk".to_string())?;
+        let raw = fs::read_to_string(&path).map_err(|e| format!("could not read it: {e}"))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("could not make sense of it: {e}"))?;
+        let file_path = v["file_path"].as_str().unwrap_or_default().to_string();
+        let timestamp = v["timestamp"].as_i64().unwrap_or(0);
+        // Missing log, unreadable log, no matching row — all the same thing
+        // to the reader: this save point has no stated reason.
+        let why = fs::read_to_string(
+            PathBuf::from(&repo_root)
+                .join(".aura")
+                .join("intent_log.jsonl"),
+        )
+        .ok()
+        .and_then(|log| reason_for(&log, &file_path, timestamp));
+        Ok(SnapshotDetail {
+            file_path,
+            content: v["content"].as_str().unwrap_or_default().to_string(),
+            timestamp,
+            trigger: v["trigger"].as_str().unwrap_or("unknown").to_string(),
+            agent_id: v["agent_id"].as_str().unwrap_or("unknown").to_string(),
+            why,
+        })
+    })
+    .await
+}
+
+/// Save points nest in subdirectories, so look for the name rather than
+/// assuming it sits at the top.
+fn find_snapshot(dir: &PathBuf, name: &str) -> Option<PathBuf> {
+    let direct = dir.join(name);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    for entry in fs::read_dir(dir).ok()?.filter_map(|r| r.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_snapshot(&path, name) {
+                return Some(found);
+            }
+        } else if path.file_name().and_then(|s| s.to_str()) == Some(name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct OrchAgent {
     #[serde(default)]
@@ -730,12 +893,9 @@ fn first_number(s: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-#[derive(Serialize)]
-pub struct FileDiffStat {
-    pub path: String,
-    pub additions: u32,
-    pub deletions: u32,
-}
+// The row shape and the `--numstat` reader are `git_parse::stats`, shared
+// with the remote twin in `manager::brain::place_work`.
+pub use crate::git_parse::stats::FileDiffStat;
 
 /// Per-file +/- counts vs HEAD, plus untracked files counted as
 /// pure additions. The right-rail Changes panel needs per-row stats
@@ -747,6 +907,7 @@ pub async fn git_diff_stats_per_file(
     repo_root: String,
     since_base: Option<bool>,
 ) -> Result<Vec<FileDiffStat>, String> {
+    use crate::git_parse::stats::parse_numstat;
     crate::blocking::run(move || {
         let cwd = PathBuf::from(&repo_root);
         let mut out: Vec<FileDiffStat> = Vec::new();
@@ -764,63 +925,20 @@ pub async fn git_diff_stats_per_file(
                     .output()
                     .map_err(|e| e.to_string())?;
                 if diff.status.success() {
-                    let body = String::from_utf8_lossy(&diff.stdout);
-                    for line in body.lines() {
-                        let mut it = line.splitn(3, '\t');
-                        let add = it.next().unwrap_or("0");
-                        let del = it.next().unwrap_or("0");
-                        let raw_path = match it.next() {
-                            Some(p) => p,
-                            None => continue,
-                        };
-                        let path = if let Some(idx) = raw_path.rfind(" => ") {
-                            let after = &raw_path[idx + 4..];
-                            after.trim_end_matches('}').to_string()
-                        } else {
-                            raw_path.to_string()
-                        };
-                        out.push(FileDiffStat {
-                            path,
-                            additions: add.parse().unwrap_or(0),
-                            deletions: del.parse().unwrap_or(0),
-                        });
-                    }
+                    out.extend(parse_numstat(&String::from_utf8_lossy(&diff.stdout)));
                 }
                 return Ok(out);
             }
         }
 
-    // Tracked changes (staged + unstaged combined) vs HEAD. Numstat
-    // emits "<add>\t<del>\t<path>" per line; binaries report "-\t-".
+    // Tracked changes (staged + unstaged combined) vs HEAD.
     let tracked = std::process::Command::new("git")
         .args(["diff", "HEAD", "--numstat"])
         .current_dir(&cwd)
         .output()
         .map_err(|e| e.to_string())?;
     if tracked.status.success() {
-        let body = String::from_utf8_lossy(&tracked.stdout);
-        for line in body.lines() {
-            let mut it = line.splitn(3, '\t');
-            let add = it.next().unwrap_or("0");
-            let del = it.next().unwrap_or("0");
-            let raw_path = match it.next() {
-                Some(p) => p,
-                None => continue,
-            };
-            // Renames look like "a/b/old.rs => a/b/new.rs" or
-            // "a/{old.rs => new.rs}/b" — keep the new path.
-            let path = if let Some(idx) = raw_path.rfind(" => ") {
-                let after = &raw_path[idx + 4..];
-                after.trim_end_matches('}').to_string()
-            } else {
-                raw_path.to_string()
-            };
-            out.push(FileDiffStat {
-                path,
-                additions: add.parse().unwrap_or(0),
-                deletions: del.parse().unwrap_or(0),
-            });
-        }
+        out.extend(parse_numstat(&String::from_utf8_lossy(&tracked.stdout)));
     }
 
     // Untracked: count newlines as additions, zero deletions. Bound at
@@ -1332,25 +1450,8 @@ pub async fn git_recent_commits(repo_root: String, limit: u32) -> Result<Vec<Com
 // and the decoration refs (branch tips / tags / HEAD) parsed into typed
 // badges. Lane assignment itself is pure and lives in the frontend.
 
-#[derive(Serialize)]
-pub struct GraphRef {
-    pub name: String,
-    /// "head" (the checked-out branch / detached HEAD) | "local" |
-    /// "remote" | "tag". The frontend colours badges by this.
-    pub kind: String,
-}
-
-#[derive(Serialize)]
-pub struct GraphCommit {
-    pub sha: String,   // full 40-char sha — stable identity for lanes
-    pub short: String, // abbreviated, for display
-    pub parents: Vec<String>, // full parent shas, first-parent first
-    pub author: String,
-    pub author_email: String,
-    pub timestamp: i64,
-    pub subject: String,
-    pub refs: Vec<GraphRef>,
-}
+pub use crate::git_parse::graph::GraphCommit;
+use crate::git_parse::graph::{parse_graph, parse_remotes, LOG_ARGS, LOG_FORMAT};
 
 #[tauri::command]
 pub async fn git_commit_graph(
@@ -1370,28 +1471,15 @@ pub async fn git_commit_graph(
             .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+            .map(|s| parse_remotes(&s))
             .unwrap_or_default();
 
-        // %H full sha · %h short · %P parents (space-sep) · %an author ·
-        // %ae email · %ct commit-time · %s subject · %D decorations.
-        let fmt = "%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%ct\x1f%s\x1f%D";
-        // Aura's own shadow/checkpoint branches (`entire/*`, `aura/*`) are
-        // machinery, not human history — excluding them keeps the graph
-        // readable (especially for non-engineers, who shouldn't see VCS
-        // internals). The `--exclude` globs must precede `--all`.
+        // The arguments and the format are `git_parse::graph`'s, shared with
+        // the machine twin, so the two arms draw one graph.
         let out = std::process::Command::new("git")
-            .args([
-                "log",
-                "--exclude=refs/heads/entire/*",
-                "--exclude=refs/heads/aura/*",
-                "--exclude=refs/remotes/*/entire/*",
-                "--exclude=refs/remotes/*/aura/*",
-                "--all",
-                "--date-order",
-                &format!("-n{n}"),
-                &format!("--pretty=format:{fmt}"),
-            ])
+            .args(LOG_ARGS)
+            .arg(format!("-n{n}"))
+            .arg(format!("--pretty=format:{LOG_FORMAT}"))
             .current_dir(&cwd)
             .output()
             .map_err(|e| e.to_string())?;
@@ -1400,80 +1488,9 @@ pub async fn git_commit_graph(
             // (the rail just shows its empty state).
             return Ok(Vec::new());
         }
-        let txt = String::from_utf8_lossy(&out.stdout);
-
-        let mut commits = Vec::new();
-        for line in txt.lines() {
-            let parts: Vec<&str> = line.split('\x1f').collect();
-            if parts.len() < 7 {
-                continue;
-            }
-            let parents: Vec<String> = parts[2]
-                .split_whitespace()
-                .map(|s| s.to_string())
-                .collect();
-            let refs = parts
-                .get(7)
-                .map(|d| parse_decorations(d, &remotes))
-                .unwrap_or_default();
-            commits.push(GraphCommit {
-                sha: parts[0].to_string(),
-                short: parts[1].to_string(),
-                parents,
-                author: parts[3].to_string(),
-                author_email: parts[4].to_string(),
-                timestamp: parts[5].parse().unwrap_or(0),
-                subject: parts[6].to_string(),
-                refs,
-            });
-        }
-        Ok(commits)
+        Ok(parse_graph(&String::from_utf8_lossy(&out.stdout), &remotes))
     })
     .await
-}
-
-/// Parse git's `%D` decoration string into typed refs. Examples:
-///   "HEAD -> feat/x, origin/feat/x, tag: v1.0, other-branch"
-///   "HEAD" (detached)
-fn parse_decorations(deco: &str, remotes: &[String]) -> Vec<GraphRef> {
-    let mut out = Vec::new();
-    for raw in deco.split(',') {
-        let tok = raw.trim();
-        if tok.is_empty() {
-            continue;
-        }
-        if let Some(branch) = tok.strip_prefix("HEAD -> ") {
-            // The checked-out branch — mark it as HEAD so the rail can
-            // pin "you are here".
-            out.push(GraphRef {
-                name: branch.trim().to_string(),
-                kind: "head".to_string(),
-            });
-        } else if tok == "HEAD" {
-            out.push(GraphRef {
-                name: "HEAD".to_string(),
-                kind: "head".to_string(),
-            });
-        } else if let Some(tag) = tok.strip_prefix("tag: ") {
-            out.push(GraphRef {
-                name: tag.trim().to_string(),
-                kind: "tag".to_string(),
-            });
-        } else {
-            // Remote if its first path segment is a known remote name.
-            let first = tok.split('/').next().unwrap_or("");
-            let kind = if remotes.iter().any(|r| r == first) {
-                "remote"
-            } else {
-                "local"
-            };
-            out.push(GraphRef {
-                name: tok.to_string(),
-                kind: kind.to_string(),
-            });
-        }
-    }
-    out
 }
 
 // ── Git contributors (auto-populated team list) ──────────────────────
@@ -2012,5 +2029,90 @@ mod intent_author_tests {
         .unwrap();
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.entries[0].intent, "tightened the retry budget");
+    }
+}
+
+#[cfg(test)]
+mod save_point_reason_tests {
+    use super::reason_for;
+
+    // The shape the snapshot hook actually writes: seconds, not
+    // milliseconds, and the stated sentence in `intent`.
+    fn row(file: &str, secs: i64, intent: &str) -> String {
+        format!(
+            r#"{{"file":"{file}","why_stated_at":{secs},"timestamp":{secs},"change":"Claude Edit on {file}","intent":"{intent}","source":"hook_auto"}}"#
+        )
+    }
+
+    #[test]
+    fn the_sentence_the_author_wrote_comes_back() {
+        let log = row("src/billing.py", 1_700_000_000, "round to cents so invoices match the bank");
+        let got = reason_for(&log, "src/billing.py", 1_700_000_000_123);
+        assert_eq!(got.as_deref(), Some("round to cents so invoices match the bank"));
+    }
+
+    #[test]
+    fn the_hooks_placeholder_is_not_offered_as_a_reason() {
+        let log = row(
+            "src/billing.py",
+            1_700_000_000,
+            "Automatic pre-Edit snapshot; no reason was stated by the agent.",
+        );
+        assert_eq!(reason_for(&log, "src/billing.py", 1_700_000_000_000), None);
+    }
+
+    #[test]
+    fn the_hook_narrating_itself_is_not_a_reason() {
+        // No `change` field: this is the log describing the tool call, not
+        // anybody explaining anything.
+        let log = r#"{"file":"src/billing.py","timestamp":1700000000,"intent":"Claude Write on src/billing.py","tool":"Write"}"#;
+        assert_eq!(reason_for(log, "src/billing.py", 1_700_000_000_000), None);
+    }
+
+    #[test]
+    fn a_reason_from_a_different_sitting_is_not_borrowed() {
+        let log = row("src/billing.py", 1_700_000_000, "an hour earlier, about something else");
+        assert_eq!(reason_for(&log, "src/billing.py", 1_700_003_600_000), None);
+    }
+
+    #[test]
+    fn a_reason_about_another_file_is_not_borrowed() {
+        let log = row("src/invoices.py", 1_700_000_000, "about the other file");
+        assert_eq!(reason_for(&log, "src/billing.py", 1_700_000_000_000), None);
+    }
+
+    #[test]
+    fn the_nearest_reason_wins_when_a_file_was_touched_twice() {
+        let log = [
+            row("src/billing.py", 1_700_000_000, "the first pass"),
+            row("src/billing.py", 1_700_000_090, "the one this save point preceded"),
+        ]
+        .join("\n");
+        let got = reason_for(&log, "src/billing.py", 1_700_000_089_000);
+        assert_eq!(got.as_deref(), Some("the one this save point preceded"));
+    }
+
+    #[test]
+    fn an_absolute_path_in_the_log_still_matches_a_relative_snapshot() {
+        let log = row("/Users/dev/proj/src/billing.py", 1_700_000_000, "same file, longer name");
+        let got = reason_for(&log, "src/billing.py", 1_700_000_000_000);
+        assert_eq!(got.as_deref(), Some("same file, longer name"));
+    }
+
+    #[test]
+    fn a_timestamp_logged_as_text_is_read_like_any_other() {
+        let log = r#"{"file":"src/billing.py","timestamp":"1700000000","change":"Claude Edit on src/billing.py","intent":"written down all the same"}"#;
+        let got = reason_for(log, "src/billing.py", 1_700_000_000_000);
+        assert_eq!(got.as_deref(), Some("written down all the same"));
+    }
+
+    #[test]
+    fn a_log_with_a_broken_line_in_it_still_gives_up_the_rest() {
+        let log = format!(
+            "not json at all\n\n{}\n",
+            row("src/billing.py", 1_700_000_000, "survived the bad line")
+        );
+        let got = reason_for(&log, "src/billing.py", 1_700_000_000_000);
+        assert_eq!(got.as_deref(), Some("survived the bad line"));
     }
 }

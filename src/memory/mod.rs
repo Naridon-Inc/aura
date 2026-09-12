@@ -17,11 +17,23 @@ pub mod provenance;
 // (see module docs for the full pipeline).
 pub mod reconcile;
 
+// CTX-04 — evidence-based truth states (supported / contradicted / stale /
+// unverified / superseded) replacing the overloaded stale/verified pair.
+pub mod truth;
+
 // W4 — Ebbinghaus×SM-2 retention decay + the scheduled consolidation pass
 // (shared by `aura memory consolidate` and the aura-daemon 30-minute loop).
 pub mod decay;
 
-// CLI surface: `aura memory add | search | why`.
+// AUDIT-CTX-05 — entry-level Ed25519 signatures (shared memory must be
+// attributable and tamper-evident; see module docs for the payload).
+pub mod signing;
+
+// W5 — sleep-time reflection: deterministic promotion of episodic
+// patterns (intent log + snapshots) into semantic memory entries.
+pub mod reflect;
+
+// CLI surface: `aura memory add | search | why | edit | forget`.
 pub mod cli;
 
 // Import another agent's per-fact memory (Claude Code's memory dir) into
@@ -141,6 +153,52 @@ pub struct MemoryEntry {
     /// decay clock measures from here (fallback: `added_at`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_accessed: Option<String>,
+
+    /// Canonical scope manifest (AUDIT-CAP-01) — which repo/checkout/session
+    /// this memory was written in. Pre-schema entries load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<serde_json::Value>,
+
+    // ── AUDIT-CTX-05 entry signature (see memory/signing.rs) — all
+    // serde-default so pre-schema files keep loading; entries written on a
+    // box without an awareness identity stay unsigned (all three None). ──
+    /// Base64 (std, no pad) Ed25519 signature over the canonical payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sig: Option<String>,
+    /// Full 32-byte verifying key, base64url no-pad — self-certifying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sig_pubkey: Option<String>,
+    /// `did:aura:key/…` of the identity that signed THIS entry (unlike
+    /// `signer_key_id`, which merely copies the latest intent row's key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sig_key_id: Option<String>,
+
+    // ── Sharing (AURA-1372) — serde-default; an entry that has never left
+    // this machine carries neither field, which is the common case. ──
+    /// RFC3339 of the last successful `memory-cloud push` of this entry.
+    ///
+    /// Memory is local until somebody shares it, and until this existed
+    /// nothing recorded when somebody had: the fact looked identical
+    /// before and after leaving the machine, and every surface offered
+    /// Share again with no way to say it was a second time. "Deliberately
+    /// control whether it stays local" needs the state to be visible, not
+    /// only the button.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_at: Option<String>,
+    /// The SERVER's verdict on the signature of that push — `signed`,
+    /// `unsigned`, or whatever else it reported. Recorded rather than
+    /// derived, because whether the org can verify who wrote a fact is
+    /// the receiving end's answer and not ours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_signature: Option<String>,
+    /// RFC3339 of the last withdrawal — `memory-cloud retract` succeeded
+    /// and the team can no longer read this through Aura. Kept after the
+    /// fact goes local again, because "never shared" and "shared and
+    /// taken back" are different things to the person deciding what to
+    /// do next, and only one of them means somebody may already have a
+    /// copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_retracted_at: Option<String>,
 }
 
 /// serde default for `MemoryEntry::importance` — mirrors `decay::W_MIN`.
@@ -168,6 +226,13 @@ impl Default for MemoryEntry {
             access_count: 0,
             importance: default_importance(),
             last_accessed: None,
+            scope: None,
+            sig: None,
+            sig_pubkey: None,
+            sig_key_id: None,
+            shared_at: None,
+            shared_signature: None,
+            shared_retracted_at: None,
         }
     }
 }
@@ -291,10 +356,21 @@ impl MemoryManager {
         }
     }
 
-    /// Truncate content to MAX_ENTRY_LENGTH
+    /// Truncate content to at most MAX_ENTRY_LENGTH bytes, on a char boundary.
     fn truncate(content: &str) -> String {
         if content.len() > MAX_ENTRY_LENGTH {
-            format!("{}...", &content[..MAX_ENTRY_LENGTH])
+            // A fixed-offset byte slice panics when it splits a multi-byte
+            // char ("byte index N is not a char boundary"). This path is hit
+            // by `aura memory add`, the aura_memory_write MCP tool, and the
+            // unattended daemon consolidation loop — all carrying arbitrary
+            // prose (em-dashes, accents, emoji, CJK), so the cut routinely
+            // lands mid-character. Walk back to the nearest boundary at or
+            // below the byte budget before slicing.
+            let mut end = MAX_ENTRY_LENGTH;
+            while end > 0 && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &content[..end])
         } else {
             content.to_string()
         }
@@ -408,6 +484,105 @@ impl MemoryManager {
             }
         }
         None
+    }
+
+    /// AUDIT-CTX-05 — edit one live entry by id: closes the old row's
+    /// window and lands a signed, provenance-stamped successor with a
+    /// `supersedes` back-pointer (see `reconcile::apply_edit`). Returns
+    /// the successor as it landed on disk.
+    pub fn edit_entry(
+        id: &str,
+        content: &str,
+        tags: Option<Vec<String>>,
+        author: &str,
+    ) -> Result<MemoryEntry, String> {
+        let mut mem = Self::load();
+        let truncated = Self::truncate(content);
+        let successor =
+            reconcile::apply_edit(&mut mem, id, &truncated, tags, author, Self::now())?;
+        mem.last_updated = Self::now();
+        Self::save(&mut mem)?;
+        Ok(successor)
+    }
+
+    /// AURA-1372 — record that this entry was shared org-wide, and what
+    /// the server said about its signature.
+    ///
+    /// Called by the one place that can know: the `memory-cloud push`
+    /// path, after the POST returned. Both the terminal and the desktop
+    /// share through that path, so neither can share without the fact
+    /// saying so afterwards. Returns false when the id is unknown.
+    pub fn mark_shared(id: &str, signature: &str) -> bool {
+        let mut mem = Self::load();
+        let now = chrono::Utc::now().to_rfc3339();
+        let sections: [&mut Vec<MemoryEntry>; 4] = [
+            &mut mem.conventions,
+            &mut mem.gotchas,
+            &mut mem.context,
+            &mut mem.active_work,
+        ];
+        let mut hit = false;
+        for entries in sections {
+            if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
+                e.shared_at = Some(now.clone());
+                e.shared_signature = Some(signature.to_string());
+                hit = true;
+                break;
+            }
+        }
+        if !hit {
+            return false;
+        }
+        mem.last_updated = Self::now();
+        Self::save(&mut mem).is_ok()
+    }
+
+    /// The other direction: the entry was withdrawn org-wide, so it stops
+    /// claiming to be shared and records when it was taken back.
+    ///
+    /// The retraction stamp outlives the share stamp on purpose. A fact
+    /// that was never shared and a fact that was shared for three weeks
+    /// and then withdrawn are in the same state as far as the server is
+    /// concerned, and in completely different states as far as the person
+    /// is concerned — somebody may be holding a copy of the second one.
+    /// Returns false when the id is unknown.
+    pub fn mark_unshared(id: &str) -> bool {
+        let mut mem = Self::load();
+        let now = chrono::Utc::now().to_rfc3339();
+        let sections: [&mut Vec<MemoryEntry>; 4] = [
+            &mut mem.conventions,
+            &mut mem.gotchas,
+            &mut mem.context,
+            &mut mem.active_work,
+        ];
+        let mut hit = false;
+        for entries in sections {
+            if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
+                e.shared_at = None;
+                e.shared_signature = None;
+                e.shared_retracted_at = Some(now.clone());
+                hit = true;
+                break;
+            }
+        }
+        if !hit {
+            return false;
+        }
+        mem.last_updated = Self::now();
+        Self::save(&mut mem).is_ok()
+    }
+
+    /// AUDIT-CTX-05 — forget, soft: close the entry's validity window so
+    /// it leaves default recall but stays on disk as audit trail (the
+    /// same shape a reconcile DELETE produces). `forget` below remains
+    /// the hard-erase privacy path.
+    pub fn forget_soft(id: &str) -> bool {
+        let mut mem = Self::load();
+        if !reconcile::close_entry(&mut mem, id, &chrono::Utc::now().to_rfc3339()) {
+            return false;
+        }
+        mem.last_updated = Self::now();
+        Self::save(&mut mem).is_ok()
     }
 
     /// Remove a memory entry by id from any section
@@ -671,6 +846,16 @@ impl MemoryManager {
                 v["superseded"] = serde_json::json!(true);
                 v["valid_to"] = serde_json::json!(to);
             }
+            // AURA-1372 — which of these facts have left this machine.
+            // Carried on every result so a reader can tell at a glance,
+            // rather than having to remember what they once pressed.
+            if let Some(when) = &entry.shared_at {
+                v["shared_at"] = serde_json::json!(when);
+                v["shared_signature"] =
+                    serde_json::json!(entry.shared_signature.as_deref().unwrap_or("unsigned"));
+            } else if let Some(when) = &entry.shared_retracted_at {
+                v["shared_retracted_at"] = serde_json::json!(when);
+            }
             if entry.source_symbol.is_none() {
                 continue;
             }
@@ -683,14 +868,17 @@ impl MemoryManager {
             if parser.is_none() {
                 parser = crate::parser::SemanticParser::new().ok();
             }
-            let staleness = match parser.as_mut() {
-                Some(p) => provenance::verify_entry_with_parser(entry, p),
-                None => None,
-            };
-            if let Some(s) = staleness {
-                v["stale"] = serde_json::json!(s.stale);
-                if let Some(reason) = s.reason {
-                    v["stale_reason"] = serde_json::json!(reason);
+            // CTX-04: one evidence-based truth state per anchored entry.
+            // The legacy `stale` boolean is DERIVED from it for existing
+            // readers; `verified` is gone — an unchanged fingerprint no
+            // longer implies the claim is true.
+            if let Some(p) = parser.as_mut() {
+                let report = truth::evaluate(entry, None, p);
+                v["truth_state"] = serde_json::json!(report.state.as_str());
+                v["truth_reason"] = serde_json::json!(report.reason);
+                v["stale"] = serde_json::json!(report.state == truth::TruthState::Stale);
+                if report.state == truth::TruthState::Stale {
+                    v["stale_reason"] = serde_json::json!(report.reason);
                 }
             }
         }
@@ -875,5 +1063,199 @@ impl MemoryManager {
             return Some(format!("{} context entries — compaction recommended", mem.context.len()));
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::{MemoryManager, MAX_ENTRY_LENGTH};
+
+    #[test]
+    fn truncate_does_not_split_a_multibyte_char() {
+        // (MAX-2) ASCII + a 4-byte crab → the crab straddles the byte budget,
+        // so a fixed-offset `&content[..MAX_ENTRY_LENGTH]` slices inside it and
+        // panics "byte index N is not a char boundary".
+        let content = format!("{}🦀", "a".repeat(MAX_ENTRY_LENGTH - 2));
+        assert!(content.len() > MAX_ENTRY_LENGTH);
+        let out = MemoryManager::truncate(&content);
+        assert!(out.ends_with("..."), "long content is marked truncated");
+        let body = out.trim_end_matches("...");
+        assert!(body.len() <= MAX_ENTRY_LENGTH, "stays within the byte budget");
+        assert!(content.starts_with(body), "keeps a valid prefix");
+        // The crash is what we're fixing: this is valid UTF-8, not a panic.
+        assert!(!body.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn truncate_handles_two_byte_chars_at_the_boundary() {
+        // 'é' is two bytes; a run of them has a char boundary only on even
+        // offsets, so an odd-length budget always splits one.
+        let content = "é".repeat(MAX_ENTRY_LENGTH); // 2*MAX bytes
+        let out = MemoryManager::truncate(&content);
+        let body = out.trim_end_matches("...");
+        assert!(content.starts_with(body));
+        assert_eq!(body.len() % 2, 0, "cut fell on a whole 'é'");
+    }
+
+    #[test]
+    fn truncate_leaves_short_content_untouched() {
+        assert_eq!(MemoryManager::truncate("hello"), "hello");
+        let exact = "a".repeat(MAX_ENTRY_LENGTH);
+        assert_eq!(MemoryManager::truncate(&exact), exact, "== budget is not cut");
+    }
+}
+
+/// AUDIT-CTX-05 — the stress gate for flipping `MEMORY_SURFACE_ENABLED`
+/// in the desktop app (aura-shell/src/lib/featureFlags.ts), mirroring the
+/// `cmd_kg.rs::view_tests` gate for CODE_MAP_ENABLED. A large repository's
+/// memory is a store grown to (and past) every cap, with embeddings on
+/// every entry and a deep superseded audit trail. The whole read path —
+/// ranked recall, reconcile candidate scan, decay blending, full-view
+/// serialization — must stay interactive over that store, and prune must
+/// keep it bounded, evicting closed history before live knowledge.
+#[cfg(test)]
+mod stress_tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// A store at (and over) the caps: `live` + `superseded` entries per
+    /// section with `dim`-wide embeddings, plus full architecture and
+    /// timeline planes. Deterministic — no RNG, no disk, no network.
+    fn synthetic_memory(live: usize, superseded: usize, dim: usize) -> ProjectMemory {
+        let mut mem = ProjectMemory::default();
+        // Recent timestamps: prune age-gates active_work against the real
+        // clock, and the decay math measures elapsed time from added_at —
+        // a fixed 2023 epoch would age everything out of the test's reach.
+        let base = MemoryManager::now().saturating_sub(3_600);
+        let topics = [
+            "auth token refresh", "retry backoff", "database migration",
+            "render pipeline", "worktree paths", "release packaging",
+            "embedding cache", "signal handling",
+        ];
+        for (si, section) in ["conventions", "gotchas", "context", "active_work"]
+            .iter()
+            .enumerate()
+        {
+            let mut rows = Vec::with_capacity(live + superseded);
+            for i in 0..(live + superseded) {
+                let topic = topics[(si + i) % topics.len()];
+                let closed = i < superseded;
+                rows.push(MemoryEntry {
+                    id: format!("mem-{}{:05x}", si, i),
+                    content: format!(
+                        "{} rule {} in {}: prefer the {} path and never block the loop",
+                        section, i, topic, topic
+                    ),
+                    tags: vec![topic.split(' ').next().unwrap_or("t").to_string()],
+                    added_by: "stress".to_string(),
+                    added_at: base.saturating_sub((live + superseded - i) as u64),
+                    // Deterministic pseudo-embedding; magnitude varies so
+                    // cosine work is real, not degenerate.
+                    embedding: Some(
+                        (0..dim)
+                            .map(|d| ((d + i * 7 + si * 13) % 97) as f32 / 97.0 - 0.5)
+                            .collect(),
+                    ),
+                    valid_to: closed.then(|| "2026-01-01T00:00:00Z".to_string()),
+                    ..Default::default()
+                });
+            }
+            match *section {
+                "conventions" => mem.conventions = rows,
+                "gotchas" => mem.gotchas = rows,
+                "context" => mem.context = rows,
+                _ => mem.active_work = rows,
+            }
+        }
+        for i in 0..MAX_ARCHITECTURE {
+            mem.architecture.push(ArchComponent {
+                name: format!("component-{}", i),
+                kind: "module".to_string(),
+                path: Some(format!("src/mod{}.rs", i)),
+                description: format!("owns the {} plane", topics[i % topics.len()]),
+                connects_to: vec![format!("component-{}", (i + 1) % MAX_ARCHITECTURE)],
+            });
+        }
+        for i in 0..MAX_TIMELINE {
+            mem.decisions.push(TimelineEntry {
+                date: "2026-01-01".to_string(),
+                title: format!("decision {}", i),
+                description: format!("chose {} over the alternative", topics[i % topics.len()]),
+                category: "decision".to_string(),
+                author: Some("stress".to_string()),
+            });
+        }
+        mem
+    }
+
+    #[test]
+    fn stress_large_memory_stays_bounded_and_fast() {
+        // 4 × (50 live + 250 superseded) entries with 256-dim embeddings
+        // + 100 components + 200 timeline rows ≈ the biggest store a
+        // long-lived large repository can accumulate between prunes.
+        let mut mem = synthetic_memory(50, 250, 256);
+        let now = MemoryManager::now();
+        let started = Instant::now();
+
+        // Ranked recall — the query embedding leg included — over every
+        // query shape the dialog issues.
+        let qe: Vec<f32> = (0..256).map(|d| (d % 89) as f32 / 89.0 - 0.5).collect();
+        for q in [
+            "auth token refresh", "retry", "migration gotcha", "render",
+            "worktree", "release", "embedding", "signal", "loop", "path",
+        ] {
+            let ranked = retrieval::ranked_search(&mem, q, Some(&qe));
+            let blended = decay::blend_results(ranked, &mem, now, false);
+            for (r, _) in &blended {
+                assert!(!r.id.is_empty());
+            }
+        }
+
+        // Reconcile candidate scan — what every write pays before landing.
+        for i in 0..10 {
+            let live: Vec<&MemoryEntry> =
+                mem.gotchas.iter().filter(|e| e.is_live()).collect();
+            let incoming = format!("gotchas rule {} in retry backoff: prefer the retry path", i);
+            let cands = reconcile::find_candidates(&live, &incoming, Some(&qe));
+            assert!(cands.len() <= 3, "candidate shortlist stays capped");
+        }
+
+        // Full-view serialization — the payload the desktop reads.
+        let json = serde_json::to_string(&mem).expect("store serializes");
+        assert!(!json.is_empty());
+
+        // Prune keeps the store bounded, sacrificing closed audit rows
+        // before live knowledge.
+        MemoryManager::prune(&mut mem);
+        for (name, rows) in [
+            ("conventions", &mem.conventions),
+            ("gotchas", &mem.gotchas),
+            ("context", &mem.context),
+            ("active_work", &mem.active_work),
+        ] {
+            assert!(
+                rows.len() <= MAX_ENTRIES_PER_SECTION,
+                "{} stays capped at {}, has {}",
+                name,
+                MAX_ENTRIES_PER_SECTION,
+                rows.len()
+            );
+            let live = rows.iter().filter(|e| e.is_live()).count();
+            assert_eq!(
+                live, 50,
+                "{}: every live fact survives the cap — only audit rows are evicted",
+                name
+            );
+        }
+
+        // Loose wall-clock ceiling: catches a quadratic regression, not a
+        // benchmark. The whole pass above is ~10 searches + 10 candidate
+        // scans + a full serialize over ~1200 embedded entries.
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed.as_secs() < 5,
+            "large-memory read path took {:?} — quadratic regression?",
+            elapsed
+        );
     }
 }

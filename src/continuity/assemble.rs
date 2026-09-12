@@ -12,7 +12,7 @@
 //! All readers are cwd-relative (worktree-aware via `worktree_aura_path`),
 //! so callers `set_current_dir` to the repo before assembling.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -139,6 +139,31 @@ fn touched_nodes(repo: &Repository, checkpoint_limit: usize, node_cap: usize) ->
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<NodeState> = Vec::new();
 
+    // A node from an older checkpoint may cite a symbol the file no longer
+    // has (deleted or renamed since). For each file, the newest checkpoint
+    // that parsed it is the authority on which node_ids still exist — a
+    // citation absent there is stale and must not be handed to the next
+    // brain as a live location.
+    let mut authority: HashMap<String, HashSet<String>> = HashMap::new();
+    for cp in checkpoints.iter().take(checkpoint_limit) {
+        let mut by_file: HashMap<&str, HashSet<String>> = HashMap::new();
+        for node in &cp.ast_nodes {
+            if let Some(f) = node.file_path.as_deref() {
+                by_file.entry(f).or_default().insert(node.node_id.clone());
+            }
+        }
+        for (f, ids) in by_file {
+            // Checkpoints walk newest-first, so first claim per file wins.
+            authority.entry(f.to_string()).or_insert(ids);
+        }
+    }
+
+    // Checkpoints only know what was true when they were taken; the
+    // carryover claims to describe the exact present moment. So a cited
+    // node must also survive a worktree check: its file still exists and
+    // still contains the identifier. Bounded by node_cap, cached per file.
+    let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
+
     for cp in checkpoints.iter().take(checkpoint_limit) {
         for node in &cp.ast_nodes {
             if out.len() >= node_cap {
@@ -146,6 +171,22 @@ fn touched_nodes(repo: &Repository, checkpoint_limit: usize, node_cap: usize) ->
             }
             if !is_definition_kind(&node.kind) {
                 continue;
+            }
+            if let Some(f) = node.file_path.as_deref() {
+                if authority
+                    .get(f)
+                    .is_some_and(|ids| !ids.contains(&node.node_id))
+                {
+                    continue;
+                }
+                let content = file_cache
+                    .entry(f.to_string())
+                    .or_insert_with(|| std::fs::read_to_string(f).ok());
+                match (content.as_deref(), node.identifier.as_deref()) {
+                    (None, _) => continue, // cited file is gone
+                    (Some(src), Some(id)) if !src.contains(id) => continue, // symbol deleted/renamed
+                    _ => {}
+                }
             }
             if !seen.insert(node.node_id.clone()) {
                 continue;
@@ -171,7 +212,7 @@ fn touched_nodes(repo: &Repository, checkpoint_limit: usize, node_cap: usize) ->
 /// surfacing in a carryover. Excludes `variable_declarator`,
 /// `lexical_declaration`, bare identifiers, and other non-definition nodes
 /// a full-file re-parse emits.
-fn is_definition_kind(kind: &str) -> bool {
+pub(crate) fn is_definition_kind(kind: &str) -> bool {
     const NEEDLES: [&str; 11] = [
         "function",
         "method",
@@ -189,6 +230,18 @@ fn is_definition_kind(kind: &str) -> bool {
     NEEDLES.iter().any(|n| k.contains(n))
 }
 
+/// Max per-file entries embedded in the diff. A giant refactor (or an
+/// untracked vendored tree) must not turn the carryover into a file
+/// listing; the elided remainder is counted so renderers can say so.
+const MAX_DIFF_FILES: usize = 50;
+
+/// Aura's own state directory. Its churn (checkpoints, task JSON, logs)
+/// is machine noise to a resuming brain, so those paths never ride in
+/// the carryover's file list.
+fn is_aura_path(p: &str) -> bool {
+    p == ".aura" || p.starts_with(".aura/") || p.contains("/.aura/")
+}
+
 /// Uncommitted changes vs HEAD: per-file status + total line stats.
 fn working_tree_diff(repo: &Repository) -> WorkingTreeDiff {
     let mut out = WorkingTreeDiff::default();
@@ -198,6 +251,13 @@ fn working_tree_diff(repo: &Repository) -> WorkingTreeDiff {
     if let Ok(statuses) = repo.statuses(Some(&mut so)) {
         for entry in statuses.iter() {
             if let Some(p) = entry.path() {
+                if is_aura_path(p) {
+                    continue;
+                }
+                if out.files.len() >= MAX_DIFF_FILES {
+                    out.files_elided += 1;
+                    continue;
+                }
                 out.files.push(FileDiffStat {
                     path: p.to_string(),
                     status: status_code(entry.status()).to_string(),
@@ -270,4 +330,25 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     let mut t: String = s.chars().take(max).collect();
     t.push('…');
     t
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_aura_path;
+
+    #[test]
+    fn aura_paths_are_excluded_wherever_they_sit() {
+        assert!(is_aura_path(".aura"));
+        assert!(is_aura_path(".aura/intent_log.jsonl"));
+        assert!(is_aura_path(".aura/tasks/t-1.json"));
+        assert!(is_aura_path("sub/crate/.aura/atlas.json"));
+    }
+
+    #[test]
+    fn source_paths_survive_including_aura_lookalikes() {
+        assert!(!is_aura_path("src/main.rs"));
+        assert!(!is_aura_path("aura-cli/src/mcp.rs"));
+        assert!(!is_aura_path(".aurarc"));
+        assert!(!is_aura_path("docs/.aura.md"));
+    }
 }

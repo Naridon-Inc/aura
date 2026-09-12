@@ -63,7 +63,9 @@ describe("a member row with no address says so in words", () => {
   });
 
   test("the teammate picker drops the key rather than printing it", async () => {
-    const src = await readSrc("components/settings/IntegrationsTab.tsx");
+    // Moved with the Jira people table when Integrations and API keys became
+    // one Connected services pane; the rule did not move with it by itself.
+    const src = await readSrc("components/settings/connected/JiraPeople.tsx");
     expect(src).toContain("isDeviceIdentity");
     expect(src).toContain("m.email && !isDeviceIdentity(m.email)");
   });

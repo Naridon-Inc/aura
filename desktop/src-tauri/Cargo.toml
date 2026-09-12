@@ -1,6 +1,6 @@
 [package]
 name = "aura-shell"
-version = "0.19.39"
+version = "0.19.47"
 description = "Aura desktop shell — Tauri 2 binary backed by every aura-* Rust crate."
 authors = ["Aura"]
 edition = "2021"
@@ -53,6 +53,11 @@ tauri-plugin-process = "2"
 # anywhere. Registered on the Rust side (lib.rs/hud.rs) so it fires no
 # matter which app is focused and needs no JS-side capability entry.
 tauri-plugin-global-shortcut = "2"
+# `aura://session/<id>` links, so a session read in the console can be handed
+# to the machine that actually holds the checkout. The console has always
+# written the link; without this nothing on the desktop claimed the scheme, so
+# the OS found no handler and the click did nothing at all.
+tauri-plugin-deep-link = "2"
 
 # Aura engine — every Rust crate in the workspace is reachable from the
 # shell via tauri commands. Path deps share Cargo.lock so signing/CRDT/
@@ -68,6 +73,7 @@ aura-daemon-client = { path = "../../crates/aura-daemon-client" }
 # `Place::sh`, the CLI drives the same plan through `std::process`, so a box and
 # a laptop converge on one implementation rather than two that agree for now.
 aura-env           = { path = "../../crates/aura-env" }
+aura-hooks         = { path = "../../crates/aura-hooks" }
 aura-egress        = { path = "../../crates/aura-egress" }
 # Aura Loop — the shared dependency-graph + ready-set model. The shell's
 # native-brain loop driver (W4) and the unified chat ready_view (W3)
@@ -76,6 +82,7 @@ aura-loop          = { path = "../../crates/aura-loop" }
 # Plugin-bundle signing — the registry verifies bundle signatures at
 # scan time with the SAME digest the CLI's `aura plugin sign` computes.
 aura-plugin-sign   = { path = "../../crates/aura-plugin-sign" }
+aura-repo-identity = { path = "../../crates/aura-repo-identity" }
 # Native GPU terminal — the wgpu-rendered replacement for xterm.js
 # (cmd_native_term). `aura-term-core` owns the PTY + alacritty grid model,
 # `aura-term-gpu` turns its RenderList into wgpu draw calls. Both are the same

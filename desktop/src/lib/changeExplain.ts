@@ -3,20 +3,44 @@
 // The split-diff header shows the real changed pieces instantly (grounded in
 // the AST change-note). This layer fetches the richer, model-written story on
 // top — what the code USED TO DO, what it does NOW, and WHY it was changed and
-// how it works — and caches it so the header paints instantly and silently
-// upgrades once the words arrive. A committed diff is immutable, so its cache
-// entry is safe for the surface's lifetime; a working-tree edit is re-fetched
-// only when its key changes.
+// how it works — and holds it so the header paints instantly and silently
+// upgrades once the words arrive.
+//
+// A committed diff is immutable, so its entry is true for the surface's
+// lifetime and is held. A working-tree edit is not, and holding one meant the
+// account a reviewer read described a diff that had since been edited away —
+// see `isImmutable`. Those re-ask.
+//
+// The WHY is not always Aura's to write: `aura snapshot-file --why` records the
+// author's own reason against a file, and the backend now returns it verbatim
+// with `why_source: "recorded"`. `whyIsRecorded` is how a surface tells a quote
+// from a reading.
 
 import { api, type ChangedSymbol, type ChangeExplanation, type SymbolExplanation } from "./api";
 
 export type { ChangeExplanation };
 
-const EMPTY: ChangeExplanation = {
+/** Nothing to describe — the change has no diff. Exported as the counterpart to
+ *  {@link FAILED_EXPLANATION}; the two must never be folded back into one. */
+export const EMPTY_EXPLANATION: ChangeExplanation = {
   before: "",
   what: "",
   why: "",
+  why_source: "none",
   source: "none",
+  diff_hash: "",
+};
+
+/** What a failed request resolves to. Deliberately NOT {@link
+ *  EMPTY_EXPLANATION}: "the request blew up" and "this change has nothing to
+ *  describe" are different facts, and collapsing them told a reviewer there was
+ *  nothing to say about a change Aura had merely failed to read. */
+export const FAILED_EXPLANATION: ChangeExplanation = {
+  before: "",
+  what: "",
+  why: "",
+  why_source: "error",
+  source: "error",
   diff_hash: "",
 };
 
@@ -29,40 +53,92 @@ function keyOf(repoRoot: string, file: string, commit?: string | null): string {
   return `${repoRoot}\u0000${file}\u0000${commit ?? ""}`;
 }
 
+/** Is this change's content fixed for good?
+ *
+ *  A commit's diff is immutable, so an explanation of it is true forever and
+ *  can be held for the surface's lifetime. A working-tree edit is not: the file
+ *  changes under the same key, and keying on (repo, file, commit) with an empty
+ *  commit pinned the FIRST account of a file and served it for every later
+ *  edit — the reviewer read a description of a diff that no longer existed.
+ *  Those re-ask instead. The backend keys its own store by diff content-hash
+ *  and answers without waiting on a model, so a re-ask is cheap, and it is the
+ *  only thing that keeps the words attached to the change in front of you. */
+function isImmutable(commit?: string | null): boolean {
+  return !!(commit ?? "").trim();
+}
+
 /** Cached before/what/why for a file's change. `commit` scopes it to a past
  *  commit's change; omit for the live working-tree edit. Never throws — a
- *  failure (or no reachable model) resolves to an empty explanation, and the
- *  header simply keeps its instant, grounded text. */
+ *  failure resolves to a result the caller can tell apart from an empty one,
+ *  and the header simply keeps its instant, grounded text. */
 export async function loadExplanation(
   repoRoot: string,
   file: string,
   commit?: string | null,
 ): Promise<ChangeExplanation> {
   const key = keyOf(repoRoot, file, commit);
-  const hit = cache.get(key);
-  if (hit) return hit;
+  const durable = isImmutable(commit);
+  if (durable) {
+    const hit = cache.get(key);
+    if (hit) return hit;
+  }
+  // In-flight dedupe applies either way: two panes asking for the same change
+  // in the same tick share one request without pinning a stale answer.
   const pending = inflight.get(key);
   if (pending) return pending;
 
   const p = api
     .explainChange(repoRoot, file, commit ?? undefined)
     .then((r) => {
-      cache.set(key, r);
+      if (durable) cache.set(key, r);
       inflight.delete(key);
       return r;
     })
     .catch(() => {
       inflight.delete(key);
-      return EMPTY;
+      return FAILED_EXPLANATION;
     });
   inflight.set(key, p);
   return p;
 }
 
+/** Forget what is held for one change, so the next load re-asks. The retry
+ *  control after a failure calls this: it clears the entry and nothing else, so
+ *  the reader's scroll position, open pieces and picked symbol all survive. */
+export function forgetExplanation(
+  repoRoot: string,
+  file: string,
+  commit?: string | null,
+): void {
+  const key = keyOf(repoRoot, file, commit);
+  cache.delete(key);
+  inflight.delete(key);
+  symCache.delete(key);
+  symInflight.delete(key);
+}
+
 /** True when an explanation actually carries readable words (not the empty /
- *  no-model result), so the caller only swaps in real content. */
+ *  no-model / failed result), so the caller only swaps in real content. */
 export function hasExplanation(e: ChangeExplanation | null | undefined): boolean {
   return !!e && !!(e.what.trim() || e.before.trim() || e.why.trim());
+}
+
+/** The request failed. Distinct from an empty answer: there may well be
+ *  something to say about this change, and Aura did not manage to say it. */
+export function explanationFailed(e: ChangeExplanation | null | undefined): boolean {
+  return e?.source === "error";
+}
+
+/** The `why` is the author's own words, quoted, rather than Aura's reading of
+ *  the diff — so the surface attributes it instead of presenting it as Aura's. */
+export function whyIsRecorded(e: ChangeExplanation | null | undefined): boolean {
+  return e?.why_source === "recorded" && !!e.why.trim();
+}
+
+/** The words were mined from the diff because no model was reachable — an
+ *  inference, labelled as one so it is never mistaken for a stated reason. */
+export function isInferredFromDiff(e: ChangeExplanation | null | undefined): boolean {
+  return e?.source === "fallback";
 }
 
 /** Per-piece plain-language meanings for one file's change: what each piece
@@ -99,8 +175,11 @@ export async function loadSymbolExplanations(
 ): Promise<SymbolMeanings> {
   if (!symbols.length) return EMPTY_SYMS;
   const key = keyOf(repoRoot, file, commit);
-  const hit = symCache.get(key);
-  if (hit) return hit;
+  const durable = isImmutable(commit);
+  if (durable) {
+    const hit = symCache.get(key);
+    if (hit) return hit;
+  }
   const pending = symInflight.get(key);
   if (pending) return pending;
 
@@ -109,10 +188,12 @@ export async function loadSymbolExplanations(
     .then((rows) => {
       symInflight.delete(key);
       const result = foldMeanings(rows, symbols);
-      // Only a fully-resolved answer is durable. A partial one means the model
-      // is still backfilling — don't freeze the placeholders in; let a re-poll
-      // re-ask and swap in the real words when they arrive.
-      if (result.complete) symCache.set(key, result);
+      // Only a fully-resolved answer for an immutable change is durable. A
+      // partial one means the model is still backfilling — don't freeze the
+      // placeholders in; let a re-poll re-ask and swap in the real words when
+      // they arrive. A working-tree change is never durable at all: the pieces
+      // themselves change under the same key (see `isImmutable`).
+      if (durable && result.complete) symCache.set(key, result);
       return result;
     })
     .catch(() => {
@@ -183,7 +264,7 @@ export async function loadExplanationForDiff(
     })
     .catch(() => {
       inflight.delete(key);
-      return EMPTY;
+      return FAILED_EXPLANATION;
     });
   inflight.set(key, p);
   return p;

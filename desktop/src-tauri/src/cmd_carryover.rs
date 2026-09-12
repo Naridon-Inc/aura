@@ -133,6 +133,10 @@ pub struct WorkingTreeDiff {
     pub deletions: usize,
     #[serde(default)]
     pub files: Vec<FileDiffStat>,
+    /// Entries the CLI's per-file cap left out of `files` (stats still
+    /// count them).
+    #[serde(default)]
+    pub files_elided: usize,
 }
 
 /// Mirror of `continuity::model::FileDiffStat`.

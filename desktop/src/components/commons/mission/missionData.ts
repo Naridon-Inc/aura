@@ -420,14 +420,27 @@ export function summaryLine(args: {
   queuedCount: number;
   hostConfigured: boolean;
   hostOnline: boolean;
+  /** AUDIT-UI-04 — the backend's lifecycle word ("online" | "draining" |
+   *  "offline" | "unconfigured"). When present it wins over the two
+   *  booleans, so "winding down" stops being reported as a hard offline. */
+  hostState?: string;
 }): string {
-  const { liveCount, queuedCount, hostConfigured, hostOnline } = args;
+  const { liveCount, queuedCount, hostConfigured, hostOnline, hostState } =
+    args;
   const parts: string[] = [];
   parts.push(
     liveCount === 1 ? "1 agent live" : `${liveCount} agents live`,
   );
   parts.push(`${queuedCount} queued`);
-  if (hostConfigured) {
+  if (hostState === "online") {
+    parts.push("Runner online");
+  } else if (hostState === "draining") {
+    parts.push("Runner winding down");
+  } else if (hostState === "offline") {
+    parts.push("Runner offline");
+  } else if (hostState === "unconfigured") {
+    parts.push("Runner —");
+  } else if (hostConfigured) {
     parts.push(hostOnline ? "Runner online" : "Runner offline");
   } else {
     parts.push("Runner · ");

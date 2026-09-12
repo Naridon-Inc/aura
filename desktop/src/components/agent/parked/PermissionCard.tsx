@@ -25,7 +25,7 @@ import { getChannelMeta } from "../../../lib/agentStreamStore";
 import { Button } from "../../ui/button";
 import { ParkedHeader, ParkedShell } from "./dock";
 import { describeToolCall, KIND_LABEL, type ToolKind } from "./toolCall";
-import { titleCaseName } from "../../../lib/textCase";
+import { titleCaseName } from "@shared/textCase";
 
 // Chip tone by what kind of thing the tool does. Amber for anything that
 // changes a file, runs a command or leaves the machine; neutral for the

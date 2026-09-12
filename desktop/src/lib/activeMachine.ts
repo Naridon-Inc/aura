@@ -52,6 +52,12 @@ export type ActiveMachine = {
 export type MachinePresence = ActiveMachine & {
   key: string;
   repoRoot: string | null;
+  /** Where the checkout is ON the machine, when it is not the folder the
+   *  machine's row records — the sibling worktree a launched workspace works
+   *  in. Every routed file and git command carries it, so the tree and the
+   *  Changes list describe that worktree and not the box's main checkout.
+   *  Null means the row's own folder. */
+  remoteRoot: string | null;
 };
 
 /** Not on a machine — this laptop, and whatever it has open. */
@@ -59,9 +65,11 @@ export const NO_MACHINE: ActiveMachine = { machineId: null, threadKey: null };
 
 /** A member as `syncMachines` takes it: a key, plus whatever the request that
  *  opened it happened to name. */
-export type MachineMember = { key: string; repoRoot?: string | null } & Partial<
-  ActiveMachine
->;
+export type MachineMember = {
+  key: string;
+  repoRoot?: string | null;
+  remoteRoot?: string | null;
+} & Partial<ActiveMachine>;
 
 let entered: readonly MachinePresence[] = [];
 let focusedKey: string | null = null;
@@ -126,11 +134,13 @@ export function syncMachines(
     if (!key) continue;
     const held = entered.find((e) => e.key === key);
     const repoRoot = sameRootText(m.repoRoot);
+    const remoteRoot = sameRootText(m.remoteRoot);
     if (held) {
       // A held member keeps everything the workspace resolved for it. The one
       // thing a re-sync may still teach it is the project — a place entered
       // through a conversation names no repo until App learns which board the
-      // thread belongs to — so that is folded in, and only then.
+      // thread belongs to — so that is folded in, and only then. The worktree
+      // on the box is part of the key, so a held member already has it.
       next.push(
         held.repoRoot || !repoRoot ? held : { ...held, repoRoot },
       );
@@ -141,6 +151,7 @@ export function syncMachines(
       machineId: clean(m.machineId),
       threadKey: clean(m.threadKey),
       repoRoot,
+      remoteRoot,
     });
   }
   const focus = next.some((m) => m.key === nextFocusedKey)
@@ -159,6 +170,7 @@ export function resolveMachine(
   machineId: string | null,
   threadKey: string | null = null,
   repoRoot: string | null = null,
+  remoteRoot: string | null = null,
 ): void {
   const at = entered.findIndex((m) => m.key === key.trim());
   if (at < 0) return;
@@ -168,11 +180,15 @@ export function resolveMachine(
     threadKey: clean(threadKey),
   };
   // A workspace that hasn't worked out its project yet must not erase the one
-  // the request already named — a resolution adds, it never forgets.
+  // the request already named — a resolution adds, it never forgets. The same
+  // for the worktree on the box.
   const root = sameRootText(repoRoot) ?? held.repoRoot;
-  if (samePair(held, pair) && root === held.repoRoot) return;
+  const there = sameRootText(remoteRoot) ?? held.remoteRoot;
+  if (samePair(held, pair) && root === held.repoRoot && there === held.remoteRoot) {
+    return;
+  }
   const next = entered.slice();
-  next[at] = { key: held.key, repoRoot: root, ...pair };
+  next[at] = { key: held.key, repoRoot: root, remoteRoot: there, ...pair };
   settle(next, focusedKey, true);
 }
 
@@ -219,6 +235,23 @@ export function getEnteredMachines(): readonly MachinePresence[] {
  * it, and it is the only place you are in.
  */
 export function machineIdForRoot(root: string | null | undefined): string | null {
+  return remotePlaceForRoot(root)?.machineId ?? null;
+}
+
+/** Where a routed command on `root` runs: the box, the local root it was
+ *  asked about, and — for a launched workspace — the worktree on the box. */
+export type RemoteWorkAt = {
+  machineId: string;
+  repoRoot: string;
+  /** Absent when the place works in the machine's own checkout. */
+  remoteRoot?: string;
+};
+
+/** `machineIdForRoot`, with everything a `place_*` command needs to run in
+ *  the right checkout over there. `null` for this laptop. */
+export function remotePlaceForRoot(
+  root: string | null | undefined,
+): RemoteWorkAt | null {
   const want = sameRootText(root);
   if (!want) return null;
   const place = focusedKey
@@ -226,7 +259,47 @@ export function machineIdForRoot(root: string | null | undefined): string | null
     : null;
   if (!place?.machineId) return null;
   if (place.repoRoot && place.repoRoot !== want) return null;
-  return place.machineId;
+  return {
+    machineId: place.machineId,
+    repoRoot: want,
+    remoteRoot: place.remoteRoot ?? undefined,
+  };
+}
+
+/** The place a bare file path belongs to, when that place is a machine: its
+ *  id and the LOCAL project root the path sits under. `null` for this laptop.
+ *
+ *  The file tree, the editor and the @-mention popup name files, not
+ *  projects — `/Users/me/app/src/main.rs`, not "the app project" — so the
+ *  question they ask before reading or saving is "which machine holds this
+ *  path?". The answer is the focused place's, exactly as `machineIdForRoot`
+ *  gives it, provided the path is inside that place's project. A place that
+ *  has not named a project cannot own a bare path: there is nothing to cut
+ *  the path against on the other side, so it stays local rather than being
+ *  guessed onto a box. */
+export function remotePlaceForPath(
+  path: string | null | undefined,
+): RemoteWorkAt | null {
+  const want = path?.trim();
+  if (!want) return null;
+  const place = focusedKey
+    ? (entered.find((m) => m.key === focusedKey) ?? null)
+    : null;
+  if (!place?.machineId || !place.repoRoot) return null;
+  const root = place.repoRoot;
+  const inside = want === root || want.startsWith(root + "/");
+  return inside
+    ? {
+        machineId: place.machineId,
+        repoRoot: root,
+        remoteRoot: place.remoteRoot ?? undefined,
+      }
+    : null;
+}
+
+/** `machineIdForRoot`, for a bare path instead of a project. */
+export function machineIdForPath(path: string | null | undefined): string | null {
+  return remotePlaceForPath(path)?.machineId ?? null;
 }
 
 /** Where this window is. `{ machineId: null, threadKey: null }` means here. */

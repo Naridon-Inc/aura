@@ -23,7 +23,16 @@
 // "your app is up", and it would be wrong exactly when it mattered. So the
 // row says what it knows: whether Run is open, and what it runs.
 
-import { api, type RunSuggestion } from "./api";
+//
+// WHERE IT RUNS. A workspace standing in a machine has its checkout over
+// there, so both halves go there too (AURA-1307): the detection reads the
+// box's files through `workApi.runDetect`, and the command is typed after
+// the box's own boot line (`bootCommandFor`) so it starts in that checkout,
+// not in the laptop's copy of it.
+
+import type { RunSuggestion } from "./api";
+import { bootCommandFor } from "./place/runAt";
+import { placeScope, rootOfScope, runDetect } from "./place/workApi";
 import { readShared, sharedReader, dropShared } from "./sharedRead";
 
 /** The label the reserved terminal carries. Also what the panel row says. */
@@ -35,8 +44,10 @@ export const RUN_LABEL = "Run";
  *  than the repo changes. */
 const DETECT_FRESH_MS = 60_000;
 
+// Keyed by place: the laptop's copy and the box's copy of one project can
+// say different things about running themselves.
 const detector = sharedReader<RunSuggestion>(
-  (repoRoot) => api.runDetect(repoRoot),
+  (scope) => runDetect(rootOfScope(scope)),
   DETECT_FRESH_MS,
 );
 
@@ -76,7 +87,7 @@ export function setRunCommandOverride(repoRoot: string, command: string | null):
 
 /** What the repo says about running itself, shared and cached. */
 export function detectRun(repoRoot: string, force = false): Promise<RunSuggestion> {
-  return readShared(detector, repoRoot, force);
+  return readShared(detector, placeScope(repoRoot), force);
 }
 
 /** Forget the detection — for after a `package.json` or `Makefile` edit. */
@@ -135,7 +146,11 @@ export type RunOutcome =
   | { ok: true; termId: string; command: string; restarted: boolean }
   /** Nothing in the repo justified a command and nothing was pinned. The
    *  caller asks the user for one — it does not invent a default. */
-  | { ok: false; reason: "no-command" };
+  | { ok: false; reason: "no-command" }
+  /** The project stands in a machine that could not be opened — no boot
+   *  line, so nothing to type. `message` is what the place said; the caller
+   *  shows it rather than running the command on this laptop instead. */
+  | { ok: false; reason: "no-place"; message: string };
 
 /** Start this project, or restart it if Run is already open.
  *
@@ -146,11 +161,19 @@ export async function runProject(repoRoot: string, deps: RunDeps): Promise<RunOu
   const command = await resolveRunCommand(repoRoot);
   if (!command) return { ok: false, reason: "no-command" };
 
+  let bootCommand: string;
+  try {
+    bootCommand = await bootCommandFor(repoRoot, command);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return { ok: false, reason: "no-place", message };
+  }
+
   const existing = liveRunTermId(repoRoot, deps);
   if (existing) deps.closeTerminal(existing);
 
   const termId = deps.openPanelTerminal(repoRoot, {
-    bootCommand: command,
+    bootCommand,
     label: RUN_LABEL,
   });
   lsSet(TERM_PREFIX + repoRoot, termId);

@@ -158,7 +158,11 @@ fn prove_goals(
         // builds three branches at once the newest note is whoever committed last
         // *anywhere*. Grading a goal against a sibling branch's code reports a
         // confident, wrong zero and throws the work away.
-        let outcome = GsdEngine::prove_requirements_at(&goal.text, &requirements, commit_sha);
+        // Proven in `work_root` — the checkout the agent actually built in,
+        // which under a crew loop is a linked worktree rather than the
+        // ledger's own root.
+        let outcome =
+            GsdEngine::prove_requirements_at(work_root, Some(commit_sha), &goal.text, &requirements);
         let verdict_str = outcome["verdict"].as_str().unwrap_or("unknown");
         if verdict_str == "unknown" {
             continue; // couldn't check (no snapshot) — don't record a misleading run

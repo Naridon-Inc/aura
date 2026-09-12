@@ -145,8 +145,8 @@ export function OnboardingDialog() {
     step === "presets"
   ) {
     return (
-      // No Escape binding on purpose: the only exit is "Skip onboarding", and a
-      // stray Escape should never silently skip first-run setup.
+      // no-escape-dismissal: the only exit is "Skip onboarding", and a stray
+      // Escape should never silently skip first-run setup.
       <div
         className="fixed inset-0 z-[60] bg-black/55 backdrop-blur-[3px] flex items-center justify-center p-6"
         role="dialog"

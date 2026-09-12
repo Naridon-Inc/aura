@@ -11,7 +11,8 @@
 // Click a node → focuses that PR's detail (calls editorStore.openPrDetail).
 
 import { useEffect, useState } from "react";
-import { api, type PrStackNode, type PrSummary } from "../../lib/api";
+import type { PrStackNode, PrSummary } from "../../lib/api";
+import { prStack } from "../../lib/prApi";
 import { fetchPrList } from "../../lib/prsCache";
 import { useEditorStore } from "../../lib/editorStore";
 import { StatusChip, type ChipTone } from "../ui/statusChip";
@@ -38,7 +39,7 @@ export function PrStackRail({ repoRoot, prNumber, viewer }: Props) {
     let cancelled = false;
     setLoading(true);
     Promise.all([
-      api.prStack(repoRoot, prNumber).catch(() => [] as PrStackNode[]),
+      prStack(repoRoot, prNumber).catch(() => [] as PrStackNode[]),
       fetchPrList(repoRoot).catch(() => [] as PrSummary[]),
     ])
       .then(([nodes, list]) => {
@@ -72,6 +73,7 @@ export function PrStackRail({ repoRoot, prNumber, viewer }: Props) {
   // PrStackNode carries .parent so we can topo-sort.
   const ordered = topoSort(stack);
   const activeIdx = ordered.findIndex((n) => n.number === prNumber);
+  const tool = stackToolLabel(ordered);
 
   return (
     <section className="border border-line-soft rounded-lg bg-bg-content">
@@ -98,6 +100,14 @@ export function PrStackRail({ repoRoot, prNumber, viewer }: Props) {
         <span className="text-xs text-text-4 tabular-nums">
           {Math.max(activeIdx + 1, 1)} of {ordered.length}
         </span>
+        {tool && (
+          <span
+            className="ml-auto text-2xs text-text-4"
+            title={`The order of this stack comes from ${tool}.`}
+          >
+            {tool}
+          </span>
+        )}
       </button>
       {!collapsed && (
         <div className="px-2 pb-2 relative">
@@ -122,6 +132,17 @@ export function PrStackRail({ repoRoot, prNumber, viewer }: Props) {
       )}
     </section>
   );
+}
+
+/** Which stacking tool the backend read the order from. Graphite and
+ *  GitHub's `gh stack` extension both get named — a person who uses one of
+ *  them should see the rail agrees with it. Plain head/base inference from
+ *  GitHub gets no label: there is no tool to credit. */
+function stackToolLabel(nodes: PrStackNode[]): string | null {
+  const tool = nodes[0]?.stack_tool ?? "";
+  if (tool === "graphite") return "Graphite";
+  if (tool === "gh-stack") return "gh stack";
+  return null;
 }
 
 function TrunkAnchor({ baseRef }: { baseRef?: string | null }) {

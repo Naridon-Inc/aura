@@ -18,7 +18,7 @@
 // network — which is a fact about the tool, not a guess about the call.
 
 /** What category of thing this tool does. A fact about the tool itself. */
-import { titleCaseName } from "../../../lib/textCase";
+import { titleCaseName } from "@shared/textCase";
 
 export type ToolKind =
   | "reads"

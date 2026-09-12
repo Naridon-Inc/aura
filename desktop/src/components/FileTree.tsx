@@ -26,6 +26,16 @@ import {
 import { api, type DirEntry, type EditorInfo } from "../lib/api";
 import { loadDirList, reloadDirList } from "../lib/dirListCache";
 import { beginInAppFileDrag, endInAppFileDrag } from "../lib/osFileDrop";
+// Mutations go through the place seam: a tree drawn for a workspace standing
+// in a machine makes, moves and deletes on the box, where the listing came
+// from (AURA-1306). Reads already do, through dirListCache.
+import {
+  fsCreateFile,
+  fsCreateFolder,
+  fsDelete,
+  fsRename,
+  needsPolling,
+} from "../lib/place/workApi";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
 import { cn } from "../lib/utils";
 import { AsciiSpinner } from "./ui/ascii-spinner";
@@ -86,6 +96,11 @@ type PendingDelete =
   | { kind: "one"; node: Node }
   | { kind: "many"; paths: string[] }
   | null;
+
+/** How often a tree on a machine is re-listed while on screen. Every open
+ *  folder is one round trip over the wire, so this is slower than the 5s
+ *  the Changes list polls on — a new file shows up in Changes first. */
+const REMOTE_RELIST_MS = 15_000;
 
 export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreeProps) {
   const [tree, setTree] = useState<Node[]>([]);
@@ -151,6 +166,49 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
 
   useEffect(() => {
     void reloadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [root]);
+
+  // A checkout on a machine has no watcher — nothing here can see its disk —
+  // so a tree drawn for one is re-listed on a beat while it is on screen, and
+  // whenever git moved something under it. Quietly: the spinner is for the
+  // first paint, not for a re-read the person did not ask for. A local root
+  // keeps its existing behaviour and never enters here.
+  useEffect(() => {
+    if (!needsPolling(root)) return;
+    let alive = true;
+    const relist = async () => {
+      if (!alive || document.visibilityState !== "visible") return;
+      try {
+        const rootEntries = await reloadDirList(root);
+        const rootNodes = rootEntries.map((e) => toNode(e, 0));
+        const expand = async (nodes: Node[]) => {
+          for (const n of nodes) {
+            if (n.is_dir && expandedRef.current.has(n.path)) {
+              try {
+                const kids = await reloadDirList(n.path);
+                n.children = kids.map((e) => toNode(e, n.depth + 1));
+                await expand(n.children);
+              } catch {
+                n.children = [];
+              }
+            }
+          }
+        };
+        await expand(rootNodes);
+        if (alive) setTree(rootNodes);
+      } catch {
+        /* the last-known tree stays; the next beat tries again */
+      }
+    };
+    const id = window.setInterval(() => void relist(), REMOTE_RELIST_MS);
+    const onGitChanged = () => void relist();
+    window.addEventListener("aura:git-changed", onGitChanged);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+      window.removeEventListener("aura:git-changed", onGitChanged);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root]);
 
@@ -258,7 +316,7 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
       if (parentOf(from) === destDir) continue; // already here
       const dest = `${destDir}/${basename(from)}`;
       try {
-        await api.fsRename(from, dest);
+        await fsRename(from, dest);
         moved++;
         if (selected === from) onSelect(dest);
       } catch (e) {
@@ -289,7 +347,7 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
       if (editor.kind === "rename") {
         const dir = parentOf(editor.path);
         const dest = dir ? `${dir}/${trimmed}` : trimmed;
-        await api.fsRename(editor.path, dest);
+        await fsRename(editor.path, dest);
         if (dir) await reloadFolder(dir);
         else await reloadAll();
         // If the renamed file was selected, follow it.
@@ -297,11 +355,11 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
       } else {
         const dest = `${editor.parent}/${trimmed}`;
         if (editor.kind === "new-file") {
-          await api.fsCreateFile(dest);
+          await fsCreateFile(dest);
           await reloadFolder(editor.parent);
           onSelect(dest);
         } else {
-          await api.fsCreateFolder(dest);
+          await fsCreateFolder(dest);
           await reloadFolder(editor.parent);
         }
       }
@@ -362,7 +420,7 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
     setPendingDelete(null);
     try {
       if (target.kind === "one") {
-        await api.fsDelete(target.node.path);
+        await fsDelete(target.node.path);
         const dir = parentOf(target.node.path);
         if (dir) await reloadFolder(dir);
         else await reloadAll();
@@ -376,7 +434,7 @@ export function FileTree({ root, selected, onSelect, onSelectSplit }: FileTreePr
         }
         for (const p of top) {
           try {
-            await api.fsDelete(p);
+            await fsDelete(p);
           } catch (e) {
             setError(String(e));
           }

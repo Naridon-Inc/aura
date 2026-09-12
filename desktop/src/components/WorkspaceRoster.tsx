@@ -85,6 +85,7 @@ import {
 import type { WorktreeBadge } from "../lib/useWorktreeBadges";
 import { useWorkingRoots } from "../lib/useFleetActivity";
 import { AsciiSpinner } from "./ui/ascii-spinner";
+import { splitCopies } from "../lib/rosterCopies";
 import type { Workspace, WorktreeRef } from "../lib/workspaceRef";
 import { useDismiss } from "../lib/useDismiss";
 
@@ -193,6 +194,22 @@ function CopyIcon() {
       <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
       <path
         d="M3.5 10.5h-.5a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v.5"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+// Magnifier glyph for "Find missing worktrees…" — same 16-box at 13px /
+// 1.4 nominal stroke as its menu neighbours (see the weight note above).
+function FindWorktreesGlyph() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="7" cy="7" r="4.2" stroke="currentColor" strokeWidth="1.4" />
+      <path
+        d="M10.2 10.2 13.6 13.6"
         stroke="currentColor"
         strokeWidth="1.4"
         strokeLinecap="round"
@@ -397,6 +414,11 @@ type WorkspaceRosterProps = {
   /** Add a project to the roster (open a folder). Wired to the "Projects"
    *  section header's + control. Omit to hide it. */
   onAddProject?: () => void;
+  /** Open the lost-worktree recovery dialog for this project. The roster's
+   *  worktree rows come straight from `git worktree list`, so a crash that
+   *  corrupts git's registry silently drops checkouts that still exist on
+   *  disk — this is the manual way to find them and attach them back. */
+  onFindWorktrees?: (root: string) => void;
 };
 
 // How the "Projects" list is ordered, driven by the section-header sort
@@ -535,12 +557,6 @@ function sortWorkspaces(list: Workspace[], sort: RosterSort): Workspace[] {
   return next;
 }
 
-// A worktree counts as "recently active" — and so stays in the primary
-// group rather than sinking into the inactive disclosure — for an hour
-// after it was last opened. Without this, switching to worktree B would
-// immediately hide worktree A even though you were just there.
-const RECENT_MS = 60 * 60 * 1000;
-
 // The live-agent face pile (LiveAgentLane / AgentChip / AgentChipCard) was
 // removed from the roster: showing which agent is driving each worktree
 // cluttered the sidebar. Worktree rows now read as plain git checkouts
@@ -558,6 +574,7 @@ export function WorkspaceRoster({
   onRemoveWorktree,
   onOpenAllCopies,
   onAddProject,
+  onFindWorktrees,
 }: WorkspaceRosterProps) {
   const editor = useEditorStore();
   // Per-project pin + archive flags (device-local UI state). Subscribing here
@@ -1615,77 +1632,16 @@ export function WorkspaceRoster({
         const agentsByPath = new Map<string, LaneAgent[]>(
           rows.map((w) => [w.path, agentsForPath(w.path)] as const),
         );
-        // Primary = the active worktree + anything with a live agent.
-        // Everything else (idle feature checkouts and machine
-        // `worktree-agent-…` scratch alike) is "inactive" and collapses
-        // into one disclosure. Within inactive: has-work → idle → scratch.
-        const now = Date.now();
-        const enriched = rows.map((w) => {
-          const bare = (w.branch || "").replace(/^refs\/heads\//, "");
-          const isScratch =
-            /^worktree-agent-/.test(bare) ||
-            /\/worktree-agent-[^/]*$/.test(w.path);
-          // `aura work` worktrees (`work/<slug>` branch in a sibling
-          // `<repo>-work-<slug>` dir) are the HUMAN's own deliberate
-          // parallel sessions — not crew agents. Bucket them separately
-          // so they never inflate the "N other parallel copies" count and
-          // never get swept into the agent-pip lane, while still rendering
-          // as normal switchable rows.
-          const isWorkSession =
-            /^work\//.test(bare) || /-work-[^/]+$/.test(w.path);
-          const hasAgent = (agentsByPath.get(w.path)?.length ?? 0) > 0;
-          const badge = badgeByPath?.[w.path];
-          // Work in flight on a runner counts as work. Without it, the one copy
-          // a machine is actively changing sinks into the "N other parallel
-          // copies" disclosure — the row you least want hidden, because
-          // locally it looks idle and nothing else on screen says otherwise.
-          const hasWork =
-            (!!badge && (badge.added > 0 || badge.removed > 0)) ||
-            !!badge?.pr ||
-            !!badge?.cloud;
-          const isActive = w.path === activePath;
-          // Recently opened (within the last hour) keeps a worktree primary
-          // so flipping between checkouts doesn't immediately bury the one
-          // you just left.
-          const recentlyActive =
-            !!visited[w.path] && now - visited[w.path] < RECENT_MS;
-          const rank = isActive
-            ? 0
-            : w.is_main
-              ? // The home checkout is always a surfaced (primary) copy — it's
-                // a workspace's one stable "active" view, so it never sinks
-                // into the "N other parallel copies" disclosure. Fixes the case
-                // where an idle project showed ONLY the disclosure with nothing
-                // clickable to work on.
-                1
-              : hasAgent || recentlyActive
-                ? 1
-                : hasWork
-                  ? 2
-                  : isScratch
-                    ? 4
-                    : 3;
-          return { w, rank, isWorkSession };
+        // Which copies the rail shows and which fold away — the rule lives
+        // in `lib/rosterCopies` so it can be tested without a DOM.
+        const { primary, workSessions, inactive } = splitCopies({
+          rows,
+          activePath,
+          now: Date.now(),
+          agentCount: (path) => agentsByPath.get(path)?.length ?? 0,
+          badgeByPath,
+          visited,
         });
-        // Keep the visible (primary) list in git's natural worktree order
-        // so clicking a row doesn't reshuffle it to the top — activating a
-        // worktree only re-tints it in place. Only the hidden inactive
-        // disclosure is sorted (has-work → idle → scratch), so machine
-        // scratch dirs sink to its bottom.
-        //
-        // `aura work` sessions are pulled out into their own bucket: they
-        // render as ordinary switchable rows (next to primary) but are
-        // NOT part of the "N other parallel copies" disclosure count.
-        const primary = enriched
-          .filter((r) => !r.isWorkSession && r.rank <= 1)
-          .map((r) => r.w);
-        const workSessions = enriched
-          .filter((r) => r.isWorkSession)
-          .map((r) => r.w);
-        const inactive = enriched
-          .filter((r) => !r.isWorkSession && r.rank > 1)
-          .sort((a, b) => a.rank - b.rank)
-          .map((r) => r.w);
         const isCollapsed = !!collapsed[ws.id];
         const showInactive = !!expanded[ws.id];
         // The workspace's one active copy — what clicking the project header
@@ -1908,10 +1864,15 @@ export function WorkspaceRoster({
                 {(cloudThreadsByRoot.get(ws.id) ?? []).map((t) =>
                   renderCloudRow(t),
                 )}
-                {/* The count chip in the header opens the full Workspaces
-                    view for the hidden copies. Only when no such view is
-                    wired do we fall back to expanding the idle rows in place. */}
-                {inactive.length > 0 && !onOpenAllCopies && (
+                {/* The rest of this project's copies, expandable in place.
+                    This used to render only when `onOpenAllCopies` was absent
+                    — i.e. never, since the app always wires it — so a project
+                    with fifty-seven worktrees showed one row and a `+57` pill,
+                    and read as a project with no worktrees at all. The pill and
+                    this list are not the same offer: the pill leaves for the
+                    Workspaces view, this switches you to a copy without leaving
+                    the rail. Both count `inactive`, so they still agree. */}
+                {inactive.length > 0 && (
                   <>
                     <button
                       type="button"
@@ -2132,6 +2093,24 @@ export function WorkspaceRoster({
                   <CloudGlyph size={13} />
                   Connect a machine…
                 </button>
+                {/* Recovery, in the same group as the other "my copies"
+                    actions: when a crash makes worktrees vanish from this
+                    list even though their folders still exist, this is the
+                    manual way to find them and attach them back. */}
+                {onFindWorktrees && (
+                  <button
+                    type="button"
+                    className="rm-item"
+                    onClick={() => {
+                      onFindWorktrees(menu.wsId);
+                      setMenu(null);
+                    }}
+                    title="Scan this project's worktree folder for checkouts that fell off this list, and attach them back"
+                  >
+                    <FindWorktreesGlyph />
+                    Find missing worktrees…
+                  </button>
+                )}
                 <div className="rm-sep" />
                 <button
                   type="button"

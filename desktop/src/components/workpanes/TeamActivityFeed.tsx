@@ -12,16 +12,22 @@
 //
 // HONESTY RULE (inherited from OverviewPane / SessionsPane): every line is a
 // real, observed signal. The "sealed" badge keys off `signed_block_id` (in
-// the shared log); "touches a file you're editing" keys off the live
-// git-dirty set (best-effort — if git status can't be read, the tag simply
-// doesn't show, it is never faked). When the log is empty we render a calm
-// empty state, never invented rows.
+// the shared log) and can be CHECKED in place: clicking it runs
+// `aura attest verify --no-rekor` on this machine and the chip becomes a
+// verdict — "Genuine record" (naming the teammate when it verified against
+// the team key registry) or "Couldn't verify the seal" with the real error.
+// A signed-but-unchecked chip never claims more than "a signed block
+// exists". "Touches a file you're editing" keys off the live git-dirty set
+// (best-effort — if git status can't be read, the tag simply doesn't show,
+// it is never faked). When the log is empty we render a calm empty state,
+// never invented rows.
 //
 // Clicking a card opens the same SessionDetailPane drill the Sessions list
 // uses, so the feed is the breadth lens and the detail is the depth lens —
 // one model, two zooms.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   api,
   type ClaudeSession,
@@ -31,7 +37,8 @@ import {
 import { fetchSessions } from "../../lib/sessionsCache";
 import { fetchIntentRows } from "../../lib/intentCache";
 import { agentDisplayLabel, isAutomationIdentity } from "../../lib/agentIdentity";
-import { intentTypeChip } from "../../lib/intentTypeLabels";
+import { invalidateCache, peekCache, writeCache } from "../../lib/resourceCache";
+import { intentTypeChip } from "@shared/intentTypeLabels";
 import { AgentIcon } from "../agent/AgentIcon";
 import { Button } from "../ui/button";
 import { ErrorState, LoadingState } from "../ui/state";
@@ -161,6 +168,222 @@ function SealIcon() {
   );
 }
 
+/** Minimal shape of `aura attest verify --json` this feed reads — the verdict
+ *  plus who/how it verified. SessionAttestation parses the full payload; both
+ *  surfaces share one cache entry per block, so a check made on either
+ *  pre-paints the other. */
+type SealVerifyResult = {
+  signature_verified?: boolean;
+  /** "local" | "team-registry" | "rotation-chain" — how the key was trusted. */
+  verified_via?: string;
+  /** Present when the block verified against a TEAMMATE's registered key —
+   *  the cross-machine case, with the human identity the registry carries. */
+  verified_via_team?: {
+    display_name?: string | null;
+    github_login?: string | null;
+    human_id?: string | null;
+  };
+};
+
+type SealCheck =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "verified"; via: string; teamName: string | null }
+  | { kind: "failed"; message: string };
+
+function sealVerdict(parsed: SealVerifyResult): SealCheck {
+  const team = parsed.verified_via_team;
+  return {
+    kind: "verified",
+    via: parsed.verified_via || "local",
+    teamName:
+      team?.display_name || team?.github_login || team?.human_id || null,
+  };
+}
+
+/** The plain sentence behind a verified chip — says HOW the seal was trusted,
+ *  because "verified with my own key" and "verified against a teammate's
+ *  registered key on my machine" are different claims. */
+function sealVerifiedTitle(check: Extract<SealCheck, { kind: "verified" }>): string {
+  if (check.via === "team-registry") {
+    return check.teamName
+      ? `Genuine record — sealed by ${check.teamName} and verified on your machine against your team's key registry.`
+      : "Genuine record — verified on your machine against your team's key registry.";
+  }
+  if (check.via === "rotation-chain") {
+    return "Genuine record — verified through your key-rotation history.";
+  }
+  return "Genuine record — the seal verifies with your own key on this machine.";
+}
+
+/** The seal chip, upgraded from a static claim to a checkable one. Three
+ *  honest states:
+ *    · signed (unchecked) — the shared log says a signed block exists; the
+ *      chip claims nothing more. Click runs `aura attest verify --no-rekor`
+ *      right here, offline-safe.
+ *    · Genuine record — the signature verified. When it verified against the
+ *      team key registry the chip names the teammate: their key, your
+ *      machine — the cross-machine proof, not a local echo.
+ *    · Couldn't verify — the real error, never softened; click retries.
+ *  Lazy by design: nothing verifies until asked, so a 200-row feed never
+ *  shells 200 CLI calls. Without a repoRoot (preview harness) it stays the
+ *  static chip. */
+function SealBadge({
+  repoRoot,
+  blockId,
+  showSignedChip,
+}: {
+  repoRoot?: string;
+  blockId: string;
+  showSignedChip: boolean;
+}) {
+  const cacheKey = `attest:verify:${repoRoot ?? ""}:${blockId}`;
+  const [check, setCheck] = useState<SealCheck>(() => {
+    if (!repoRoot) return { kind: "idle" };
+    const cached = peekCache<SealVerifyResult>(cacheKey);
+    return cached?.signature_verified ? sealVerdict(cached) : { kind: "idle" };
+  });
+
+  const runCheck = useCallback(
+    async (e: { stopPropagation(): void; preventDefault(): void }) => {
+      // The whole card is a button that opens the session — the seal check
+      // must not also open it.
+      e.stopPropagation();
+      e.preventDefault();
+      if (!repoRoot || check.kind === "checking" || check.kind === "verified") return;
+      setCheck({ kind: "checking" });
+      try {
+        const res = await api.auraCli(repoRoot, [
+          "attest",
+          "verify",
+          blockId,
+          "--no-rekor",
+          "--json",
+        ]);
+        const trimmed = res.stdout.trim();
+        if (res.status !== 0 || !trimmed) {
+          invalidateCache(cacheKey);
+          setCheck({
+            kind: "failed",
+            message: (res.stderr || trimmed || `exit ${res.status}`).trim(),
+          });
+          return;
+        }
+        const parsed = JSON.parse(trimmed) as SealVerifyResult;
+        if (parsed.signature_verified) {
+          writeCache(cacheKey, parsed);
+          setCheck(sealVerdict(parsed));
+        } else {
+          invalidateCache(cacheKey);
+          setCheck({ kind: "failed", message: "The signature did not verify." });
+        }
+      } catch (err) {
+        invalidateCache(cacheKey);
+        setCheck({
+          kind: "failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [repoRoot, blockId, cacheKey, check.kind],
+  );
+
+  const onKey = (e: ReactKeyboardEvent) => {
+    if (e.key === "Enter" || e.key === " ") void runCheck(e);
+  };
+
+  // Preview harness / no project: the pre-upgrade static chip, no fake action.
+  if (!repoRoot) {
+    if (!showSignedChip) return null;
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-2xs text-accent-green"
+        style={{
+          background: "color-mix(in srgb, var(--color-accent-green) 12%, transparent)",
+        }}
+        title="Aura sealed exactly what the AI changed and why. This record can't be altered."
+      >
+        <SealIcon />
+        Signed
+      </span>
+    );
+  }
+
+  if (check.kind === "checking") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full border border-line-soft px-1.5 py-px text-2xs text-text-4">
+        Checking the seal…
+      </span>
+    );
+  }
+
+  if (check.kind === "verified") {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-2xs text-accent-green"
+        style={{
+          background: "color-mix(in srgb, var(--color-accent-green) 12%, transparent)",
+        }}
+        title={sealVerifiedTitle(check)}
+      >
+        <SealIcon />
+        {check.via === "team-registry" && check.teamName
+          ? `Genuine — ${check.teamName}`
+          : "Genuine record"}
+      </span>
+    );
+  }
+
+  if (check.kind === "failed") {
+    return (
+      <span
+        role="button"
+        tabIndex={0}
+        onClick={(e) => void runCheck(e)}
+        onKeyDown={onKey}
+        className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-2xs text-red"
+        style={{ background: "color-mix(in srgb, currentColor 10%, transparent)" }}
+        title={`Aura couldn't confirm this record is intact: ${check.message || "the check failed"}. Click to try again.`}
+      >
+        Couldn't verify the seal
+      </span>
+    );
+  }
+
+  // Idle. On a mixed feed the green "Signed" pill earns its place; on an
+  // all-signed feed the header carries the claim once and each row keeps only
+  // a quiet, text-free affordance — an ACTION (check this seal), not the
+  // repeated pill the design pass removed.
+  return showSignedChip ? (
+    <span
+      role="button"
+      tabIndex={0}
+      onClick={(e) => void runCheck(e)}
+      onKeyDown={onKey}
+      className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-2xs text-accent-green"
+      style={{
+        background: "color-mix(in srgb, var(--color-accent-green) 12%, transparent)",
+      }}
+      title="Aura sealed exactly what the AI changed and why. Click to check the seal on this machine."
+    >
+      <SealIcon />
+      Signed
+    </span>
+  ) : (
+    <span
+      role="button"
+      tabIndex={0}
+      onClick={(e) => void runCheck(e)}
+      onKeyDown={onKey}
+      className="inline-flex items-center text-text-4 hover:text-accent-green"
+      title="Signed by Aura. Click to check the seal on this machine."
+      aria-label="Check this change's seal"
+    >
+      <SealIcon />
+    </span>
+  );
+}
+
 /** A small overlap glyph for the "touches a file you're editing" warning. */
 function OverlapIcon() {
   return (
@@ -190,6 +413,7 @@ function ActivityCard({
   dirty,
   onOpen,
   showSignedChip,
+  repoRoot,
 }: {
   display: SessionDisplayRow;
   nowSecs: number;
@@ -201,6 +425,8 @@ function ActivityCard({
    *  identical green pills that distinguish nothing. The "Not signed"
    *  exception always shows — that one is the actionable half. */
   showSignedChip: boolean;
+  /** Enables the in-place seal check (absent in the preview harness). */
+  repoRoot?: string;
 }) {
   const { row, editCount } = display;
   const label = agentDisplayLabel(row.agent_id || "unknown");
@@ -323,24 +549,17 @@ function ActivityCard({
           ) : null}
 
           {/* Genuine-record seal. "Not signed" is always shown — it is the
-              exception, and the one a reader needs to act on. The green
-              "Signed" only shows when the feed is MIXED: on a healthy project
-              every row is signed, and a green pill repeated on all 178 rows
-              distinguishes nothing while shouting on every line. The header
-              carries the all-signed claim once instead. */}
+              exception, and the one a reader needs to act on. A signed row
+              gets the checkable SealBadge: loud green pill only when the feed
+              is MIXED (on a healthy project every row is signed and the
+              header carries that claim once), quiet icon-only affordance
+              otherwise — either way, clicking verifies the seal in place. */}
           {sealed ? (
-            showSignedChip ? (
-              <span
-                className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-2xs text-accent-green"
-                style={{
-                  background: "color-mix(in srgb, var(--color-accent-green) 12%, transparent)",
-                }}
-                title="Aura sealed exactly what the AI changed and why. This record can't be altered."
-              >
-                <SealIcon />
-                Signed
-              </span>
-            ) : null
+            <SealBadge
+              repoRoot={repoRoot}
+              blockId={row.signed_block_id as string}
+              showSignedChip={showSignedChip}
+            />
           ) : (
             <span
               className="rounded-full border border-line-soft px-1.5 py-px text-2xs text-text-4"
@@ -534,6 +753,7 @@ export function TeamActivityFeedView({
   enabling,
   onRefresh,
   onOpenSession,
+  repoRoot,
 }: {
   rows: IntentRow[];
   /** Claude Code sessions — used to fold a run's `[auto]` stub spam into one
@@ -552,6 +772,9 @@ export function TeamActivityFeedView({
   enabling: boolean;
   onRefresh: () => void;
   onOpenSession: (row: IntentRow) => void;
+  /** Enables the in-place seal check on signed rows. Optional so the preview
+   *  harness (no project, no CLI) renders the static chips instead. */
+  repoRoot?: string;
 }) {
   const nowSecs = Math.floor(nowMs / 1000);
 
@@ -682,6 +905,7 @@ export function TeamActivityFeedView({
                       dirty={dirty}
                       onOpen={onOpenSession}
                       showSignedChip={sealedCount < total}
+                      repoRoot={repoRoot}
                     />
                   ))}
                 </div>
@@ -881,6 +1105,7 @@ export function TeamActivityFeed({
       enabling={enabling}
       onRefresh={() => void load()}
       onOpenSession={onOpenSession}
+      repoRoot={repoRoot}
     />
   );
 }

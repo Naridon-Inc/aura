@@ -38,12 +38,24 @@ struct ConflictDetail {
     #[serde(default)] remote_hash: Option<String>,
 }
 
+/// First 8 characters of an id, for the short display prefix.
+///
+/// The ids come straight from the server's conflict rows and carry no length
+/// or ASCII guarantee. A raw `&id[..8]` byte-slice panics when the id is
+/// shorter than 8 bytes (e.g. a legacy numeric id like "42") or when byte 8
+/// splits a multi-byte character — and that panic aborts the whole `aura
+/// resolve` listing, so one odd row hides every other open conflict. Taking
+/// chars is bounded and boundary-safe on both counts.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
 fn client() -> Result<(reqwest::blocking::Client, String, String), String> {
     let cfg = ConfigManager::load();
-    let url = cfg.cloud_url.ok_or("not connected — run `aura connect`")?;
-    let token = cfg.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
-        .ok_or("no cloud token")?;
+    let url = crate::cloud_endpoint::origin(cfg.cloud_url.as_deref())
+        .ok_or("not connected — run `aura connect`")?;
+    let token =
+        crate::cloud_endpoint::token(cfg.cloud_api_token.as_deref()).ok_or("no cloud token")?;
     let c = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -112,7 +124,7 @@ pub fn run(list_only: bool, interactive: bool) -> Result<(), String> {
             println!(
                 "  {}. [{}] {} :: {} on {}",
                 i + 1,
-                crate::text::clip(&c.id, 8),
+                short_id(&c.id),
                 c.file_path,
                 c.function_name.cyan(),
                 c.branch,
@@ -128,6 +140,10 @@ pub fn run(list_only: bool, interactive: bool) -> Result<(), String> {
         }
     }
 
+    // WRK-03: a resolve round where posting (or fetching) failed must not
+    // exit 0 — the conflicts it skipped are still live on the server.
+    let mut transport_failures = 0usize;
+
     for summary in &conflicts {
         println!();
         println!("{} Conflict on {} :: {}",
@@ -140,6 +156,7 @@ pub fn run(list_only: bool, interactive: bool) -> Result<(), String> {
             Ok(d) => d,
             Err(e) => {
                 println!("  {} skipping ({})", "✗".red(), e);
+                transport_failures += 1;
                 continue;
             }
         };
@@ -168,9 +185,69 @@ pub fn run(list_only: bool, interactive: bool) -> Result<(), String> {
 
         match post_resolution(&detail.id, resolution, None) {
             Ok(_) => println!("  {} resolved as {}", "✓".green(), resolution),
-            Err(e) => println!("  {} failed ({})", "✗".red(), e),
+            Err(e) => {
+                println!("  {} failed ({})", "✗".red(), e);
+                transport_failures += 1;
+            }
         }
     }
 
+    if transport_failures > 0 {
+        return Err(format!(
+            "{} conflict{} could not be resolved (fetch or post failed) — still live on the server; re-run `aura resolve`",
+            transport_failures,
+            if transport_failures == 1 { "" } else { "s" },
+        ));
+    }
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_id_is_a_bounded_ascii_prefix() {
+        assert_eq!(short_id("abcdef1234567890"), "abcdef12");
+        // Exactly 8 is kept whole.
+        assert_eq!(short_id("abcdef12"), "abcdef12");
+    }
+
+    #[test]
+    fn short_id_survives_a_short_id() {
+        // A raw &id[..8] here panics "byte index 8 out of bounds"; the whole
+        // `aura resolve` listing dies over one legacy/numeric row.
+        assert_eq!(short_id("42"), "42");
+        assert_eq!(short_id(""), "");
+    }
+
+    #[test]
+    fn short_id_survives_multibyte_ids() {
+        // A raw &id[..8] can land mid-character here and panic "not a char
+        // boundary"; taking chars never splits one.
+        let id = "😀😀😀😀😀😀😀😀😀😀"; // 4 bytes each
+        let out = short_id(id);
+        assert_eq!(out.chars().count(), 8, "8 whole chars, no split");
+        assert!(id.starts_with(&out));
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn raw_byte_slice_panics_on_short_id() {
+        // Documents exactly what line 115 did before this fix — `&id[..8]` on a
+        // server row whose id is shorter than 8 bytes. This panic aborted the
+        // whole listing; short_id replaces it.
+        let id = "42";
+        let _ = &id[..8];
+    }
+
+    #[test]
+    #[should_panic(expected = "char boundary")]
+    fn raw_byte_slice_panics_mid_multibyte() {
+        // The other half: `&id[..8]` splitting a multi-byte char. "abc😀…" puts
+        // an emoji straddling byte 8 (bytes 3..7), so byte 8 is inside it.
+        let id = "abcd😀😀";
+        let _ = &id[..7];
+    }
 }

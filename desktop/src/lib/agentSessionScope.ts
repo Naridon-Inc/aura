@@ -133,6 +133,28 @@ export function resumeCwdOf(
   return encodeProjectDir(cwd) === dir ? cwd : repoRoot;
 }
 
+/** Whether `claude --resume <id>` launched from `cwd` will actually find this
+ *  conversation, rather than silently opening a blank REPL.
+ *
+ *  Claude looks for `<id>.jsonl` under `~/.claude/projects/<encoded cwd>/` and
+ *  says nothing when it isn't there — you get a new empty session that looks
+ *  exactly like a resumed one until you scroll up and find no history. That is
+ *  the deleted-worktree case: {@link resumeCwdOf} falls back to the workspace
+ *  root for an orphaned session (its own folder is gone), and from there the
+ *  transcript is unreachable by construction. A surface that offers "resume"
+ *  has to know the difference before it prints the word.
+ *
+ *  No `file_path` (the lister always sets one) means there is nothing to check
+ *  against, so the recorded cwd is taken at face value. */
+export function resumeReachableFrom(
+  session: Pick<ClaudeSession, "cwd" | "file_path">,
+  cwd: string,
+): boolean {
+  const dir = projectDirOf(session.file_path);
+  if (!dir) return true;
+  return dir === encodeProjectDir(cwd);
+}
+
 /** Which conversation a tab should resume, and where to spawn it.
  *
  *  One place, because the mount-resume path, the "Start agent" overlay and the

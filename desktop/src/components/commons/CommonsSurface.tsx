@@ -11,10 +11,9 @@
 // — nothing about those panels is rebuilt. A failing roster read degrades
 // to an empty lounge, never a broken surface.
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
-import { type TeamMember } from "../../lib/api";
-import { fetchTeam } from "../../lib/teamCache";
+import { useTeamRoster } from "../../lib/useTeamRoster";
 import { LoungePanel } from "../team/presentation/LoungePanel";
 import { PluginBrowser } from "../team/presentation/PluginBrowser";
 import { SegmentedControl } from "../ui/segmented";
@@ -36,36 +35,19 @@ type Props = {
 
 export function CommonsSurface({ repoRoot, initialTab = "lounge" }: Props) {
   const [tab, setTab] = useState<CommonsTab>(initialTab);
-  const [members, setMembers] = useState<TeamMember[]>([]);
-
-  // Roster for the Lounge presence rows. Polled on the same calm cadence
-  // as the Team manifest (15s); every read degrades to the last-good list.
-  useEffect(() => {
-    let alive = true;
-    const load = () =>
-      fetchTeam(repoRoot)
-        .then((m) => {
-          if (alive) setMembers(m.members ?? []);
-        })
-        .catch(() => {
-          /* room-less repo → quiet lounge */
-        });
-    load();
-    const id = window.setInterval(load, 15_000);
-    return () => {
-      alive = false;
-      window.clearInterval(id);
-    };
-  }, [repoRoot]);
+  // Roster for the Lounge presence rows, on the shared 15s poll — the rail
+  // Commons and this one read the same answer instead of each running their
+  // own timer against the same manifest.
+  const members = useTeamRoster(repoRoot);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg-0">
       <header className="flex-shrink-0 flex items-center gap-3 px-4 h-12 border-b border-line-soft">
         <div className="min-w-0">
-          <div className="text-base font-semibold text-text-1 leading-tight">
+          <div className="text-[13px] font-semibold text-text-1 leading-tight">
             Commons
           </div>
-          <div className="text-xs text-text-3 leading-tight">
+          <div className="text-[10.5px] text-text-3 leading-tight">
             Who’s here, what shipped, and the apps you can run
           </div>
         </div>

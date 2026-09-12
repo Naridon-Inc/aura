@@ -7,8 +7,15 @@
 // the Conversation/threads don't re-flash empty on restart; SWR (15s
 // fresh window) refreshes in the background.
 
+//
+// AURA-1307: keyed by PLACE (`placeScope`), not by root alone — the same
+// local root standing in a machine is a different repo's threads. `gh` still
+// runs here; on a machine it is told the repo by name (`remoteRepoFor`).
+
 import { api, type PrComment } from "./api";
 import { setCache } from "./localStore";
+import { placeScope } from "./place/workApi";
+import { remoteRepoFor } from "./prRepo";
 
 const STALE_MS = 15_000; // 15s: comments move faster than detail
 const EXPIRY_MS = 10 * 60_000;
@@ -23,7 +30,7 @@ const mem = new Map<string, Entry>();
 const subs = new Map<string, Set<(list: PrComment[]) => void>>();
 
 function key(repoRoot: string, prNumber: number): string {
-  return `${repoRoot}#${prNumber}`;
+  return `${placeScope(repoRoot)}#${prNumber}`;
 }
 
 function lsKey(k: string): string {
@@ -72,8 +79,8 @@ async function refreshNow(
   const k = key(repoRoot, prNumber);
   const existing = mem.get(k);
   if (existing?.inflight) return existing.inflight;
-  const p = api
-    .prCommentsList(repoRoot, prNumber)
+  const p = remoteRepoFor(repoRoot)
+    .then((remoteRepo) => api.prCommentsList(repoRoot, prNumber, remoteRepo))
     .then((list) => {
       const entry: Entry = { data: list, fetchedAt: Date.now() };
       mem.set(k, entry);

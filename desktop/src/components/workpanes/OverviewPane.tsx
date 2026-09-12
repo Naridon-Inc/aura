@@ -310,11 +310,16 @@ function CostSummaryLine({
 export function OverviewPane({
   repoRoot,
   onOpenSessions,
+  onOpenSession,
   onOpenWrapped,
   onOpenCostUsage,
 }: {
   repoRoot: string;
   onOpenSessions: () => void;
+  /** Open ONE run's session detail — the same wizard the Sessions list opens.
+   *  Overview plots every run as a dot and named each one in a tooltip, with no
+   *  way to reach the run it named; this is that way. */
+  onOpenSession?: (row: IntentRow) => void;
   onOpenWrapped: () => void;
   /** Open the dedicated Cost & usage view — the one home for token/cost data.
    *  Overview only shows a single summary line that links here. */
@@ -693,7 +698,7 @@ export function OverviewPane({
                 colored by the agent that authored it (the x-axis is time, the
                 legend is the per-agent breakdown — so this one chart replaces
                 the old separate activity strip + by-agent bars). */}
-            <ContributionsScatter rows={rows} />
+            <ContributionsScatter rows={rows} onOpenSession={onOpenSession} />
 
             {/* One-line cost summary → opens the dedicated Cost & usage view.
                 The full breakdown (per-model, trend, per-developer) lives

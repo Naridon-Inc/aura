@@ -167,6 +167,7 @@ mod tests {
                     path: "src/auth.rs".into(),
                     status: "M".into(),
                 }],
+                files_elided: 0,
             },
             memory: None,
             recent_turns: vec![TurnBrief {

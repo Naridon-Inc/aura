@@ -348,11 +348,19 @@ function FilterPopover({
         </button>
       </PopoverTrigger>
       <PopoverContent
+        collisionPadding={8}
         align="start"
         sideOffset={4}
         className="w-[260px] p-0 text-text-1"
       >
-        <div className="max-h-[420px] overflow-y-auto p-1.5">
+        {/* Capped by the room the window leaves — see the Display menu below. */}
+        <div
+          className="overflow-y-auto p-1.5"
+          style={{
+            maxHeight:
+              "min(420px, var(--radix-popover-content-available-height, 420px))",
+          }}
+        >
           <Section title="Status">
             {(Object.keys(STATUS_LABEL) as TaskStatus[]).map((s) => (
               <CheckRow
@@ -620,9 +628,24 @@ function DisplayPopover({
       <PopoverContent
         align="end"
         sideOffset={4}
+        collisionPadding={8}
         className="w-[240px] p-0 text-text-1"
       >
-        <div className="max-h-[440px] overflow-y-auto p-1.5">
+        {/* Never taller than the room the window leaves. A fixed 440px is
+            taller than a 900×600 window has below this button, so at Aura's
+            minimum size the menu ran off the bottom edge: "Show on cards" was
+            cut off, and because the content fitted inside 440px the scroller
+            never engaged, so there was no way to reach it (AURA-271). Radix
+            measures the space it placed the menu in and publishes it as
+            --radix-popover-content-available-height; capping by that turns the
+            clipped tail into a scroll. */}
+        <div
+          className="overflow-y-auto p-1.5"
+          style={{
+            maxHeight:
+              "min(440px, var(--radix-popover-content-available-height, 440px))",
+          }}
+        >
           <Section title="Group by">
             {GROUP_BY_OPTIONS.map((o) => (
               <PickRow

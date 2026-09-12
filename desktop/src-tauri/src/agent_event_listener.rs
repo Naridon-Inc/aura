@@ -417,6 +417,15 @@ fn capture_intent(event: &CliAgentEvent, session_id: &str, cwd: Option<&str>) {
         .arg(&summary)
         .arg("--source")
         .arg("hook_auto");
+    // `--source hook_auto` says the row was captured automatically rather than
+    // typed by anyone. It does NOT say who did the work — but `aura log-intent`
+    // falls back to "hook_auto" for the agent too when nothing names one, and
+    // the cloud then synthesizes a session whose agent reads `hook_auto`: the
+    // mechanism wearing the worker's name. This hook is the one place that
+    // knows the answer, because the plugin sent it.
+    if let Some(agent) = attributable_agent(&event.agent) {
+        cmd.env("AURA_AGENT", agent);
+    }
     if let Some(tool) = event.tool_name.as_deref().filter(|t| !t.is_empty()) {
         cmd.arg("--tool").arg(tool);
     }
@@ -776,6 +785,24 @@ fn wrote_file(event: &CliAgentEvent) -> Option<String> {
 ///
 /// `pub(crate)` and kept at this name because it is what thirty-odd call
 /// sites already ask for — one resolver, one set of rules.
+/// The agent name to attribute a captured row to, or `None` when the event
+/// does not actually name one.
+///
+/// Plugins are free-form and a few send a placeholder; attributing to those is
+/// worse than attributing to nothing, because "unknown" and "hook_auto" render
+/// as if they were agent names. Empty means the caller leaves `AURA_AGENT`
+/// unset and the CLI's own fallback applies.
+fn attributable_agent(agent: &str) -> Option<&str> {
+    let name = agent.trim();
+    if name.is_empty() {
+        return None;
+    }
+    match name.to_ascii_lowercase().as_str() {
+        "hook_auto" | "unknown" | "none" | "n/a" => None,
+        _ => Some(name),
+    }
+}
+
 pub(crate) fn resolve_aura_bin() -> String {
     crate::cmd_doctor_cli::resolve_runnable_aura()
 }
@@ -858,4 +885,24 @@ async fn write_response(
     sock.write_all(resp.as_bytes())
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attributable_agent;
+
+    #[test]
+    fn the_agent_the_plugin_named_is_the_one_credited() {
+        assert_eq!(attributable_agent("claude"), Some("claude"));
+        assert_eq!(attributable_agent("  gemini "), Some("gemini"));
+    }
+
+    #[test]
+    fn a_placeholder_credits_nobody_rather_than_inventing_an_agent() {
+        // These are the values that produced `agent: "hook_auto"` on live
+        // sessions in the cloud — the mechanism reported as the worker.
+        for placeholder in ["hook_auto", "HOOK_AUTO", "unknown", "none", "n/a", "", "   "] {
+            assert_eq!(attributable_agent(placeholder), None, "{placeholder}");
+        }
+    }
 }

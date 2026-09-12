@@ -12,8 +12,39 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../../lib/api";
 import type { ExchangeRow, PluginRow } from "../../../lib/api";
 import { refreshPluginContributes } from "../../../lib/pluginContributesStore";
+import { useDocumentVisibility } from "../../../lib/useDocumentVisibility";
 import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { Button } from "../../ui/button";
+
+/** Exchange listings compare on what a row draws — plus the two trust and
+ *  install flags, which are the whole reason a row's actions change. */
+function sameExchange(a: ExchangeRow[], b: ExchangeRow[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (
+      a[i].publish_id !== b[i].publish_id ||
+      a[i].installed !== b[i].installed ||
+      a[i].trusted !== b[i].trusted
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function samePlugins(a: PluginRow[], b: PluginRow[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (
+      a[i].id !== b[i].id ||
+      a[i].version !== b[i].version ||
+      a[i].enabled !== b[i].enabled
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
 
 export function PluginBrowser({ repoRoot }: { repoRoot: string }) {
   const [rows, setRows] = useState<ExchangeRow[] | null>(null);
@@ -23,6 +54,7 @@ export function PluginBrowser({ repoRoot }: { repoRoot: string }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmTrust, setConfirmTrust] = useState<ExchangeRow | null>(null);
   const alive = useRef(true);
+  const visible = useDocumentVisibility();
 
   const refresh = useCallback(async () => {
     try {
@@ -33,12 +65,18 @@ export function PluginBrowser({ repoRoot }: { repoRoot: string }) {
         api.pluginList().catch(() => [] as PluginRow[]),
       ]);
       if (!alive.current) return;
-      setRows(listed);
-      setLocals(local);
+      // Nobody publishes a bundle every 30s — compare so a quiet exchange
+      // costs no re-render of the browser's rows.
+      setRows((cur) => (cur && sameExchange(cur, listed) ? cur : listed));
+      setLocals((cur) => (samePlugins(cur, local) ? cur : local));
       setError(null);
     } catch (e) {
       if (!alive.current) return;
-      setRows([]);
+      // Show the error, but keep whatever we already listed — a failed poll
+      // is not "the exchange is empty", and blanking it lost the install
+      // state of every bundle the user could see a second ago. Only an
+      // exchange we have never successfully read falls back to empty.
+      setRows((cur) => cur ?? []);
       setError(String(e));
     }
   }, [repoRoot]);
@@ -46,12 +84,19 @@ export function PluginBrowser({ repoRoot }: { repoRoot: string }) {
   useEffect(() => {
     alive.current = true;
     void refresh();
+    // No polling behind a hidden window; the effect re-runs when `visible`
+    // flips back, so returning to the app re-lists straight away.
+    if (!visible) {
+      return () => {
+        alive.current = false;
+      };
+    }
     const t = window.setInterval(() => void refresh(), 30_000);
     return () => {
       alive.current = false;
       window.clearInterval(t);
     };
-  }, [refresh]);
+  }, [refresh, visible]);
 
   const install = async (row: ExchangeRow) => {
     setBusy(row.publish_id);

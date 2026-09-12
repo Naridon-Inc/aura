@@ -1,7 +1,10 @@
 // Side-by-side diff via Monaco's DiffEditor. Left pane = HEAD's version
 // (from the daemon's git), right pane = the editor's current buffer.
-// Both panes are read-only — the right buffer re-syncs from the live
-// editor as the user types, so chunks live-update.
+// The left pane is read-only. The right pane can be typed into ("Edit in
+// diff", the default) and ⌘S writes it to disk; the editor tab's own buffer
+// then follows via the workspace watcher, so the two never disagree. While
+// there are unsaved edits the right buffer holds still — a re-read of the
+// file shows "Changed on disk" with a Reload instead of overwriting typing.
 //
 // When git can't produce a HEAD blob (untracked file, no repo) we fall
 // back to baseline-vs-current — still useful for unsaved edits.
@@ -14,6 +17,8 @@ import { DiffEditor, type DiffOnMount, type Monaco } from "@monaco-editor/react"
 import type { editor } from "monaco-editor";
 
 import { Churn } from "./diff/Churn";
+import { useEditableDiff } from "./diff/useEditableDiff";
+import { DiskChangedNotice, EditToggle, UnsavedMark } from "./diff/DiffSaveState";
 import { AsciiSpinner } from "./ui/ascii-spinner";
 import { installMonacoEnvironment } from "../lib/monacoEnv";
 import { languageSlugForPath } from "../lib/monacoLanguage";
@@ -25,6 +30,11 @@ import {
   setIgnoreWhitespace,
   subscribeIgnoreWhitespace,
 } from "../lib/ignoreWhitespacePref";
+import {
+  getEditableDiffs,
+  setEditableDiffs,
+  subscribeEditableDiffs,
+} from "../lib/diffViewPref";
 
 installMonacoEnvironment();
 
@@ -55,6 +65,14 @@ export function DiffView({
   // Shared whitespace-hiding toggle — flips every open diff pane at once.
   const [ignoreWs, setIgnoreWs] = useState(getIgnoreWhitespace);
   useEffect(() => subscribeIgnoreWhitespace(setIgnoreWs), []);
+  // "Edit in diff" / "Read only" — the same shared, persisted choice every
+  // diff pane reads.
+  const [editPref, setEditPref] = useState(getEditableDiffs);
+  useEffect(() => subscribeEditableDiffs(setEditPref), []);
+  // The right pane's text and its save handle. `current` is the editor tab's
+  // buffer, which is what disk holds whenever that tab is clean — so it is
+  // the "disk text" here, and a save lands back in it through the watcher.
+  const edit = useEditableDiff({ absPath: path, diskText: current });
 
   // Pull HEAD copy whenever the file changes. If git fails we fall back
   // to the in-memory baseline so the diff is still useful for unsaved
@@ -82,6 +100,8 @@ export function DiffView({
   const onMount: DiffOnMount = (editorInstance, monaco) => {
     editorRef.current = editorInstance;
     monacoRef.current = monaco;
+    // Dirty tracking + ⌘S, scoped to this editor instance.
+    edit.attach(editorInstance, monaco);
   };
 
   // Re-read tokens + reapply the Aura theme on runtime theme/variant change.
@@ -92,16 +112,10 @@ export function DiffView({
     monaco.editor.setTheme(auraThemeName(isDark));
   }, [isDark, variant]);
 
-  // Keep the right (modified) buffer in sync with the live editor text.
-  // Monaco re-runs the diff incrementally so this is cheap.
-  useEffect(() => {
-    const ed = editorRef.current;
-    if (!ed) return;
-    const modified = ed.getModel()?.modified;
-    if (!modified) return;
-    if (modified.getValue() === current) return;
-    modified.setValue(current);
-  }, [current]);
+  // The right (modified) buffer follows `edit.modified`, which tracks the live
+  // editor text while clean and holds still while there are unsaved edits —
+  // the DiffEditor wrapper applies it to the model on change, so no manual
+  // sync is needed (and a manual one would overwrite typing).
 
   // Push original (HEAD) updates into the left model. The editor is reused
   // across files (no `key`-forced remount below), so both a path switch and a
@@ -148,13 +162,18 @@ export function DiffView({
     <div className="h-full w-full overflow-hidden bg-bg-content flex flex-col">
       <div className="h-8 px-3 flex items-center gap-3 border-b border-line-soft bg-bg-1 text-xs">
         <span className="text-text-3 font-mono truncate">{path}</span>
+        <UnsavedMark edit={edit} />
         <Churn additions={stats.added} deletions={stats.removed} />
+        <DiskChangedNotice edit={edit} />
+        <span className="ml-auto inline-flex shrink-0">
+          <EditToggle on={editPref} onChange={setEditableDiffs} />
+        </span>
         <button
           type="button"
           onClick={() => setIgnoreWhitespace(!ignoreWs)}
           aria-pressed={ignoreWs}
           title={ignoreWs ? "Showing whitespace changes off" : "Hide whitespace-only changes"}
-          className={`ml-auto h-5 px-1.5 rounded border text-xs transition-colors ${
+          className={`h-5 px-1.5 rounded border text-xs transition-colors ${
             ignoreWs
               ? "border-[var(--color-accent)] text-[var(--color-accent)] bg-bg-2"
               : "border-line-soft text-text-3 hover:text-text-1"
@@ -170,7 +189,7 @@ export function DiffView({
           // updating the models in place (see effects above) avoids the Monaco
           // diff teardown race that a per-file dispose triggers.
           original={original}
-          modified={current}
+          modified={edit.modified}
           language={language}
           theme={auraThemeName(isDark)}
           beforeMount={(monaco) => {
@@ -179,7 +198,10 @@ export function DiffView({
           }}
           onMount={onMount}
           options={{
-            readOnly: true,
+            // Right side opens to typing under "Edit in diff"; the left
+            // (last commit) is what the change is measured against and
+            // stays read-only always.
+            readOnly: !editPref,
             originalEditable: false,
             renderSideBySide: true,
             // Fold to inline when the pane is too narrow for two columns so the

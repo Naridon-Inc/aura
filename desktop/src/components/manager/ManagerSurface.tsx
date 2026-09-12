@@ -11,11 +11,18 @@
 // sits under the i-more button.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useDocumentVisibility } from "../../lib/useDocumentVisibility";
 import {
+  getManagerSession,
   retryManagerSession,
   useManagerLoadError,
   useManagerSession,
 } from "../../lib/managerStore";
+// AURA-1296 — tab-menu actions: fork, mark unread, reset chat (+ files).
+import { forkChatFromTab } from "../../lib/forkFromTab";
+import { markTabUnread } from "../../lib/tabUnread";
+import { resetChatFromTab } from "../../lib/resetChat";
+import { peekUncommittedCount, resetFilesLabel } from "../../lib/uncommittedCount";
 import { useEditorStore } from "../../lib/editorStore";
 import { stripSteeringDirective } from "../../lib/steeringDirective";
 import { AsciiSpinner } from "../ui/ascii-spinner";
@@ -73,7 +80,11 @@ export type ManagerPaneAction =
   | "toggle-details"
   | "toggle-loop"
   | "compare"
-  | "cancel";
+  | "cancel"
+  // AURA-1296 — Reset chat needs the store hook to close the old tab, which
+  // only the live surface holds; the two reset flavours ride the bridge.
+  | "reset-chat"
+  | "reset-chat-files";
 
 export type ManagerPaneActionDetail = {
   sessionId: string;
@@ -291,6 +302,30 @@ export function buildManagerTabMenuItems(opts: {
         }),
       ),
   });
+  // AURA-1296 — fork in place, mark unread, start over. Fork and unread need
+  // nothing from the live surface, so they act directly; reset rides the
+  // bridge (see ManagerPaneAction). The files row names how many
+  // uncommitted files the chat's project has, when that's known yet.
+  items.push({ kind: "separator" });
+  items.push({
+    kind: "item",
+    label: "Fork chat",
+    onSelect: () => void forkChatFromTab(opts.sessionId),
+  });
+  items.push({
+    kind: "item",
+    label: "Mark as unread",
+    onSelect: () => markTabUnread(opts.sessionId),
+  });
+  items.push({ kind: "item", label: "Reset chat…", onSelect: fire("reset-chat") });
+  items.push({
+    kind: "item",
+    label: resetFilesLabel(
+      peekUncommittedCount(getManagerSession(opts.sessionId)?.projects[0]?.root),
+    ),
+    onSelect: fire("reset-chat-files"),
+    tone: "danger",
+  });
   if (!opts.isTerminal) {
     items.push({ kind: "separator" });
     items.push({
@@ -370,6 +405,12 @@ export function ManagerSurface({
   // Click-outside / Esc closes the More menu.
   useDismiss(menuOpen, () => setMenuOpen(false), menuRef);
 
+  // AURA-1296 — the pane-action listener below is bound once per session;
+  // the store hook's closer is read through a ref so it stays current.
+  const editorStore = useEditorStore();
+  const closeManagerRef = useRef(editorStore.closeManager);
+  closeManagerRef.current = editorStore.closeManager;
+
   // Chat-tab right-click actions arrive here as a sessionId-scoped window
   // event (the controls that used to live on the `.p-tabs` header bar). Only
   // the surface that owns this sessionId reacts.
@@ -396,6 +437,20 @@ export function ManagerSurface({
         case "cancel":
           api.managerCancel(sessionId);
           break;
+        // AURA-1296 — start over. The fresh chat is opened by resetChat; the
+        // old tab closes here, through the hook, once that has succeeded.
+        case "reset-chat":
+        case "reset-chat-files": {
+          const alsoFiles = detail.action === "reset-chat-files";
+          const root = getManagerSession(sessionId)?.projects[0]?.root;
+          void resetChatFromTab(sessionId, {
+            alsoFiles,
+            fileCount: alsoFiles ? peekUncommittedCount(root) : null,
+          }).then((fresh) => {
+            if (fresh) closeManagerRef.current(sessionId);
+          });
+          break;
+        }
       }
     }
     window.addEventListener(MANAGER_PANE_ACTION_EVENT, onPaneAction);
@@ -968,11 +1023,21 @@ function DetailsPane({
 function UsageChip({ session }: { session: ManagerSession }) {
   const [agg, setAgg] = useState<UsageReport | null>(null);
   const projectKey = session.projects.map((p) => p.root).sort().join("|");
+  // Cmd-Tab away and the poll kept spawning a CLI process per project for a
+  // chip nobody can see. Re-entering the effect on the visible edge also buys
+  // a catch-up fetch, so the chip is current the moment it is looked at.
+  const visible = useDocumentVisibility();
+  // The effect is keyed by `projectKey` — roots, not the session object, which
+  // the store re-creates on every snapshot. Read the live list through a ref
+  // so the fetch can't close over a stale one.
+  const projectsRef = useRef(session.projects);
+  projectsRef.current = session.projects;
   useEffect(() => {
+    if (!visible) return;
     let cancelled = false;
     const fetch = async () => {
       const reports = await Promise.all(
-        session.projects.map((p) => api.auraUsageReport(p.root, "today")),
+        projectsRef.current.map((p) => api.auraUsageReport(p.root, "today")),
       );
       if (cancelled) return;
       const merged = reports.reduce<UsageReport | null>((acc, r) => {
@@ -985,6 +1050,13 @@ function UsageChip({ session }: { session: ManagerSession }) {
           totalOutputTokens: acc.totalOutputTokens + r.totalOutputTokens,
           totalCacheReadTokens:
             acc.totalCacheReadTokens + r.totalCacheReadTokens,
+          cacheCostUsd: acc.cacheCostUsd + r.cacheCostUsd,
+          measuredCostUsd: acc.measuredCostUsd + r.measuredCostUsd,
+          unattributedCostUsd: acc.unattributedCostUsd + r.unattributedCostUsd,
+          // Every project's report says the same thing about what it
+          // measures, so the merged one keeps a single copy rather than
+          // repeating it once per project.
+          measurementNotes: acc.measurementNotes,
           sessionCount: acc.sessionCount + r.sessionCount,
           byModel: mergeByModel(acc.byModel, r.byModel),
           // Per-dev rows are (month, developer, agent) buckets per project —
@@ -992,26 +1064,41 @@ function UsageChip({ session }: { session: ManagerSession }) {
           byDeveloper: [...acc.byDeveloper, ...r.byDeveloper],
         };
       }, null);
-      setAgg(merged);
+      // Nothing moved since the last poll — swallow it. Today's spend is
+      // flat whenever no agent is burning tokens, and re-setting state here
+      // re-rendered the session header (and everything under it) every 12s
+      // for a chip whose pixels were identical.
+      setAgg((prev) =>
+        usageSignature(prev) === usageSignature(merged) ? prev : merged,
+      );
     };
     void fetch();
     const isLive = session.status === "running" || session.status === "paused";
-    if (!isLive) return;
+    if (!isLive) {
+      return () => {
+        cancelled = true;
+      };
+    }
     const id = setInterval(fetch, 12000);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, [projectKey, session.status]);
+  }, [projectKey, session.status, visible]);
 
   if (!agg || agg.totalCostUsd < 0.0001) return null;
 
   const total = agg.totalInputTokens + agg.totalOutputTokens;
-  const cacheSavings = agg.totalCacheReadTokens;
+  const cacheRead = agg.totalCacheReadTokens;
   const tooltip = [
     `Today across ${session.projects.length} project${session.projects.length === 1 ? "" : "s"}`,
     `${compactNumber(agg.totalInputTokens)} in · ${compactNumber(agg.totalOutputTokens)} out`,
-    cacheSavings > 0 ? `${compactNumber(cacheSavings)} cache-read (saved)` : null,
+    // Cache reads are cheap, not free, and the figure beside them now
+    // charges for them. Calling them "saved" here while billing for them
+    // there described the same tokens two incompatible ways.
+    cacheRead > 0
+      ? `${compactNumber(cacheRead)} read from cache · ${formatCost(agg.cacheCostUsd)}`
+      : null,
     "",
     ...agg.byModel.map(
       (m) =>
@@ -1054,6 +1141,24 @@ function mergeByModel(
     cur.sessions += m.sessions;
   }
   return Array.from(map.values()).sort((x, y) => y.costUsd - x.costUsd);
+}
+
+/** Everything the chip actually draws — the two numbers plus the per-model
+ *  tooltip rows — flattened so two polls that read the same thing compare
+ *  equal. Deliberately NOT a deep compare of the report: `byDeveloper` never
+ *  reaches the screen here, and it grows on every project the session adds. */
+function usageSignature(r: UsageReport | null): string {
+  if (!r) return "";
+  return [
+    r.totalCostUsd,
+    r.totalInputTokens,
+    r.totalOutputTokens,
+    r.totalCacheReadTokens,
+    r.sessionCount,
+    ...r.byModel.map(
+      (m) => `${m.model}:${m.inputTokens}:${m.outputTokens}:${m.costUsd}`,
+    ),
+  ].join("|");
 }
 
 function TaskCard({

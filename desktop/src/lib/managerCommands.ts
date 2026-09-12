@@ -119,6 +119,12 @@ export const MANAGER_COMMANDS: ManagerCommand[] = [
     args: "<branch> <agent> [agent…]",
     summary: "Create a parallel copy on a branch and spawn an agent fleet inside it.",
   },
+  // AURA-1296 — expands in lib/chatSlashHandler.ts via lib/prototypePrompt.ts.
+  {
+    name: "prototype",
+    args: "[what to try]",
+    summary: "Ask for a quick throwaway version in a scratch folder, then a report on what was learned.",
+  },
 ];
 
 /** Filter the catalog by a verb prefix (no leading slash). Matches the primary

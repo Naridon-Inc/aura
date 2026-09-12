@@ -20,11 +20,12 @@
 
 import * as React from "react";
 import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import { remarkCallouts } from "../../markdown/remarkCallouts";
 import { calloutFromBlockquote } from "../../markdown/Callout";
-import rehypeKatex from "rehype-katex";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { openFileImperative } from "../../../lib/editorStore";
 import { resolveAgainstRepo, useChatRepoRoot } from "./context";
@@ -552,22 +553,455 @@ function CodeBlock({ children }: { children: React.ReactNode }) {
   );
 }
 
-// Memoized: react-markdown re-parses the whole document on every render, so a
-// parent that re-renders for unrelated reasons (a busy timer tick, a sibling
-// turn streaming) would otherwise re-parse settled prose needlessly. Shallow
-// prop compare (source string + trailingCursor bool) keeps a settled bubble's
-// DOM stable — which is also what keeps a text selection inside it alive.
-export const MarkdownBody = React.memo(function MarkdownBody({
+// Hoisted out of the render so the plugin array and the component map keep a
+// stable identity across renders — that's what lets `MarkdownChunk` memoize on
+// its source string alone. Rebuilding the map inline (as this did) meant
+// react-markdown re-ran its whole pipeline on every parent re-render even when
+// the text hadn't changed by a single character.
+const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkCallouts];
+const REHYPE_PLUGINS = [rehypeKatex];
+
+const MD_COMPONENTS: Components = {
+  p: ({ children }) => (
+    <p className="m-0 mb-[9px] first:mt-0 last:mb-0">
+      {applyLinkify(children)}
+    </p>
+  ),
+  a: ({ href, children }) => (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (href) openExternalUrl(ensureUrlScheme(href));
+      }}
+      className="underline decoration-dotted underline-offset-2"
+      style={{ color: "var(--color-accent)", cursor: "pointer" }}
+    >
+      {children}
+    </a>
+  ),
+  ul: ({ children }) => (
+    <ul className="mt-1.5 mb-[9px] ml-[16px] list-disc last:mb-0 space-y-[3px] marker:text-[var(--color-text-4)]">
+      {children}
+    </ul>
+  ),
+  ol: ({ children }) => (
+    <ol className="mt-1.5 mb-[9px] ml-[16px] list-decimal last:mb-0 space-y-[3px] marker:text-[var(--color-text-4)]">
+      {children}
+    </ol>
+  ),
+  li: ({ children }) => (
+    <li className="pl-0.5" style={{ lineHeight: 1.5 }}>
+      {applyLinkify(children)}
+    </li>
+  ),
+  h1: ({ children }) => (
+    <h1
+      className="text-lg font-[650] mt-4 mb-1.5 first:mt-0"
+      style={{ color: "var(--color-text-1)", lineHeight: 1.3, letterSpacing: "-0.01em" }}
+    >
+      {children}
+    </h1>
+  ),
+  h2: ({ children }) => (
+    <h2
+      className="text-md font-[650] mt-3.5 mb-1 first:mt-0"
+      style={{ color: "var(--color-text-1)", lineHeight: 1.32, letterSpacing: "-0.006em" }}
+    >
+      {children}
+    </h2>
+  ),
+  h3: ({ children }) => (
+    <h3
+      className="text-base font-semibold mt-3 mb-0.5 first:mt-0"
+      style={{ color: "var(--color-text-1)", lineHeight: 1.35 }}
+    >
+      {children}
+    </h3>
+  ),
+  h4: ({ children }) => (
+    <h4
+      className="section-label mt-3 mb-1 first:mt-0"
+      style={{ color: "var(--color-text-3)", letterSpacing: "0.04em" }}
+    >
+      {children}
+    </h4>
+  ),
+  blockquote: ({ children, className }) =>
+    calloutFromBlockquote(className, children) ?? (
+      <blockquote
+        className="my-3 pl-3.5 italic"
+        style={{
+          borderLeft: "2px solid var(--color-accent)",
+          color: "var(--color-text-2)",
+        }}
+      >
+        {children}
+      </blockquote>
+    ),
+  hr: () => (
+    <hr
+      className="my-4 border-0"
+      style={{ borderTop: "1px solid var(--color-line)" }}
+    />
+  ),
+  code: ({ className, children, ...rest }: any) => {
+    // react-markdown v10 no longer passes the `inline` flag, so we
+    // detect block-vs-inline ourselves (otherwise EVERY inline code
+    // span fell through to the block branch below — its clickable
+    // file/URL chips never fired, which is exactly the "entities
+    // aren't clickable" bug). A fenced block carries a `language-*`
+    // class or an embedded newline; everything else is inline.
+    const raw =
+      typeof children === "string"
+        ? children
+        : Array.isArray(children) && children.length === 1 && typeof children[0] === "string"
+          ? (children[0] as string)
+          : null;
+    const isBlock =
+      /language-/.test(className ?? "") || (raw != null && /\n/.test(raw));
+    if (isBlock) {
+      return (
+        <code
+          className={`font-mono text-sm ${className ?? ""}`}
+          style={{ color: "var(--color-text-1)" }}
+          {...rest}
+        >
+          {children}
+        </code>
+      );
+    }
+    // Inline span. Single-child string chips often name a file path,
+    // folder, or URL — render those as clickable chips with a leading
+    // icon so users jump straight into the editor or browser. Falls
+    // back to the bordered chip for everything else (flags,
+    // identifiers, commands).
+    if (raw && isUrlLike(raw)) {
+      return <ClickableUrlChip text={raw} />;
+    }
+    const kind = raw ? inlineCodeKind(raw) : null;
+    if (raw && kind) {
+      return <ClickableCodeChip text={raw} kind={kind} />;
+    }
+    // Not a path/URL — does it NAME a code symbol? Route those to a
+    // prefilled project search so `OnboardingFlow`, `ONBOARDING_V2`,
+    // `api.tasksCreate` are all jumpable, while flags/keywords stay
+    // quiet bordered chips.
+    const symQuery = raw ? inlineSymbolQuery(raw) : null;
+    if (raw && symQuery) {
+      return <SymbolChip text={raw} query={symQuery} />;
+    }
+    // Everything else (flags, commands, identifiers we can't route) —
+    // the quiet bordered token from the `Code` primitive.
+    return <Code {...rest}>{children}</Code>;
+  },
+  pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+  table: ({ children }) => (
+    <div className="my-2 overflow-x-auto">
+      <table
+        className="text-sm border-collapse"
+        style={{ border: "1px solid var(--color-line)" }}
+      >
+        {children}
+      </table>
+    </div>
+  ),
+  th: ({ children }) => (
+    <th
+      className="px-2 py-1 text-left font-semibold"
+      style={{
+        background: "var(--color-bg-2)",
+        border: "1px solid var(--color-line)",
+        color: "var(--color-text-1)",
+      }}
+    >
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td
+      className="px-2 py-1 align-top"
+      style={{
+        border: "1px solid var(--color-line)",
+        color: "var(--color-text-2)",
+      }}
+    >
+      {children}
+    </td>
+  ),
+  strong: ({ children }) => (
+    <strong className="font-semibold" style={{ color: "var(--color-text-1)" }}>
+      {children}
+    </strong>
+  ),
+  em: ({ children }) => <em className="italic">{children}</em>,
+};
+
+/** One parsed run of markdown. `React.memo` on the source string is the whole
+ *  point: while a reply streams, the settled prefix is byte-identical render
+ *  after render, so remark never re-parses it — only the short live tail is
+ *  re-parsed. react-markdown renders into a Fragment (no wrapper element), so
+ *  two chunks inside one `.aura-md` produce exactly the same DOM children — and
+ *  therefore the same `first:`/`last:` margin collapse — as one chunk would. */
+const MarkdownChunk = React.memo(function MarkdownChunk({
+  source,
+}: {
+  source: string;
+}) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
+      components={MD_COMPONENTS}
+    >
+      {source}
+    </ReactMarkdown>
+  );
+});
+
+// ─── Incremental parse split ──────────────────────────────────────────
+//
+// A streaming reply hands this component a source string that grows a couple
+// of characters at a time (see StreamingMessageText's char-drip). Re-parsing
+// the whole accumulated message on every one of those ticks is quadratic in
+// message length — the "chat gets slower the longer the answer runs" lag.
+//
+// The fix: cut the text at the last CommonMark *block boundary* that is
+// provably safe, render everything before it as a memoized chunk (parsed once,
+// then skipped), and re-parse only the block currently being typed. A blank
+// line at the top level ends every leaf block in CommonMark, so parsing the two
+// halves separately yields the same tree as parsing the whole — provided the
+// boundary is not inside a construct that spans blank lines. Those exceptions
+// are exactly what the guards below refuse:
+//
+//   - fenced code   a blank line inside ``` … ``` is content, not a boundary;
+//                   we track fence state and only accept depth-0 blank lines.
+//   - lists         "- a\n\n- b" is ONE loose list. Splitting it would emit two
+//                   <ul>s (and restart an <ol> at 1, since our `ol` override
+//                   drops the `start` attribute). We refuse any boundary whose
+//                   preceding block is still inside a list unless the next line
+//                   is unindented and not itself a list item — CommonMark's own
+//                   list-termination rule.
+//   - indented code "    a\n\n    b" is one code block spanning the blank line,
+//                   so we refuse a boundary whose next line is indented 4+.
+//   - reference defs / footnotes  a `[x]: url` or `[^1]: …` definition resolves
+//                   references anywhere in the document. Split the halves and
+//                   the reference stops resolving, so the moment a definition
+//                   line appears we stop splitting that message entirely.
+//
+// Tables and blockquotes need no guard: GFM tables cannot contain a blank line,
+// and a blank line already terminates a blockquote, so neither can straddle a
+// boundary. Raw HTML isn't rendered at all (no rehype-raw), so it can't render
+// differently either.
+//
+// Everything not provably safe falls back to the old whole-source parse, and a
+// settled message ALWAYS takes that path — so the final rendered form is
+// byte-for-byte what it was before this optimization existed.
+
+/** `- item` / `* item` / `+ item` / `1. item` / `1) item`, up to 3 leading
+ *  spaces (4+ would be indented code, not a list). */
+const LIST_ITEM_RE = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)/;
+/** A list marker whose content hasn't streamed in yet — the bare `-` / `1.`
+ *  that exists for a few characters between "the model typed a bullet" and
+ *  "the model typed what's in it". CommonMark reads an empty item differently
+ *  standalone than it does in document context, so it is never a safe cut. */
+const EMPTY_LIST_ITEM_RE = /^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]*$/;
+/** A link-reference or footnote definition: `[label]: …` / `[^1]: …`. */
+const DEFINITION_RE = /^ {0,3}\[[^\]\n]*\]:/;
+
+/** Count leading spaces (a tab counts as 4 — enough to trip the indented-code
+ *  guard, which is all we use this for). Stops at 4 since nothing downstream
+ *  distinguishes deeper indents. */
+function leadingIndent(src: string, start: number, end: number): number {
+  let n = 0;
+  for (let i = start; i < end && n < 4; i++) {
+    const c = src.charCodeAt(i);
+    if (c === 32) n += 1;
+    else if (c === 9) n += 4;
+    else break;
+  }
+  return n;
+}
+
+/** Index at which `src` can be cut into an already-settled prefix and a still-
+ *  streaming tail, such that parsing the two halves independently renders the
+ *  same as parsing the whole. Returns -1 when no safe cut exists (then the
+ *  caller parses the whole thing, exactly as before).
+ *
+ *  Single linear scan, no allocation — it runs on every drip tick, and a
+ *  charCode walk is orders of magnitude cheaper than the remark parse it
+ *  saves. */
+function settledSplitIndex(src: string): number {
+  let lastValid = -1;
+  // Start of the block following the current blank-line run, plus what the
+  // block *before* that run was (still inside a list / an indented code
+  // block). -1 when we're not sitting after a blank line.
+  let pendingBoundary = -1;
+  let pendingInList = false;
+  let pendingIndentedCode = false;
+  // Indent of the last non-blank line outside a fence, so the blank-line
+  // handler can tell whether the block it just closed was indented code.
+  let lastIndent = 0;
+  // Open fence, if any: the marker character and the run length that opened it
+  // (a closing fence must be the same char and at least as long).
+  let fenceChar = 0;
+  let fenceLen = 0;
+  let inList = false;
+  let pos = 0;
+  const len = src.length;
+  while (pos <= len) {
+    const nl = src.indexOf("\n", pos);
+    const atEnd = nl < 0;
+    const lineEnd = atEnd ? len : nl;
+    const indent = leadingIndent(src, pos, lineEnd);
+    let contentStart = pos;
+    while (
+      contentStart < lineEnd &&
+      (src.charCodeAt(contentStart) === 32 || src.charCodeAt(contentStart) === 9)
+    ) {
+      contentStart++;
+    }
+    const blank = contentStart >= lineEnd;
+    if (!blank) lastIndent = indent;
+
+    if (fenceChar !== 0) {
+      // Inside a fence: only a closing fence matters. Blank lines here are
+      // code content, never boundaries.
+      if (!blank && indent < 4 && src.charCodeAt(contentStart) === fenceChar) {
+        let run = 0;
+        while (
+          contentStart + run < lineEnd &&
+          src.charCodeAt(contentStart + run) === fenceChar
+        ) {
+          run++;
+        }
+        // A closing fence carries no info string — only the marker + spaces.
+        let rest = contentStart + run;
+        while (
+          rest < lineEnd &&
+          (src.charCodeAt(rest) === 32 || src.charCodeAt(rest) === 9)
+        ) {
+          rest++;
+        }
+        if (run >= fenceLen && rest >= lineEnd) {
+          fenceChar = 0;
+          fenceLen = 0;
+        }
+      }
+    } else if (blank) {
+      // Remember where the next block would start; it is only *committed* once
+      // we see what that block actually is (below).
+      if (pendingBoundary < 0) {
+        pendingInList = inList;
+        pendingIndentedCode = lastIndent >= 4;
+      }
+      pendingBoundary = atEnd ? len : nl + 1;
+    } else {
+      const c = src.charCodeAt(contentStart);
+      // A definition anywhere in the message resolves references anywhere else
+      // — never safe to split. Bail out for this message entirely.
+      if (c === 91 /* [ */ && indent < 4) {
+        if (DEFINITION_RE.test(src.slice(contentStart, lineEnd))) return -1;
+      }
+      if (pendingBoundary >= 0) {
+        // Commit the pending boundary iff this next block can't be a
+        // continuation of what came before the blank line, and iff it is
+        // itself far enough along to parse the same alone as in context.
+        const lineText = src.slice(pos, lineEnd);
+        const isListItem = indent < 4 && LIST_ITEM_RE.test(lineText);
+        const safe =
+          // An indented code block bends what follows it: `10) x` after one
+          // parses as a paragraph in context but as an ordered list alone.
+          // Rather than model that, never cut straight after indented code.
+          pendingIndentedCode
+            ? false
+            : isListItem && EMPTY_LIST_ITEM_RE.test(lineText)
+              ? false
+              : pendingInList
+                ? indent === 0 && !isListItem
+                : indent < 4;
+        if (safe) lastValid = pendingBoundary;
+        pendingBoundary = -1;
+      }
+      // Fence opener? (``` or ~~~, 3+, indented less than 4.)
+      if (indent < 4 && (c === 96 /* ` */ || c === 126 /* ~ */)) {
+        let run = 0;
+        while (
+          contentStart + run < lineEnd &&
+          src.charCodeAt(contentStart + run) === c
+        ) {
+          run++;
+        }
+        if (run >= 3) {
+          fenceChar = c;
+          fenceLen = run;
+        }
+      }
+      if (fenceChar === 0) {
+        // CommonMark list termination: a list item starts/continues a list; an
+        // unindented non-item line ends it. Indented lines are lazy
+        // continuations, so they leave the flag alone.
+        if (indent < 4 && LIST_ITEM_RE.test(src.slice(pos, lineEnd))) inList = true;
+        else if (indent === 0) inList = false;
+      }
+    }
+    if (atEnd) break;
+    pos = nl + 1;
+  }
+  // The message ends on a blank line: everything before it is settled, so long
+  // as no fence is open and neither a list nor an indented code block could
+  // still be continued by content that hasn't streamed in yet.
+  if (
+    pendingBoundary >= 0 &&
+    fenceChar === 0 &&
+    !pendingInList &&
+    !pendingIndentedCode
+  ) {
+    lastValid = pendingBoundary;
+  }
+  return lastValid > 0 ? lastValid : -1;
+}
+
+export function MarkdownBody({
   source,
   trailingCursor,
+  streaming = false,
 }: {
   source: string;
   trailingCursor?: boolean;
+  /** The text is still arriving. Enables the incremental split above; a
+   *  settled body always parses whole, so what finally lands on screen is
+   *  identical to the pre-optimization render. Optional because the streaming
+   *  callers don't have to say so — a body whose `source` is observed GROWING
+   *  is self-evidently live (see below). */
+  streaming?: boolean;
 }) {
   // Strip mode-label decorations the model occasionally emits ("[PLAN]
   // ...", "[Ask] ...") and stale prefixes from earlier sessions. The
   // composer chip already shows mode — labels in body text are noise.
   const cleaned = source.replace(/^\s*\[(plan|ask|build)\][ \t]*/i, "");
+  // Self-detected live body: a source that is a strict extension of what this
+  // same mount rendered last commit can only be a stream in progress. Sticky,
+  // so a re-render that doesn't happen to add characters doesn't flip us back
+  // to the whole-source parse mid-stream (which would re-parse everything).
+  // Recorded in an effect, never during render, so the render stays pure — and
+  // so a body's FIRST paint is always the plain whole-source parse. A settled
+  // message never grows, so it never leaves that path.
+  const liveRef = React.useRef(false);
+  const prevRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    const prev = prevRef.current;
+    if (prev !== null && cleaned.length > prev.length && cleaned.startsWith(prev)) {
+      liveRef.current = true;
+    }
+    prevRef.current = cleaned;
+  });
+  const split = streaming || liveRef.current ? settledSplitIndex(cleaned) : -1;
+  const head = split > 0 ? cleaned.slice(0, split) : cleaned;
+  const tail = split > 0 ? cleaned.slice(split) : "";
   return (
     <div
       className="aura-md"
@@ -584,190 +1018,8 @@ export const MarkdownBody = React.memo(function MarkdownBody({
         textRendering: "optimizeLegibility",
       }}
     >
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath, remarkCallouts]}
-        rehypePlugins={[rehypeKatex]}
-        components={{
-          p: ({ children }) => (
-            <p className="m-0 mb-[9px] first:mt-0 last:mb-0">
-              {applyLinkify(children)}
-            </p>
-          ),
-          a: ({ href, children }) => (
-            <a
-              href={href}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                if (href) openExternalUrl(ensureUrlScheme(href));
-              }}
-              className="underline decoration-dotted underline-offset-2"
-              style={{ color: "var(--color-accent)", cursor: "pointer" }}
-            >
-              {children}
-            </a>
-          ),
-          ul: ({ children }) => (
-            <ul className="mt-1.5 mb-[9px] ml-[16px] list-disc last:mb-0 space-y-[3px] marker:text-[var(--color-text-4)]">
-              {children}
-            </ul>
-          ),
-          ol: ({ children }) => (
-            <ol className="mt-1.5 mb-[9px] ml-[16px] list-decimal last:mb-0 space-y-[3px] marker:text-[var(--color-text-4)]">
-              {children}
-            </ol>
-          ),
-          li: ({ children }) => (
-            <li className="pl-0.5" style={{ lineHeight: 1.5 }}>
-              {applyLinkify(children)}
-            </li>
-          ),
-          h1: ({ children }) => (
-            <h1
-              className="text-lg font-[650] mt-4 mb-1.5 first:mt-0"
-              style={{ color: "var(--color-text-1)", lineHeight: 1.3, letterSpacing: "-0.01em" }}
-            >
-              {children}
-            </h1>
-          ),
-          h2: ({ children }) => (
-            <h2
-              className="text-md font-[650] mt-3.5 mb-1 first:mt-0"
-              style={{ color: "var(--color-text-1)", lineHeight: 1.32, letterSpacing: "-0.006em" }}
-            >
-              {children}
-            </h2>
-          ),
-          h3: ({ children }) => (
-            <h3
-              className="text-base font-semibold mt-3 mb-0.5 first:mt-0"
-              style={{ color: "var(--color-text-1)", lineHeight: 1.35 }}
-            >
-              {children}
-            </h3>
-          ),
-          h4: ({ children }) => (
-            <h4
-              className="section-label mt-3 mb-1 first:mt-0"
-              style={{ color: "var(--color-text-3)", letterSpacing: "0.04em" }}
-            >
-              {children}
-            </h4>
-          ),
-          blockquote: ({ children, className }) =>
-            calloutFromBlockquote(className, children) ?? (
-              <blockquote
-                className="my-3 pl-3.5 italic"
-                style={{
-                  borderLeft: "2px solid var(--color-accent)",
-                  color: "var(--color-text-2)",
-                }}
-              >
-                {children}
-              </blockquote>
-            ),
-          hr: () => (
-            <hr
-              className="my-4 border-0"
-              style={{ borderTop: "1px solid var(--color-line)" }}
-            />
-          ),
-          code: ({ className, children, ...rest }: any) => {
-            // react-markdown v10 no longer passes the `inline` flag, so we
-            // detect block-vs-inline ourselves (otherwise EVERY inline code
-            // span fell through to the block branch below — its clickable
-            // file/URL chips never fired, which is exactly the "entities
-            // aren't clickable" bug). A fenced block carries a `language-*`
-            // class or an embedded newline; everything else is inline.
-            const raw =
-              typeof children === "string"
-                ? children
-                : Array.isArray(children) && children.length === 1 && typeof children[0] === "string"
-                  ? (children[0] as string)
-                  : null;
-            const isBlock =
-              /language-/.test(className ?? "") || (raw != null && /\n/.test(raw));
-            if (isBlock) {
-              return (
-                <code
-                  className={`font-mono text-sm ${className ?? ""}`}
-                  style={{ color: "var(--color-text-1)" }}
-                  {...rest}
-                >
-                  {children}
-                </code>
-              );
-            }
-            // Inline span. Single-child string chips often name a file path,
-            // folder, or URL — render those as clickable chips with a leading
-            // icon so users jump straight into the editor or browser. Falls
-            // back to the bordered chip for everything else (flags,
-            // identifiers, commands).
-            if (raw && isUrlLike(raw)) {
-              return <ClickableUrlChip text={raw} />;
-            }
-            const kind = raw ? inlineCodeKind(raw) : null;
-            if (raw && kind) {
-              return <ClickableCodeChip text={raw} kind={kind} />;
-            }
-            // Not a path/URL — does it NAME a code symbol? Route those to a
-            // prefilled project search so `OnboardingFlow`, `ONBOARDING_V2`,
-            // `api.tasksCreate` are all jumpable, while flags/keywords stay
-            // quiet bordered chips.
-            const symQuery = raw ? inlineSymbolQuery(raw) : null;
-            if (raw && symQuery) {
-              return <SymbolChip text={raw} query={symQuery} />;
-            }
-            // Everything else (flags, commands, identifiers we can't route) —
-            // the quiet bordered token from the `Code` primitive.
-            return <Code {...rest}>{children}</Code>;
-          },
-          pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
-          table: ({ children }) => (
-            <div className="my-2 overflow-x-auto">
-              <table
-                className="text-sm border-collapse"
-                style={{ border: "1px solid var(--color-line)" }}
-              >
-                {children}
-              </table>
-            </div>
-          ),
-          th: ({ children }) => (
-            <th
-              className="px-2 py-1 text-left font-semibold"
-              style={{
-                background: "var(--color-bg-2)",
-                border: "1px solid var(--color-line)",
-                color: "var(--color-text-1)",
-              }}
-            >
-              {children}
-            </th>
-          ),
-          td: ({ children }) => (
-            <td
-              className="px-2 py-1 align-top"
-              style={{
-                border: "1px solid var(--color-line)",
-                color: "var(--color-text-2)",
-              }}
-            >
-              {children}
-            </td>
-          ),
-          strong: ({ children }) => (
-            <strong className="font-semibold" style={{ color: "var(--color-text-1)" }}>
-              {children}
-            </strong>
-          ),
-          em: ({ children }) => <em className="italic">{children}</em>,
-        }}
-      >
-        {cleaned}
-      </ReactMarkdown>
+      <MarkdownChunk source={head} />
+      {tail ? <MarkdownChunk source={tail} /> : null}
       {trailingCursor && (
         <span
           className="inline-block w-1.5 h-3 ml-0.5 align-text-bottom animate-pulse"
@@ -776,4 +1028,4 @@ export const MarkdownBody = React.memo(function MarkdownBody({
       )}
     </div>
   );
-});
+}

@@ -155,6 +155,14 @@ pub struct Task {
     /// First-class so the goals tree can index it.
     #[serde(default)]
     pub objective: Option<String>,
+    /// Structured acceptance criteria: the checkable done-oracle this
+    /// card's work is verified against once it is offered to the Crew
+    /// queue. Distinct from `description`, which may narrate acceptance
+    /// as prose the graph can't read — the board→graph projection reads
+    /// THIS field, and a card without it projects as visibility-only
+    /// work no agent can ever claim.
+    #[serde(default)]
+    pub acceptance: Option<String>,
     /// Tasks that must complete before this one (other task IDs).
     /// Cycle detection happens at sort time.
     #[serde(default)]
@@ -302,17 +310,77 @@ fn tasks_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".aura").join("tasks").join("tasks.json")
 }
 
+/// Read the board: the aggregate document AND every per-file card in the
+/// same directory.
+///
+/// This used to read `tasks.json` alone and call a missing file an empty
+/// board. But `.aura/tasks/` holds two stores — this document, and the
+/// `T-xxxxxxxx.json` cards the `aura task` CLI and the crew write — and a
+/// reader that knows one filename cannot tell "there is no work" from "the
+/// work is in the other shape". Move the document aside and List and Board
+/// went to zero while the CLI still listed every card; file a card from the
+/// crew and it never showed up in the app at all. Neither failure said
+/// anything, which is how it survived.
+///
+/// The directory is the board. See `task_store` for the projection.
 fn load(repo_root: &Path) -> Result<TaskFile, String> {
     let p = tasks_path(repo_root);
-    if !p.exists() {
-        return Ok(TaskFile::default());
+    let mut file = if p.exists() {
+        let bytes = fs::read(&p).map_err(|e| format!("read {}: {}", p.display(), e))?;
+        serde_json::from_slice::<TaskFile>(&bytes)
+            .map_err(|e| format!("parse {}: {}", p.display(), e))?
+    } else {
+        TaskFile::default()
+    };
+    // A card is the live row for its id: it is what the CLI rewrites, and
+    // it is written one file at a time, so it is also the copy that
+    // survives a crash mid-write. Where an id somehow appears in both, the
+    // card wins.
+    for card in crate::task_store::read_cards(repo_root) {
+        let row = crate::task_store::card_to_task(&card);
+        match file.tasks.iter_mut().find(|t| t.id == row.id) {
+            Some(slot) => *slot = row,
+            None => file.tasks.push(row),
+        }
     }
-    let bytes = fs::read(&p).map_err(|e| format!("read {}: {}", p.display(), e))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("parse {}: {}", p.display(), e))
+    Ok(file)
 }
 
+/// Write the board back, each row to the store it came from.
+///
+/// A card goes back to its own file and an aggregate row back into the
+/// document, so neither store loses the property it exists for: the cards
+/// stay one-file-per-task and crash-safe, and the CLI keeps reading the
+/// same bytes the app just wrote. A row dropped from the list is deleted
+/// in whichever store held it — the aggregate has always worked that way,
+/// and a card that survived being removed would simply reappear on the
+/// next read.
 fn save(repo_root: &Path, file: &TaskFile) -> Result<(), String> {
-    crate::fs_atomic::write_json_pretty(&tasks_path(repo_root), file)
+    let (cards, rows): (Vec<&Task>, Vec<&Task>) = file
+        .tasks
+        .iter()
+        .partition(|t| crate::task_store::is_card_id(&t.id));
+
+    let previous: std::collections::HashMap<String, crate::task_store::Card> =
+        crate::task_store::read_cards(repo_root)
+            .into_iter()
+            .map(|c| (c.id.clone(), c))
+            .collect();
+
+    for task in &cards {
+        let card = crate::task_store::task_into_card(task, previous.get(&task.id));
+        crate::task_store::write_card(repo_root, &card)?;
+    }
+    for id in previous.keys() {
+        if !cards.iter().any(|t| &t.id == id) {
+            crate::task_store::remove_card(repo_root, id)?;
+        }
+    }
+
+    let aggregate = TaskFile {
+        tasks: rows.into_iter().cloned().collect(),
+    };
+    crate::fs_atomic::write_json_pretty(&tasks_path(repo_root), &aggregate)
 }
 
 // ─── Live-sync apply (#218) ─────────────────────────────────────────────
@@ -544,9 +612,9 @@ pub struct TaskState {
     /// Sort key for the kanban columns. Smaller renders first.
     #[serde(default)]
     pub position: i32,
-    /// When true, this state is one of the five seeded defaults — the
-    /// UI hides the delete affordance for these so users don't lock
-    /// themselves out of the canonical workflow.
+    /// When true, this state is one of the seeded defaults — the UI hides
+    /// the delete affordance for these so users don't lock themselves out
+    /// of the canonical workflow.
     #[serde(default)]
     pub is_default: bool,
     pub created_at: String,
@@ -580,9 +648,14 @@ fn save_task_states(repo_root: &Path, file: &TaskStateFile) -> Result<(), String
 /// without touching customisations the user has already made. Returns
 /// `true` when the file was mutated so the caller can persist.
 fn ensure_default_states(file: &mut TaskStateFile) -> bool {
-    let defaults: [(&str, &str, &str, &str, i32); 5] = [
+    let defaults: [(&str, &str, &str, &str, i32); 6] = [
         ("backlog", "Backlog", "backlog", "#94a3b8", 100),
         ("unstarted", "Todo", "unstarted", "#64748b", 200),
+        // The CLI's cards can say `blocked`, and a board with nowhere to
+        // put that would have to round it down to Todo — which reads as
+        // "someone can pick this up now" when nobody can. Grouped with the
+        // not-started states so it never counts as progress.
+        ("blocked", "Blocked", "unstarted", "#f59e0b", 250),
         ("started", "In Progress", "started", "#3b82f6", 300),
         ("completed", "Done", "completed", "#22c55e", 400),
         ("cancelled", "Cancelled", "cancelled", "#ef4444", 500),
@@ -876,6 +949,14 @@ pub struct CreateTaskInput {
     pub is_epic: bool,
     #[serde(default)]
     pub objective: Option<String>,
+    /// Structured acceptance criteria: the checkable done-oracle this
+    /// card's work is verified against once it is offered to the Crew
+    /// queue. Distinct from `description`, which may narrate acceptance
+    /// as prose the graph can't read — the board→graph projection reads
+    /// THIS field, and a card without it projects as visibility-only
+    /// work no agent can ever claim.
+    #[serde(default)]
+    pub acceptance: Option<String>,
     #[serde(default)]
     pub dependencies: Vec<String>,
     /// The plan, in order. Sent as plain sentences — the caller states the
@@ -964,6 +1045,10 @@ pub struct UpdateTaskInput {
     pub is_epic: Option<bool>,
     #[serde(default)]
     pub objective: Option<String>,
+    /// Structured acceptance criteria. `Some("")` clears it (the card
+    /// drops back to visibility-only in the graph projection).
+    #[serde(default)]
+    pub acceptance: Option<String>,
     #[serde(default)]
     pub dependencies: Option<Vec<String>>,
     /// Replace the whole plan. Use this to *edit* the steps — rewording
@@ -1341,6 +1426,7 @@ pub async fn tasks_create(repo_root: String, input: CreateTaskInput) -> Result<T
         epic_id: parent,
         is_epic: input.is_epic,
         objective: input.objective,
+        acceptance: input.acceptance,
         dependencies: input.dependencies,
         // A plan is not progress: everything the caller states arrives
         // unchecked, whoever is filing it. Blank lines are dropped rather than
@@ -1533,6 +1619,7 @@ pub async fn tasks_upsert_external(
         // `assignee_ids` unless the caller supplied a non-empty list —
         // re-running a JQL shouldn't wipe a hand-picked assignee.
         let patch = UpdateTaskInput {
+            acceptance: None,
             id: id.clone(),
             title: if input.title.trim().is_empty() {
                 None
@@ -1588,6 +1675,7 @@ pub async fn tasks_upsert_external(
         return Err("title is required for a new external task".into());
     }
     let create = CreateTaskInput {
+        acceptance: None,
         title: input.title.clone(),
         description: input.description.clone().unwrap_or_default(),
         status: None,
@@ -1772,6 +1860,12 @@ pub async fn tasks_update(repo_root: String, input: UpdateTaskInput) -> Result<T
     }
     if let Some(v) = input.objective {
         t.objective = Some(v);
+    }
+    // WRK-02 — an empty string clears the oracle rather than storing a
+    // blank one, so the projection reads "no acceptance" instead of an
+    // acceptance nothing can ever satisfy.
+    if let Some(v) = input.acceptance {
+        t.acceptance = if v.trim().is_empty() { None } else { Some(v) };
     }
     if let Some(v) = input.dependencies {
         t.dependencies = v;
@@ -2863,6 +2957,7 @@ mod tests {
             epic_id: None,
             is_epic: false,
             objective: None,
+            acceptance: None,
             dependencies: Vec::new(),
             steps: Vec::new(),
             bead_id: None,
@@ -3346,5 +3441,154 @@ mod tests {
         .unwrap();
         assert_eq!(applied, vec!["t1".to_string()]);
         assert_eq!(load(&repo).unwrap().tasks[0].title, "reborn");
+    }
+
+    // ─── one board, two stores ──────────────────────────────────────────
+    //
+    // The regression these guard is the silent one: `.aura/tasks/` holds
+    // both the aggregate document and the CLI's per-file cards, and for a
+    // while the app read only the document. Move the document aside and
+    // List and Board reported "No tasks yet" while `aura task list` showed
+    // every card. Nothing errored, so nothing surfaced.
+
+    fn card(id: &str, title: &str, status: &str) -> crate::task_store::Card {
+        crate::task_store::Card {
+            id: id.into(),
+            title: title.into(),
+            body: "why this exists".into(),
+            status: status.into(),
+            priority: "high".into(),
+            author: "ashiq".into(),
+            assignee: None,
+            claimed_by: Some("claude".into()),
+            labels: vec!["audit".into()],
+            created_at: 1_767_225_600,
+            updated_at: 1_767_225_600,
+            comments: vec![serde_json::json!({ "body": "picked this up" })],
+            linked_pr: Some("https://github.com/MHASK/aura-sovereign/pull/57".into()),
+            linked_branch: Some("post-audit".into()),
+            sequence_id: 0,
+            rest: Default::default(),
+        }
+    }
+
+    #[test]
+    fn the_board_is_the_directory_not_one_file() {
+        let repo = tmp_repo("bothstores");
+        std::fs::create_dir_all(crate::task_store::tasks_dir(&repo)).unwrap();
+
+        // One row in the aggregate, one card beside it.
+        save(
+            &repo,
+            &TaskFile {
+                tasks: vec![fixture_legacy_task("todo", "medium", None, &[])],
+            },
+        )
+        .unwrap();
+        crate::task_store::write_card(&repo, &card("T-aaaaaaaa", "from the CLI", "open")).unwrap();
+
+        let ids: Vec<String> = load(&repo).unwrap().tasks.iter().map(|t| t.id.clone()).collect();
+        assert!(ids.contains(&"task_test".to_string()), "aggregate row lost: {ids:?}");
+        assert!(ids.contains(&"T-aaaaaaaa".to_string()), "card never appeared: {ids:?}");
+    }
+
+    #[test]
+    fn a_missing_aggregate_does_not_blank_a_board_full_of_cards() {
+        let repo = tmp_repo("noaggregate");
+        std::fs::create_dir_all(crate::task_store::tasks_dir(&repo)).unwrap();
+        crate::task_store::write_card(&repo, &card("T-bbbbbbbb", "still here", "in_progress")).unwrap();
+        assert!(!tasks_path(&repo).exists(), "test needs the document absent");
+
+        let file = load(&repo).unwrap();
+        assert_eq!(file.tasks.len(), 1, "this is the reported bug: 0 tasks shown");
+        assert_eq!(file.tasks[0].state_id, "started");
+    }
+
+    #[test]
+    fn every_card_status_survives_a_load_save_load() {
+        let repo = tmp_repo("roundtrip");
+        std::fs::create_dir_all(crate::task_store::tasks_dir(&repo)).unwrap();
+        let statuses = ["open", "in_progress", "blocked", "done", "cancelled"];
+        for (i, st) in statuses.iter().enumerate() {
+            crate::task_store::write_card(&repo, &card(&format!("T-000000{i}"), st, st)).unwrap();
+        }
+
+        let first = load(&repo).unwrap();
+        save(&repo, &first).unwrap();
+        let second = load(&repo).unwrap();
+
+        assert_eq!(first.tasks.len(), statuses.len());
+        assert_eq!(second.tasks.len(), first.tasks.len(), "a round trip changed the count");
+        for (a, b) in first.tasks.iter().zip(second.tasks.iter()) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.title, b.title);
+            assert_eq!(a.state_id, b.state_id, "{} changed state on a round trip", a.id);
+            assert_eq!(a.status, b.status);
+            assert_eq!(a.priority, b.priority);
+        }
+        // And the CLI still reads its own vocabulary back, unchanged.
+        for c in crate::task_store::read_cards(&repo) {
+            assert_eq!(c.status, c.title, "card {} came back as {}", c.id, c.status);
+        }
+    }
+
+    #[test]
+    fn a_card_edited_in_the_app_goes_back_to_its_own_file() {
+        let repo = tmp_repo("writeback");
+        std::fs::create_dir_all(crate::task_store::tasks_dir(&repo)).unwrap();
+        crate::task_store::write_card(&repo, &card("T-cccccccc", "pick me up", "open")).unwrap();
+
+        let mut file = load(&repo).unwrap();
+        file.tasks[0].state_id = "started".into();
+        file.tasks[0].status = "in_progress".into();
+        save(&repo, &file).unwrap();
+
+        let cards = crate::task_store::read_cards(&repo);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].status, "in_progress", "the CLI would still call this open");
+        // Card-only fields the board row cannot carry must survive the trip.
+        assert_eq!(cards[0].comments.len(), 1);
+        assert_eq!(
+            cards[0].linked_pr.as_deref(),
+            Some("https://github.com/MHASK/aura-sovereign/pull/57")
+        );
+        assert_eq!(cards[0].linked_branch.as_deref(), Some("post-audit"));
+        // …and the card must not have been copied into the aggregate, or
+        // the next read would show it twice.
+        let doc: TaskFile =
+            serde_json::from_slice(&std::fs::read(tasks_path(&repo)).unwrap()).unwrap();
+        assert!(doc.tasks.is_empty(), "card leaked into the aggregate document");
+    }
+
+    #[test]
+    fn deleting_a_card_from_the_board_deletes_its_file() {
+        let repo = tmp_repo("cardelete");
+        std::fs::create_dir_all(crate::task_store::tasks_dir(&repo)).unwrap();
+        crate::task_store::write_card(&repo, &card("T-dddddddd", "goner", "open")).unwrap();
+
+        let mut file = load(&repo).unwrap();
+        file.tasks.retain(|t| t.id != "T-dddddddd");
+        save(&repo, &file).unwrap();
+
+        assert!(crate::task_store::read_cards(&repo).is_empty());
+        assert!(load(&repo).unwrap().tasks.is_empty(), "a deleted card came back");
+    }
+
+    #[test]
+    fn a_blocked_card_lands_on_a_state_the_catalog_ships() {
+        let states = empty_states();
+        let blocked = states
+            .states
+            .iter()
+            .find(|s| s.id == crate::task_store::card_status_to_state_id("blocked"))
+            .expect("blocked cards need a state to point at");
+        assert_eq!(blocked.group, "unstarted", "blocked must not read as progress");
+        for status in ["open", "in_progress", "blocked", "done", "cancelled"] {
+            let id = crate::task_store::card_status_to_state_id(status);
+            assert!(
+                states.states.iter().any(|s| s.id == id),
+                "{status} points at missing state {id}"
+            );
+        }
     }
 }

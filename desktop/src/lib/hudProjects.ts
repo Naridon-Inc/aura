@@ -16,7 +16,7 @@
 
 import { api } from "./api";
 import type { LivePtySession, ProjectEntry, WorktreeEntry } from "./api";
-import { sentenceCase } from "./textCase";
+import { sentenceCase } from "@shared/textCase";
 
 /** A worktree instance of a project (the main checkout, or a parallel copy). */
 export type HudInstance = {

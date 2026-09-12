@@ -10,6 +10,13 @@ const MAX_TRANSCRIPT_LINES: usize = 5000;
 /// Resolve session/transcript directories — worktree-aware.
 /// In a git worktree, uses the worktree-local .aura directory so concurrent
 /// agents in different worktrees don't collide on session state.
+/// How long an *ended* session's record and transcript are kept.
+///
+/// Written down once because three surfaces talk about this number — the
+/// listing, the doctor and the MCP doctor — and two of them used to arrive
+/// at it by deleting the records and counting what went.
+pub const STALE_SESSION_DAYS: u64 = 7;
+
 fn sessions_dir() -> String {
     worktree_aura_path("sessions")
 }
@@ -17,6 +24,7 @@ fn sessions_dir() -> String {
 fn transcripts_dir() -> String {
     worktree_aura_path("transcripts")
 }
+
 
 /// State that belongs to **this checkout only** — the session you are in, its
 /// transcript, its memory. Namespaced per worktree so two agents working side
@@ -28,6 +36,43 @@ fn transcripts_dir() -> String {
 /// `worktree::paths` for why.
 pub(crate) fn worktree_aura_path(subdir: &str) -> String {
     crate::worktree::paths::private_aura_path(subdir)
+}
+
+/// Marker prefix for session file paths that resolve OUTSIDE the declared
+/// checkout (AUDIT-CAP-02). Consumers must treat these as foreign: the cloud
+/// auto-push skips them, and UIs render them as external rather than as
+/// project files.
+pub const EXTERNAL_PREFIX: &str = "external:";
+
+/// Scope a touched-file path to a checkout root — pure, so the multi-repo
+/// contamination fixture can drive it directly.
+///
+/// * inside the checkout → normalized repo-relative path
+/// * outside the checkout (or no checkout at all) → `external:<absolute>`
+/// * already marked external → unchanged
+pub fn scoped_session_path(checkout_root: Option<&Path>, file_path: &str) -> String {
+    if file_path.starts_with(EXTERNAL_PREFIX) {
+        return file_path.to_string();
+    }
+    let Some(root) = checkout_root else {
+        return format!("{}{}", EXTERNAL_PREFIX, file_path);
+    };
+    let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let p = Path::new(file_path);
+    // Resolve the candidate to an absolute path: relative paths resolve
+    // against the process cwd exactly as the file APIs would use them.
+    let absolute = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    };
+    let canon = absolute.canonicalize().unwrap_or(absolute);
+    match canon.strip_prefix(&canon_root) {
+        Ok(rel) => rel.to_string_lossy().to_string(),
+        Err(_) => format!("{}{}", EXTERNAL_PREFIX, canon.to_string_lossy()),
+    }
 }
 
 /// Session phase — tracks lifecycle of an agent conversation
@@ -125,6 +170,11 @@ pub struct AgentSession {
     /// Display handle — the email's local part (team manifest convention).
     #[serde(default)]
     pub developer_handle: Option<String>,
+    /// Canonical scope manifest (AUDIT-CAP-01) — immutable repo/checkout
+    /// identity this session belongs to, stamped at start. Pre-schema
+    /// sessions deserialize with `None` (scope_version 0 semantics).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<serde_json::Value>,
 }
 
 /// A single turn in a conversation transcript
@@ -221,6 +271,18 @@ fn find_own_session(paths: &[PathBuf], my_pid: u32) -> Option<(PathBuf, AgentSes
     None
 }
 
+impl AgentSession {
+    /// Whether a process is still running behind this session.
+    ///
+    /// A session with no pid recorded cannot be shown to belong to anything,
+    /// so it answers `false` — the same reading `most_recent_live_session`
+    /// takes, and for the same reason: sessions are only marked `Ended` when
+    /// a run finishes cleanly, and runs are usually killed instead.
+    pub fn process_is_running(&self) -> bool {
+        self.pid.map(pid_is_running).unwrap_or(false)
+    }
+}
+
 /// The most recently active session belonging to a process that is still
 /// running.
 ///
@@ -275,6 +337,69 @@ pub(crate) fn active_session_in(dir: &str) -> Option<AgentSession> {
         return Some(session);
     }
     most_recent_live_session(&paths)
+}
+
+/// What `aura explain` found, including the shapes of "nothing".
+///
+/// `explain` answers a question about **committed** history: it walks a line
+/// back to the commit that wrote it, and that commit back to the session that
+/// produced it. `aura diff` answers a question about the **working tree**.
+/// Both are legitimate and they routinely disagree, because a change you have
+/// not committed is visible to one and invisible to the other.
+///
+/// That disagreement only reads as a bug when neither command says which
+/// question it answered, so every variant here exists to be said out loud —
+/// see [`ExplainOutcome::describe`].
+#[derive(Debug)]
+pub enum ExplainOutcome {
+    /// Traced to the session (or the checkpoint note) behind the commit.
+    Traced {
+        session: AgentSession,
+        transcript: Vec<TranscriptEntry>,
+    },
+    /// The identifier is in the working copy, but the line it sits on has
+    /// never been committed — so there is no commit to trace it back to.
+    Uncommitted { line: usize },
+    /// The identifier does not appear in the working copy of that file.
+    NotFound,
+    /// Committed, but nothing was ever recorded about why.
+    NoRecord { commit: String },
+    /// The question could not be asked here at all.
+    Unavailable(String),
+}
+
+impl ExplainOutcome {
+    /// The reader-facing account of an outcome that has no transcript to show.
+    /// Empty for [`ExplainOutcome::Traced`], where the caller renders the
+    /// session itself and there is nothing to explain away.
+    ///
+    /// Kept here rather than at the call site so the scope this command
+    /// searched is stated by the code that did the searching, and cannot drift
+    /// away from it.
+    pub fn describe(&self, file_path: &str, identifier: &str) -> String {
+        match self {
+            ExplainOutcome::Traced { .. } => String::new(),
+            ExplainOutcome::Uncommitted { line } => format!(
+                "'{identifier}' is at {file_path}:{line}, which is not committed yet.\n\
+                 `explain` reads committed history — the commit that wrote a line, and the\n\
+                 session behind that commit — so it has nothing to trace this to until you\n\
+                 commit it. `aura diff` is the command that sees uncommitted work."
+            ),
+            ExplainOutcome::NotFound => format!(
+                "'{identifier}' does not appear anywhere in {file_path}.\n\
+                 `explain` looks for the identifier in the file as it is on disk right now."
+            ),
+            ExplainOutcome::NoRecord { commit } => format!(
+                "'{identifier}' was last written by commit {commit}, but nothing was recorded\n\
+                 about why: no Aura session names {file_path}, and the commit carries no\n\
+                 checkpoint note. The code predates Aura here, or the commit was made\n\
+                 without `aura log-intent`."
+            ),
+            ExplainOutcome::Unavailable(reason) => format!(
+                "Cannot trace '{identifier}' in {file_path}: {reason}."
+            ),
+        }
+    }
 }
 
 pub struct SessionManager;
@@ -353,13 +478,26 @@ impl SessionManager {
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())),
             developer,
             developer_handle,
+            // CAP-01: bind the session to its repo/checkout identity at
+            // start — consumers stop inferring it from the active project.
+            scope: git2::Repository::discover(".")
+                .ok()
+                .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
+                .and_then(|root| crate::scope::scope_value(&root, agent_id, Some(&session_id))),
         };
 
         Self::save_session(&session);
         session
     }
 
-    /// Record a file as touched in the current session
+    /// Record a file as touched in the current session.
+    ///
+    /// CAP-02: the recorded path is scoped to the checkout FIRST. A file
+    /// inside this repository is stored repo-relative; a path outside it
+    /// (another project's file that an agent reached over an absolute path)
+    /// is stored with an explicit `external:` prefix — it never enters the
+    /// session as a bare foreign path, and downstream consumers (cloud
+    /// auto-push, console session views) can tell the difference.
     pub fn touch_file(file_path: &str) {
         Self::touch_files(std::slice::from_ref(&file_path.to_string()));
     }
@@ -377,6 +515,11 @@ impl SessionManager {
     /// Dedup is against the set already recorded as well as within `paths`, so
     /// this is exactly equivalent to calling [`touch_file`] for each path in
     /// order — just without paying for the store each time.
+    ///
+    /// Every path is scoped to the checkout first (AUDIT-CAP-02), so a file
+    /// that resolves outside it is recorded as `external:` rather than as a
+    /// project file. The checkout is discovered once for the whole batch —
+    /// that is a `Repository::discover` per commit rather than per file.
     pub fn touch_files(paths: &[String]) {
         if paths.is_empty() {
             return;
@@ -384,12 +527,16 @@ impl SessionManager {
         let Some(mut session) = Self::get_active_session() else {
             return;
         };
-        let mut seen: std::collections::HashSet<&str> =
-            session.files_touched.iter().map(|s| s.as_str()).collect();
+        let checkout_root = git2::Repository::discover(".")
+            .ok()
+            .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+        let mut seen: std::collections::HashSet<String> =
+            session.files_touched.iter().cloned().collect();
         let mut added: Vec<String> = Vec::new();
         for path in paths {
-            if seen.insert(path.as_str()) {
-                added.push(path.clone());
+            let recorded = scoped_session_path(checkout_root.as_deref(), path);
+            if seen.insert(recorded.clone()) {
+                added.push(recorded);
             }
         }
         session.files_touched.extend(added);
@@ -540,6 +687,10 @@ impl SessionManager {
                     .and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string())),
                 developer: None,
                 developer_handle: None,
+                scope: git2::Repository::discover(".")
+                    .ok()
+                    .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
+                    .and_then(|root| crate::scope::scope_value(&root, agent_id, Some(session_id))),
             });
 
         // Stamp the developer (git user.email) once, so aggregation credits
@@ -759,27 +910,69 @@ impl SessionManager {
     }
 
     /// Cleanup: remove ended sessions older than N days
-    pub fn cleanup_stale(max_age_days: u64) -> usize {
-        let now = now_secs();
-        let max_age_secs = max_age_days * 86400;
-        let mut removed = 0;
+    /// Whether a session record has outlived its usefulness.
+    ///
+    /// Stated once, as a function of nothing but the record and the clock,
+    /// so the number a listing reports and the records a prune deletes can
+    /// never be answers to two different questions.
+    ///
+    /// Only an *ended* session qualifies. Active and idle sessions have a
+    /// process or a person behind them, and age alone says nothing about
+    /// either — an agent can sit idle for a week and still be someone's
+    /// open window.
+    pub fn is_prunable(sess: &AgentSession, now: u64, max_age_days: u64) -> bool {
+        sess.phase == SessionPhase::Ended
+            // Saturating because a record written under a clock that has
+            // since been moved back would otherwise underflow, and a panic
+            // in a listing command is a worse answer than "not stale yet".
+            && now.saturating_sub(sess.last_activity) > max_age_days * 86_400
+    }
 
+    /// The ids of every session record a prune would remove. Reads only.
+    ///
+    /// This exists because the only way to ask the question used to be to
+    /// perform the deletion and read the count off it, so `aura sessions`
+    /// and `aura doctor` — a listing and a diagnostic — destroyed ten
+    /// sessions and their transcripts as a side effect of being run.
+    /// Transcripts are the evidence trail the rest of the product is built
+    /// on; nothing should throw them away while claiming to look at them.
+    pub fn stale_sessions(max_age_days: u64) -> Vec<String> {
+        let now = now_secs();
+        let mut stale = Vec::new();
         if let Ok(entries) = fs::read_dir(&sessions_dir()) {
             for entry in entries.flatten() {
-                if entry.path().extension().map(|x| x == "json").unwrap_or(false) {
-                    if let Ok(content) = fs::read_to_string(entry.path()) {
-                        if let Ok(sess) = serde_json::from_str::<AgentSession>(&content) {
-                            if sess.phase == SessionPhase::Ended && now - sess.last_activity > max_age_secs {
-                                let _ = fs::remove_file(entry.path());
-                                // Also remove transcript
-                                let transcript = format!("{}/{}.jsonl", &transcripts_dir(), sess.session_id);
-                                let _ = fs::remove_file(&transcript);
-                                removed += 1;
-                            }
-                        }
-                    }
+                if !entry.path().extension().map(|x| x == "json").unwrap_or(false) {
+                    continue;
+                }
+                let Ok(content) = fs::read_to_string(entry.path()) else {
+                    continue;
+                };
+                let Ok(sess) = serde_json::from_str::<AgentSession>(&content) else {
+                    continue;
+                };
+                if Self::is_prunable(&sess, now, max_age_days) {
+                    stale.push(sess.session_id);
                 }
             }
+        }
+        stale
+    }
+
+    /// Delete the session records [`Self::stale_sessions`] names, and their
+    /// transcripts. Returns how many were removed.
+    ///
+    /// Destructive, and reachable from exactly one place: `aura sessions
+    /// --prune`. Every other surface that wants to talk about stale
+    /// sessions counts them instead and names this command.
+    pub fn cleanup_stale(max_age_days: u64) -> usize {
+        let mut removed = 0;
+        for id in Self::stale_sessions(max_age_days) {
+            let record = format!("{}/{}.json", &sessions_dir(), id);
+            if fs::remove_file(&record).is_ok() {
+                removed += 1;
+            }
+            let transcript = format!("{}/{}.jsonl", &transcripts_dir(), id);
+            let _ = fs::remove_file(&transcript);
         }
         removed
     }
@@ -1187,27 +1380,61 @@ impl SessionManager {
         entries
     }
 
-    /// Find the session/transcript that introduced a specific function
-    /// by correlating git blame → commit → checkpoint → session
-    pub fn explain_code(file_path: &str, identifier: &str) -> Option<(AgentSession, Vec<TranscriptEntry>)> {
-        // 1. Find which commit introduced/last modified this code via git blame
-        let repo = git2::Repository::open(".").ok()?;
-        let blame = repo.blame_file(Path::new(file_path), None).ok()?;
+    /// The same lookup, with the reason it came up empty kept instead of
+    /// thrown away.
+    ///
+    /// Every path out of here is a different sentence for the reader, and
+    /// collapsing them into one `None` is what made this command look like it
+    /// disagreed with `aura diff`. It does not: `diff` reads the working tree,
+    /// this reads committed history, and a change that has not been committed
+    /// is simply not a question this command can answer yet. Said out loud
+    /// that is useful; said as "the file is not tracked by git" it is wrong.
+    pub fn explain_outcome(file_path: &str, identifier: &str) -> ExplainOutcome {
+        let repo = match git2::Repository::open(".") {
+            Ok(r) => r,
+            Err(e) => return ExplainOutcome::Unavailable(format!("not a git repository here ({})", e)),
+        };
+        let file_content = match fs::read_to_string(file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                return ExplainOutcome::Unavailable(format!("cannot read {} ({})", file_path, e))
+            }
+        };
 
         // Search the file for the identifier to find the line number
-        let file_content = fs::read_to_string(file_path).ok()?;
-        let mut target_line = None;
-        for (i, line) in file_content.lines().enumerate() {
-            if line.contains(identifier) {
-                target_line = Some(i);
-                break;
-            }
-        }
+        let Some(line_num) = file_content.lines().position(|line| line.contains(identifier)) else {
+            return ExplainOutcome::NotFound;
+        };
 
-        let line_num = target_line?;
-        let hunk = blame.get_line(line_num + 1)?; // 1-indexed
-        let commit_id = hunk.final_commit_id().to_string();
-        let short_commit = &commit_id[..7];
+        let blame = match repo.blame_file(Path::new(file_path), None) {
+            Ok(b) => b,
+            Err(e) => {
+                return ExplainOutcome::Unavailable(format!("git cannot blame {} ({})", file_path, e))
+            }
+        };
+        // The line number came from the file on disk, and the blame came from
+        // HEAD. On a file with uncommitted edits those are two different line
+        // numberings, so indexing one with the other answers about whichever
+        // line happens to sit there — or falls off the end and answers nothing.
+        // `blame_buffer` maps the working copy onto the blame, which is the
+        // only way this is right on a dirty tree. A buffer git cannot map
+        // (binary, an encoding change) still has a HEAD blame worth showing.
+        let mapped = blame.blame_buffer(file_content.as_bytes()).ok();
+        let hunk = match mapped.as_ref() {
+            Some(m) => m.get_line(line_num + 1), // 1-indexed
+            None => blame.get_line(line_num + 1),
+        };
+        let Some(hunk) = hunk else {
+            return ExplainOutcome::NotFound;
+        };
+        let final_id = hunk.final_commit_id();
+        if final_id.is_zero() {
+            // Blame gives the zero oid for a line that exists only in the
+            // working tree. That is an answer, not a failure.
+            return ExplainOutcome::Uncommitted { line: line_num + 1 };
+        }
+        let commit_id = final_id.to_string();
+        let short_commit = &commit_id[..7.min(commit_id.len())];
 
         // 2. Find the session that was active around this commit
         let sessions = Self::list_sessions();
@@ -1218,14 +1445,13 @@ impl SessionManager {
 
         if let Some(session) = matching_session {
             let transcript = Self::get_transcript(&session.session_id);
-            return Some((session.clone(), transcript));
+            return ExplainOutcome::Traced { session: session.clone(), transcript };
         }
 
         // 3. Fallback: check checkpoint intent from git notes
         // Find the checkpoint for this commit and show its intent
-        let commit = repo.find_commit(hunk.final_commit_id()).ok()?;
         let notes_ref = "refs/notes/aura";
-        if let Ok(note) = repo.find_note(Some(notes_ref), commit.id()) {
+        if let Ok(note) = repo.find_note(Some(notes_ref), final_id) {
             let note_text = note.message().unwrap_or("").to_string();
             if let Ok(checkpoint) = serde_json::from_str::<serde_json::Value>(&note_text) {
                 let agent = checkpoint["agent_id"].as_str().unwrap_or("unknown").to_string();
@@ -1252,6 +1478,9 @@ impl SessionManager {
                     project: None,
                     developer: None,
                     developer_handle: None,
+                    // Synthetic replay of an old checkpoint — its scope was
+                    // never recorded, and none is invented (CAP-01 v0).
+                    scope: None,
                 };
 
                 let transcript = vec![TranscriptEntry {
@@ -1261,11 +1490,11 @@ impl SessionManager {
                     session_id: session.session_id.clone(),
                 }];
 
-                return Some((session, transcript));
+                return ExplainOutcome::Traced { session, transcript };
             }
         }
 
-        None
+        ExplainOutcome::NoRecord { commit: short_commit.to_string() }
     }
 
     /// Condense a session transcript into a summary for storage efficiency
@@ -1423,7 +1652,173 @@ mod tests {
             project: None,
             developer: None,
             developer_handle: None,
+            scope: None,
         }
+    }
+
+    fn ended_at(id: &str, last_activity: u64) -> AgentSession {
+        let mut sess = blank_session(id);
+        sess.phase = SessionPhase::Ended;
+        sess.last_activity = last_activity;
+        sess
+    }
+
+    const DAY: u64 = 86_400;
+
+    #[test]
+    fn only_an_ended_session_is_ever_prunable() {
+        let now = 100 * DAY;
+        // Ended and long past the window: the one case that qualifies.
+        assert!(SessionManager::is_prunable(&ended_at("a", 10 * DAY), now, 7));
+
+        // Same age, still running or merely idle. Age says nothing about
+        // whether a person or a process is still behind it.
+        for phase in [SessionPhase::Active, SessionPhase::Idle] {
+            let mut sess = ended_at("b", 10 * DAY);
+            sess.phase = phase;
+            assert!(
+                !SessionManager::is_prunable(&sess, now, 7),
+                "a session that has not ended must survive any age"
+            );
+        }
+    }
+
+    #[test]
+    fn the_window_is_measured_from_last_activity() {
+        let now = 100 * DAY;
+        // Exactly at the boundary is not yet past it.
+        assert!(!SessionManager::is_prunable(&ended_at("a", 93 * DAY), now, 7));
+        assert!(SessionManager::is_prunable(&ended_at("b", 93 * DAY - 1), now, 7));
+    }
+
+    #[test]
+    fn a_record_from_the_future_is_not_stale_and_does_not_panic() {
+        // A clock moved backwards leaves records stamped ahead of `now`.
+        // The subtraction used to be bare, which panics in a debug build —
+        // inside a listing command, where the cost of being wrong should be
+        // an unhelpful answer, not a crash.
+        let now = 10 * DAY;
+        assert!(!SessionManager::is_prunable(&ended_at("a", 99 * DAY), now, 7));
+    }
+
+    /// The regression itself, guarded at the only place it can come back.
+    ///
+    /// `aura sessions` and `aura doctor` reported how many stale sessions
+    /// there were by deleting them and counting what went, so a read-only
+    /// audit of this repository destroyed ten session records and their
+    /// transcripts. Counting is now [`SessionManager::stale_sessions`];
+    /// deleting is `--prune` and nothing else.
+    #[test]
+    fn deleting_sessions_is_reachable_from_exactly_one_command() {
+        // Scanned across the whole crate rather than one file: the listing
+        // has already moved once (out of `main.rs` and into `cmd_sessions`),
+        // and a guard that names the file it expects stops guarding the
+        // moment the code it guards is tidied somewhere else.
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let read = |name: &str| {
+            std::fs::read_to_string(src_dir.join(name))
+                .unwrap_or_else(|e| panic!("{name} must be readable: {e}"))
+        };
+
+        let mut callers: Vec<String> = Vec::new();
+        let mut stack = vec![src_dir.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src must be readable").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().map(|e| e != "rs").unwrap_or(true) {
+                    continue;
+                }
+                // This file declares it and this test names it; neither is a
+                // call site.
+                if path.file_name().map(|n| n == "session.rs").unwrap_or(false) {
+                    continue;
+                }
+                let body = std::fs::read_to_string(&path).unwrap_or_default();
+                for _ in 0..body.matches("SessionManager::cleanup_stale(").count() {
+                    callers.push(path.display().to_string());
+                }
+            }
+        }
+
+        assert_eq!(
+            callers.len(),
+            1,
+            "exactly one command may delete session records, and it is the \
+             one the user has to ask for by name — found: {callers:?}"
+        );
+        assert!(
+            callers[0].ends_with("cmd_sessions.rs"),
+            "the deletion belongs to the sessions command, not to {}",
+            callers[0]
+        );
+        let cmd = read("cmd_sessions.rs");
+        assert!(
+            cmd.contains("pub fn run(prune: bool)") && cmd.contains("if prune {"),
+            "the prune has to be a flag the caller passes, not something \
+             the listing decides on its own"
+        );
+        assert!(
+            read("main.rs").contains("Commands::Sessions { prune }"),
+            "and the flag has to reach it from the command line"
+        );
+    }
+
+    /// AUDIT-CAP-02 regression — the audited failure: an agent in repo A
+    /// touching a file that lives in repo B recorded B's absolute path
+    /// verbatim, and every downstream consumer (cloud auto-push, console
+    /// session views) treated it as one of A's project files.
+    #[test]
+    fn multi_repo_fixture_produces_zero_bare_foreign_paths() {
+        let repo_a = tempfile::tempdir().unwrap();
+        let repo_b = tempfile::tempdir().unwrap();
+        for d in [repo_a.path(), repo_b.path()] {
+            git2::Repository::init(d).unwrap();
+            fs::create_dir_all(d.join("src")).unwrap();
+        }
+        fs::write(repo_a.path().join("src/a.rs"), "fn a() {}").unwrap();
+        fs::write(repo_b.path().join("src/b.rs"), "fn b() {}").unwrap();
+        let a_root = repo_a.path().canonicalize().unwrap();
+        let b_root = repo_b.path().canonicalize().unwrap();
+
+        // Two simultaneous agents: each records its own file plus the OTHER
+        // repo's file over an absolute path.
+        let a_files = [
+            scoped_session_path(Some(&a_root), a_root.join("src/a.rs").to_str().unwrap()),
+            scoped_session_path(Some(&a_root), b_root.join("src/b.rs").to_str().unwrap()),
+        ];
+        let b_files = [
+            scoped_session_path(Some(&b_root), b_root.join("src/b.rs").to_str().unwrap()),
+            scoped_session_path(Some(&b_root), a_root.join("src/a.rs").to_str().unwrap()),
+        ];
+
+        assert_eq!(a_files[0], "src/a.rs", "own file stored repo-relative");
+        assert_eq!(b_files[0], "src/b.rs");
+        assert!(a_files[1].starts_with(EXTERNAL_PREFIX), "foreign file explicitly marked");
+        assert!(b_files[1].starts_with(EXTERNAL_PREFIX));
+
+        // Zero foreign paths: every unmarked path must resolve INSIDE its
+        // declared checkout.
+        for (root, files) in [(&a_root, &a_files), (&b_root, &b_files)] {
+            for f in files.iter().filter(|f| !f.starts_with(EXTERNAL_PREFIX)) {
+                assert!(root.join(f).exists(), "{f} must resolve inside {root:?}");
+                assert!(!f.contains(".."), "no traversal escapes");
+                assert!(!Path::new(f).is_absolute(), "no absolute paths recorded");
+            }
+        }
+    }
+
+    #[test]
+    fn session_paths_without_a_checkout_are_external_and_markers_are_stable() {
+        // No checkout at all → the path can only be external.
+        let scoped = scoped_session_path(None, "/somewhere/else/main.rs");
+        assert_eq!(scoped, format!("{}{}", EXTERNAL_PREFIX, "/somewhere/else/main.rs"));
+        // Re-scoping an already-marked path never double-wraps it.
+        let repo = tempfile::tempdir().unwrap();
+        assert_eq!(scoped_session_path(Some(repo.path()), &scoped), scoped);
     }
 
     #[test]
@@ -1638,5 +2033,120 @@ mod tests {
 
         let third = active_session_in(tmp.path().to_str().unwrap()).expect("third read");
         assert_eq!(third.model_name.as_deref(), Some("claude-opus-5"));
+    }
+
+    // ─── `explain` says which question it answered ─────────────────────────
+    //
+    // The audit finding these pin: `aura diff` and `aura explain` were run
+    // over one changeset and disagreed. They were never asking the same thing
+    // — `diff` reads the working tree, `explain` reads committed history — but
+    // neither said so, and `explain` in particular answered "the file is not
+    // tracked by git" to a file that was tracked and a change that simply had
+    // not been committed.
+
+    /// A repo with one committed function, plus one written but not committed.
+    fn repo_with_an_uncommitted_edit() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            assert!(ok, "git {:?} failed", args);
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t.t"]);
+        git(&["config", "user.name", "Tester"]);
+        fs::write(dir.path().join("lib.rs"), "fn committed() {}\n").expect("write");
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        fs::write(dir.path().join("lib.rs"), "fn committed() {}\nfn uncommitted() {}\n")
+            .expect("write");
+        dir
+    }
+
+    struct Cwd(PathBuf);
+    impl Drop for Cwd {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
+    #[test]
+    fn an_uncommitted_change_is_named_as_uncommitted_not_as_untracked() {
+        let _lk = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = repo_with_an_uncommitted_edit();
+        let _restore = Cwd(std::env::current_dir().expect("cwd"));
+        std::env::set_current_dir(dir.path()).expect("cd");
+
+        let outcome = SessionManager::explain_outcome("lib.rs", "uncommitted");
+        match &outcome {
+            ExplainOutcome::Uncommitted { line } => assert_eq!(*line, 2),
+            other => panic!("expected Uncommitted, got {:?}", other),
+        }
+        let said = outcome.describe("lib.rs", "uncommitted");
+        assert!(said.contains("not committed yet"), "must name the real reason: {}", said);
+        assert!(said.contains("aura diff"), "must point at the command that can see it: {}", said);
+        assert!(
+            !said.contains("not tracked"),
+            "the file IS tracked; that reason was always wrong: {}",
+            said
+        );
+    }
+
+    #[test]
+    fn a_committed_line_is_still_traced_through_a_dirty_file() {
+        // The line number comes from the working copy and the blame comes from
+        // HEAD. Before the fix those were indexed against each other, so an
+        // edit anywhere above the line moved the answer onto a different one.
+        let _lk = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            assert!(ok, "git {:?} failed", args);
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t.t"]);
+        git(&["config", "user.name", "Tester"]);
+        fs::write(dir.path().join("lib.rs"), "fn keeper() {}\n").expect("write");
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "first"]);
+        // Push `keeper` down the file with uncommitted lines above it.
+        fs::write(dir.path().join("lib.rs"), "// a\n// b\n// c\nfn keeper() {}\n")
+            .expect("write");
+
+        let _restore = Cwd(std::env::current_dir().expect("cwd"));
+        std::env::set_current_dir(dir.path()).expect("cd");
+
+        match SessionManager::explain_outcome("lib.rs", "keeper") {
+            // `keeper` is committed, and nothing here recorded why — so the
+            // honest answer is NoRecord naming the commit, never Uncommitted.
+            ExplainOutcome::NoRecord { commit } => {
+                assert_eq!(commit.len(), 7, "short sha expected, got {:?}", commit);
+            }
+            other => panic!("expected NoRecord for a committed line, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn an_identifier_that_is_not_in_the_file_says_exactly_that() {
+        let _lk = crate::TEST_CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = repo_with_an_uncommitted_edit();
+        let _restore = Cwd(std::env::current_dir().expect("cwd"));
+        std::env::set_current_dir(dir.path()).expect("cd");
+
+        let outcome = SessionManager::explain_outcome("lib.rs", "no_such_thing");
+        assert!(matches!(outcome, ExplainOutcome::NotFound), "got {:?}", outcome);
+        let said = outcome.describe("lib.rs", "no_such_thing");
+        assert!(said.contains("does not appear"), "{}", said);
     }
 }

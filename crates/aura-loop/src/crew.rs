@@ -45,6 +45,73 @@ impl CrewMeta {
     }
 }
 
+/// One crew as every surface shows it: durable identity joined to the live
+/// lifecycle tally from the graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrewRow {
+    pub meta: CrewMeta,
+    pub summary: crate::CrewSummary,
+}
+
+/// A zero-count tally for a crew that is registered but has no nodes yet, so
+/// a freshly spawned crew still renders with a clean row.
+pub fn empty_summary(id: &str) -> crate::CrewSummary {
+    crate::CrewSummary {
+        crew: id.to_string(),
+        total: 0,
+        ready: 0,
+        planned: 0,
+        unrunnable: 0,
+        working: 0,
+        done: 0,
+        paused: 0,
+        blocked: 0,
+        failed: 0,
+        goals: Vec::new(),
+    }
+}
+
+/// Every crew this repo has — the registry AND every `crew_id` that only ever
+/// appears on a node — "main" first, then registered crews in creation order,
+/// then the unregistered ones.
+///
+/// The two sources answer different questions and neither is complete on its
+/// own. The registry holds crews that exist before any work is assigned, so it
+/// is the only place an empty crew appears. The graph holds crews that were
+/// stamped straight onto nodes without ever being spawned, so it is the only
+/// place those appear — `env-plane` had four finished nodes and no registry
+/// row, and every surface that read one source counted a different number of
+/// crews: the app said eight, the CLI seven, the console six. This is the one
+/// derivation they all call.
+pub fn crew_rows(tasks: &[crate::LoopTask], registry: &CrewRegistry) -> Vec<CrewRow> {
+    let summaries = crate::crews_summary(tasks);
+    let mut rows: Vec<CrewRow> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for meta in registry.list() {
+        let summary = summaries
+            .iter()
+            .find(|s| s.crew == meta.id)
+            .cloned()
+            .unwrap_or_else(|| empty_summary(&meta.id));
+        seen.insert(meta.id.clone());
+        rows.push(CrewRow { meta, summary });
+    }
+    for summary in summaries {
+        if seen.contains(&summary.crew) {
+            continue;
+        }
+        let meta = CrewMeta {
+            id: summary.crew.clone(),
+            title: summary.crew.clone(),
+            description: None,
+            created_at: 0,
+        };
+        rows.push(CrewRow { meta, summary });
+    }
+    rows
+}
+
 /// File-backed crew registry under `<repo>/.aura/crew/crews.json`.
 pub struct CrewRegistry {
     path: PathBuf,
@@ -171,6 +238,21 @@ mod tests {
     use std::env;
     use uuid::Uuid;
 
+    fn node(graph: &crate::LoopGraph, title: &str) -> crate::LoopTask {
+        graph
+            .create(
+                title.to_string(),
+                String::new(),
+                "medium".into(),
+                "task".into(),
+                Vec::new(),
+                None,
+                Some("claude".into()),
+                Vec::new(),
+            )
+            .unwrap()
+    }
+
     fn tmp() -> PathBuf {
         let mut p = env::temp_dir();
         p.push(format!("aura-crewreg-{}", Uuid::new_v4()));
@@ -234,4 +316,35 @@ mod tests {
         assert_eq!(reg.list().len(), 1);
         let _ = fs::remove_dir_all(&repo);
     }
+    #[test]
+    fn a_crew_that_only_exists_on_a_node_is_still_a_crew() {
+        let dir = tmp();
+        let registry = CrewRegistry::at(&dir);
+        registry.spawn("Mobile", None, 10).unwrap();
+
+        let graph = crate::LoopGraph::at(&dir);
+        let mut registered = node(&graph, "registered");
+        registered.crew_id = Some("mobile".into());
+        let mut stamped = node(&graph, "stamped straight onto a node");
+        stamped.crew_id = Some("env-plane".into());
+        let uncrewed = node(&graph, "no crew at all");
+
+        let rows = crew_rows(&[registered, stamped, uncrewed], &registry);
+        let ids: Vec<&str> = rows.iter().map(|r| r.meta.id.as_str()).collect();
+        assert_eq!(ids, vec![MAIN_CREW, "mobile", "env-plane"]);
+        assert_eq!(rows[0].summary.total, 1, "an uncrewed node is on the default crew");
+        assert_eq!(rows[2].summary.total, 1, "env-plane was never registered and still counts");
+    }
+
+    #[test]
+    fn a_registered_crew_with_no_work_yet_still_has_a_row() {
+        let dir = tmp();
+        let registry = CrewRegistry::at(&dir);
+        registry.spawn("Perf crew", None, 10).unwrap();
+        let rows = crew_rows(&[], &registry);
+        let perf = rows.iter().find(|r| r.meta.id == "perf-crew").expect("registered crew");
+        assert_eq!(perf.summary.total, 0);
+        assert_eq!(perf.summary.done, 0);
+    }
+
 }

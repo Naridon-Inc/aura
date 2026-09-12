@@ -18,7 +18,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { IntentRow } from "../../lib/api";
 import { agentDisplayLabel, canonicalAgentId } from "../../lib/agentIdentity";
 import { colorForName } from "../../lib/identityColors";
-import { intentTypeChip } from "../../lib/intentTypeLabels";
+import { intentTypeChip } from "@shared/intentTypeLabels";
 import { providerAccent, providerForModel } from "./usageProviders";
 
 const KNOWN_AGENTS = new Set([
@@ -99,6 +99,12 @@ type Dot = {
   intentType: string | null;
   signed: boolean;
   date: Date;
+  /** The run this dot IS. The chart's own key says "each dot = one run", so a
+   *  dot that cannot be opened is a reference to a session with no way to reach
+   *  it — the reader is told a run exists and left to find it by hand in the
+   *  Sessions list. Carrying the row is what lets a click open that run's own
+   *  detail wizard, the same one the list opens. */
+  row: IntentRow;
 };
 
 type Legend = { id: string; label: string; color: string; count: number };
@@ -121,7 +127,17 @@ const HOUR_LABEL: Record<number, string> = {
  *  honest intent log the rest of the pane folds; we only read timestamp,
  *  agent_id, intent, intent_type, signature and changeset churn off each row.
  *  Renders null when there's nothing real to plot. */
-export function ContributionsScatter({ rows }: { rows: IntentRow[] }) {
+export function ContributionsScatter({
+  rows,
+  onOpenSession,
+}: {
+  rows: IntentRow[];
+  /** Open one run's session detail — the same wizard the Sessions list opens,
+   *  layered over whichever Trace tab you were on, so Esc puts you back here.
+   *  Omitted on a surface with no wizard to open, and then the dots stay
+   *  hover-only rather than pretending to be clickable. */
+  onOpenSession?: (row: IntentRow) => void;
+}) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [w, setW] = useState(0);
   // Index into the draw-ordered `dots` array that the cursor is nearest to.
@@ -163,6 +179,7 @@ export function ContributionsScatter({ rows }: { rows: IntentRow[] }) {
           intentType: (r.intent_type ?? "").trim() || null,
           signed: !!r.signed_block_id,
           date: d,
+          row: r,
         };
       });
 
@@ -249,6 +266,7 @@ export function ContributionsScatter({ rows }: { rows: IntentRow[] }) {
         intentType: p.intentType,
         signed: p.signed,
         date: p.date,
+        row: p.row,
       }))
       .sort((a, b) => b.r - a.r);
   }, [rawPoints, innerW, innerH, span, minTs, maxChurn]);
@@ -289,6 +307,15 @@ export function ContributionsScatter({ rows }: { rows: IntentRow[] }) {
   function onLeave() {
     setHoverIdx(null);
     setCursor(null);
+  }
+
+  // Clicking opens the run the cursor is already snapped to — the same nearest-
+  // run hit test the tooltip uses, so what you click is exactly what you were
+  // just reading about. Overlapping dots make per-circle handlers unreliable,
+  // which is why this lives on the plot rather than on each circle.
+  const canOpen = !!onOpenSession && !!hovered;
+  function onClick() {
+    if (onOpenSession && hovered) onOpenSession(hovered.row);
   }
 
   if (rawPoints.length === 0) return null;
@@ -354,9 +381,15 @@ export function ContributionsScatter({ rows }: { rows: IntentRow[] }) {
             height={H}
             viewBox={`0 0 ${w} ${H}`}
             role="img"
-            aria-label="Runs over time, colored by agent. Hover a run for details."
+            aria-label={
+              onOpenSession
+                ? "Runs over time, colored by agent. Hover a run for details, click to open it."
+                : "Runs over time, colored by agent. Hover a run for details."
+            }
             onMouseMove={onMove}
             onMouseLeave={onLeave}
+            onClick={onOpenSession ? onClick : undefined}
+            style={canOpen ? { cursor: "pointer" } : undefined}
           >
             {/* Horizontal hour gridlines + y labels */}
             {HOURS.map((hr) => {
@@ -506,6 +539,12 @@ export function ContributionsScatter({ rows }: { rows: IntentRow[] }) {
               <div className="mt-1.5 line-clamp-2 text-xs leading-snug text-text-3">
                 {hovered.intent}
               </div>
+            ) : null}
+            {/* Say the dot is openable. A chart nobody expects to be clickable
+                is a chart nobody clicks, and the run stays as unreachable as it
+                was when there was no handler at all. */}
+            {onOpenSession ? (
+              <div className="mt-1.5 text-2xs text-text-5">Click to open this run</div>
             ) : null}
           </div>
         ) : null}

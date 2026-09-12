@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import path from "node:path";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -15,7 +16,21 @@ export default defineConfig(async () => ({
   // by the other — and syntax highlighting disappears with no error.
   // Force a single instance for every CodeMirror core package.
   resolve: {
+    // The words this app and the web console must agree on live outside both
+    // of them, so `BugFix` cannot read as "Bug fix" here and as `BugFix`
+    // there. Not a package — a folder, resolved by both bundlers.
+    alias: {
+      "@shared": path.resolve(__dirname, "../aura-shared"),
+    },
     dedupe: [
+      // The shared ui/ folder resolves react through a symlink into THIS app's
+      // node_modules (see aura-shared/node_modules/README.md); dedupe pins the
+      // bundle to one copy of each so a hook can never see two reacts.
+      "react",
+      "react-dom",
+      "clsx",
+      "tailwind-merge",
+      "lucide-react",
       "@codemirror/state",
       "@codemirror/view",
       "@codemirror/language",

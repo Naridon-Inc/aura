@@ -80,10 +80,17 @@ const ALLOWED: Array<{ file: string; fn: string; reason: string }> = [
   },
 ];
 
-/** Files that ARE the cache (or the api surface underneath it). */
+/** Files that ARE the cache (or the api surface underneath it).
+ *
+ *  `lib/place/workApi.ts` is the second half of that surface: the caches
+ *  read through it so a project the window is standing in on a machine is
+ *  answered off that machine (AURA-1306). It is underneath the caches, not
+ *  beside them — which is why the second pattern below catches a surface
+ *  importing a guarded read from it, exactly as it would from `api`. */
 function exempt(rel: string): boolean {
   return (
     rel === "src/lib/api.ts" ||
+    rel === "src/lib/place/workApi.ts" ||
     /^src\/lib\/[A-Za-z]*[Cc]ache\.ts$/.test(rel) ||
     rel.startsWith("src/lib/sharedRead")
   );
@@ -108,15 +115,32 @@ describe("a read with a cache in front of it goes through the cache", () => {
     "g",
   );
 
+  // The same reads reached through the place seam instead of `api`: a named
+  // import of a guarded function from lib/place/workApi is the same bypass
+  // with a different spelling.
+  const viaPlace = /import\s*\{([^}]*)\}\s*from\s*"[^"]*\/place\/workApi"/g;
+
   const bypasses = walk(SRC).flatMap((full) => {
     const rel = "src" + full.slice(SRC.length);
     if (exempt(rel)) return [];
     const body = readFileSync(full, "utf8");
-    return [...body.matchAll(pattern)].map((m) => ({
+    const direct = [...body.matchAll(pattern)].map((m) => ({
       file: rel,
       fn: m[1] as string,
       line: body.slice(0, m.index).split("\n").length,
     }));
+    const routed = [...body.matchAll(viaPlace)].flatMap((m) =>
+      (m[1] as string)
+        .split(",")
+        .map((n) => n.trim().split(/\s+as\s+/)[0]!.replace(/^type\s+/, ""))
+        .filter((n) => n in GUARDED)
+        .map((fn) => ({
+          file: rel,
+          fn,
+          line: body.slice(0, m.index).split("\n").length,
+        })),
+    );
+    return [...direct, ...routed];
   });
 
   test("no surface calls a guarded command directly", () => {

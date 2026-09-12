@@ -23,6 +23,7 @@ pub mod contract;
 pub mod dependents;
 pub mod restore;
 pub mod scan;
+pub mod severed;
 pub mod verdict;
 
 use colored::Colorize;
@@ -30,6 +31,23 @@ use contract::IntentContract;
 use git2::Repository;
 use std::path::{Path, PathBuf};
 use verdict::{Finding, Severity, Verdict};
+
+/// The only place a verdict is produced.
+///
+/// `evaluate` is the pure decision and `severed::detect` is the half that needs
+/// git, and a caller that ran the first without the second would report a clean
+/// commit on a change that cut an authorization check. So neither is called
+/// directly anywhere else — there is one door, and it is this one.
+fn judge(
+    repo: &Repository,
+    contract: &IntentContract,
+    baseline: &std::collections::BTreeMap<String, scan::SymbolFacts>,
+    staged: &std::collections::BTreeMap<String, scan::SymbolFacts>,
+) -> Verdict {
+    let mut v = verdict::evaluate(contract, baseline, staged);
+    verdict::record_severed(&mut v, &severed::detect(repo, contract, staged));
+    v
+}
 
 /// Repo root for the repository `repo` points at.
 fn root_of(repo: &Repository) -> PathBuf {
@@ -283,7 +301,7 @@ pub fn run_verify(json: bool) -> i32 {
         }
     };
 
-    let v = verdict::evaluate(&contract, &baseline, &staged);
+    let v = judge(&repo, &contract, &baseline, &staged);
 
     if json {
         let payload = verdict_json(&repo, &contract, &v, &baseline, &staged);
@@ -415,8 +433,18 @@ fn print_failed(
 
     println!("\n{}", "Unexpected semantic change".bold());
     for x in &blocking {
-        let visibility = if x.exported { "exported " } else { "" };
-        println!("  Deleted {visibility}{}:", plain_kind(&x.kind));
+        // Two blocking findings, two different sentences. A severed call is
+        // not a deletion, and printing "Deleted" over one would send the
+        // reader looking for a function that is still exactly where it was.
+        match x.finding {
+            Finding::ProtectedCallRemoved => {
+                println!("  Call removed, {} still present:", plain_kind(&x.kind));
+            }
+            _ => {
+                let visibility = if x.exported { "exported " } else { "" };
+                println!("  Deleted {visibility}{}:", plain_kind(&x.kind));
+            }
+        }
         println!("  {}", format!("{}()", x.symbol).yellow().bold());
     }
 
@@ -424,6 +452,12 @@ fn print_failed(
     // this block the screen says only "a rule was broken"; with it, it says
     // which code stops working.
     for x in &blocking {
+        // Only for a removal. The dependents walk answers "what breaks now
+        // that this is gone", and for a severed call nothing is gone — the
+        // reason line already names both ends of the edge that was cut.
+        if x.finding == Finding::ProtectedCallRemoved {
+            continue;
+        }
         let Some(facts) = baseline.get(&x.symbol) else { continue };
         let chain =
             dependents::dependents_of(repo, &contract.baseline, &x.symbol, &facts.file, staged);
@@ -518,7 +552,7 @@ pub fn run_restore(symbol: &str, json: bool) -> i32 {
                         return 1;
                     }
                 };
-                let v = verdict::evaluate(&contract, &baseline, &staged);
+                let v = judge(&repo, &contract, &baseline, &staged);
                 let payload = serde_json::json!({
                     "restored": outcome.symbol,
                     "file": outcome.file,

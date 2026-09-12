@@ -1,6 +1,6 @@
 [package]
 name = "aura"
-version = "0.19.39"
+version = "0.19.47"
 edition = "2024"
 
 # Public release workspace: the aura CLI (root package) + its vendored
@@ -45,6 +45,7 @@ aura-blockstore  = { path = "crates/aura-blockstore" }
 # `std::process`, the desktop app drives the same plan through `Place::sh`, so a
 # laptop and a box converge through one implementation rather than two.
 aura-env         = { path = "crates/aura-env" }
+aura-hooks       = { path = "crates/aura-hooks" }
 aura-egress      = { path = "crates/aura-egress" }
 aura-loop        = { path = "crates/aura-loop" }
 aura-policy       = { path = "crates/aura-policy" }
@@ -62,6 +63,10 @@ aura-redact      = { path = "crates/aura-redact" }
 # (`aura review post`) and cloud (`/api/v2/pr/review`) PR-review paths anchor
 # inline comments to real diff lines identically. See `src/review/github.rs`.
 aura-prdiff      = { path = "crates/aura-prdiff" }
+aura-repo-identity = { path = "crates/aura-repo-identity" }
+# Shared with the cloud: one answer to "did a person write this intent row",
+# so a synthesised session is named the same thing in both places.
+aura-intent-grammar = { path = "crates/aura-intent-grammar" }
 # S1-G aura-stackgraph (Python + TypeScript find-refs/find-defs) is
 # *not* a direct dep here: stack-graphs pins tree-sitter 0.24 and our
 # parser stack pins 0.26 — `links = "tree-sitter"` collides. Wire-up
@@ -77,7 +82,7 @@ git2 = { version = "0.20.4", features = ["vendored-openssl", "vendored-libgit2"]
 indicatif = "0.18.4"
 notify = "8.2.0"
 petgraph = "0.8.3"
-reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "json", "rustls"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "json", "query", "rustls"] }
 age = "0.11.1"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -109,6 +114,9 @@ tree-sitter-cpp = "0.23.4"
 tree-sitter-c = "0.24.1"
 tree-sitter-php = "0.24.2"
 sha2 = "0.10"
+# Kimi names its session directory `md5(cwd)` — the only handle on which
+# repo one of its sessions ran in. See src/history/kimi.rs.
+md5 = "0.7"
 hex = "0.4"
 rand = "0.8"
 bcrypt = "0.17"

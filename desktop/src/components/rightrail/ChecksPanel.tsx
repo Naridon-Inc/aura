@@ -21,13 +21,13 @@
 // deliberate exception — putting a comment IN the chat is the whole point.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  api,
-  type AheadBehind,
-  type PrComment,
-  type PrDetail,
-  type PrSummary,
+import type {
+  AheadBehind,
+  PrComment,
+  PrDetail,
+  PrSummary,
 } from "../../lib/api";
+import { prUpdate } from "../../lib/prApi";
 import { fetchAheadBehind, fetchDiffStats } from "../../lib/gitStateCache";
 import { fetchPrDetail } from "../../lib/prDetailCache";
 import { fetchPrComments } from "../../lib/prCommentsCache";
@@ -291,7 +291,7 @@ export function ChecksPanel({ repoRoot, conflictsCount }: Props) {
     async (patch: { title?: string; body?: string }) => {
       if (!pr) return;
       try {
-        await api.prUpdate(
+        await prUpdate(
           repoRoot,
           pr.number,
           patch.title ?? null,

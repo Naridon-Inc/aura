@@ -14,15 +14,21 @@
 //! recover signals like a `#[tauri::command]` attribute or an axum route
 //! registration we open the node's source file and inspect a *bounded*
 //! window of lines (the handful above `start_line` for attributes) or scan
-//! for a route/subcommand table. Classification is only ever called on a
-//! handful of reached nodes, so a few small file reads are acceptable.
+//! for a route/subcommand table.
+//!
+//! Those reads have to be cheap per node, not merely small: `aura impact`
+//! classifies every caller it reached, which on a real repo is thousands, so
+//! anything done per node is done thousands of times. Whole-file reads are
+//! memoized and a directory's route table is indexed once
+//! ([`dir_route_index`]) rather than re-scanned for each symbol asked about.
 //!
 //! Reads are best-effort: on any failure we fall back to
 //! path/kind/signature-only heuristics, and we never panic.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::models::AstNode;
 
@@ -66,12 +72,18 @@ thread_local! {
     /// acceptable. The map is keyed by the absolute/relative path string we
     /// actually opened.
     static FILE_MEMO: RefCell<HashMap<String, Option<String>>> = RefCell::new(HashMap::new());
+
+    /// One `identifier -> url path` index per directory whose sibling files
+    /// have been read, so a directory is read at most once however many nodes
+    /// in it get classified. See [`dir_route_index`] for why that matters.
+    static DIR_ROUTES: RefCell<HashMap<PathBuf, Rc<HashMap<String, String>>>> =
+        RefCell::new(HashMap::new());
 }
 
 /// Read a file's full contents, trying `file_path` joined under `repo_root`
 /// first (when relative) and then the path as-is. Returns `None` on any
 /// failure. Results are memoized per thread by the path string.
-fn read_source(file_path: &str, repo_root: &Path) -> Option<String> {
+pub(crate) fn read_source(file_path: &str, repo_root: &Path) -> Option<String> {
     // Candidate paths to try, in order. We dedupe identical strings.
     let mut candidates: Vec<String> = Vec::new();
 
@@ -141,34 +153,17 @@ fn lines_above(content: &str, start_line: u32, window: usize) -> String {
 /// 4. [`EntryKind::UiComponent`]
 /// 5. [`EntryKind::PublicApi`] (fallback, used sparingly)
 ///
-/// Most nodes are internal helpers and return `None`. May content-peek under
-/// `repo_root`; never panics.
-pub fn classify(node: &AstNode, repo_root: &Path) -> Option<EntryPoint> {
-    let file = node.file_path.as_deref().unwrap_or("");
-    // Read source once up front if we have a path; individual detectors decide
-    // whether they need it. `None` content just means peeks are skipped and we
-    // lean on path/kind/signature heuristics.
-    let content = if file.is_empty() {
-        None
-    } else {
-        read_source(file, repo_root)
-    };
-    // Single-node callers (the impact gate) want maximum fidelity, including the
-    // cross-file sibling-router scan.
-    classify_with_content(node, repo_root, content.as_deref(), true)
-}
-
-/// Same as [`classify`], but the caller supplies the file's already-read source
-/// (or `None`). This lets bulk callers — e.g. `aura atlas`, which classifies
-/// thousands of nodes — read each file *once* and reuse it across every node in
-/// that file, instead of re-reading the file per node.
+/// Most nodes are internal helpers and return `None`. Never panics.
 ///
-/// `cross_file` controls whether HTTP-route detection may fall back to scanning
-/// *sibling* `.rs` files for a route table that references this handler. That
-/// scan reads (and string-searches) every neighbouring file and is fine for a
-/// one-off single-node classification, but catastrophic when run across tens of
-/// thousands of nodes — so bulk callers pass `false` and rely on same-file route
-/// tables plus the handler-shape fallback instead.
+/// The caller supplies the node's file contents (or `None` — then the peeks are
+/// skipped and we lean on path/kind/signature heuristics), because every caller
+/// classifies many nodes and a handful of files covers all of them: the read
+/// belongs to the file, not to the node. [`read_source`] is the reader they use.
+///
+/// `cross_file` controls whether HTTP-route detection may fall back to a route
+/// table in a *sibling* file rather than this one. Sibling lookups go through a
+/// per-directory index built once ([`dir_route_index`]), so this is a hash
+/// lookup per node and callers no longer have to trade fidelity for speed.
 pub fn classify_with_content(
     node: &AstNode,
     repo_root: &Path,
@@ -389,29 +384,97 @@ fn find_route_path_for_handler(content: &str, ident: &str) -> Option<String> {
             continue;
         }
 
-        // axum `.route("<path>", ...)` — the path is the first quoted arg, and
-        // the handler appears later on the same line.
-        if let Some(rest) = line.split_once(".route(") {
-            if let Some(path) = first_quoted(rest.1) {
-                if path.starts_with('/') {
-                    return Some(path);
-                }
-            }
-        }
-
-        // builder `*.get("<path>", ident)` / `*.post(...)` etc. The path is the
-        // first quoted string and `ident` is referenced as the handler arg.
-        if let Some(path) = first_quoted(line) {
-            if path.starts_with('/') {
-                // Make sure the verb call shape is plausible (a method call with
-                // a path then a handler), not an unrelated string literal.
-                if line_has_http_verb_call(line) {
-                    return Some(path);
-                }
-            }
+        if let Some(path) = route_path_on_line(line) {
+            return Some(path);
         }
     }
     None
+}
+
+/// The URL path a single line mounts something at, if it is a route
+/// registration at all. Depends only on the line, never on which handler is
+/// being asked about — which is what lets the same rule serve both the
+/// per-handler scan above and the whole-file index below.
+fn route_path_on_line(line: &str) -> Option<String> {
+    // axum `.route("<path>", ...)` — the path is the first quoted arg, and
+    // the handler appears later on the same line.
+    if let Some(rest) = line.split_once(".route(") {
+        if let Some(path) = first_quoted(rest.1) {
+            if path.starts_with('/') {
+                return Some(path);
+            }
+        }
+    }
+
+    // builder `*.get("<path>", ident)` / `*.post(...)` etc. The path is the
+    // first quoted string and the handler is referenced as the handler arg.
+    if let Some(path) = first_quoted(line) {
+        if path.starts_with('/') {
+            // Make sure the verb call shape is plausible (a method call with
+            // a path then a handler), not an unrelated string literal.
+            if line_has_http_verb_call(line) {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+/// Every handler this file mounts, as `identifier -> url path`.
+///
+/// One pass over the file answers for all handlers at once, where
+/// [`find_route_path_for_handler`] answers for one. That is the difference
+/// between reading a directory once and reading it once per node, which is
+/// what the sibling scan below needs.
+///
+/// The two agree by construction: a line contributes exactly the path
+/// [`route_path_on_line`] gives it, to exactly the identifiers that appear on
+/// it as whole words, and the earliest line wins — the same line order, the
+/// same first match.
+fn route_index(content: &str) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for raw in content.lines() {
+        let line = raw.trim();
+        let Some(path) = route_path_on_line(line) else {
+            continue;
+        };
+        for word in ident_words(line) {
+            out.entry(word).or_insert_with(|| path.clone());
+        }
+    }
+    out
+}
+
+/// The identifier-shaped words on a line: maximal runs of identifier bytes.
+///
+/// This is the set of words for which `contains_word(line, word)` holds, for
+/// any word that is itself all identifier bytes — a run is by definition
+/// bounded by bytes that are not, and a shorter piece of one would have an
+/// identifier byte on a side. Words that are *not* all identifier bytes
+/// (a CJK symbol name, say — [`is_ident_byte`] is ASCII-only) cannot be
+/// recovered this way, which is why [`scan_sibling_router_files`] keeps the
+/// scan for them rather than answering wrongly.
+fn ident_words(line: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for b in line.bytes() {
+        if is_ident_byte(b) {
+            current.push(b as char);
+        } else if !current.is_empty() {
+            out.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// True when `ident` is made only of identifier bytes, so an index of
+/// identifier runs can answer for it exactly.
+fn is_simple_ident(ident: &str) -> bool {
+    !ident.is_empty() && ident.bytes().all(is_ident_byte)
 }
 
 /// True if the line contains an HTTP-verb-shaped method call.
@@ -436,18 +499,17 @@ fn scan_sibling_router_files(file: &str, ident: &str, repo_root: &Path) -> Optio
         }
     }?;
 
+    if is_simple_ident(ident) {
+        return dir_route_index(&dir).get(ident).cloned();
+    }
+
+    // A symbol whose name is not identifier-shaped cannot be looked up in an
+    // index of identifier runs, so it gets the scan it always got.
     let entries = std::fs::read_dir(&dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
-        }
-        // Skip the node's own file (already scanned by the caller).
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if file.ends_with(name) && Path::new(file).file_name() == Some(name.as_ref()) {
-                // Could still be a different dir with same filename; cheap skip
-                // is fine because the own-file scan already ran.
-            }
         }
         if let Ok(c) = std::fs::read_to_string(&path) {
             if let Some(p) = find_route_path_for_handler(&c, ident) {
@@ -456,6 +518,47 @@ fn scan_sibling_router_files(file: &str, ident: &str, repo_root: &Path) -> Optio
         }
     }
     None
+}
+
+/// Every handler mounted by any `.rs` file directly in `dir`, built once and
+/// kept for the rest of the process.
+///
+/// The scan this replaces read every sibling file from disk and string-searched
+/// all of it *per node asked about*. That is fine for the handful of nodes this
+/// module was written for and quadratic for the thousands `aura impact` reaches:
+/// on this repo a single `aura impact` spent twenty-two of its twenty-four
+/// seconds here, which is what the desktop saw as a timed-out impact analysis.
+/// Reading a directory once turns the per-node cost into a hash lookup.
+///
+/// Files are visited in `read_dir` order and the earliest mount wins, which is
+/// the order and the winner the scan had.
+fn dir_route_index(dir: &Path) -> Rc<HashMap<String, String>> {
+    let key = dir.to_path_buf();
+    if let Some(hit) = DIR_ROUTES.with(|m| m.borrow().get(&key).cloned()) {
+        return hit;
+    }
+
+    let mut index: HashMap<String, String> = HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (ident, route) in route_index(&content) {
+                index.entry(ident).or_insert(route);
+            }
+        }
+    }
+
+    let index = Rc::new(index);
+    DIR_ROUTES.with(|m| {
+        m.borrow_mut().insert(key, Rc::clone(&index));
+    });
+    index
 }
 
 /// Heuristic: does this node look like a request handler even without a route
@@ -871,7 +974,13 @@ fn contains_word(haystack: &str, word: &str) -> bool {
         if before_ok && after_ok {
             return true;
         }
+        // Step past the rejected match's first character, not its first byte:
+        // `abs + 1` is mid-codepoint when the word starts with a multi-byte
+        // char, and re-slicing `haystack[idx..]` there panics.
         idx = abs + 1;
+        while idx < haystack.len() && !haystack.is_char_boundary(idx) {
+            idx += 1;
+        }
         if idx >= haystack.len() {
             break;
         }
@@ -994,6 +1103,20 @@ fn title_case_word(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Read the node's file, then classify it — what a caller holding a single
+    /// node does, written once here so each test states its own case and not
+    /// the plumbing. Cross-file route lookup is on: these tests are about what
+    /// the classifier can recognise, not about how much of the tree it reads.
+    fn classify(node: &AstNode, repo_root: &Path) -> Option<EntryPoint> {
+        let file = node.file_path.as_deref().unwrap_or("");
+        let content = if file.is_empty() {
+            None
+        } else {
+            read_source(file, repo_root)
+        };
+        classify_with_content(node, repo_root, content.as_deref(), true)
+    }
     use std::path::PathBuf;
 
     /// Create a unique temp directory for a test and return its path.
@@ -1011,6 +1134,21 @@ mod tests {
         dir.push(uniq);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    /// A rejected match must re-search from the next *character*, not the
+    /// next byte. With a word starting on a multi-byte char, `abs + 1` lands
+    /// mid-codepoint and the old `haystack[idx..]` re-slice panicked.
+    #[test]
+    fn contains_word_survives_multibyte_word_after_rejection() {
+        // "xét ét": first "ét" (at byte 1) is rejected — 'x' before it is an
+        // identifier byte — and byte 2 is inside é. Must not panic, and must
+        // still find the standalone "ét" later in the string.
+        assert!(contains_word("xét ét", "ét"));
+        // Rejected everywhere: still no panic, just false.
+        assert!(!contains_word("xét", "ét"));
+        // CJK word embedded then standalone.
+        assert!(contains_word("a语言 语言", "语言"));
     }
 
     /// Write `content` to `dir/name` and return the full path string.
@@ -1242,5 +1380,111 @@ pub async fn user_profile() -> HttpResponse {
         let ep = classify(&n, Path::new("/")).expect("actix macro should classify");
         assert_eq!(ep.kind, EntryKind::HttpRoute);
         assert_eq!(ep.feature_name, "Users Profile");
+    }
+
+    /// A router file with every registration shape the scan understands, so
+    /// the index has to reproduce all of them and not just the common one.
+    const ROUTER: &str = "\
+pub fn routes() -> Router {
+    Router::new()
+        .route(\"/users/profile\", get(user_profile))
+        .route(\"/users/settings\", post(save_settings).get(read_settings))
+        .route(\"/health\", get(health))
+}
+
+pub fn legacy(app: &mut App) {
+    app.get(\"/reports/export\", export_reports);
+    app.post(\"/reports/import\", import_reports);
+}
+
+// Not a mount: a bare string, and a path with no verb call on the line.
+const BANNER: &str = \"/not/a/route\";
+";
+
+    /// The whole speedup rests on the index answering exactly what the scan
+    /// answered, so the two are asked the same question about the same file.
+    ///
+    /// Every identifier on a mounting line is checked, including the ones that
+    /// are not handlers — `get`, `Router`, the path segments' neighbours — so a
+    /// disagreement about what counts as a whole word shows up here too.
+    #[test]
+    fn the_route_index_answers_exactly_what_scanning_the_file_answers() {
+        let index = route_index(ROUTER);
+
+        for line in ROUTER.lines() {
+            for word in ident_words(line.trim()) {
+                assert_eq!(
+                    index.get(&word).cloned(),
+                    find_route_path_for_handler(ROUTER, &word),
+                    "index and scan disagree about `{word}`"
+                );
+            }
+        }
+
+        // And the answers are the right ones, not merely equal to each other.
+        assert_eq!(index.get("user_profile").map(String::as_str), Some("/users/profile"));
+        assert_eq!(index.get("read_settings").map(String::as_str), Some("/users/settings"));
+        assert_eq!(index.get("export_reports").map(String::as_str), Some("/reports/export"));
+        assert_eq!(index.get("import_reports").map(String::as_str), Some("/reports/import"));
+        assert_eq!(index.get("BANNER"), None, "a bare string constant is not a mount");
+    }
+
+    /// The earliest mount wins in both, so a handler named on two lines keeps
+    /// the path the scan would have returned.
+    #[test]
+    fn a_handler_mounted_twice_keeps_the_first_path_in_both() {
+        let src = "\
+.route(\"/first\", get(handler))
+.route(\"/second\", get(handler))
+";
+        assert_eq!(find_route_path_for_handler(src, "handler").as_deref(), Some("/first"));
+        assert_eq!(route_index(src).get("handler").map(String::as_str), Some("/first"));
+    }
+
+    /// The sibling lookup is what `aura impact` runs thousands of times, so it
+    /// has to find a route defined in a *different* file of the same directory.
+    #[test]
+    fn a_route_mounted_by_a_sibling_file_is_still_found() {
+        let dir = unique_tmpdir("siblings");
+        write_file(&dir, "src/router.rs", ROUTER);
+        let file = write_file(
+            &dir,
+            "src/handlers.rs",
+            "pub async fn export_reports() -> HttpResponse { todo() }\n",
+        );
+
+        let n = node(
+            "function_item",
+            "export_reports",
+            &file,
+            1,
+            "pub async fn export_reports() -> HttpResponse",
+        );
+
+        let ep = classify(&n, Path::new("/")).expect("sibling router should classify it");
+        assert_eq!(ep.kind, EntryKind::HttpRoute);
+        assert_eq!(ep.feature_name, "Reports Export");
+    }
+
+    /// A symbol whose name is not identifier-shaped cannot be looked up in an
+    /// index of identifier runs. It has to keep getting the scan, rather than
+    /// silently coming back unmounted.
+    #[test]
+    fn a_symbol_name_the_index_cannot_hold_still_gets_scanned() {
+        let ident = "导出报表";
+        assert!(!is_simple_ident(ident), "the fallback is only interesting for these");
+
+        let dir = unique_tmpdir("nonascii");
+        write_file(
+            &dir,
+            "src/router.rs",
+            &format!(".route(\"/reports/export\", get({ident}))\n"),
+        );
+        let file = write_file(&dir, "src/handlers.rs", "// handler lives elsewhere\n");
+
+        assert_eq!(
+            scan_sibling_router_files(&file, ident, Path::new("/")).as_deref(),
+            Some("/reports/export")
+        );
     }
 }

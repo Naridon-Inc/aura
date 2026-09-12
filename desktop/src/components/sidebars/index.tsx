@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { FileTree } from "../FileTree";
 import { clockTimeFromSecs } from "../../lib/clockTime";
+import { savePointLabel } from "../../lib/snapshotDetail";
 import {
   api,
   type AuditEntry,
@@ -523,7 +524,9 @@ function labelFor(ev: HistoryEvent): [string, string] {
     return [ev.entry.intent || "(no reason)", ev.entry.agent || ""];
   }
   if (ev.kind === "snapshot") {
-    return [ev.entry.file, ev.entry.id];
+    // Both lines used to be the storage filename — the path with its
+    // slashes mangled, and the same string again underneath it.
+    return savePointLabel(ev.entry.file);
   }
   if (ev.kind === "commit") {
     return [ev.entry.subject, `${ev.entry.sha} · ${ev.entry.author}`];

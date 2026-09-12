@@ -268,9 +268,26 @@ pub fn section_entries_mut<'a>(
     }
 }
 
+/// The canonical section name behind any accepted alias — the exact same
+/// mapping as `section_entries_mut`, kept in lockstep because the entry
+/// SIGNATURE binds to this name (signing.rs puts the section in the
+/// payload, and read-time verify only knows the canonical home).
+pub fn canonical_entry_section(section: &str) -> &'static str {
+    match section {
+        "convention" | "conventions" => "conventions",
+        "gotcha" | "gotchas" => "gotchas",
+        "active" | "active_work" => "active_work",
+        _ => "context",
+    }
+}
+
 /// Build a fresh provenance-stamped entry (W2 stamp + optional symbol
-/// fingerprint), exactly as the pre-W3 write path did.
+/// fingerprint), exactly as the pre-W3 write path did — plus, since
+/// AUDIT-CTX-05, an Ed25519 signature over (id, section, content,
+/// added_at) when the repo has an awareness identity, so shared memory
+/// is attributable and tamper-evident.
 fn build_entry(
+    section: &str,
     content: &str,
     tags: Vec<String>,
     author: &str,
@@ -283,7 +300,7 @@ fn build_entry(
         Some(s) => provenance::stamp_symbol(s),
         None => (None, None),
     };
-    MemoryEntry {
+    let mut entry = MemoryEntry {
         id: format!("mem-{}", &uuid::Uuid::new_v4().to_string()[..8]),
         content: content.to_string(),
         tags,
@@ -296,8 +313,17 @@ fn build_entry(
         source_symbol,
         source_symbol_hash,
         supersedes,
+        // CAP-01: bind the entry to its repo/checkout/session at mint time.
+        scope: git2::Repository::discover(".")
+            .ok()
+            .and_then(|r| r.workdir().map(|w| w.to_path_buf()))
+            .and_then(|root| crate::scope::scope_value(&root, author, None)),
         ..Default::default()
-    }
+    };
+    // Sign against the CANONICAL section — read-time verification only
+    // knows the section the entry actually lives in, never the alias.
+    super::signing::stamp(&mut entry, canonical_entry_section(section));
+    entry
 }
 
 /// The full reconcile-on-write pipeline over an in-memory store. Pure with
@@ -354,7 +380,7 @@ pub fn reconcile_write(
     let now_rfc3339 = chrono::Utc::now().to_rfc3339();
     match decision {
         Decision::Add => {
-            let entry = build_entry(content, tags, author, symbol, None, now);
+            let entry = build_entry(section, content, tags, author, symbol, None, now);
             let id = entry.id.clone();
             section_entries_mut(mem, section).push(entry);
             ReconcileOutcome {
@@ -373,7 +399,7 @@ pub fn reconcile_write(
                 Some(old) => {
                     old.valid_to = Some(now_rfc3339);
                     let entry =
-                        build_entry(content, tags, author, symbol, Some(target.clone()), now);
+                        build_entry(section, content, tags, author, symbol, Some(target.clone()), now);
                     let id = entry.id.clone();
                     entries.push(entry);
                     ReconcileOutcome {
@@ -387,7 +413,7 @@ pub fn reconcile_write(
                 // Target vanished between candidate retrieval and apply
                 // (can't happen single-threaded, but never lose the write).
                 None => {
-                    let entry = build_entry(content, tags, author, symbol, None, now);
+                    let entry = build_entry(section, content, tags, author, symbol, None, now);
                     let id = entry.id.clone();
                     entries.push(entry);
                     ReconcileOutcome {
@@ -414,7 +440,7 @@ pub fn reconcile_write(
                     }
                 }
                 None => {
-                    let entry = build_entry(content, tags, author, symbol, None, now);
+                    let entry = build_entry(section, content, tags, author, symbol, None, now);
                     let id = entry.id.clone();
                     entries.push(entry);
                     ReconcileOutcome {
@@ -440,6 +466,82 @@ pub fn reconcile_write(
             }
         }
     }
+}
+
+// ── Direct edit / forget (AUDIT-CTX-05 — the desktop Memory workflow) ──
+
+/// Which canonical section a LIVE entry with this id lives in, if any.
+fn live_entry_section(mem: &ProjectMemory, id: &str) -> Option<&'static str> {
+    let sections: [(&'static str, &Vec<MemoryEntry>); 4] = [
+        ("conventions", &mem.conventions),
+        ("gotchas", &mem.gotchas),
+        ("context", &mem.context),
+        ("active_work", &mem.active_work),
+    ];
+    sections
+        .iter()
+        .find(|(_, entries)| entries.iter().any(|e| e.id == id && e.is_live()))
+        .map(|(name, _)| *name)
+}
+
+/// Edit one live entry BY ID — the explicit "fix this fact" gesture (the
+/// desktop's Edit button), as opposed to `reconcile_write`'s "here is a
+/// new fact, work out what it displaces". Supersede-never-delete: the old
+/// row's window closes, a fresh provenance-stamped + signed successor
+/// (with `supersedes` back-pointer) lands in the same section. Tags:
+/// `None` inherits the old row's tags, `Some` replaces them. The old
+/// symbol anchor is carried and re-fingerprinted against today's code.
+/// Pure with respect to disk — `MemoryManager::edit_entry` loads/saves.
+pub fn apply_edit(
+    mem: &mut ProjectMemory,
+    id: &str,
+    content: &str,
+    tags: Option<Vec<String>>,
+    author: &str,
+    now: u64,
+) -> Result<MemoryEntry, String> {
+    let section = live_entry_section(mem, id)
+        .ok_or_else(|| format!("no live memory entry with id '{}'", id))?;
+    let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+    let entries = section_entries_mut(mem, section);
+    let old = entries
+        .iter_mut()
+        .find(|e| e.id == id && e.valid_to.is_none())
+        .ok_or_else(|| format!("no live memory entry with id '{}'", id))?;
+    old.valid_to = Some(now_rfc3339);
+    let old_tags = old.tags.clone();
+    let old_symbol = old.source_symbol.clone();
+    let successor = build_entry(
+        section,
+        content,
+        tags.unwrap_or(old_tags),
+        author,
+        old_symbol.as_deref(),
+        Some(id.to_string()),
+        now,
+    );
+    entries.push(successor.clone());
+    Ok(successor)
+}
+
+/// Close one live entry's validity window ("forget", soft). The row stays
+/// on disk as audit trail and drops out of default recall — the same
+/// semantics as a reconcile DELETE, unlike `MemoryManager::forget` which
+/// erases the row entirely (the privacy path). Returns false when no
+/// live entry carries the id. Pure with respect to disk.
+pub fn close_entry(mem: &mut ProjectMemory, id: &str, now_rfc3339: &str) -> bool {
+    for entries in [
+        &mut mem.conventions,
+        &mut mem.gotchas,
+        &mut mem.context,
+        &mut mem.active_work,
+    ] {
+        if let Some(e) = entries.iter_mut().find(|e| e.id == id && e.valid_to.is_none()) {
+            e.valid_to = Some(now_rfc3339.to_string());
+            return true;
+        }
+    }
+    false
 }
 
 // ── Supersession chain (for `aura memory why`) ──
@@ -716,5 +818,55 @@ mod tests {
         assert!(cands.iter().all(|c| c.id != "mem-2"), "dissimilar entry must not clear the floor");
         assert!(cands.len() <= MAX_CANDIDATES);
         assert!(cands.iter().all(|c| c.similarity >= SIMILARITY_FLOOR));
+    }
+
+    // ── AUDIT-CTX-05: direct edit / soft forget ──
+
+    #[test]
+    fn apply_edit_supersedes_in_place_and_inherits_tags() {
+        let mut mem = ProjectMemory::default();
+        let first = reconcile_write(
+            &mut mem, "gotchas", "The retry cap is 3", vec!["retry".into()],
+            "test", None, NOW, &no_ai, &no_embed,
+        );
+        let successor =
+            apply_edit(&mut mem, &first.id, "The retry cap is 5", None, "editor", NOW + 10)
+                .expect("edit lands");
+
+        // Old row: window closed, still on disk — audit trail intact.
+        let old = mem.gotchas.iter().find(|e| e.id == first.id).unwrap();
+        assert!(old.valid_to.is_some(), "old row's window closes");
+        // Successor: same section, back-pointer, inherited tags, new author.
+        assert_eq!(successor.supersedes.as_deref(), Some(first.id.as_str()));
+        assert_eq!(successor.tags, vec!["retry".to_string()], "None inherits tags");
+        assert_eq!(successor.added_by, "editor");
+        assert!(mem.gotchas.iter().any(|e| e.id == successor.id && e.is_live()));
+
+        // Explicit tags replace instead.
+        let third = apply_edit(
+            &mut mem, &successor.id, "The retry cap is 7",
+            Some(vec!["limits".into()]), "editor", NOW + 20,
+        )
+        .expect("second edit lands");
+        assert_eq!(third.tags, vec!["limits".to_string()]);
+
+        // Editing a closed row (or a ghost) refuses honestly.
+        assert!(apply_edit(&mut mem, &first.id, "x", None, "editor", NOW + 30).is_err());
+        assert!(apply_edit(&mut mem, "mem-ghost", "x", None, "editor", NOW + 30).is_err());
+    }
+
+    #[test]
+    fn close_entry_soft_forgets_without_erasing() {
+        let mut mem = ProjectMemory::default();
+        let added = write(&mut mem, "The database port is 55432", &no_ai);
+        assert!(close_entry(&mut mem, &added.id, "2026-09-01T00:00:00Z"));
+
+        let row = mem.context.iter().find(|e| e.id == added.id).unwrap();
+        assert!(!row.is_live(), "window closed");
+        assert_eq!(mem.context.len(), 1, "the row is NOT erased");
+
+        // Already-closed and unknown ids report false.
+        assert!(!close_entry(&mut mem, &added.id, "2026-09-01T00:00:01Z"));
+        assert!(!close_entry(&mut mem, "mem-ghost", "2026-09-01T00:00:01Z"));
     }
 }

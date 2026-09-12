@@ -66,6 +66,12 @@ pub struct ChatRequest {
     /// currently ignore it.
     #[serde(default)]
     pub approval: Option<aura_agents::ApprovalPolicy>,
+    // AURA-1296 — the composer's Concise chip. `None` → nothing added to the
+    // invocation (byte-identical request); `Some("concise")` → Claude Code's
+    // `--output-style`. Only the CLI wrapper reads it, and only for Claude
+    // (see `output_style.rs`); every other brain ignores it.
+    #[serde(default)]
+    pub output_style: Option<String>,
     /// Working directory for this turn — the repo/worktree root the user is
     /// actually in. CLI-wrapper brains spawn their subprocess here (so a
     /// "Claude Code" turn opened in a worktree runs *inside* that worktree,
@@ -74,6 +80,16 @@ pub struct ChatRequest {
     /// ignore it (their built-in tool loop is rooted via its own `repo_root`).
     #[serde(default)]
     pub cwd: String,
+    /// The machine this turn's hands are on, when the session is bound to one
+    /// (`ManagerSession.machine_id`). `None` → this laptop, in `cwd`.
+    ///
+    /// Only the CLI-wrapper brain reads it: a CLI IS the hands, so it has to be
+    /// started on the box rather than here against a path that means nothing
+    /// on this disk while the tab says the machine's name. Native brains run
+    /// their own tool loop, which already lands on the machine through
+    /// `Place` — for them this is carried and ignored.
+    #[serde(default)]
+    pub machine_id: Option<String>,
 }
 
 /// Build the cacheable request prefix: the system prompt and tool list with

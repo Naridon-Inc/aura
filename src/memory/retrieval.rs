@@ -149,6 +149,37 @@ pub fn bm25_scores(doc_tokens: &[Vec<String>], query_tokens: &[String]) -> Vec<f
     scores
 }
 
+/// The path a `file:<path>` tag carries, if this tag is one. Reflection
+/// stamps every promoted entry with one; `aura memory add --symbol` and
+/// the MCP writers use the same key.
+pub fn tag_path(tag: &str) -> Option<&str> {
+    tag.strip_prefix("file:")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Does `path` name what `query` asked for — the whole path, or a trailing
+/// run of WHOLE segments?
+///
+/// `main.rs` and `src/main.rs` both name `aura-cli/src/main.rs`. `ain.rs`
+/// and `cli/src/mai` name nothing, which is the point: a substring test
+/// here would make every query that happens to appear inside a path
+/// outrank the entries the query is actually about.
+pub fn path_names(path: &str, query: &str) -> bool {
+    let norm = |s: &str| {
+        s.trim()
+            .replace('\\', "/")
+            .trim_start_matches("./")
+            .trim_matches('/')
+            .to_lowercase()
+    };
+    let (path, query) = (norm(path), norm(query));
+    if path.is_empty() || query.is_empty() {
+        return false;
+    }
+    path == query || path.ends_with(&format!("/{query}"))
+}
+
 /// One leg's ordering: doc indices, best first.
 pub type LegRanking = Vec<usize>;
 
@@ -286,6 +317,41 @@ fn ranked_search_opts(
         lexical.extend(fallback);
     }
 
+    // ── Leg 0: anchor — the query names a file some entries are ABOUT ──
+    //
+    // Without this, asking for `main.rs` in this repo's own store returned
+    // `aura-cloud/src/main.rs` first and the `aura-cli/src/main.rs` entry —
+    // the largest in the store — sixth, behind three entries about other
+    // files entirely. BM25 divides by document length, so the entry that
+    // carries the reason somebody wrote is longer and scores lower than a
+    // shorter one about a different file with the same basename; the three
+    // legs then fuse to within 0.002 of each other and insertion order
+    // effectively decides. Naming a file is the least ambiguous thing a
+    // query can do, and it was the case the ranking handled worst.
+    let mut anchor: Vec<usize> = (0..docs.len())
+        .filter(|&i| {
+            docs[i]
+                .tags
+                .iter()
+                .filter_map(|t| tag_path(t))
+                .any(|p| path_names(p, query))
+        })
+        .collect();
+    // The whole path beats a suffix of it, then newest, then index.
+    anchor.sort_by(|&a, &b| {
+        let exact = |i: usize| {
+            docs[i]
+                .tags
+                .iter()
+                .filter_map(|t| tag_path(t))
+                .any(|p| p.trim().eq_ignore_ascii_case(query.trim()))
+        };
+        exact(b)
+            .cmp(&exact(a))
+            .then_with(|| docs[b].added_at.cmp(&docs[a].added_at))
+            .then_with(|| a.cmp(&b))
+    });
+
     // ── Leg 2: semantic (only with a query embedding) ──
     let mut semantic: Vec<usize> = Vec::new();
     if let Some(qv) = query_embedding {
@@ -311,7 +377,7 @@ fn ranked_search_opts(
     // ── Candidate set: union of the content legs. Recency alone never
     // nominates a doc — otherwise every query would return the whole store.
     let mut candidates: Vec<usize> = Vec::new();
-    for &i in lexical.iter().chain(semantic.iter()) {
+    for &i in anchor.iter().chain(lexical.iter()).chain(semantic.iter()) {
         if !candidates.contains(&i) {
             candidates.push(i);
         }
@@ -324,7 +390,11 @@ fn ranked_search_opts(
     let mut recency = candidates.clone();
     recency.sort_by(|&a, &b| docs[b].added_at.cmp(&docs[a].added_at).then_with(|| a.cmp(&b)));
 
-    let mut legs: Vec<(&'static str, LegRanking)> = vec![("lexical", lexical)];
+    let mut legs: Vec<(&'static str, LegRanking)> = Vec::new();
+    if !anchor.is_empty() {
+        legs.push(("anchor", anchor));
+    }
+    legs.push(("lexical", lexical));
     if !semantic.is_empty() {
         legs.push(("semantic", semantic));
     }
@@ -392,6 +462,84 @@ mod tests {
         assert!(results.iter().all(|r| r.id != "mem-2"));
         // The single-term doc is present but below the two-term doc.
         assert!(results.iter().any(|r| r.id == "mem-3"));
+    }
+
+    #[test]
+    fn a_path_names_a_file_by_whole_segments_only() {
+        assert!(path_names("aura-cli/src/main.rs", "main.rs"));
+        assert!(path_names("aura-cli/src/main.rs", "src/main.rs"));
+        assert!(path_names("aura-cli/src/main.rs", "aura-cli/src/main.rs"));
+        assert!(path_names("aura-cli/src/main.rs", "./main.rs"));
+        // Half a segment names nothing — a substring test here would let
+        // any query that happens to appear inside a path claim the anchor.
+        assert!(!path_names("aura-cli/src/main.rs", "ain.rs"));
+        assert!(!path_names("aura-cli/src/main.rs", "cli/src/mai"));
+        assert!(!path_names("aura-cli/src/domain.rs", "main.rs"));
+        assert!(!path_names("aura-cli/src/main.rs", ""));
+        assert_eq!(tag_path("file:src/a.rs"), Some("src/a.rs"));
+        assert_eq!(tag_path("reflection"), None);
+        assert_eq!(tag_path("file:"), None);
+    }
+
+    #[test]
+    fn naming_a_file_puts_the_entries_about_that_file_first() {
+        // The real shape from this repo's own store: the entry that carries
+        // the reason somebody wrote is the LONGEST one, and BM25 divides by
+        // document length — so before the anchor leg it ranked below a
+        // short entry about a different file with the same basename.
+        let mem = mem_with_context(vec![
+            entry(
+                "mem-other",
+                "Sustained work on aura-cloud/src/main.rs: 19 changes across 3 distinct days",
+                &["reflection", "file:aura-cloud/src/main.rs"],
+                200,
+            ),
+            entry(
+                "mem-unrelated",
+                "Sustained work on aura-shell/src/App.tsx: 32 changes across 6 distinct days",
+                &["reflection", "file:aura-shell/src/App.tsx"],
+                300,
+            ),
+            entry(
+                "mem-wanted",
+                "Sustained work on aura-cli/src/main.rs: 172 changes across 4 distinct days                  (span 9d) — latest: \"group top-level commands into Trace/Crew/Control, hide \
+                 advanced from first-run help while keeping them invokable and discoverable\"",
+                &["reflection", "file:aura-cli/src/main.rs"],
+                100,
+            ),
+        ]);
+
+        let exact = ranked_search(&mem, "aura-cli/src/main.rs", None);
+        assert_eq!(exact[0].id, "mem-wanted", "the named file wins outright");
+        assert!(exact[0].legs.contains(&"anchor"));
+
+        // The bare basename names two of the three, and only those two.
+        let bare = ranked_search(&mem, "main.rs", None);
+        let anchored: Vec<&str> = bare
+            .iter()
+            .filter(|r| r.legs.contains(&"anchor"))
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(anchored.len(), 2, "both main.rs entries, and only those");
+        assert!(anchored.contains(&"mem-wanted"));
+        assert!(anchored.contains(&"mem-other"));
+        assert!(bare
+            .iter()
+            .all(|r| r.id != "mem-unrelated" || !r.legs.contains(&"anchor")));
+    }
+
+    #[test]
+    fn a_query_that_names_no_file_leaves_the_ranking_alone() {
+        let mem = mem_with_context(vec![
+            entry("mem-1", "retry_logic uses exponential backoff", &["file:src/retry.rs"], 100),
+            entry("mem-2", "the UI theme is arctic blue", &["file:src/theme.ts"], 200),
+        ]);
+        let results = ranked_search(&mem, "exponential backoff", None);
+        assert_eq!(results[0].id, "mem-1");
+        assert!(
+            results.iter().all(|r| !r.legs.contains(&"anchor")),
+            "no anchor leg fires when the query names no path"
+        );
     }
 
     #[test]

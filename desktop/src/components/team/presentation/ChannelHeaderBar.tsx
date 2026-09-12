@@ -43,7 +43,7 @@ import {
 import { Avatar } from "./Avatar";
 import { onExternalAnchorClick } from "../../../lib/openExternal";
 import { useDismiss } from "../../../lib/useDismiss";
-import { sentenceCase } from "../../../lib/textCase";
+import { sentenceCase } from "@shared/textCase";
 
 export function ChannelHeader({
   conv,

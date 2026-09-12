@@ -28,11 +28,17 @@ fn key_path() -> PathBuf {
 /// gets a stable handle immediately.
 pub fn run_show(json: bool) {
     let path = key_path();
-    let kid = key_id();
+    let key = load();
+    let kid = key.as_ref().map(|k| k.key_id());
+    let pubkey = key.as_ref().map(|k| {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        URL_SAFE_NO_PAD.encode(k.verifying_key().to_bytes())
+    });
 
     if json {
         let data = serde_json::json!({
             "key_id": kid,
+            "pubkey": pubkey,
             "key_path": path.display().to_string(),
             "exists": kid.is_some(),
         });
@@ -46,6 +52,14 @@ pub fn run_show(json: bool) {
     match kid {
         Some(k) => {
             println!("  {}  {}", "id  ".dimmed(), k.green().bold());
+            if let Some(pk) = &pubkey {
+                println!("  {}  {}", "pub ".dimmed(), pk);
+                println!(
+                    "  {}",
+                    "share the pub line to be added as a delegate (`aura refs quorum … --delegate NAME=<pub>`)"
+                        .dimmed()
+                );
+            }
             println!("  {}  {}", "key ".dimmed(), path.display().to_string().dimmed());
             println!(
                 "  {}",

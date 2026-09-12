@@ -13,7 +13,7 @@
 //!   3. **BFS** — reverse-walk `callers_of_node` from each removed symbol's
 //!      definition, bounded by depth, node budget, and a wall-clock budget.
 //!   4. **classify** — for every reached caller, ask
-//!      [`crate::entrypoints::classify`] whether it is a user-facing entry
+//!      [`crate::entrypoints::classify_with_content`] whether it is a user-facing entry
 //!      point (Tauri command, HTTP route, CLI command, UI component, public API).
 //!   5. **summarize** — turn the graph facts into a severity, a confidence,
 //!      and a human sentence for the gate card.
@@ -347,6 +347,24 @@ fn merge_current_file(nodes: &mut Vec<AstNode>, repo_root: &Path, file: &str) {
     nodes.extend(fresh);
 }
 
+/// A file's source, read at most once per analysis and borrowed thereafter.
+///
+/// `classify_with_content` wants the node's file already in hand; thousands of
+/// reached nodes share a few hundred files between them, so the read belongs
+/// to the file and not to the node. A file that cannot be read is remembered
+/// as unreadable, so it is not retried once per node either.
+fn file_source<'a>(
+    cache: &'a mut HashMap<String, Option<String>>,
+    repo_root: &Path,
+    file: &str,
+) -> Option<&'a str> {
+    if !cache.contains_key(file) {
+        let source = entrypoints::read_source(file, repo_root);
+        cache.insert(file.to_string(), source);
+    }
+    cache.get(file).and_then(|v| v.as_deref())
+}
+
 /// Bounded recursive scan of `repo_root` for source files, parsing each into
 /// AST nodes. Honors a file cap and a wall-clock budget; partial results are
 /// fine. Never panics.
@@ -412,7 +430,7 @@ fn scan_worktree(repo_root: &Path) -> Vec<AstNode> {
 /// Build a [`DeleteImpact`] from an already-loaded node set. This is the pure
 /// heart of the engine: it does the reverse-BFS, entry-point classification,
 /// and summary/severity selection with no git or filesystem access (aside from
-/// `entrypoints::classify`, which the caller controls via `repo_root`).
+/// `entrypoints::classify_with_content`, which the caller controls via `repo_root`).
 ///
 /// `analyze_deletion` delegates here after loading nodes; tests construct nodes
 /// directly. The returned `graph_source` is left as `"worktree"` and
@@ -448,21 +466,37 @@ fn build_impact_from_nodes(
     let mut name_only_edges = 0usize;
     let mut total_edges = 0usize;
 
-    // Reverse-BFS from every removed symbol's definition.
+    // Resolve every removed symbol's definition and seed it at hop 0 BEFORE
+    // any BFS runs. This is what keeps the verdict independent of the order of
+    // `removed_symbols`. When two co-deleted symbols call each other — a helper
+    // and its only caller, a handler and the route it served: the single most
+    // common multi-symbol delete — one is reached at hop 1 while walking back
+    // from the other. A per-root `entry(id).or_insert(0)` could not lower that
+    // already-recorded hop, so whichever symbol happened to come second in the
+    // slice stayed at hop 1 and was then mis-counted as a *surviving* direct
+    // caller / transitive caller / live feature of the very change deleting it,
+    // and the opposite slice order produced a different severity. Seeding all
+    // roots to 0 up front makes every later `hop < 0` relaxation a no-op, so a
+    // removed symbol is never demoted from hop 0 whichever order the callers
+    // arrive in. Roots then carry hop 0 and are excluded downstream (direct
+    // callers want hop==1, transitive/feature loops skip hop==0).
+    let mut roots: Vec<String> = Vec::new();
     for symbol in removed_symbols {
-        let start_id = match graph.resolve_def(symbol, Some(file)) {
-            Some(id) => {
-                any_def_resolved = true;
-                id
+        // Symbol with no def in the graph contributes no callers; the
+        // `any_def_resolved` / leaf logic still accounts for it.
+        if let Some(id) = graph.resolve_def(symbol, Some(file)) {
+            any_def_resolved = true;
+            // Two names can resolve to the same node; seed and walk it once.
+            if min_hops.insert(id.clone(), 0).is_none() {
+                roots.push(id);
             }
-            // Symbol had no def in the graph — count it (handled via
-            // `any_def_resolved` / leaf logic) but it contributes no callers.
-            None => continue,
-        };
+        }
+    }
 
-        // BFS frontier of (node_id, depth). The starting def sits at depth 0.
+    // Reverse-BFS from every seeded root.
+    for start_id in &roots {
+        // BFS frontier of (node_id, depth). The root def sits at depth 0.
         let mut frontier: Vec<(String, usize)> = vec![(start_id.clone(), 0)];
-        min_hops.entry(start_id).or_insert(0);
 
         while let Some((node_id, depth)) = frontier.pop() {
             if depth >= MAX_DEPTH {
@@ -541,18 +575,44 @@ fn build_impact_from_nodes(
     let transitive_caller_count = min_hops.values().filter(|&&h| h > 0).count();
 
     // ---- Entry-point classification over every reached caller node ----
+    //
+    // Nearest first, then by node id: the loop dedupes features by name, so
+    // whichever node arrives first is the one whose call chain gets shown.
+    // Taken straight off `min_hops` that was hash order, and the same delete
+    // could explain itself through a different path each run.
+    let mut reached: Vec<(&String, usize)> = min_hops
+        .iter()
+        .filter(|&(_, &hops)| hops > 0) // skip the removed defs themselves
+        .map(|(id, &hops)| (id, hops))
+        .collect();
+    reached.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+
     let mut features: Vec<FeatureImpact> = Vec::new();
     let mut seen_feat: HashSet<(String, String)> = HashSet::new();
-    for (node_id, &hops) in min_hops.iter() {
-        if hops == 0 {
-            continue; // skip the removed defs themselves
+    // One entry per file the reached nodes live in, not one per node.
+    let mut sources: HashMap<String, Option<String>> = HashMap::new();
+    // Classification reads source, so it gets the same wall-clock bound the
+    // walk above has. Without one the command had a bounded search followed by
+    // an unbounded explanation of it, and reported no ceiling had been hit.
+    let classify_start = Instant::now();
+    for (node_id, hops) in reached {
+        if classify_start.elapsed().as_millis() > TIME_BUDGET_MS {
+            truncated = true;
+            break;
         }
         let node = match graph.node(node_id) {
             Some(n) => n,
             None => continue,
         };
+        // The bulk entry point: `classify` re-derives the node's source path
+        // per call, and this loop runs once per reached caller rather than the
+        // "handful" that API was written for.
+        let content = node
+            .file_path
+            .as_deref()
+            .and_then(|f| file_source(&mut sources, repo_root, f));
         if let Some(EntryPoint { kind, feature_name, entry_symbol, file: ef }) =
-            entrypoints::classify(node, repo_root)
+            entrypoints::classify_with_content(node, repo_root, content, true)
         {
             let key = (feature_name.clone(), ef.clone());
             if !seen_feat.insert(key) {
@@ -908,17 +968,28 @@ fn conf_rank(c: Confidence) -> u8 {
 }
 
 /// True if `path` (possibly relative, possibly normalized) refers to `file`.
-/// We compare on path tails so checkpoint-relative and our normalized paths
-/// reconcile (`src/foo.rs` vs `./src/foo.rs` vs an absolute path ending the same).
+/// Equality after separator normalization, or an absolute path whose tail is
+/// the relative one. The caller feeds this to `retain`, so a false positive
+/// *deletes* another file's nodes: two differing relative paths are genuinely
+/// different files (`src/auth.rs` is not `crates/api/src/auth.rs`), and the
+/// tail match must be '/'-segment-aligned or `foo_src/auth.rs` swallows
+/// `src/auth.rs`.
 fn same_file(path: Option<&str>, file: &str) -> bool {
-    match path {
-        Some(p) => {
-            let pn = normalize_sep(p);
-            let fn_ = normalize_sep(file);
-            pn == fn_ || pn.ends_with(&fn_) || fn_.ends_with(&pn)
-        }
-        None => false,
+    let Some(p) = path else { return false };
+    let pn = normalize_sep(p);
+    let fn_ = normalize_sep(file);
+    if pn == fn_ {
+        return true;
     }
+    let is_abs = |s: &str| s.starts_with('/') || (s.len() > 1 && s.as_bytes()[1] == b':');
+    let tail_matches = |long: &str, short: &str| {
+        !short.is_empty()
+            && long.len() > short.len()
+            && long.ends_with(short)
+            && long.as_bytes()[long.len() - short.len() - 1] == b'/'
+    };
+    (is_abs(&pn) && !is_abs(&fn_) && tail_matches(&pn, &fn_))
+        || (is_abs(&fn_) && !is_abs(&pn) && tail_matches(&fn_, &pn))
 }
 
 /// Normalize separators and strip a leading `./` for path comparison.
@@ -962,6 +1033,27 @@ fn short_file(file: &str) -> String {
 mod tests {
     use super::*;
 
+    /// `same_file` feeds a destructive `retain` — a false positive deletes a
+    /// different file's nodes from the checkpoint overlay.
+    #[test]
+    fn same_file_matches_only_the_actual_file() {
+        // Equality, with normalization.
+        assert!(same_file(Some("src/auth.rs"), "src/auth.rs"));
+        assert!(same_file(Some("./src/auth.rs"), "src/auth.rs"));
+        assert!(same_file(Some("src\\auth.rs"), "src/auth.rs"));
+        // Absolute vs relative, same tail, segment-aligned: still the file.
+        assert!(same_file(Some("/repo/src/auth.rs"), "src/auth.rs"));
+        assert!(same_file(Some("src/auth.rs"), "/repo/src/auth.rs"));
+        // Two differing relative paths are DIFFERENT files, even when one is
+        // a path-suffix of the other — this was the destructive bug.
+        assert!(!same_file(Some("crates/api/src/auth.rs"), "src/auth.rs"));
+        assert!(!same_file(Some("src/auth.rs"), "crates/api/src/auth.rs"));
+        // Non-segment-aligned tails never match, absolute or not.
+        assert!(!same_file(Some("/repo/foo_src/auth.rs"), "src/auth.rs"));
+        assert!(!same_file(Some("foo_src/auth.rs"), "src/auth.rs"));
+        assert!(!same_file(None, "src/auth.rs"));
+    }
+
     /// Minimal AstNode builder for tests.
     fn node(id: &str, ident: &str, kind: &str, file: &str) -> AstNode {
         AstNode {
@@ -981,6 +1073,62 @@ mod tests {
             signature: None,
             doc_comment: None,
             top_level: true,
+        }
+    }
+
+    /// Two nodes can name the same feature in the same file — a symbol the
+    /// checkpoint recorded twice, an impl method beside the free function it
+    /// wraps. Only one of them gets to explain the feature, and it has to be
+    /// the same one every run: the nearest to what is being deleted.
+    ///
+    /// The loop used to read straight off a `HashMap`, so the winner was hash
+    /// order and a single delete could produce a one-hop explanation or a
+    /// two-hop one on consecutive runs with nothing changed.
+    #[test]
+    fn the_nearest_caller_explains_a_feature_on_every_run() {
+        let mut nearest = node("n_near", "onSavePanel", "function_declaration", "src/components/Panel.tsx");
+        nearest.dependencies.push(crate::models::DependencyUri {
+            name: "compute".to_string(),
+            uri: None,
+        });
+        let mut middle = node("n_mid", "helper_fn", "function_definition", "src/math.rs");
+        middle.dependencies.push(crate::models::DependencyUri {
+            name: "compute".to_string(),
+            uri: None,
+        });
+        // Same identifier and file as `nearest`, so both land on one feature
+        // key — but this one is a hop further out.
+        let mut farther = node("n_far", "onSavePanel", "function_declaration", "src/components/Panel.tsx");
+        farther.dependencies.push(crate::models::DependencyUri {
+            name: "helper_fn".to_string(),
+            uri: None,
+        });
+
+        let nodes = vec![
+            node("n_target", "compute", "function_definition", "src/math.rs"),
+            nearest,
+            middle,
+            farther,
+        ];
+
+        // Each call builds fresh maps, so each one gets its own hash order.
+        // One pass could pick the right winner by luck; twenty could not.
+        for run in 0..20 {
+            let impact = build_impact_from_nodes(
+                &nodes,
+                "src/math.rs",
+                &["compute".to_string()],
+                Path::new("/tmp/does-not-matter"),
+            );
+            let panel = impact
+                .features
+                .iter()
+                .find(|f| f.file == "src/components/Panel.tsx")
+                .unwrap_or_else(|| panic!("run {run}: the component should be a reached feature"));
+            assert_eq!(
+                panel.hops, 1,
+                "run {run}: the feature was explained through the farther caller"
+            );
         }
     }
 
@@ -1035,6 +1183,89 @@ mod tests {
         assert!(impact.features.is_empty());
         assert!(impact.summary.contains("use_compute"));
         assert!(impact.summary.contains(&format!("{} hops", MAX_DEPTH)));
+    }
+
+    #[test]
+    fn a_co_deleted_caller_is_not_a_surviving_caller() {
+        // `old_handler` calls `old_helper`; BOTH are being deleted in the same
+        // change. Neither is a surviving caller of the other, so the cluster is
+        // a leaf: no direct callers, no transitive callers, no features.
+        let helper = node("n_helper", "old_helper", "function_definition", "src/api.rs");
+        let mut handler = node("n_handler", "old_handler", "function_definition", "src/api.rs");
+        handler.dependencies.push(crate::models::DependencyUri {
+            name: "old_helper".to_string(),
+            uri: None,
+        });
+        let nodes = vec![helper, handler];
+        let removed = ["old_helper".to_string(), "old_handler".to_string()];
+        let impact = build_impact_from_nodes(
+            &nodes,
+            "src/api.rs",
+            &removed,
+            Path::new("/tmp/does-not-matter"),
+        );
+        assert_eq!(
+            impact.transitive_caller_count, 0,
+            "a symbol in the delete set is not a surviving caller"
+        );
+        assert!(impact.direct_callers.is_empty(), "no surviving direct callers");
+        assert!(impact.features.is_empty());
+        assert!(impact.leaf, "a self-contained co-deleted cluster is a leaf");
+    }
+
+    #[test]
+    fn removed_symbol_order_does_not_change_the_verdict() {
+        // Same node set + same delete set, only the *order* of removed_symbols
+        // differs. Before the pre-seed fix this produced two different verdicts
+        // (LeafSafe vs CallersOnly) because `entry().or_insert(0)` could not
+        // reset a co-deleted symbol that was already reached at hop 1.
+        let build = |removed: &[String]| {
+            let helper = node("n_helper", "old_helper", "function_definition", "src/api.rs");
+            let mut handler =
+                node("n_handler", "old_handler", "function_definition", "src/api.rs");
+            handler.dependencies.push(crate::models::DependencyUri {
+                name: "old_helper".to_string(),
+                uri: None,
+            });
+            build_impact_from_nodes(
+                &[helper, handler],
+                "src/api.rs",
+                removed,
+                Path::new("/tmp/does-not-matter"),
+            )
+        };
+        let a = build(&["old_helper".to_string(), "old_handler".to_string()]);
+        let b = build(&["old_handler".to_string(), "old_helper".to_string()]);
+        assert_eq!(a.transitive_caller_count, b.transitive_caller_count);
+        assert_eq!(a.leaf, b.leaf);
+        assert_eq!(
+            format!("{:?}", a.severity),
+            format!("{:?}", b.severity),
+            "the delete verdict must not depend on symbol order"
+        );
+    }
+
+    #[test]
+    fn a_real_outside_caller_still_survives_the_pre_seed() {
+        // The pre-seed must not suppress a genuine caller that is NOT in the
+        // delete set: `live_caller` calls `old_helper` (deleted) and stays a
+        // hop-1 caller. Guards against over-correcting the co-delete fix.
+        let mut live = node("n_live", "live_caller", "function_definition", "src/app.rs");
+        live.dependencies.push(crate::models::DependencyUri {
+            name: "old_helper".to_string(),
+            uri: None,
+        });
+        let helper = node("n_helper", "old_helper", "function_definition", "src/api.rs");
+        let impact = build_impact_from_nodes(
+            &[helper, live],
+            "src/api.rs",
+            &["old_helper".to_string()],
+            Path::new("/tmp/does-not-matter"),
+        );
+        assert_eq!(impact.transitive_caller_count, 1);
+        assert_eq!(impact.direct_callers.len(), 1);
+        assert_eq!(impact.direct_callers[0].symbol, "live_caller");
+        assert!(!impact.leaf);
     }
 
     #[test]

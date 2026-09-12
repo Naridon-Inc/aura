@@ -65,6 +65,11 @@ impl TestRepo {
     fn aura(&self, args: &[&str]) -> std::process::Output {
         Command::new(aura_binary())
             .args(args)
+            // `aura init` otherwise forks a watcher daemon that outlives the
+            // tempdir it was watching. A full suite inits many repos, so the
+            // watchers accumulate — a few hundred resident processes after a
+            // handful of runs — and the one watching *this* repo races the
+            // tests by snapshotting files they are asserting about.
             .env("AURA_NO_DAEMON", "1")
             .current_dir(self.dir.path())
             .output()
@@ -88,6 +93,35 @@ impl TestRepo {
 
         Command::new("git")
             .args(["commit", "-m", message, "--no-verify"])
+            .current_dir(self.dir.path())
+            .output()
+            .expect("git commit failed");
+    }
+
+    /// Commit with **no** hook of any kind running.
+    ///
+    /// `--no-verify` is not enough: it skips `pre-commit` and `commit-msg` but
+    /// git still runs `post-commit`, and `aura init` installs one that calls
+    /// `aura persist-checkpoint` — which snapshots what was just committed.
+    /// A test that asserts something about the *absence* of Aura state is
+    /// otherwise racing Aura's own checkpointing, and loses whenever the
+    /// machine is busy enough for that separate process to win.
+    fn commit_without_hooks(&self, message: &str) {
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(self.dir.path())
+            .output()
+            .expect("git add failed");
+
+        Command::new("git")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-m",
+                message,
+                "--no-verify",
+            ])
             .current_dir(self.dir.path())
             .output()
             .expect("git commit failed");
@@ -797,6 +831,110 @@ fn test_memory_json_is_valid() {
     }
 }
 
+/// AUDIT-CTX-05 — the full memory lifecycle, each step a SEPARATE process
+/// invocation (that is what "cross-session" means at the CLI boundary):
+/// add → search finds it → why explains it (signed) → edit supersedes it →
+/// search returns only the successor → forget closes it → --all still
+/// shows the audit trail. This is the acceptance spine the desktop Memory
+/// surface shells into.
+#[test]
+fn test_memory_lifecycle_add_search_edit_forget_across_processes() {
+    let repo = TestRepo::new();
+
+    // Session 1 — add. The --json output is the desktop's IPC contract.
+    let out = repo.aura(&[
+        "memory", "add", "The staging database listens on port 55432",
+        "--section", "gotcha", "--tags", "db,staging", "--json",
+    ]);
+    assert!(out.status.success(), "add failed: {}", String::from_utf8_lossy(&out.stderr));
+    let added: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("add --json is parseable");
+    assert_eq!(added["op"], "added");
+    assert_eq!(added["section"], "gotchas", "alias resolves to the canonical section");
+    let id = added["id"].as_str().expect("added id").to_string();
+    assert!(
+        added["entry"].get("embedding").is_none(),
+        "vectors never appear in the user-facing record"
+    );
+    // The entry is signed at mint (TestRepo has a mintable identity path).
+    let entry_signed = added["entry"].get("sig").is_some();
+
+    // Session 2 — search finds the fact.
+    let out = repo.aura(&["memory", "search", "staging database port", "--json"]);
+    assert!(out.status.success());
+    let hits: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        hits.iter().any(|h| h["id"] == id.as_str()),
+        "a later session finds the earlier session's fact: {hits:?}"
+    );
+
+    // Session 3 — why reports provenance + the signature verdict.
+    let out = repo.aura(&["memory", "why", &id, "--json"]);
+    assert!(out.status.success(), "why failed: {}", String::from_utf8_lossy(&out.stderr));
+    let why: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(why["id"], id.as_str());
+    if entry_signed {
+        assert_eq!(why["signature"], "valid", "a signed entry verifies: {why}");
+    } else {
+        assert_eq!(why["signature"], "unsigned");
+    }
+
+    // Session 4 — edit supersedes, never deletes.
+    let out = repo.aura(&[
+        "memory", "edit", &id, "The staging database listens on port 55433", "--json",
+    ]);
+    assert!(out.status.success(), "edit failed: {}", String::from_utf8_lossy(&out.stderr));
+    let edited: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(edited["op"], "edited");
+    assert_eq!(edited["supersedes"], id.as_str());
+    let new_id = edited["id"].as_str().expect("successor id").to_string();
+    assert_ne!(new_id, id);
+    assert_eq!(
+        edited["entry"]["tags"],
+        serde_json::json!(["db", "staging"]),
+        "an edit without --tags inherits the old tags"
+    );
+
+    // Session 5 — default search returns the successor, not the closed row.
+    let out = repo.aura(&["memory", "search", "staging database port", "--json"]);
+    let hits: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(hits.iter().any(|h| h["id"] == new_id.as_str()));
+    assert!(
+        !hits.iter().any(|h| h["id"] == id.as_str()),
+        "the superseded row leaves default recall"
+    );
+
+    // Session 6 — forget (soft) closes the successor…
+    let out = repo.aura(&["memory", "forget", &new_id, "--json"]);
+    assert!(out.status.success());
+    let forgotten: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(forgotten["removed"], true);
+
+    // …so default search is empty, but --all keeps the audit trail.
+    let out = repo.aura(&["memory", "search", "staging database port", "--json"]);
+    let hits: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        !hits.iter().any(|h| h["id"] == new_id.as_str() || h["id"] == id.as_str()),
+        "forgotten facts leave default recall: {hits:?}"
+    );
+    let out = repo.aura(&["memory", "search", "staging database port", "--all", "--json"]);
+    let hits: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        hits.iter().any(|h| h["id"] == new_id.as_str()),
+        "--all still shows the closed row — soft forget never erases: {hits:?}"
+    );
+
+    // Session 7 — hard forget (the privacy path) erases the row entirely.
+    let out = repo.aura(&["memory", "forget", &new_id, "--hard", "--json"]);
+    assert!(out.status.success());
+    let mem_raw =
+        std::fs::read_to_string(repo.path().join(".aura/memory.json")).unwrap_or_default();
+    assert!(
+        !mem_raw.contains(&new_id),
+        "--hard leaves no trace of the erased row on disk"
+    );
+}
+
 // ══════════════════════════════════════════════════
 // Sentinel Tests (file-based — no CLI subcommand)
 // ══════════════════════════════════════════════════
@@ -834,6 +972,154 @@ fn test_handover_generates_payload() {
         "handover should generate output: {}", stdout);
 }
 
+#[test]
+fn test_handover_default_is_compact_and_full_is_the_expansion_flag() {
+    let repo = TestRepo::new();
+    repo.aura(&["init", "--force-baseline"]);
+
+    repo.write_file("app.ts", "export function main() { console.log('hello'); }\n");
+    repo.commit("Add app entry point");
+
+    let compact = repo.aura(&["handover", "claude"]);
+    let compact_out = String::from_utf8_lossy(&compact.stdout);
+    assert!(
+        compact_out.contains("mode=\"semantic\""),
+        "default handover must use the compact semantic profile: {compact_out}"
+    );
+
+    let full = repo.aura(&["handover", "claude", "--full"]);
+    let full_out = String::from_utf8_lossy(&full.stdout);
+    assert!(
+        full_out.contains("mode=\"full\""),
+        "--full must switch to the full-fidelity profile: {full_out}"
+    );
+}
+
+// ══════════════════════════════════════════════════
+// CTX-02 — bounded, compact context outputs
+// ══════════════════════════════════════════════════
+
+/// The audited small fixture: the default carryover must be materially
+/// smaller than the source it describes while still naming the files in
+/// play, and Aura's own state directory must never ride along.
+#[test]
+fn test_carryover_default_is_materially_smaller_than_source() {
+    let repo = TestRepo::new();
+    repo.aura(&["init", "--force-baseline"]);
+
+    // A source file big enough that "smaller" is meaningful (~40 KB).
+    let mut src = String::new();
+    for i in 0..400 {
+        src.push_str(&format!(
+            "pub fn compute_step_{i}(input: u64) -> u64 {{\n    let doubled = input * 2;\n    doubled + {i}\n}}\n\n"
+        ));
+    }
+    repo.write_file("src_big.rs", &src);
+    repo.commit("Add the big computation module");
+
+    // Uncommitted edit — the "exact moment" the carryover must retain.
+    repo.write_file("src_big.rs", &format!("{src}pub fn dirty_edit() {{}}\n"));
+    // Aura-generated churn that must NOT appear in the context.
+    repo.write_file(".aura/scratch_state.json", "{\"noise\": true}");
+
+    let output = repo.aura(&["carryover"]);
+    assert!(output.status.success(), "carryover failed: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.len() < src.len() / 2,
+        "default context ({} bytes) must be materially smaller than the source ({} bytes)",
+        stdout.len(),
+        src.len()
+    );
+    assert!(
+        stdout.contains("src_big.rs"),
+        "the touched file is a task-relevant fact and must survive: {stdout}"
+    );
+    assert!(
+        !stdout.contains("scratch_state.json"),
+        "Aura-generated files must not ride in the context: {stdout}"
+    );
+}
+
+/// A giant dirty tree becomes a capped list with an explicit elision
+/// marker, not an unbounded file dump.
+#[test]
+fn test_carryover_caps_file_list_with_elision_marker() {
+    let repo = TestRepo::new();
+    repo.aura(&["init", "--force-baseline"]);
+
+    for i in 0..60 {
+        repo.write_file(&format!("gen/f{i:03}.txt"), "x\n");
+    }
+
+    let output = repo.aura(&["carryover"]);
+    assert!(output.status.success(), "carryover failed: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("more files (elided)"),
+        "a capped file list must say what it left out: {stdout}"
+    );
+    assert!(stdout.contains("gen/f000.txt"), "early entries must still be listed: {stdout}");
+    assert!(
+        !stdout.contains("gen/f059.txt"),
+        "entries past the cap must be elided: {stdout}"
+    );
+}
+
+/// Symbols deleted since an older checkpoint must not be cited: every
+/// path and symbol in the carryover exists at the newest checkpoint that
+/// parsed its file.
+#[test]
+fn test_carryover_drops_symbols_deleted_since_their_checkpoint() {
+    let repo = TestRepo::new();
+
+    // Both symbols exist BEFORE init, so the baseline checkpoint captures
+    // them — with file paths — as tracked semantic state.
+    repo.write_file(
+        "lib_x.rs",
+        "pub fn keep_me() -> u32 { 1 }\n\npub fn delete_me() -> u32 { 2 }\n",
+    );
+    repo.commit("Add keep_me and delete_me");
+    repo.aura(&["init", "--force-baseline"]);
+
+    // Then the symbol is deleted (hookless commit — no newer checkpoint
+    // records the deletion, which is exactly the stale-citation trap).
+    repo.write_file("lib_x.rs", "pub fn keep_me() -> u32 { 1 }\n");
+    repo.commit("Drop delete_me");
+
+    let output = repo.aura(&["carryover", "--json"]);
+    assert!(output.status.success(), "carryover failed: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("carryover --json must emit valid JSON");
+
+    let nodes = parsed["touched_nodes"].as_array().cloned().unwrap_or_default();
+    let cites = |name: &str| {
+        nodes.iter().any(|n| {
+            n["identifier"].as_str() == Some(name) || n["node_id"].as_str().is_some_and(|id| id.contains(name))
+        })
+    };
+    assert!(
+        cites("keep_me"),
+        "the surviving symbol must still be cited (fixture must not be vacuous): {nodes:?}"
+    );
+    assert!(
+        !cites("delete_me"),
+        "a symbol deleted since its checkpoint must not be cited as live state: {nodes:?}"
+    );
+    // Every cited path must exist in the repo the carryover describes.
+    for n in &nodes {
+        if let Some(f) = n["file_path"].as_str() {
+            assert!(
+                repo.path().join(f).exists(),
+                "cited path must exist in the worktree: {f}"
+            );
+        }
+    }
+}
+
 // ══════════════════════════════════════════════════
 // Prove / Goal-Trace Tests
 // ══════════════════════════════════════════════════
@@ -865,7 +1151,9 @@ fn test_snapshot_guard_detects_unsnapshotted_edits() {
 
     // Create and commit a file
     repo.write_file("service.rs", "pub fn serve() -> bool { true }\n");
-    repo.commit("Add service");
+    // Hookless: the point of this test is that an *unsnapshotted* edit is
+    // detectable, so the commit must not hand Aura a chance to snapshot it.
+    repo.commit_without_hooks("Add service");
 
     // Modify without snapshotting
     repo.write_file("service.rs", "pub fn serve() -> bool { false }\n");
@@ -882,10 +1170,20 @@ fn test_snapshot_guard_detects_unsnapshotted_edits() {
 
     // Verify NO snapshot exists
     let snap_dir = repo.path().join(".aura/snapshots");
-    let has_snapshot = snap_dir.is_dir() && std::fs::read_dir(&snap_dir)
-        .map(|entries| entries.flatten().any(|e| e.file_name().to_string_lossy().contains("service")))
-        .unwrap_or(false);
-    assert!(!has_snapshot, "No snapshot should exist for service.rs");
+    let snapshots: Vec<String> = std::fs::read_dir(&snap_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let matched: Vec<&String> = snapshots.iter().filter(|n| n.contains("service")).collect();
+    assert!(
+        matched.is_empty(),
+        "No snapshot should exist for service.rs, but found {matched:?} in {} (dir holds {snapshots:?})",
+        snap_dir.display(),
+    );
 }
 
 // ══════════════════════════════════════════════════

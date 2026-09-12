@@ -179,6 +179,11 @@ export type NoticeCopy = {
   /** Offer the manual install command next to the details — the escape hatch
    *  for a machine where the in-app update can't write. */
   showInstallCommand: boolean;
+  /** Set when macOS is refusing a folder. The button then opens the switch
+   *  that fixes it rather than re-running a command that cannot succeed —
+   *  Aura is not allowed to ask for this access itself, so no number of
+   *  retries will ever produce a different answer. */
+  privacyPath: string | null;
 };
 
 export function noticeCopy(state: TrackAttempt): NoticeCopy {
@@ -205,15 +210,19 @@ export function noticeCopy(state: TrackAttempt): NoticeCopy {
         ? `Still off after trying. ${reason}`
         : `Still off after ${attempts} tries. ${reason}`;
 
+  const privacyPath = status?.privacy_path ?? null;
+
   const cta = !isGit
     ? "Turn on Aura"
-    : needsPassword
-      ? "Enter password"
-      : stale
-        ? `Update to ${stale.expected}`
-        : attempts > 0
-          ? "Try again"
-          : "Retry";
+    : privacyPath
+      ? "Open Settings"
+      : needsPassword
+        ? "Enter password"
+        : stale
+          ? `Update to ${stale.expected}`
+          : attempts > 0
+            ? "Try again"
+            : "Retry";
 
   const parts: string[] = [];
   if (stale) {
@@ -232,6 +241,7 @@ export function noticeCopy(state: TrackAttempt): NoticeCopy {
     // installs one is exactly as useful there.
     showInstallCommand:
       stale !== null || (raw?.includes("couldn't start Aura") ?? false),
+    privacyPath,
   };
 }
 
@@ -292,6 +302,7 @@ export function AuraTrackingNotice({ repoRoot, onCliUpdated }: Props) {
             wired: false,
             detail: null,
             stale_cli: null,
+            privacy_path: null,
             raw_detail: null,
           },
         });
@@ -371,7 +382,8 @@ export function AuraTrackingNotice({ repoRoot, onCliUpdated }: Props) {
   }
 
   // ── Action notice (non-git, or enable didn't stick) ────────────────────
-  const { line, cta, details, showInstallCommand } = noticeCopy(attempt);
+  const { line, cta, details, showInstallCommand, privacyPath } =
+    noticeCopy(attempt);
 
   function copyInstall() {
     navigator.clipboard
@@ -420,13 +432,19 @@ export function AuraTrackingNotice({ repoRoot, onCliUpdated }: Props) {
         )}
         <button
           type="button"
-          onClick={() => void turnOn(attempt.needsPassword)}
+          onClick={() =>
+            privacyPath
+              ? void api.openMacosPrivacyPane("Privacy_AllFiles")
+              : void turnOn(attempt.needsPassword)
+          }
           disabled={busy}
           className="flex items-center gap-1 text-xs px-2 py-0.5 rounded font-medium bg-accent text-bg-0 hover:opacity-90 disabled:opacity-50"
           title={
             !status.is_git
               ? "Set this folder up for Git and start tracking it with Aura"
-              : attempt.needsPassword
+              : privacyPath
+                ? `Open Full Disk Access so macOS lets Aura read ${privacyPath}`
+                : attempt.needsPassword
                 ? "Update Aura's helper — this asks for your password"
                 : status.stale_cli
                   ? "Replace the out-of-date Aura helper on this computer, then switch tracking on"

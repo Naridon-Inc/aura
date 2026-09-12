@@ -7,7 +7,7 @@
 // `useMcpTools()` so add/remove here flows straight into the slash
 // palette + @-mention picker.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ExternalLink,
   Eye,
@@ -20,6 +20,7 @@ import {
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { useDismiss } from "../../lib/useDismiss";
 import { EmptyState, ErrorNote } from "../ui/state";
 import {
   MODAL_BACKDROP,
@@ -978,6 +979,15 @@ function AuthSetupModal({
   onClose: () => void;
   onSaved: () => void | Promise<void>;
 }) {
+  // Escape used to be a React onKeyDown on the backdrop div. That div is not
+  // focusable and nothing inside it takes focus when the modal opens, so the
+  // key event never reached the handler and Escape did nothing at all until
+  // you had clicked into the dialog. The app has one answer for closing a
+  // surface — outside mousedown and Escape, listened for on the document —
+  // and this is it.
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useDismiss(true, onClose, panelRef);
+
   const template = useMemo(
     () => matchTemplate(server.name, server.args),
     [server.name, server.args],
@@ -1183,21 +1193,11 @@ function AuthSetupModal({
   return (
     <div
       className={cn(MODAL_BACKDROP, "z-[10000] flex items-center justify-center")}
-      onClick={onClose}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") {
-          e.stopPropagation();
-          onClose();
-        }
-      }}
       role="dialog"
       aria-modal="true"
       aria-label={server.name}
     >
-      <div
-        className={cn(MODAL_PANEL, "max-w-lg max-h-[80vh] flex flex-col")}
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div ref={panelRef} className={cn(MODAL_PANEL, "max-w-lg max-h-[80vh] flex flex-col")}>
         {/* Header */}
         <div className={cn(MODAL_HEADER, "items-start justify-between gap-3")}>
           <div className="min-w-0">

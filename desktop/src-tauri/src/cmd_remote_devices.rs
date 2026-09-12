@@ -76,9 +76,15 @@ fn aura_home() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".aura"))
 }
 
-/// Read `~/.aura/device_id`, minting + persisting a fresh UUID the first
-/// time. Falls back to an ephemeral id if HOME is unreadable (the laptop
-/// still works, it just won't be stable across restarts in that edge case).
+/// Read `~/.aura/device_id`, persisting one the first time. Falls back to
+/// an ephemeral id if HOME is unreadable (the laptop still works, it just
+/// won't be stable across restarts in that edge case).
+///
+/// AUDIT-UI-04 — when the file is absent we ADOPT the id `device.json`
+/// (cmd_device) already minted instead of minting a second UUID. Two ids
+/// for one laptop meant the same machine appeared as two device rows on
+/// the phone list. An existing `device_id` file is honoured as-is so
+/// installs that already beaconed under it don't change identity.
 fn load_or_make_device_id() -> String {
     if let Some(dir) = aura_home() {
         let path = dir.join("device_id");
@@ -88,7 +94,11 @@ fn load_or_make_device_id() -> String {
                 return trimmed.to_string();
             }
         }
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = crate::cmd_device::load_or_create_device()
+            .map(|d| d.device_id)
+            .ok()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(&path, &id);
         return id;
@@ -154,6 +164,11 @@ struct HeartbeatBody {
 struct HeartbeatReply {
     #[serde(default)]
     wake_requested: bool,
+    /// The cloud cannot route the relay code this beat reported. Defaults to
+    /// false, which is also what an older cloud answers — on one of those the
+    /// desktop behaves exactly as it did before.
+    #[serde(default)]
+    relay_stale: bool,
 }
 
 /// Spawn the single always-on presence heartbeat. Safe to call once at
@@ -222,8 +237,25 @@ async fn beat_once(app: &AppHandle, client: &reqwest::Client) -> Result<(), Stri
     }
 
     let reply: HeartbeatReply = resp.json().await.map_err(|e| e.to_string())?;
-    if reply.wake_requested && !status.running {
-        tracing::info!("[presence] wake requested by phone — starting relay");
+
+    // A relay this cloud cannot route is not a relay. Drop it first, so the
+    // wake below dials a real one instead of `ensure_started` handing back the
+    // dead handle it is already holding.
+    //
+    // The relay clears itself when its socket closes, which covers the common
+    // case. This covers the ones it cannot see: a socket that died without a
+    // close frame across sleep, and a cloud that restarted and forgot a code
+    // whose socket is somehow still open at this end. Either way the cloud is
+    // the authority on what it can dial, and it has just said it cannot dial
+    // this.
+    if reply.relay_stale && status.running {
+        tracing::info!("[presence] cloud cannot route our relay code — dropping it");
+        relay.stop(app).await;
+    }
+
+    let relay_down = !status.running || reply.relay_stale;
+    if reply.wake_requested && relay_down {
+        tracing::info!("[presence] wake requested — starting relay");
         // Bring the relay up. `ensure_started` upserts the live code into
         // presence itself, and the next beat reports it — clearing the wake.
         if let Err(e) = relay.ensure_started(app).await {
@@ -231,4 +263,49 @@ async fn beat_once(app: &AppHandle, client: &reqwest::Client) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod device_identity_tests {
+    use super::*;
+    use crate::test_home;
+
+    // AUDIT-UI-04 — one machine, one identity. With no device_id file,
+    // the beacon adopts the id device.json already minted (instead of
+    // minting a second UUID and splitting the machine into two rows),
+    // and persists it so later reads short-circuit.
+    #[test]
+    fn adopts_device_json_id_instead_of_minting_a_second() {
+        let home = test_home::borrow();
+        let aura = home.path().join(".aura");
+        std::fs::create_dir_all(&aura).unwrap();
+        std::fs::write(
+            aura.join("device.json"),
+            r#"{"device_id":"11111111-2222-3333-4444-555555555555","display_name":"mo","email":""}"#,
+        )
+        .unwrap();
+
+        let id = load_or_make_device_id();
+        assert_eq!(id, "11111111-2222-3333-4444-555555555555");
+        // Persisted for stability — the next read comes from the file.
+        let on_disk = std::fs::read_to_string(aura.join("device_id")).unwrap();
+        assert_eq!(on_disk.trim(), id);
+    }
+
+    // An existing device_id file wins — installs that already beaconed
+    // under it must not change identity, even when device.json disagrees.
+    #[test]
+    fn an_existing_device_id_file_is_honoured() {
+        let home = test_home::borrow();
+        let aura = home.path().join(".aura");
+        std::fs::create_dir_all(&aura).unwrap();
+        std::fs::write(aura.join("device_id"), "aaaa-existing\n").unwrap();
+        std::fs::write(
+            aura.join("device.json"),
+            r#"{"device_id":"bbbb-other","display_name":"mo","email":""}"#,
+        )
+        .unwrap();
+
+        assert_eq!(load_or_make_device_id(), "aaaa-existing");
+    }
 }

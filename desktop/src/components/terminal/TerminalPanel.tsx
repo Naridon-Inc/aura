@@ -23,6 +23,7 @@ import {
   type WorkSplitTree,
 } from "../../lib/editorStore";
 import { api, type TerminalProfile } from "../../lib/api";
+import { toast } from "../../lib/toast";
 import { TerminalPanelToolbar } from "./TerminalPanelToolbar";
 import { TerminalTabsList } from "./TerminalTabsList";
 import { TerminalFindWidget } from "./TerminalFindWidget";
@@ -226,6 +227,13 @@ export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePa
   async function handleRun() {
     const outcome = await runProject(repoRoot, runDeps);
     if (outcome.ok) return;
+    if (outcome.reason === "no-place") {
+      // The project stands in a machine that could not be opened. Say so;
+      // running its command on this laptop instead would start the wrong
+      // thing on the wrong computer.
+      toast.warning("Run couldn't start on the machine", outcome.message);
+      return;
+    }
     // The repo justified no command and none was pinned. Ask — in the same
     // dialog the row's pencil opens — and run the answer. A cancelled prompt
     // runs nothing; it does not fall back to a hopeful guess.

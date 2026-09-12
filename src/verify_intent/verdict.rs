@@ -1,12 +1,22 @@
 //! The decision. No git, no I/O, no model — given two symbol sets and an
 //! approved contract, which findings block the commit?
 //!
-//! One rule blocks:
+//! Two rules block, and they are the same rule read twice:
 //!
 //! > A protected or exported symbol was removed, and that removal was not
 //! > approved.
 //!
-//! It is deterministic, it reproduces, and it is explainable in a sentence.
+//! > A protected symbol is still here, but something that called it stopped
+//! > calling it.
+//!
+//! The second exists because the first, alone, checks the wrong thing. Delete
+//! the call to `requireCheckoutAuth` and leave the function sitting there, and
+//! a presence check sees a protected symbol present and passes — while the
+//! endpoint it guarded is open. A preserve list means the symbol keeps doing
+//! its job; it cannot mean its text is still on disk.
+//!
+//! Both are deterministic, both reproduce, and both are explainable in a
+//! sentence.
 //! Everything else this module produces is advisory: worth telling a human,
 //! never worth failing a commit over, because the cost of a false block is
 //! that people disable the gate.
@@ -33,6 +43,11 @@ pub enum Severity {
 pub enum Finding {
     /// An exported or explicitly protected symbol is gone from the tree.
     ProtectedExportRemoved,
+    /// A protected symbol survived, but a caller that also survived no longer
+    /// calls it. Blocking, and deliberately so: the contract's preserve list is
+    /// a person having said this specific thing must keep working, and a guard
+    /// nobody calls has stopped working whatever its source still says.
+    ProtectedCallRemoved,
     /// A symbol the contract said to preserve is still there, but its logic
     /// changed. Advisory by design — the one blocking rule is removal — but it
     /// is never folded into a bare count, because "must preserve" and "we
@@ -47,7 +62,7 @@ pub enum Finding {
 impl Finding {
     fn severity(self) -> Severity {
         match self {
-            Finding::ProtectedExportRemoved => Severity::Blocking,
+            Finding::ProtectedExportRemoved | Finding::ProtectedCallRemoved => Severity::Blocking,
             Finding::ProtectedSymbolChanged
             | Finding::UnapprovedSymbolChanged
             | Finding::OutOfScopeFile => Severity::Advisory,
@@ -86,6 +101,9 @@ pub struct Verdict {
     pub unexpected_changed: Vec<String>,
     /// Protected or exported symbols that vanished.
     pub protected_removed: Vec<String>,
+    /// Protected symbols that are still here and lost a caller, as
+    /// `"caller -> protected"` so a summary line reads without a lookup.
+    pub severed_calls: Vec<String>,
     pub violations: Vec<Violation>,
 }
 
@@ -219,8 +237,36 @@ pub fn evaluate(
         requested_changed,
         unexpected_changed,
         protected_removed,
+        severed_calls: Vec::new(),
         violations,
     }
+}
+
+/// Fold severed-call evidence into a verdict `evaluate` has already produced.
+///
+/// Kept separate because `evaluate` is pure and this needs a repository: the
+/// call graph is built from git objects, and the moment that logic moves into
+/// `evaluate` the decision stops being unit-testable without a checkout. The
+/// cost of the split is that a caller could forget to make this call, which is
+/// why there is exactly one place in `mod.rs` that produces a verdict.
+pub fn record_severed(v: &mut Verdict, severed: &[super::severed::SeveredCall]) {
+    for call in severed {
+        v.severed_calls.push(format!("{} -> {}", call.caller, call.protected));
+        v.violations.push(Violation {
+            finding: Finding::ProtectedCallRemoved,
+            severity: Finding::ProtectedCallRemoved.severity(),
+            symbol: call.protected.clone(),
+            file: call.file.clone(),
+            kind: "function".into(),
+            exported: true,
+            reason: format!(
+                "{} called {} in the approved baseline and no longer does. Both are still in the tree, so nothing looks deleted — but {} was on the preserve list and now runs for one caller fewer.",
+                call.caller, call.protected, call.protected,
+            ),
+        });
+    }
+    v.severed_calls.sort();
+    v.severed_calls.dedup();
 }
 
 #[cfg(test)]

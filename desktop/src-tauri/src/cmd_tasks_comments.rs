@@ -87,15 +87,37 @@ pub async fn tasks_comments_list(
     repo_root: String,
     task_id: String,
 ) -> Result<Vec<TaskComment>, String> {
-    let file = load_comments(Path::new(&repo_root))?;
+    let root = Path::new(&repo_root);
+    let file = load_comments(root)?;
     // Filter to this task; preserve insertion order so the UI can
     // render roots first then walk children in the order they were
     // written (matches Plane's "oldest first within a thread" layout).
-    Ok(file
+    let mut out: Vec<TaskComment> = file
         .comments
         .into_iter()
         .filter(|c| c.task_id == task_id)
-        .collect())
+        .collect();
+    out.extend(card_comments(root, &task_id));
+    Ok(out)
+}
+
+/// Comments the CLI wrote inline on a card.
+///
+/// `aura task comment` keeps its comments on the card itself, which is what
+/// makes a card a self-contained file. This store never looked there, so a
+/// comment left by an agent on the command line rendered as no comment at
+/// all — the audit that found 44 finished tasks carrying "0 comments" was
+/// reading past exactly these. The card stays the writer; the app reads it.
+fn card_comments(repo_root: &Path, task_id: &str) -> Vec<TaskComment> {
+    if !aura_loop::board_card::is_card_id(task_id) {
+        return Vec::new();
+    }
+    aura_loop::board_card::read_cards(repo_root)
+        .iter()
+        .filter(|c| c.id == task_id)
+        .flat_map(aura_loop::board_card::card_comment_rows)
+        .filter_map(|row| serde_json::from_value(row).ok())
+        .collect()
 }
 
 #[tauri::command]

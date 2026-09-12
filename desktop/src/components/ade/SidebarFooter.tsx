@@ -19,20 +19,15 @@
 // opens the account menu, and the header strip carries no avatar at all.
 
 import { useEffect, useState } from "react";
-import { HelpCircle, Settings } from "lucide-react";
+import { BookOpen, Compass, HelpCircle, Keyboard, Settings } from "lucide-react";
 
 import { api } from "../../lib/api";
 import { useEffectiveHandle } from "../../lib/identityHandle";
 import { openExternal } from "../../lib/openExternal";
 import { AccountMenu } from "../account/AccountMenu";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "../ui/dropdown-menu";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { FinderMenu } from "@shared/ui/FinderList";
 
 const DOCS_URL = "https://auravcs.com/docs";
 
@@ -198,38 +193,9 @@ export function SidebarFooter({ repoRoot = "" }: { repoRoot?: string }) {
       />
 
       <div className="ade-foot-acts">
-        <DropdownMenu>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <DropdownMenuTrigger asChild>
-                <button type="button" className="ade-foot-btn" aria-label="Help">
-                  <HelpCircle size={15} />
-                </button>
-              </DropdownMenuTrigger>
-            </TooltipTrigger>
-            <TooltipContent side="top">Help</TooltipContent>
-          </Tooltip>
-          <DropdownMenuContent align="start" side="top">
-            <DropdownMenuItem
-              onSelect={() =>
-                window.dispatchEvent(new CustomEvent("aura:start-tour"))
-              }
-            >
-              Take the tour
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onSelect={() =>
-                window.dispatchEvent(new CustomEvent("aura:open-shortcuts"))
-              }
-            >
-              Keyboard shortcuts
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => void openExternal(DOCS_URL)}>
-              Documentation
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {/* Help opens on the same panel as the account chip beside it —
+            Popover + FinderMenu, the sidebar's one drop-out surface. */}
+        <HelpMenu />
 
         <Tooltip>
           <TooltipTrigger asChild>
@@ -248,5 +214,42 @@ export function SidebarFooter({ repoRoot = "" }: { repoRoot?: string }) {
         </Tooltip>
       </div>
     </div>
+  );
+}
+
+function HelpMenu() {
+  const [open, setOpen] = useState(false);
+  const fire = (name: string) => {
+    window.dispatchEvent(new CustomEvent(name));
+  };
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <button type="button" className="ade-foot-btn" aria-label="Help">
+              <HelpCircle size={15} />
+            </button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="top">Help</TooltipContent>
+      </Tooltip>
+      <PopoverContent align="start" side="top" sideOffset={6} className="w-[232px] p-0">
+        <FinderMenu
+          onClose={() => setOpen(false)}
+          groups={[
+            {
+              items: [
+                { id: "tour", icon: <Compass />, label: "Take the tour", onSelect: () => fire("aura:start-tour") },
+                { id: "keys", icon: <Keyboard />, label: "Keyboard shortcuts", trailing: "?", onSelect: () => fire("aura:open-shortcuts") },
+              ],
+            },
+            {
+              items: [{ id: "docs", icon: <BookOpen />, label: "Documentation", onSelect: () => void openExternal(DOCS_URL) }],
+            },
+          ]}
+        />
+      </PopoverContent>
+    </Popover>
   );
 }

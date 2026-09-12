@@ -57,6 +57,12 @@ pub struct PrSummary {
     /// PR labels — name + GitHub colour hex (no `#` prefix). Populated
     /// from `gh pr list --json labels`.
     pub labels: Vec<PrLabel>,
+    /// True when the head branch lives in a fork. Its branch has no ref in
+    /// this clone, so checking the PR out means fetching `pull/<n>/head`.
+    pub is_cross_repository: bool,
+    /// Login of the repo that owns the head branch (the fork's owner for a
+    /// cross-repository PR; the base repo's owner otherwise).
+    pub head_repo_owner: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -214,14 +220,165 @@ pub struct AuraReviewPayload {
 
 // ── gh shell helpers ──────────────────────────────────────────────────
 
-fn run_gh(repo_root: &str, args: &[&str]) -> Result<String, String> {
-    let cwd = PathBuf::from(repo_root);
-    if !cwd.is_dir() {
-        return Err(format!("repo root does not exist: {}", repo_root));
+/// The repository a `gh` call is about — and where the call runs.
+///
+/// On this laptop, gh reads `owner/repo` off the checkout's `origin`, so it
+/// runs in the checkout and is told nothing. A workspace whose checkout is on
+/// a machine (AURA-1307) has no checkout here worth asking: the laptop's copy
+/// may be stale, a different fork, or not cloned at all, and gh reading
+/// `origin` off it would answer about the wrong repository while looking
+/// exactly right. So for that case gh is told the repository outright
+/// (`-R owner/repo`, the slug the *box* resolved from its own origin) and runs
+/// in the home directory, where there is no `.git` to consult.
+///
+/// gh itself still runs HERE, with the person's own credential. The box is
+/// where the code is, not where the person's GitHub login lives.
+///
+/// This is the one place the `-R`/cwd decision is made. Every gh spawn in
+/// this file goes through [`gh_command`] or [`gh_tokio`], and both ask this.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GhRepo {
+    /// The checkout on this laptop. Without `remote` gh runs in it; either
+    /// way it keys the per-repo `[github] host` setting and `.aura/reviews`,
+    /// which stay here.
+    root: String,
+    /// `owner/repo`, when the checkout lives on a machine.
+    remote: Option<String>,
+}
+
+/// What an `owner/repo` slug may be made of. These go into an argv slot gh
+/// parses itself, and the value arrived over the wire from a box's `origin`,
+/// so the shape is checked rather than trusted.
+fn slug_ok(slug: &str) -> bool {
+    let mut parts = slug.split('/');
+    let (Some(owner), Some(repo), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let word = |s: &str| {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && !s.starts_with('-')
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    };
+    word(owner) && word(repo)
+}
+
+impl GhRepo {
+    pub(crate) fn new(root: &str, remote_repo: Option<String>) -> Result<Self, String> {
+        let remote = remote_repo
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(slug) = &remote {
+            if !slug_ok(slug) {
+                return Err(format!(
+                    "`{slug}` isn't a repository name — expected `owner/repo`, like `octocat/hello-world`."
+                ));
+            }
+        }
+        Ok(Self {
+            root: root.to_string(),
+            remote,
+        })
     }
-    let out = Command::new("gh")
-        .args(args)
-        .current_dir(&cwd)
+
+    fn is_remote(&self) -> bool {
+        self.remote.is_some()
+    }
+
+    fn root(&self) -> &str {
+        &self.root
+    }
+
+    /// Where gh runs: the checkout, or — for a repository named outright —
+    /// the home directory, so no checkout on this disk can colour the answer.
+    fn cwd(&self) -> PathBuf {
+        match &self.remote {
+            None => PathBuf::from(&self.root),
+            Some(_) => dirs::home_dir().unwrap_or_else(std::env::temp_dir),
+        }
+    }
+
+    /// `args`, with the repository named when gh can't read it off a
+    /// checkout. `gh api` takes no `-R`; its paths and variables already
+    /// carry the slug, which [`owner_path`](Self::owner_path) hands out.
+    fn argv(&self, args: &[&str]) -> Vec<String> {
+        let mut out: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        if let Some(slug) = &self.remote {
+            if args.first() != Some(&"api") {
+                out.push("-R".to_string());
+                out.push(slug.clone());
+            }
+        }
+        out
+    }
+
+    /// The `owner/repo` slug: known outright on a machine, asked of gh here
+    /// (which reads the configured remote; ~30ms locally).
+    fn owner_path(&self) -> Result<String, String> {
+        if let Some(slug) = &self.remote {
+            return Ok(slug.clone());
+        }
+        let stdout = run_gh(
+            self,
+            &["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        )?;
+        let trimmed = stdout.trim();
+        if trimmed.is_empty() {
+            return Err("gh repo view returned empty owner/repo".to_string());
+        }
+        Ok(trimmed.to_string())
+    }
+}
+
+/// The environment a gh child gets, on either spawn path. The child inherits
+/// this process's environment, which on macOS carries `GH_HOST` /
+/// `GH_ENTERPRISE_TOKEN` / `GH_TOKEN` imported from the login shell at
+/// startup (see `fix_path_for_gui_macos`), so a GitHub Enterprise login set
+/// up in the terminal works from the Dock-launched app too. A per-repo
+/// `[github] host` in `.aura/settings.toml` wins over the shell's `GH_HOST`,
+/// so one machine can hold github.com repos next to enterprise ones.
+fn gh_env(repo: &GhRepo) -> Vec<(&'static str, String)> {
+    let mut env = Vec::new();
+    for key in ["GH_HOST", "GH_ENTERPRISE_TOKEN", "GH_TOKEN"] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.trim().is_empty() {
+                env.push((key, v));
+            }
+        }
+    }
+    if let Some(host) = crate::cmd_repo_settings::gh_host_for(repo.root()) {
+        env.push(("GH_HOST", host));
+    }
+    env
+}
+
+/// Build the `gh` command for a repo — see [`GhRepo`] for where it runs and
+/// what it is told.
+fn gh_command(repo: &GhRepo, args: &[&str]) -> Command {
+    let mut cmd = Command::new("gh");
+    cmd.args(repo.argv(args)).current_dir(repo.cwd());
+    for (key, value) in gh_env(repo) {
+        cmd.env(key, value);
+    }
+    cmd
+}
+
+/// The same, for the async paths (`pr_detail`'s diff chain).
+fn gh_tokio(repo: &GhRepo, args: &[&str]) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("gh");
+    cmd.args(repo.argv(args)).current_dir(repo.cwd());
+    for (key, value) in gh_env(repo) {
+        cmd.env(key, value);
+    }
+    cmd
+}
+
+fn run_gh(repo: &GhRepo, args: &[&str]) -> Result<String, String> {
+    if !repo.is_remote() && !PathBuf::from(repo.root()).is_dir() {
+        return Err(format!("repo root does not exist: {}", repo.root()));
+    }
+    let out = gh_command(repo, args)
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -261,6 +418,29 @@ fn run_git(repo_root: &str, args: &[&str]) -> Result<String, String> {
         });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The branch a pull request on a machine is from. There is no checkout here
+/// to ask, so the dialog has to say — and it has to be a branch name git would
+/// accept, since it goes into `--head` unquoted by us and unchecked by gh.
+fn remote_head_branch(requested: Option<&str>) -> Result<String, String> {
+    let branch = requested.map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
+        "Name the branch this pull request is from — on a machine there is no checkout here to read it off."
+            .to_string()
+    })?;
+    let bad = branch.starts_with('-')
+        || branch.ends_with('/')
+        || branch.ends_with(".lock")
+        || branch.contains("..")
+        || branch.contains("//")
+        || branch.contains("@{")
+        || branch
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\'));
+    if bad {
+        return Err(format!("`{branch}` isn't a branch name git would accept."));
+    }
+    Ok(branch.to_string())
 }
 
 fn current_branch(repo_root: &str, requested: Option<&str>) -> Result<String, String> {
@@ -544,6 +724,12 @@ struct GhPrSummary {
     // requests and tripped the secondary "too many requests" rate limit).
     #[serde(default, rename = "statusCheckRollup", deserialize_with = "null_to_default")]
     status_check_rollup: Vec<GhRollupEntry>,
+    // Fork PRs: `isCrossRepository` + `headRepositoryOwner.login` say whether
+    // the head branch lives somewhere this clone can't see.
+    #[serde(default, rename = "isCrossRepository")]
+    is_cross_repository: bool,
+    #[serde(default, rename = "headRepositoryOwner", deserialize_with = "null_to_default")]
+    head_repository_owner: GhUser,
 }
 
 #[derive(Deserialize, Default)]
@@ -630,6 +816,10 @@ pub struct PrCheck {
     pub url: String,
     pub workflow: String,
     pub description: String,
+    /// Why an Actions run failed *to start* (`startup_failure`): the
+    /// invalid-workflow-file / unmatched-runner message GitHub records on
+    /// the check run. Empty for every other state, or when GitHub gave none.
+    pub failure_reason: String,
 }
 
 /// The individual CI checks on one PR (name + state + logs link), for the
@@ -637,10 +827,15 @@ pub struct PrCheck {
 /// the per-check detail from the SAME `statusCheckRollup` GitHub already
 /// exposes, so it's one cached `gh pr view` call and no new integration.
 #[tauri::command]
-pub async fn pr_checks(repo_root: String, number: u64) -> Result<Vec<PrCheck>, String> {
+pub async fn pr_checks(
+    repo_root: String,
+    number: u64,
+    remote_repo: Option<String>,
+) -> Result<Vec<PrCheck>, String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         let stdout = run_gh(
-            &repo_root,
+            &repo,
             &[
                 "pr",
                 "view",
@@ -676,13 +871,27 @@ pub async fn pr_checks(repo_root: String, number: u64) -> Result<Vec<PrCheck>, S
                 } else {
                     r.target_url.clone()
                 };
+                let raw = raw_signal(r);
+                // A run that never started carries its reason on the check
+                // run, not in the rollup — one extra `gh api` per such row,
+                // and startup failures are rare enough for that to be fine.
+                let failure_reason = if raw.eq_ignore_ascii_case("STARTUP_FAILURE") {
+                    crate::integrations::gh_actions::startup_failure_reason(
+                        |args| run_gh(&repo, args),
+                        &url,
+                    )
+                    .unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 PrCheck {
                     name,
                     bucket: signal_for(r).to_string(),
-                    raw: raw_signal(r),
+                    raw,
                     url,
                     workflow: r.workflow_name.clone(),
                     description: r.description.clone(),
+                    failure_reason,
                 }
             })
             .collect();
@@ -701,7 +910,7 @@ struct GhLabel {
     description: String,
 }
 
-const PR_LIST_FIELDS: &str = "number,title,state,author,headRefName,baseRefName,isDraft,additions,deletions,createdAt,updatedAt,reviewDecision,url,reviewRequests,labels,statusCheckRollup";
+const PR_LIST_FIELDS: &str = "number,title,state,author,headRefName,baseRefName,isDraft,additions,deletions,createdAt,updatedAt,reviewDecision,url,reviewRequests,labels,statusCheckRollup,isCrossRepository,headRepositoryOwner";
 
 /// List PRs in the repo via `gh pr list --json …`. Passes `--state all`
 /// so the Inbox can bucket Approved / Merged / Closed alongside open
@@ -709,17 +918,21 @@ const PR_LIST_FIELDS: &str = "number,title,state,author,headRefName,baseRefName,
 /// and starved the other buckets. Limit bumped to 200 for headroom on
 /// busy repos; the desktop sidebar paginates client-side.
 #[tauri::command]
-pub async fn pr_list(repo_root: String) -> Result<Vec<PrSummary>, String> {
+pub async fn pr_list(
+    repo_root: String,
+    remote_repo: Option<String>,
+) -> Result<Vec<PrSummary>, String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         let stdout = run_gh(
-            &repo_root,
+            &repo,
             &["pr", "list", "--limit", "200", "--state", "all", "--json", PR_LIST_FIELDS],
         )?;
         let raw: Vec<GhPrSummary> =
             serde_json::from_str(&stdout).map_err(|e| format!("gh json parse: {}", e))?;
         // Resolve the gh viewer once per call so Inbox bucketing has a stable
         // "is this me" answer. Empty string falls through as "no match".
-        let viewer = viewer_login(&repo_root).unwrap_or_default();
+        let viewer = viewer_login(&repo).unwrap_or_default();
         // One disk scan for all reviews; CI state comes from each PR's inline
         // statusCheckRollup (already in `raw`) — so the whole list is exactly
         // ONE GitHub request, not 1 + N. This is what keeps us off GitHub's
@@ -760,6 +973,8 @@ pub async fn pr_list(repo_root: String) -> Result<Vec<PrSummary>, String> {
                     checks_pending: checks.pending,
                     is_authored_by_me,
                     is_review_requested_for_me,
+                    is_cross_repository: p.is_cross_repository,
+                    head_repo_owner: p.head_repository_owner.login,
                     labels: p
                         .labels
                         .into_iter()
@@ -780,12 +995,16 @@ pub async fn pr_list(repo_root: String) -> Result<Vec<PrSummary>, String> {
 /// List repository issues through the same authenticated `gh` session as PRs.
 /// `gh issue list` excludes pull requests and returns only real issues.
 #[tauri::command]
-pub async fn github_issue_list(repo_root: String) -> Result<Vec<GithubIssue>, String> {
+pub async fn github_issue_list(
+    repo_root: String,
+    remote_repo: Option<String>,
+) -> Result<Vec<GithubIssue>, String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         const FIELDS: &str =
             "number,title,body,state,author,labels,url,createdAt,updatedAt";
         let stdout = run_gh(
-            &repo_root,
+            &repo,
             &["issue", "list", "--state", "open", "--limit", "200", "--json", FIELDS],
         )?;
         #[derive(Deserialize, Default)]
@@ -853,14 +1072,24 @@ pub async fn pr_create(
     body: String,
     base_branch: Option<String>,
     draft: bool,
+    remote_repo: Option<String>,
 ) -> Result<PrCreated, String> {
     crate::blocking::run(move || {
         let title = title.trim();
         if title.is_empty() {
             return Err("pull request title can't be empty".to_string());
         }
-        let branch = current_branch(&repo_root, head_branch.as_deref())?;
-        push_branch(&repo_root, &branch)?;
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
+        // On a machine the branch was pushed from the box (the frontend asks
+        // the place to push before opening the dialog's create); there is no
+        // checkout here to read or push, so the dialog has to name it.
+        let branch = if repo.is_remote() {
+            remote_head_branch(head_branch.as_deref())?
+        } else {
+            let branch = current_branch(&repo_root, head_branch.as_deref())?;
+            push_branch(&repo_root, &branch)?;
+            branch
+        };
 
         let args = create_args(
             &branch,
@@ -870,7 +1099,7 @@ pub async fn pr_create(
             draft,
         );
         let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let created_stdout = run_gh(&repo_root, &argrefs)?;
+        let created_stdout = run_gh(&repo, &argrefs)?;
         let created_url = created_stdout
             .lines()
             .rev()
@@ -878,7 +1107,7 @@ pub async fn pr_create(
             .find(|line| line.starts_with("https://") || line.starts_with("http://"));
         let target = created_url.unwrap_or(&branch);
         let view = run_gh(
-            &repo_root,
+            &repo,
             &["pr", "view", target, "--json", "number,title,url"],
         )?;
         #[derive(Deserialize)]
@@ -908,18 +1137,20 @@ pub async fn pr_edit(
     body: String,
     base_branch: Option<String>,
     draft: bool,
+    remote_repo: Option<String>,
 ) -> Result<(), String> {
     crate::blocking::run(move || {
         let title = title.trim();
         if title.is_empty() {
             return Err("pull request title can't be empty".to_string());
         }
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         let args = edit_args(pr_number, title, body.trim(), base_branch.as_deref());
         let argrefs: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_gh(&repo_root, &argrefs)?;
+        run_gh(&repo, &argrefs)?;
 
         let current = run_gh(
-            &repo_root,
+            &repo,
             &["pr", "view", &pr_number.to_string(), "--json", "isDraft"],
         )?;
         #[derive(Deserialize)]
@@ -932,9 +1163,9 @@ pub async fn pr_edit(
         if draft != current.is_draft {
             let number = pr_number.to_string();
             if draft {
-                run_gh(&repo_root, &["pr", "ready", &number, "--undo"])?;
+                run_gh(&repo, &["pr", "ready", &number, "--undo"])?;
             } else {
-                run_gh(&repo_root, &["pr", "ready", &number])?;
+                run_gh(&repo, &["pr", "ready", &number])?;
             }
         }
         Ok(())
@@ -946,10 +1177,14 @@ pub async fn pr_edit(
 /// label picker can show the universe of choices. Backed by
 /// `gh label list --json name,color,description --limit 200`.
 #[tauri::command]
-pub async fn pr_labels_list(repo_root: String) -> Result<Vec<PrLabel>, String> {
+pub async fn pr_labels_list(
+    repo_root: String,
+    remote_repo: Option<String>,
+) -> Result<Vec<PrLabel>, String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         let stdout = run_gh(
-            &repo_root,
+            &repo,
             &[
                 "label",
                 "list",
@@ -982,11 +1217,13 @@ pub async fn pr_labels_set(
     repo_root: String,
     pr_number: u64,
     names: Vec<String>,
+    remote_repo: Option<String>,
 ) -> Result<(), String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         // Fetch current labels for diff.
         let stdout = run_gh(
-            &repo_root,
+            &repo,
             &[
                 "pr",
                 "view",
@@ -1027,7 +1264,7 @@ pub async fn pr_labels_set(
             args.push((*name).clone());
         }
         let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        run_gh(&repo_root, &argrefs)?;
+        run_gh(&repo, &argrefs)?;
         Ok(())
     })
     .await
@@ -1042,8 +1279,10 @@ pub async fn pr_update(
     pr_number: u64,
     title: Option<String>,
     body: Option<String>,
+    remote_repo: Option<String>,
 ) -> Result<(), String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         let mut args: Vec<String> = vec!["pr".into(), "edit".into(), pr_number.to_string()];
         if let Some(t) = &title {
             args.push("--title".into());
@@ -1058,7 +1297,7 @@ pub async fn pr_update(
             return Ok(());
         }
         let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        run_gh(&repo_root, &argrefs)?;
+        run_gh(&repo, &argrefs)?;
         Ok(())
     })
     .await
@@ -1068,9 +1307,13 @@ pub async fn pr_update(
 /// Used by Inbox to bucket PRs by Yours / Reviewing-for-me. Cheap (gh
 /// caches it after the first call). Empty when gh isn't authenticated.
 #[tauri::command]
-pub async fn pr_whoami(repo_root: String) -> Result<String, String> {
+pub async fn pr_whoami(
+    repo_root: String,
+    remote_repo: Option<String>,
+) -> Result<String, String> {
     crate::blocking::run(move || {
-        viewer_login(&repo_root)
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
+        viewer_login(&repo)
     })
     .await
 }
@@ -1078,8 +1321,8 @@ pub async fn pr_whoami(repo_root: String) -> Result<String, String> {
 /// Internal: same as `pr_whoami` but returns Result for use during
 /// `pr_list` enrichment. Kept private so callers don't have to round-trip
 /// through Tauri.
-fn viewer_login(repo_root: &str) -> Result<String, String> {
-    let stdout = run_gh(repo_root, &["api", "user", "--jq", ".login"])?;
+fn viewer_login(repo: &GhRepo) -> Result<String, String> {
+    let stdout = run_gh(repo, &["api", "user", "--jq", ".login"])?;
     Ok(stdout.trim().to_string())
 }
 
@@ -1240,10 +1483,15 @@ const PR_DETAIL_FIELDS: &str = "number,title,state,body,author,headRefName,baseR
 /// `git diff <base>...` strategy before giving up and surfacing the
 /// error in `diff_error`.
 #[tauri::command]
-pub async fn pr_detail(repo_root: String, pr_number: u64) -> Result<PrDetail, String> {
+pub async fn pr_detail(
+    repo_root: String,
+    pr_number: u64,
+    remote_repo: Option<String>,
+) -> Result<PrDetail, String> {
+    let repo = GhRepo::new(&repo_root, remote_repo)?;
     let result = tokio::time::timeout(
         Duration::from_secs(30),
-        pr_detail_inner(repo_root, pr_number),
+        pr_detail_inner(repo, pr_number),
     )
     .await;
     match result {
@@ -1252,20 +1500,21 @@ pub async fn pr_detail(repo_root: String, pr_number: u64) -> Result<PrDetail, St
     }
 }
 
-async fn pr_detail_inner(repo_root: String, pr_number: u64) -> Result<PrDetail, String> {
-    let view_root = repo_root.clone();
+async fn pr_detail_inner(repo: GhRepo, pr_number: u64) -> Result<PrDetail, String> {
+    let view_repo = repo.clone();
     let raw: GhPrDetail = crate::blocking::run(move || {
         let view = run_gh(
-            &view_root,
+            &view_repo,
             &["pr", "view", &pr_number.to_string(), "--json", PR_DETAIL_FIELDS],
         )?;
         serde_json::from_str(&view).map_err(|e| format!("gh json parse: {}", e))
     })
     .await?;
-    let (diff, diff_error) =
-        fetch_pr_diff(&repo_root, pr_number, &raw.base_ref_name).await;
+    let (diff, diff_error) = fetch_pr_diff(&repo, pr_number, &raw.base_ref_name).await;
     crate::blocking::run(move || {
-        let (aura, aura_review_error) = latest_aura_review(&repo_root, &raw.base_ref_name);
+        // Reviews are this laptop's `.aura/reviews`, whichever machine holds
+        // the code — the review ran here, against the board that lives here.
+        let (aura, aura_review_error) = latest_aura_review(repo.root(), &raw.base_ref_name);
         Ok(PrDetail {
         number: raw.number,
         title: raw.title,
@@ -1337,15 +1586,11 @@ async fn pr_detail_inner(repo_root: String, pr_number: u64) -> Result<PrDetail, 
 /// one is populated. The fallback is bounded by a 20s timeout so a
 /// slow network can't hold the inbox open.
 async fn fetch_pr_diff(
-    repo_root: &str,
+    repo: &GhRepo,
     pr_number: u64,
     base_ref: &str,
 ) -> (String, Option<String>) {
-    let cwd = PathBuf::from(repo_root);
-
-    let gh_out = tokio::process::Command::new("gh")
-        .args(["pr", "diff", &pr_number.to_string()])
-        .current_dir(&cwd)
+    let gh_out = gh_tokio(repo, &["pr", "diff", &pr_number.to_string()])
         .output()
         .await;
 
@@ -1388,11 +1633,11 @@ async fn fetch_pr_diff(
     // re-synthesize the `diff --git`/`---`/`+++` headers the frontend
     // splitter and unified renderer expect from each entry's `patch`.
     let api_err: Option<String>;
-    match repo_owner_path(repo_root) {
+    match repo.owner_path() {
         Ok(owner_repo) => {
             let api = tokio::time::timeout(
                 Duration::from_secs(30),
-                files_api_fallback(&cwd, &owner_repo, pr_number),
+                files_api_fallback(repo, &owner_repo, pr_number),
             )
             .await;
             match api {
@@ -1410,17 +1655,24 @@ async fn fetch_pr_diff(
     // Secondary fallback: ask local git for the diff via the pull/<N>/head
     // ref. `git fetch` may fail with "couldn't find remote ref" on forks
     // the user hasn't cloned; we surface that case via diff_error so the
-    // user knows to re-authenticate gh rather than guessing.
-    let fallback = tokio::time::timeout(
-        Duration::from_secs(20),
-        git_diff_fallback(&cwd, pr_number, base_ref),
-    )
-    .await;
-    let git_msg = match fallback {
-        Ok(Ok(diff)) if !diff.is_empty() => return (diff, None),
-        Ok(Ok(_)) => "git fallback returned an empty diff".to_string(),
-        Ok(Err(git_err)) => format!("git fallback also failed: {}", git_err),
-        Err(_) => "git fallback timed out after 20s".to_string(),
+    // user knows to re-authenticate gh rather than guessing. Not for a
+    // checkout on a machine: the laptop's copy is not the one the PR is
+    // about, and a diff fetched into it would be an answer about the wrong
+    // computer wearing the right number.
+    let git_msg = if repo.is_remote() {
+        "no checkout on this computer to ask git".to_string()
+    } else {
+        let fallback = tokio::time::timeout(
+            Duration::from_secs(20),
+            git_diff_fallback(&PathBuf::from(repo.root()), pr_number, base_ref),
+        )
+        .await;
+        match fallback {
+            Ok(Ok(diff)) if !diff.is_empty() => return (diff, None),
+            Ok(Ok(_)) => "git fallback returned an empty diff".to_string(),
+            Ok(Err(git_err)) => format!("git fallback also failed: {}", git_err),
+            Err(_) => "git fallback timed out after 20s".to_string(),
+        }
     };
 
     let detail = match api_err {
@@ -1572,14 +1824,12 @@ fn synthesize_file_diff(f: &GhPrFileEntry) -> String {
 /// by stitching per-file patches back into one unified diff. Returns an
 /// empty string when the PR genuinely changed nothing.
 async fn files_api_fallback(
-    cwd: &std::path::Path,
+    repo: &GhRepo,
     owner_repo: &str,
     pr_number: u64,
 ) -> Result<String, String> {
     let endpoint = format!("repos/{}/pulls/{}/files", owner_repo, pr_number);
-    let out = tokio::process::Command::new("gh")
-        .args(["api", &endpoint, "--paginate"])
-        .current_dir(cwd)
+    let out = gh_tokio(repo, &["api", &endpoint, "--paginate"])
         .output()
         .await
         .map_err(|e| {
@@ -1750,22 +2000,24 @@ struct GhIssueComment {
 pub async fn pr_comments_list(
     repo_root: String,
     pr_number: u64,
+    remote_repo: Option<String>,
 ) -> Result<Vec<PrComment>, String> {
     crate::blocking::run(move || {
-        let owner_repo = repo_owner_path(&repo_root)?;
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
+        let owner_repo = repo.owner_path()?;
         let inline_path = format!("repos/{}/pulls/{}/comments?per_page=100", owner_repo, pr_number);
         let issue_path = format!("repos/{}/issues/{}/comments?per_page=100", owner_repo, pr_number);
-        let inline = run_gh(&repo_root, &["api", "--paginate", &inline_path]).unwrap_or_default();
-        let issue = run_gh(&repo_root, &["api", "--paginate", &issue_path]).unwrap_or_default();
+        let inline = run_gh(&repo, &["api", "--paginate", &inline_path]).unwrap_or_default();
+        let issue = run_gh(&repo, &["api", "--paginate", &issue_path]).unwrap_or_default();
 
         // Resolve-state lookup: we issue a single GraphQL call per PR to map
         // each review-thread node id → (resolved, [comment_node_ids]).
-        let thread_map = fetch_thread_states(&repo_root, &owner_repo, pr_number).unwrap_or_default();
+        let thread_map = fetch_thread_states(&repo, &owner_repo, pr_number).unwrap_or_default();
         // Stage 8M — bulk reactions fetch: one GraphQL call returning
         // reactionGroups for every comment on the PR (review + issue).
         // Keyed by REST databaseId so we can attach to each PrComment by id.
         let reactions_map =
-            fetch_reactions(&repo_root, &owner_repo, pr_number).unwrap_or_default();
+            fetch_reactions(&repo, &owner_repo, pr_number).unwrap_or_default();
 
         let mut out = Vec::new();
         if !inline.trim().is_empty() {
@@ -1840,10 +2092,12 @@ pub async fn pr_comment_post(
     body: String,
     side: Option<String>,
     start_line: Option<u64>,
+    remote_repo: Option<String>,
 ) -> Result<PrComment, String> {
     crate::blocking::run(move || {
-        let owner_repo = repo_owner_path(&repo_root)?;
-        let head_sha = pr_head_sha(&repo_root, pr_number)?;
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
+        let owner_repo = repo.owner_path()?;
+        let head_sha = pr_head_sha(&repo, pr_number)?;
         let side_val = side.unwrap_or_else(|| "RIGHT".to_string());
         let line_str = line.to_string();
         let pr_str = pr_number.to_string();
@@ -1888,7 +2142,7 @@ pub async fn pr_comment_post(
             }
         }
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let stdout = run_gh(&repo_root, &arg_refs)?;
+        let stdout = run_gh(&repo, &arg_refs)?;
         let _ = pr_str;
         let raw: GhInlineComment = serde_json::from_str(&stdout)
             .map_err(|e| format!("gh post comment parse: {}", e))?;
@@ -1920,15 +2174,17 @@ pub async fn pr_comment_reply(
     pr_number: u64,
     in_reply_to: u64,
     body: String,
+    remote_repo: Option<String>,
 ) -> Result<PrComment, String> {
     crate::blocking::run(move || {
-        let owner_repo = repo_owner_path(&repo_root)?;
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
+        let owner_repo = repo.owner_path()?;
         let path = format!(
             "repos/{}/pulls/{}/comments/{}/replies",
             owner_repo, pr_number, in_reply_to
         );
         let stdout = run_gh(
-            &repo_root,
+            &repo,
             &["api", "-X", "POST", &path, "-f", &format!("body={}", body)],
         )?;
         let raw: GhInlineComment = serde_json::from_str(&stdout)
@@ -1960,12 +2216,14 @@ pub async fn pr_comment_post_issue(
     repo_root: String,
     pr_number: u64,
     body: String,
+    remote_repo: Option<String>,
 ) -> Result<PrComment, String> {
     crate::blocking::run(move || {
-        let owner_repo = repo_owner_path(&repo_root)?;
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
+        let owner_repo = repo.owner_path()?;
         let path = format!("repos/{}/issues/{}/comments", owner_repo, pr_number);
         let stdout = run_gh(
-            &repo_root,
+            &repo,
             &["api", "-X", "POST", &path, "-f", &format!("body={}", body)],
         )?;
         let raw: GhIssueComment = serde_json::from_str(&stdout)
@@ -1997,11 +2255,13 @@ pub async fn pr_comment_post_issue(
 pub async fn pr_comment_resolve(
     repo_root: String,
     thread_node_id: String,
+    remote_repo: Option<String>,
 ) -> Result<(), String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         let mutation = "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}";
         run_gh(
-            &repo_root,
+            &repo,
             &[
                 "api",
                 "graphql",
@@ -2058,7 +2318,7 @@ struct ThreadGraphqlCommentNode {
 /// effort — failures fall back to "no resolve info" rather than failing
 /// the whole comments call.
 fn fetch_thread_states(
-    repo_root: &str,
+    repo: &GhRepo,
     owner_repo: &str,
     pr_number: u64,
 ) -> Option<std::collections::HashMap<String, (Option<String>, bool)>> {
@@ -2067,10 +2327,10 @@ fn fetch_thread_states(
         return None;
     }
     let owner = parts[0];
-    let repo = parts[1];
+    let name = parts[1];
     let query = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{id}}}}}}}";
     let stdout = run_gh(
-        repo_root,
+        repo,
         &[
             "api",
             "graphql",
@@ -2079,7 +2339,7 @@ fn fetch_thread_states(
             "-f",
             &format!("owner={}", owner),
             "-f",
-            &format!("repo={}", repo),
+            &format!("repo={}", name),
             "-F",
             &format!("number={}", pr_number),
         ],
@@ -2161,7 +2421,7 @@ struct ReactGqlReactors {
 }
 
 fn fetch_reactions(
-    repo_root: &str,
+    repo: &GhRepo,
     owner_repo: &str,
     pr_number: u64,
 ) -> Option<std::collections::HashMap<u64, Vec<PrCommentReaction>>> {
@@ -2170,12 +2430,12 @@ fn fetch_reactions(
         return None;
     }
     let owner = parts[0];
-    let repo = parts[1];
+    let name = parts[1];
     // `reactors { totalCount }` mirrors `users { totalCount }` in older
     // schemas — the API renamed it; reactors is the current spelling.
     let query = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{comments(first:100){nodes{databaseId reactionGroups{content viewerHasReacted reactors{totalCount}}}}}} comments(first:100){nodes{databaseId reactionGroups{content viewerHasReacted reactors{totalCount}}}}}}}";
     let stdout = run_gh(
-        repo_root,
+        repo,
         &[
             "api",
             "graphql",
@@ -2184,7 +2444,7 @@ fn fetch_reactions(
             "-f",
             &format!("owner={}", owner),
             "-f",
-            &format!("repo={}", repo),
+            &format!("repo={}", name),
             "-F",
             &format!("number={}", pr_number),
         ],
@@ -2238,8 +2498,10 @@ pub async fn pr_reaction_add(
     repo_root: String,
     comment_node_id: String,
     content: String,
+    remote_repo: Option<String>,
 ) -> Result<(), String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         if !is_valid_reaction_content(&content) {
             return Err(format!("invalid reaction content: {}", content));
         }
@@ -2252,7 +2514,7 @@ pub async fn pr_reaction_add(
             content
         );
         run_gh(
-            &repo_root,
+            &repo,
             &[
                 "api",
                 "graphql",
@@ -2272,8 +2534,10 @@ pub async fn pr_reaction_remove(
     repo_root: String,
     comment_node_id: String,
     content: String,
+    remote_repo: Option<String>,
 ) -> Result<(), String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         if !is_valid_reaction_content(&content) {
             return Err(format!("invalid reaction content: {}", content));
         }
@@ -2282,7 +2546,7 @@ pub async fn pr_reaction_remove(
             content
         );
         run_gh(
-            &repo_root,
+            &repo,
             &[
                 "api",
                 "graphql",
@@ -2318,8 +2582,10 @@ pub async fn pr_approve(
     repo_root: String,
     pr_number: u64,
     body: Option<String>,
+    remote_repo: Option<String>,
 ) -> Result<(), String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         let pr_str = pr_number.to_string();
         let mut args = vec!["pr", "review", &pr_str, "--approve"];
         let body_value;
@@ -2328,7 +2594,7 @@ pub async fn pr_approve(
             args.push("--body");
             args.push(&body_value);
         }
-        run_gh(&repo_root, &args)?;
+        run_gh(&repo, &args)?;
         Ok(())
     })
     .await
@@ -2339,13 +2605,15 @@ pub async fn pr_request_changes(
     repo_root: String,
     pr_number: u64,
     body: String,
+    remote_repo: Option<String>,
 ) -> Result<(), String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         if body.trim().is_empty() {
             return Err("request-changes needs a body".to_string());
         }
         run_gh(
-            &repo_root,
+            &repo,
             &[
                 "pr",
                 "review",
@@ -2365,13 +2633,15 @@ pub async fn pr_comment_review(
     repo_root: String,
     pr_number: u64,
     body: String,
+    remote_repo: Option<String>,
 ) -> Result<(), String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         if body.trim().is_empty() {
             return Err("comment review needs a body".to_string());
         }
         run_gh(
-            &repo_root,
+            &repo,
             &[
                 "pr",
                 "review",
@@ -2393,8 +2663,10 @@ pub async fn pr_merge(
     pr_number: u64,
     strategy: String,
     delete_branch: bool,
+    remote_repo: Option<String>,
 ) -> Result<(), String> {
     crate::blocking::run(move || {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         let flag = match strategy.as_str() {
             "squash" => "--squash",
             "rebase" => "--rebase",
@@ -2406,7 +2678,7 @@ pub async fn pr_merge(
         if delete_branch {
             args.push("--delete-branch");
         }
-        run_gh(&repo_root, &args)?;
+        run_gh(&repo, &args)?;
         Ok(())
     })
     .await
@@ -2435,6 +2707,9 @@ pub struct PrStackNode {
     /// surfaces stacks the head/base graph alone can't see (e.g. every PR
     /// opened against main while stacked locally).
     pub gt_managed: bool,
+    /// Which tool's metadata ordered this stack: `"graphite"`, `"gh-stack"`,
+    /// or `"github"` when only the head/base graph was available.
+    pub stack_tool: String,
 }
 
 /// Compute the stack rooted at `pr_number`. We fetch all open PRs once and
@@ -2451,17 +2726,43 @@ pub struct PrStackNode {
 pub async fn pr_stack(
     repo_root: String,
     pr_number: u64,
+    remote_repo: Option<String>,
 ) -> Result<Vec<PrStackNode>, String> {
     // One `gh pr list` request — CI checks now ride inline on the rollup,
     // so there's no per-PR fan-out to avoid here; the warm-cached list also
     // serves this without a second network hit.
-    let all = pr_list(repo_root.clone()).await?;
+    let on_machine = GhRepo::new(&repo_root, remote_repo.clone())?.is_remote();
+    let all = pr_list(repo_root.clone(), remote_repo).await?;
 
     crate::blocking::run(move || {
         // Local, token-free: branch -> authoritative parent branch (empty for a
         // non-Graphite repo). Read once and reused for every effective-parent
-        // lookup below.
-        let gt_parents = crate::integrations::graphite::stack_parents(&repo_root);
+        // lookup below. When Graphite knows nothing, GitHub's own `gh stack`
+        // extension is asked next (only if installed — its `--help` probe is
+        // the cheapest honest check); with neither, the head/base graph is
+        // all we have and the rail says so.
+        //
+        // Graphite and gh-stack read the CHECKOUT's refs. For a checkout on a
+        // machine the one on this disk is not it, so neither is asked and the
+        // rail is told the ordering is GitHub's own — honest, and never a
+        // stack read off the wrong computer.
+        let graphite_parents = if on_machine {
+            Default::default()
+        } else {
+            crate::integrations::graphite::stack_parents(&repo_root)
+        };
+        let (gt_parents, stack_tool) = if !graphite_parents.is_empty() {
+            (graphite_parents, "graphite")
+        } else if !on_machine && crate::integrations::gh_stack::is_installed(&repo_root) {
+            let gh_parents = crate::integrations::gh_stack::stack_parents(&repo_root);
+            if gh_parents.is_empty() {
+                (gh_parents, "github")
+            } else {
+                (gh_parents, "gh-stack")
+            }
+        } else {
+            (graphite_parents, "github")
+        };
         let eff_parent = |p: &PrSummary| -> String {
             gt_parents
                 .get(&p.head_ref)
@@ -2520,7 +2821,8 @@ pub async fn pr_stack(
                 url: p.url.clone(),
                 children: Vec::new(),
                 parent: None,
-                gt_managed: gt_parents.contains_key(&p.head_ref),
+                gt_managed: stack_tool == "graphite" && gt_parents.contains_key(&p.head_ref),
+                stack_tool: stack_tool.to_string(),
             })
             .collect();
 
@@ -2548,24 +2850,9 @@ pub async fn pr_stack(
 
 // ── helpers ───────────────────────────────────────────────────────────
 
-/// Resolve the `<owner>/<repo>` slug for the current repo by asking gh,
-/// which uses the configured remote. Cached per process would be nicer
-/// but the gh round-trip is ~30ms locally.
-fn repo_owner_path(repo_root: &str) -> Result<String, String> {
+fn pr_head_sha(repo: &GhRepo, pr_number: u64) -> Result<String, String> {
     let stdout = run_gh(
-        repo_root,
-        &["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-    )?;
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        return Err("gh repo view returned empty owner/repo".to_string());
-    }
-    Ok(trimmed.to_string())
-}
-
-fn pr_head_sha(repo_root: &str, pr_number: u64) -> Result<String, String> {
-    let stdout = run_gh(
-        repo_root,
+        repo,
         &[
             "pr",
             "view",
@@ -2596,15 +2883,17 @@ fn pr_head_sha(repo_root: &str, pr_number: u64) -> Result<String, String> {
 pub async fn pr_vercel_status(
     repo_root: String,
     pr_number: u64,
+    remote_repo: Option<String>,
 ) -> Result<Option<crate::integrations::vercel::VercelDeployment>, String> {
     // Config first — the common case (nobody configured Vercel) short-circuits
     // before we spend a `gh` round-trip resolving the sha.
     let prepared = crate::blocking::run(move || -> Result<_, String> {
+        let repo = GhRepo::new(&repo_root, remote_repo)?;
         let cfg = match crate::integrations::config::vercel().map_err(|e| e.to_string())? {
             Some(cfg) => cfg,
             None => return Ok(None),
         };
-        let sha = pr_head_sha(&repo_root, pr_number)?;
+        let sha = pr_head_sha(&repo, pr_number)?;
         Ok(Some((cfg, sha)))
     })
     .await?;
@@ -2672,6 +2961,83 @@ pub async fn aura_review_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── AURA-1307: gh told the repo outright for a checkout on a machine ──
+
+    #[test]
+    fn on_this_laptop_gh_runs_in_the_checkout_and_is_told_nothing() {
+        let repo = GhRepo::new("/Users/me/app", None).unwrap();
+        assert!(!repo.is_remote());
+        assert_eq!(repo.cwd(), PathBuf::from("/Users/me/app"));
+        assert_eq!(repo.argv(&["pr", "list"]), vec!["pr", "list"]);
+        // A blank slug is the same as none — a frontend that has no machine
+        // for this root passes null, and a trimmed-empty string must not turn
+        // into `-R ""`.
+        let blank = GhRepo::new("/Users/me/app", Some("  ".into())).unwrap();
+        assert_eq!(blank, repo);
+    }
+
+    #[test]
+    fn on_a_machine_gh_is_told_the_repo_and_runs_off_the_checkout() {
+        let repo = GhRepo::new("/Users/me/app", Some("octocat/hello-world".into())).unwrap();
+        assert!(repo.is_remote());
+        // Never the laptop's copy of the project: its origin is not the
+        // answer, and a `.git` there would be consulted before `-R` is.
+        assert_ne!(repo.cwd(), PathBuf::from("/Users/me/app"));
+        assert_eq!(
+            repo.argv(&["pr", "view", "7", "--json", "title"]),
+            vec!["pr", "view", "7", "--json", "title", "-R", "octocat/hello-world"]
+        );
+        // The slug is known outright — no gh round trip to find it.
+        assert_eq!(repo.owner_path().unwrap(), "octocat/hello-world");
+        // The settings key is still the local root.
+        assert_eq!(repo.root(), "/Users/me/app");
+    }
+
+    #[test]
+    fn gh_api_is_never_given_a_repo_flag() {
+        // `gh api` has no `-R`; its paths carry `repos/owner/repo/...` already,
+        // and a flag it doesn't know would fail every comment, reaction and
+        // GraphQL call on a remote workspace.
+        let repo = GhRepo::new("/x", Some("o/r".into())).unwrap();
+        assert_eq!(
+            repo.argv(&["api", "user", "--jq", ".login"]),
+            vec!["api", "user", "--jq", ".login"]
+        );
+    }
+
+    #[test]
+    fn a_slug_that_is_not_owner_slash_repo_is_refused() {
+        for bad in [
+            "octocat",
+            "octocat/",
+            "/hello",
+            "a/b/c",
+            "-flag/repo",
+            "owner/--repo",
+            "owner/re po",
+            "owner/repo;rm",
+            "../etc",
+            "owner/..",
+            "git@github.com:o/r.git",
+        ] {
+            assert!(GhRepo::new("/x", Some(bad.into())).is_err(), "{bad} was accepted");
+        }
+        for good in ["octocat/hello-world", "My_Org/repo.js", "a.b/c-d"] {
+            assert!(GhRepo::new("/x", Some(good.into())).is_ok(), "{good} was refused");
+        }
+    }
+
+    #[test]
+    fn a_pull_request_on_a_machine_has_to_name_its_branch() {
+        // No checkout here to read HEAD off; the dialog says which branch.
+        assert!(remote_head_branch(None).is_err());
+        assert!(remote_head_branch(Some("  ")).is_err());
+        assert_eq!(remote_head_branch(Some(" feat/x ")).unwrap(), "feat/x");
+        for bad in ["-x", "a..b", "a b", "a~1", "a:b", "a?", "a*", "a[", "a\\b", "a@{1}", "a.lock", "a/"] {
+            assert!(remote_head_branch(Some(bad)).is_err(), "{bad} was accepted");
+        }
+    }
 
     #[test]
     fn native_pr_args_preserve_metadata_without_shell_interpolation() {

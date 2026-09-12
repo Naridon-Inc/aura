@@ -4,8 +4,9 @@
 // the Rust command signatures.
 
 import { invoke } from "@tauri-apps/api/core";
-import { isToolMetadataPath } from "./categorizeChange";
+import { isToolMetadataPath } from "@shared/categorizeChange";
 import { roomAuthHeaders } from "./roomAuth";
+import { cloudOrigins } from "./cloudOrigin";
 // The place contract is spelled once, in lib/place, and mirrors
 // `manager::brain::place_contract`. Imported rather than restated here: a wire
 // type the UI keeps its own copy of is a type that can disagree with the seam.
@@ -19,7 +20,7 @@ import type { Installed } from "./place/toolbox";
 import type { PushPlan } from "./place/pushCredential";
 import type { KeyPlan } from "./place/agentKey";
 import type { SecretBoot, SecretRef } from "./place/secrets";
-import type { BaseBuild, TeamBase } from "./place/teamBase";
+import type { BaseBuild, EnvReport, TeamBase } from "./place/teamBase";
 import type { ToolchainReport } from "./place/toolchain";
 import type {
   ContributesSummary,
@@ -40,6 +41,17 @@ export type StrictModeInfo = {
   mode: "off" | "on" | "locked";
 };
 
+/** One entry in `.aura/grants/pending` — see `auraGrantsPending`. */
+export type PendingGrant = {
+  id: string;
+  /** "delete" | "reset" | "force-push". */
+  operation: string;
+  /** The one file, command or ref the grant authorizes, and nothing else. */
+  target: string;
+  issued_by: string;
+  expires_in: number;
+};
+
 export type DirEntry = {
   name: string;
   path: string;
@@ -53,6 +65,12 @@ export type WorktreeEntry = {
   head: string;
   is_main: boolean;
   locked: boolean;
+  /** Unix seconds of the HEAD commit's committer date. Null when the branch
+   *  tip can't be resolved (detached or empty head). */
+  head_committed_at?: number | null;
+  /** Unix seconds of when the copy was made — the birth of git's admin dir
+   *  for it. Null for the main checkout, which has none. */
+  created_at?: number | null;
 };
 
 export type BranchDiffFile = {
@@ -1019,6 +1037,36 @@ export type CarryoverSessionSummaryBrief = {
   learnings: string[];
 };
 
+/** Why one record placed where it did in an answer. Ordered by strength:
+ *  a record naming the file beats one naming a symbol, which beats word
+ *  overlap. Recency only breaks ties inside a tier, which is what stops the
+ *  newest unrelated record being served as the answer. */
+export type AskTier =
+  | "names the file"
+  | "names the symbol"
+  | "mentions the words";
+
+export type AskHit = {
+  tier: AskTier;
+  score: number;
+  /** Seconds since the epoch. */
+  when: number;
+  who: string;
+  what: string;
+  file?: string | null;
+  store: "intent" | "checkpoint";
+};
+
+export type AskAnswer = {
+  question: string;
+  /** `no_match` means this repository has history and none of it is about the
+   *  question. `nothing_recorded` means it has none at all. Never show the
+   *  onboarding copy for the first one. */
+  verdict: "found" | "no_match" | "nothing_recorded";
+  searched: { intents: number; checkpoints: number };
+  hits: AskHit[];
+};
+
 export type CarryoverIntentBrief = {
   timestamp: number;
   agent_id: string;
@@ -1129,6 +1177,10 @@ export type BrainChatContext = {
    *  map it onto the real per-CLI approval flag. snake_case to match the
    *  serde-deserialized Rust `ChatRequest`. */
   approval?: ApprovalPolicy | null;
+  // AURA-1296 — the composer's Concise chip. Omit / null → nothing added to
+  // the request; "concise" → Claude Code's `--output-style concise`. Other
+  // brains ignore it. snake_case to match the Rust `ChatRequest`.
+  output_style?: string | null;
 };
 
 /** Per-turn token accounting for the chat context-fill meter. `input_tokens`
@@ -1365,13 +1417,64 @@ export type AuraTrackStatus = {
   /** Set when the reason it didn't work is an `aura` helper older than this
    *  build needs. Retrying that can never succeed — updating it can. */
   stale_cli: StaleCli | null;
+  /** The folder macOS refused, when that is what stopped us. The one failure
+   *  whose fix is a switch in System Settings rather than anything in the
+   *  project — so the strip offers the switch instead of a Retry that cannot
+   *  work until it is flipped. */
+  privacy_path: string | null;
   /** The helper's own words, unabridged. `detail` is the line we show; this
    *  is what "Details" opens, so the diagnosis is never lost to the clip. */
   raw_detail: string | null;
 };
 
+// Fourteen components call `claudeListSessions` independently — the Sessions
+// pane, the session detail, Trace, Time Machine, Overview, the resume dialog,
+// the manager surfaces, the agent surface, and more. Opening Trace mounts
+// several of them at once, and each one used to re-enter the backend command
+// and re-walk every transcript on disk.
+//
+// Two guards, both keyed by repo root. The in-flight map collapses concurrent
+// callers onto one request, which is strictly correct — they asked the same
+// question at the same time. The short freshness window then covers mounts
+// that arrive staggered rather than simultaneously. Two seconds is well under
+// the time it takes a person to notice a session is missing, and any caller
+// that genuinely needs to see a just-created session can pass `{ fresh: true }`.
+const claudeSessionsInflight = new Map<string, Promise<ClaudeSession[]>>();
+const claudeSessionsRecent = new Map<string, { at: number; rows: ClaudeSession[] }>();
+const CLAUDE_SESSIONS_FRESH_MS = 2000;
+
+function listClaudeSessions(
+  repoRoot: string,
+  opts?: { fresh?: boolean },
+): Promise<ClaudeSession[]> {
+  if (!opts?.fresh) {
+    const hit = claudeSessionsRecent.get(repoRoot);
+    if (hit && Date.now() - hit.at < CLAUDE_SESSIONS_FRESH_MS) {
+      return Promise.resolve(hit.rows);
+    }
+    const pending = claudeSessionsInflight.get(repoRoot);
+    if (pending) return pending;
+  }
+  const run = invoke<ClaudeSession[]>("claude_list_sessions", { repoRoot })
+    .then((rows) => {
+      claudeSessionsRecent.set(repoRoot, { at: Date.now(), rows });
+      return rows;
+    })
+    .finally(() => {
+      claudeSessionsInflight.delete(repoRoot);
+    });
+  claudeSessionsInflight.set(repoRoot, run);
+  return run;
+}
+
 export const api = {
   auraStatus: () => invoke<AuraStatus>("aura_status"),
+  /** Every `aura://` link the OS has handed over and no window has read yet,
+   *  emptied by the read. A link that arrives before the webview exists (a
+   *  cold launch caused by the link itself) waits here; one that arrives
+   *  after also fires `deep_link::EVENT` as a nudge. Draining in both places
+   *  is what makes one click open one session exactly once. */
+  deepLinkTake: () => invoke<string[]>("deep_link_take"),
   homeDir: () => invoke<string>("home_dir"),
   currentDir: () => invoke<string>("current_dir"),
   listDir: (path: string) => invoke<DirEntry[]>("list_dir", { path }),
@@ -1586,6 +1689,11 @@ export const api = {
     invoke<string>("git_fetch", { repoRoot }),
   gitSync: (repoRoot: string) =>
     invoke<string>("git_sync", { repoRoot }),
+  /** Every uncommitted change gone — tracked files back to the last commit,
+   *  untracked files and folders removed. Resolves to how many files that
+   *  touched. Destructive; the reset-chat flow asks in red before calling. */
+  gitResetFiles: (repoRoot: string) =>
+    invoke<number>("git_reset_files", { repoRoot }),
   // Create a new project on disk (New Project screen). Both return the
   // absolute root to hand to loadProjectAt.
   gitClone: (url: string, parentDir: string, name?: string) =>
@@ -1662,6 +1770,18 @@ export const api = {
     invoke<void>("worktree_remove_managed", { repoRoot, worktreePath }),
   worktreeResolvePath: (repoRoot: string, branch: string) =>
     invoke<string>("worktree_resolve_path", { repoRoot, branch }),
+
+  // ── lost-worktree recovery ──────────────────────────────────────────
+  // `git worktree list` is the roster's only source of worktree rows, so
+  // when a crash corrupts git's registry a checkout that still exists on
+  // disk simply vanishes from the sidebar. These commands find the
+  // disagreement and mend it — see `worktree_recover.rs`.
+  worktreeScanLost: (repoRoot: string) =>
+    invoke<WorktreeScanReport>("worktree_scan_lost", { repoRoot }),
+  worktreeReattach: (repoRoot: string, worktreePath: string) =>
+    invoke<ReattachOutcome>("worktree_reattach", { repoRoot, worktreePath }),
+  worktreePruneGhosts: (repoRoot: string) =>
+    invoke<number>("worktree_prune_ghosts", { repoRoot }),
 
   // ── Lanes (AURA-81) — auto-isolated worktree per agent ──────────────
   // Launching a new agent transparently provisions an isolated "lane": a
@@ -1932,8 +2052,8 @@ export const api = {
   // a workspace by reading ~/.claude/projects/<encoded-cwd>/*.jsonl.
   // Sorted newest-first. Used by ResumeDialog to render a picker
   // without spawning a TUI.
-  claudeListSessions: (repoRoot: string) =>
-    invoke<ClaudeSession[]>("claude_list_sessions", { repoRoot }),
+  claudeListSessions: (repoRoot: string, opts?: { fresh?: boolean }) =>
+    listClaudeSessions(repoRoot, opts),
 
   /** Newest Codex session id recorded for this directory, or `null` when
    *  Codex has never run here. Scoped by the `cwd` in the rollout's own
@@ -2176,13 +2296,17 @@ export const api = {
       changeset: changeset ?? null,
       claudeSessionId: claudeSessionId ?? null,
     }),
-  // `aura_intent_recent` returns the raw intent log, which now also carries
-  // autonomous agent-event captures (agent_id/source "hook_auto") — one row
-  // per agent tool call recorded by the safety control plane (doc 23), e.g.
-  // "running Read on foo.png" or "running Bash on screencapture …". Those are
-  // telemetry, not sessions/intents, so we strip them at the data boundary.
-  // Every Trace surface (Sessions, Overview, aura card, intent split/merge)
-  // funnels through this method, so one filter here keeps them all clean.
+  // `aura_intent_recent` returns the raw intent log, which also carries
+  // autonomous agent-event captures — one row per agent tool call recorded by
+  // the safety control plane (doc 23), e.g. "running Read on foo.png" or
+  // "running Bash on screencapture …". Those are telemetry, not
+  // sessions/intents, so they are stripped here at the data boundary. Every
+  // Trace surface (Sessions, Overview, aura card, intent split/merge) funnels
+  // through this method, so doing it once keeps them all clean. What counts as
+  // telemetry is `isMechanicalHookCapture` — read the reasoning there before
+  // touching it, the obvious-looking rule is wrong. A run made of nothing but
+  // captures keeps one row so it does not vanish; see
+  // `keepOneRowPerCommandOnlyRun`.
   //
   // We ALSO strip Aura's own bookkeeping out of every changeset here: `.aura/…`
   // intent logs and `.entire/…` object-store shards are not part of the
@@ -2197,14 +2321,20 @@ export const api = {
       repoRoot,
       limit: limit ?? null,
     }).then((rows) =>
-      rows
-        .filter(
-          (r) =>
-            r.agent_id !== AUTO_CAPTURE_AGENT_ID &&
-            r.source !== AUTO_CAPTURE_AGENT_ID,
-        )
-        .map((r) => stripToolMetadataFromRow(r)),
+      keepOneRowPerCommandOnlyRun(rows).map((r) => stripToolMetadataFromRow(r)),
     ),
+  /** Ask this repository why it is the way it is.
+   *
+   *  One ranking, shared with `aura ask` and the MCP tool, so the same
+   *  question gives the same answer wherever it is asked. `verdict` separates
+   *  "there is no history" from "there is history and none of it is about
+   *  this" — render them differently, they are different facts. */
+  auraAsk: (repoRoot: string, question: string, limit?: number) =>
+    invoke<AskAnswer>("aura_ask", {
+      repoRoot,
+      question,
+      limit: limit ?? null,
+    }),
   auraIntentCoverage: (repoRoot: string, dirtyPaths: string[]) =>
     invoke<IntentCoverage>("aura_intent_coverage", { repoRoot, dirtyPaths }),
   auraIntentAttribute: (
@@ -2238,6 +2368,18 @@ export const api = {
    *  (only a human with the passcode can flip it back). Used by the
    *  StatusBar pill, SessionInfoCard pill, and the commit guard. */
   auraStrictMode: () => invoke<StrictModeInfo>("aura_strict_mode"),
+  /** Human grants standing in this repository right now — one person's
+   *  one-time authorization for a delete, hard reset or force-push, the
+   *  three things a logged intent can never authorize. Soonest to
+   *  expire first. `expires_in` is seconds and goes negative once the
+   *  grant has lapsed; nothing else about validity is judged here (see
+   *  the Rust doc) — the gate decides that when the action is tried. */
+  auraGrantsPending: (repoRoot: string) =>
+    invoke<PendingGrant[]>("aura_grants_pending", { repoRoot }),
+  /** Take a grant back. Safe by construction: removing an authorization
+   *  can only narrow what is allowed. Silent when it is already gone. */
+  auraGrantRevoke: (repoRoot: string, grantId: string) =>
+    invoke<void>("aura_grant_revoke", { repoRoot, grantId }),
   /** Take a durable snapshot of `filePath` so `aura rewind` can recover
    *  it. Fired non-blocking from `agentStreamStore.applyEvent` whenever
    *  Claude triggers an Edit/Write/MultiEdit tool — failures are
@@ -2441,6 +2583,27 @@ export const api = {
     invoke<KgGraph>("aura_kg_build", { repoRoot, force }),
   auraKgLoad: (repoRoot: string) =>
     invoke<KgGraph | null>("aura_kg_load", { repoRoot }),
+  /** Build (or reuse) the graph server-side; only stats cross IPC. */
+  auraKgEnsure: (repoRoot: string, force: boolean) =>
+    invoke<KgStats>("aura_kg_ensure", { repoRoot, force }),
+  /** Bounded subgraph view — never the whole graph. Null = not built yet. */
+  auraKgView: (repoRoot: string, view: KgViewQuery) =>
+    invoke<KgView | null>("aura_kg_view", { repoRoot, view }),
+  auraKgExplain: (repoRoot: string, nodeId: string) =>
+    invoke<KgExplain | null>("aura_kg_explain", { repoRoot, nodeId }),
+  auraKgPath: (repoRoot: string, from: string, to: string, maxHops?: number) =>
+    invoke<KgPath | null>("aura_kg_path", { repoRoot, from, to, maxHops }),
+  /** Human-readable feature map (the Code Map's landing view): plain-language
+   *  blocks per feature + links where features touch. Null = graph not built
+   *  yet — call auraKgEnsure, then ask again. */
+  auraKgFeatures: (repoRoot: string) =>
+    invoke<KgFeatureMap | null>("aura_kg_features", { repoRoot }),
+  /** The stories behind the feature map: each feature's entry points and
+   *  the chain of functions they call, traced over resolved call edges
+   *  only (name-only guesses are never followed). Same null contract as
+   *  `auraKgFeatures` — null means no graph yet, ensure first. */
+  auraKgFlows: (repoRoot: string) =>
+    invoke<KgFlowMap | null>("aura_kg_flows", { repoRoot }),
 
   // Wave C — AuraWatch background tap.
   aurawatchStart: (repoRoot: string, mode: WatchMode, preferred?: string | null) =>
@@ -2483,6 +2646,10 @@ export const api = {
     invoke<void>("aura_resolve_impact", { repoRoot, alertId }),
   auraListSnapshots: (repoRoot: string) =>
     invoke<SnapshotEntry[]>("aura_list_snapshots", { repoRoot }),
+  /** Open one save point. `file` is the entry's `file`, not its `id` — the id
+   *  drops the .json and there is nothing on disk by that name. */
+  auraReadSnapshot: (repoRoot: string, file: string) =>
+    invoke<SnapshotDetail>("aura_read_snapshot", { repoRoot, file }),
   auraReadOrchestrate: (repoRoot: string) =>
     invoke<OrchAgent[]>("aura_read_orchestrate", { repoRoot }),
   auraListConflicts: (repoRoot: string) =>
@@ -2604,6 +2771,13 @@ export const api = {
         totalInputTokens: json.total.input_tokens,
         totalOutputTokens: json.total.output_tokens,
         totalCacheReadTokens: json.total.cache_read_tokens,
+        // Optional across the wire: an older CLI on PATH reports no cache
+        // cost and no notes, and the surface renders without them rather
+        // than showing NaN.
+        cacheCostUsd: json.total.cache_cost_usd ?? 0,
+        measuredCostUsd: json.measured?.cost_usd ?? json.total.cost_usd,
+        unattributedCostUsd: json.unattributed?.cost_usd ?? 0,
+        measurementNotes: json.measurement_notes ?? [],
         sessionCount: json.total.sessions,
         byModel: (json.by_model ?? []).map((m) => ({
           model: m.model,
@@ -2658,6 +2832,18 @@ export const api = {
    *  a member). `role` defaults to "member". */
   cloudOrgInvite: (githubUsername: string, role?: string) =>
     invoke<void>("cloud_org_invite", { githubUsername, role: role ?? null }),
+  /** Everyone in the org you are acting as, privileged roles first. */
+  cloudOrgMembers: () => invoke<CloudOrgMember[]>("cloud_org_members"),
+  /** Change a member's org role (owner|admin|member). The server owns the
+   *  authority model — owner-only for anything touching `owner`, last owner
+   *  immovable — and refuses with a sentence worth showing. */
+  cloudOrgMemberSetRole: (userId: string, role: string) =>
+    invoke<void>("cloud_org_member_set_role", { userId, role }),
+  /** Remove a member from the org, or leave it when the id is your own. Their
+   *  cloud entitlement and this org's repo grants go in the same server-side
+   *  transaction. */
+  cloudOrgMemberRemove: (userId: string) =>
+    invoke<void>("cloud_org_member_remove", { userId }),
   /** Every org this account can act as, with the current one ticked.
    *  Derived from `GET /api/v2/repos` — the one cross-org read the server has.
    *  Throws when signed out or the cloud is unreachable: an empty list would
@@ -3709,6 +3895,13 @@ export const api = {
     invoke<void>("watch_repo", { repoRoot }),
   unwatchRepo: (repoRoot: string) =>
     invoke<void>("unwatch_repo", { repoRoot }),
+  /** Start describing this repo's commits the moment they land, instead of
+   *  when someone opens them. Idempotent per root; pair with unwatchCommits on
+   *  a project switch. */
+  watchCommits: (repoRoot: string) =>
+    invoke<void>("watch_commits", { repoRoot }),
+  unwatchCommits: (repoRoot: string) =>
+    invoke<void>("unwatch_commits", { repoRoot }),
 
   // Aura Manager — in-process orchestrator. `manager_start` stages a
   // plan in AwaitingApproval; `manager_resume` flips to Running and
@@ -3916,6 +4109,35 @@ export const api = {
       login: login ?? null,
       keyPath: keyPath ?? null,
     }),
+  // AURA-1298 — the declared-environment commands (`place_env`), which had
+  // no wrapper. Both measure a real place; `apply` also changes it.
+  /** How far a place is from the environment its project declares, changing
+   *  nothing. Every check runs against the machine. `deps` widens the scope
+   *  from the environment (toolchains, packages, services) to the project's
+   *  own dependencies as well. */
+  placeEnvState: (
+    place: { root: string; machineId: string | null },
+    deps = false,
+  ) =>
+    invoke<EnvReport>("place_env_state", {
+      root: place.root,
+      machineId: place.machineId,
+      deps,
+    }),
+  /** Bring a place to the environment its project declares: run each
+   *  step's check, apply the ones that fall short, verify. Installs on the
+   *  machine; does not touch the checkout or make a new copy. `force` applies
+   *  a spec whose seal this laptop's team registry cannot vouch for. */
+  placeEnvApply: (
+    place: { root: string; machineId: string | null },
+    opts?: { deps?: boolean; force?: boolean },
+  ) =>
+    invoke<EnvReport>("place_env_apply", {
+      root: place.root,
+      machineId: place.machineId,
+      deps: opts?.deps ?? false,
+      force: opts?.force ?? false,
+    }),
   /** Where the team's already-built environment lives on a place, and what it
    *  already holds. Makes the account on a place that shares one, so "where is
    *  it" and "there isn't one yet" are the same question rather than an error
@@ -3970,6 +4192,22 @@ export const api = {
    *  caller must not render as an empty box. */
   boxSessions: (machineId: string) =>
     invoke<BoxSession[]>("box_sessions", { machineId }),
+  /** What a session on a machine printed while nobody was attached — its tmux
+   *  scrollback, read off the machine as plain text (AURA-1308).
+   *
+   *  The work lives in tmux so it survives the laptop closing; this is what
+   *  lets a person coming back see the hour they missed instead of a terminal
+   *  that starts at the moment they sat down. `lines` is how far back to read
+   *  (default 2000, capped at 20000 on the Rust side). Throws when the session
+   *  isn't running there any more, or the machine can't be reached — a caller
+   *  must not render either as "nothing happened". Prefer `SessionCatchUp`
+   *  over reaching for this directly. */
+  placeSessionCapture: (machineId: string, session: string, lines?: number) =>
+    invoke<SessionCapture>("place_session_capture", {
+      machineId,
+      session,
+      lines: lines ?? null,
+    }),
   /** Every project the box has a copy of *that belongs to the org you opened it
    *  as*. One runner holds many; this is what the workspace groups its sessions
    *  by.
@@ -4063,6 +4301,90 @@ export const api = {
       machineId: place.machineId,
       bins,
       deps,
+    }),
+  // AURA-1306 — files, changes and git for a workspace whose checkout is on a
+  // machine. Each is the twin of a local command above (same answer shape),
+  // taking the machine first and then the LOCAL root the frontend already
+  // spells everything under; paths under that root are re-rooted on the box
+  // and answered back in the local spelling. Nothing here is meant to be
+  // called directly: `lib/place/workApi` picks local or place per root.
+  placeFsList: (machineId: string, root: string, path: string) =>
+    invoke<DirEntry[]>("place_fs_list", { machineId, root, path }),
+  placeFsRead: (machineId: string, root: string, path: string) =>
+    invoke<FileContent>("place_fs_read", { machineId, root, path }),
+  placeFsWrite: (machineId: string, root: string, path: string, contents: string) =>
+    invoke<void>("place_fs_write", { machineId, root, path, contents }),
+  placeFsCreateFile: (machineId: string, root: string, path: string) =>
+    invoke<string>("place_fs_create_file", { machineId, root, path }),
+  placeFsCreateFolder: (machineId: string, root: string, path: string) =>
+    invoke<string>("place_fs_create_folder", { machineId, root, path }),
+  placeFsRename: (machineId: string, root: string, from: string, to: string) =>
+    invoke<string>("place_fs_rename", { machineId, root, from, to }),
+  placeFsDelete: (machineId: string, root: string, path: string) =>
+    invoke<void>("place_fs_delete", { machineId, root, path }),
+  placeFsFindFiles: (machineId: string, root: string) =>
+    invoke<string[]>("place_fs_find_files", { machineId, root }),
+  placeGitStatusV2: (machineId: string, root: string) =>
+    invoke<GitStatusEntry[]>("place_git_status_v2", { machineId, root }),
+  placeGitDiff: (machineId: string, root: string, file: string, sinceBase?: boolean) =>
+    invoke<string>("place_git_diff", {
+      machineId,
+      root,
+      file,
+      sinceBase: sinceBase ?? null,
+    }),
+  placeGitDiffAtCommit: (machineId: string, root: string, sha: string, file: string) =>
+    invoke<string>("place_git_diff_at_commit", { machineId, root, sha, file }),
+  placeGitDiffBase: (machineId: string, root: string, base: string, file: string) =>
+    invoke<string>("place_git_diff_base", { machineId, root, base, file }),
+  placeGitDiffStatsPerFile: (machineId: string, root: string, sinceBase?: boolean) =>
+    invoke<FileDiffStat[]>("place_git_diff_stats_per_file", {
+      machineId,
+      root,
+      sinceBase: sinceBase ?? null,
+    }),
+  placeGitBranch: (machineId: string, root: string) =>
+    invoke<string>("place_git_branch", { machineId, root }),
+  placeGitBranches: (machineId: string, root: string) =>
+    invoke<GitBranchInfo[]>("place_git_branches", { machineId, root }),
+  placeGitBranchesRich: (machineId: string, root: string) =>
+    invoke<GitBranchRich[]>("place_git_branches_rich", { machineId, root }),
+  placeGitAheadBehind: (machineId: string, root: string) =>
+    invoke<AheadBehind>("place_git_ahead_behind", { machineId, root }),
+  placeGitShowCommit: (machineId: string, root: string, sha: string) =>
+    invoke<string>("place_git_show_commit", { machineId, root, sha }),
+  placeGitShowHead: (machineId: string, root: string, file: string) =>
+    invoke<string>("place_git_show_head", { machineId, root, file }),
+  placeGitRemoteOrigin: (machineId: string, root: string) =>
+    invoke<string>("place_git_remote_origin", { machineId, root }),
+  placeGitStage: (machineId: string, root: string, paths: string[]) =>
+    invoke<string>("place_git_stage", { machineId, root, paths }),
+  placeGitUnstage: (machineId: string, root: string, paths: string[]) =>
+    invoke<string>("place_git_unstage", { machineId, root, paths }),
+  placeGitDiscard: (machineId: string, root: string, paths: string[]) =>
+    invoke<string>("place_git_discard", { machineId, root, paths }),
+  placeGitCommit: (machineId: string, root: string, message: string) =>
+    invoke<string>("place_git_commit", { machineId, root, message }),
+  placeGitPush: (machineId: string, root: string, setUpstream: boolean) =>
+    invoke<string>("place_git_push", { machineId, root, setUpstream }),
+  placeGitPull: (machineId: string, root: string) =>
+    invoke<string>("place_git_pull", { machineId, root }),
+  placeGitFetch: (machineId: string, root: string) =>
+    invoke<string>("place_git_fetch", { machineId, root }),
+  placeGitCheckout: (machineId: string, root: string, branch: string) =>
+    invoke<string>("place_git_checkout", { machineId, root, branch }),
+  placeGitCreateBranch: (machineId: string, root: string, name: string) =>
+    invoke<string>("place_git_create_branch", { machineId, root, name }),
+  placeGitResetFiles: (machineId: string, root: string) =>
+    invoke<number>("place_git_reset_files", { machineId, root }),
+  // end AURA-1306
+  // AURA-1307 — `runDetect`, asked of the checkout on the machine. Same
+  // sniffer, same answer shape; the files are read over there.
+  placeRunDetect: (machineId: string, root: string, remoteRoot?: string | null) =>
+    invoke<RunSuggestion>("place_run_detect", {
+      machineId,
+      root,
+      remoteRoot: remoteRoot ?? null,
     }),
   /** What the AGENT phase of a run at this place may reach — before anything
    *  is started, and changing nothing.
@@ -4802,22 +5124,41 @@ export const api = {
   // Memory + Sessions (5D) — direct fs reader/writer over .aura/memory.json
   // and .aura/sessions/*. Memory is a single JSON with sectioned arrays;
   // each session is one JSON file keyed by session_id.
-  auraMemoryView: (repoRoot: string) =>
-    invoke<MemoryView>("aura_memory_view", { repoRoot }),
+  /** `includeSuperseded` also returns closed rows — edited away or
+   *  soft-forgotten — which is the audit trail behind "forget hides, it
+   *  doesn't erase". The default view is live entries only. */
+  auraMemoryView: (repoRoot: string, includeSuperseded = false) =>
+    invoke<MemoryView>("aura_memory_view", { repoRoot, includeSuperseded }),
   auraMemoryWriteEntry: (
     repoRoot: string,
     section: string,
     content: string,
     tags: string[],
   ) =>
-    invoke<MemoryEntry>("aura_memory_write_entry", {
+    invoke<MemoryWriteOutcome>("aura_memory_write_entry", {
       repoRoot,
       section,
       content,
       tags,
     }),
-  auraMemoryForgetEntry: (repoRoot: string, id: string) =>
-    invoke<boolean>("aura_memory_forget_entry", { repoRoot, id }),
+  /** Edit = supersede: the old row closes (audit trail), a signed successor
+   *  lands with a `supersedes` back-pointer. Omitted tags are inherited. */
+  auraMemoryUpdateEntry: (
+    repoRoot: string,
+    id: string,
+    content: string,
+    tags?: string[],
+  ) =>
+    invoke<MemoryWriteOutcome>("aura_memory_update_entry", {
+      repoRoot,
+      id,
+      content,
+      tags: tags ?? null,
+    }),
+  /** Default = SOFT forget (closes the row, keeps the audit trail).
+   *  `hard: true` is the privacy path — erases the row entirely. */
+  auraMemoryForgetEntry: (repoRoot: string, id: string, hard = false) =>
+    invoke<boolean>("aura_memory_forget_entry", { repoRoot, id, hard }),
   // Import Claude Code's per-repo memory into Aura's memory. Shells the
   // `aura memory import-claude-code --json` CLI (W3 reconcile = idempotent);
   // dryRun reports what would import without writing.
@@ -4870,12 +5211,24 @@ export const api = {
   // PR workspace (Stage 7A) — `gh` CLI passthrough enriched with
   // matching .aura/reviews/*.json risk score so the PR card surfaces
   // Aura's verdict next to GitHub's.
-  prList: (repoRoot: string) => invoke<PrSummary[]>("pr_list", { repoRoot }),
+  //
+  // AURA-1307 — every wrapper takes a trailing `remoteRepo`. `gh` always runs
+  // on THIS laptop with the human's own login; when the checkout is on a
+  // machine there is no repo here for it to look at, so the caller names the
+  // GitHub repo (`owner/repo`, read off the box's `origin`) and the backend
+  // passes it as `-R`. `null` means "the checkout is here — ask git in it".
+  prList: (repoRoot: string, remoteRepo?: string | null) =>
+    invoke<PrSummary[]>("pr_list", { repoRoot, remoteRepo: remoteRepo ?? null }),
   /** Open GitHub issues available as workspace launch context. */
-  githubIssueList: (repoRoot: string) =>
-    invoke<GithubIssue[]>("github_issue_list", { repoRoot }),
+  githubIssueList: (repoRoot: string, remoteRepo?: string | null) =>
+    invoke<GithubIssue[]>("github_issue_list", {
+      repoRoot,
+      remoteRepo: remoteRepo ?? null,
+    }),
   /** Create a PR from the selected worktree branch. The backend pushes the
-   *  branch first, then returns the concrete PR so Aura can open it. */
+   *  branch first, then returns the concrete PR so Aura can open it. With
+   *  `remoteRepo` set the branch is already pushed from the machine and
+   *  `headBranch` is required — there is no checkout here to read it off. */
   prCreate: (input: {
     repoRoot: string;
     headBranch?: string | null;
@@ -4883,7 +5236,8 @@ export const api = {
     body: string;
     baseBranch?: string | null;
     draft: boolean;
-  }) => invoke<PrCreated>("pr_create", input),
+    remoteRepo?: string | null;
+  }) => invoke<PrCreated>("pr_create", { ...input, remoteRepo: input.remoteRepo ?? null }),
   /** Edit title, description, target branch, and draft state natively. */
   prEdit: (input: {
     repoRoot: string;
@@ -4892,19 +5246,31 @@ export const api = {
     body: string;
     baseBranch?: string | null;
     draft: boolean;
-  }) => invoke<void>("pr_edit", input),
+    remoteRepo?: string | null;
+  }) => invoke<void>("pr_edit", { ...input, remoteRepo: input.remoteRepo ?? null }),
   /** GitHub viewer login (`gh api user --jq .login`). Empty string if
    *  unauthenticated. Cached by caller — Inbox uses this to highlight
    *  PRs authored by the user vs awaiting their review. */
-  prWhoami: (repoRoot: string) => invoke<string>("pr_whoami", { repoRoot }),
+  prWhoami: (repoRoot: string, remoteRepo?: string | null) =>
+    invoke<string>("pr_whoami", { repoRoot, remoteRepo: remoteRepo ?? null }),
   /** All repo labels (`gh label list --json name,color,description --limit 200`).
    *  Used by the label picker to show the universe of choices. */
-  prLabelsList: (repoRoot: string) =>
-    invoke<PrLabel[]>("pr_labels_list", { repoRoot }),
+  prLabelsList: (repoRoot: string, remoteRepo?: string | null) =>
+    invoke<PrLabel[]>("pr_labels_list", { repoRoot, remoteRepo: remoteRepo ?? null }),
   /** Replace the labels on a PR with `names`. Backend diffs against
    *  current and shells `gh pr edit --add-label / --remove-label`. */
-  prLabelsSet: (repoRoot: string, prNumber: number, names: string[]) =>
-    invoke<void>("pr_labels_set", { repoRoot, prNumber, names }),
+  prLabelsSet: (
+    repoRoot: string,
+    prNumber: number,
+    names: string[],
+    remoteRepo?: string | null,
+  ) =>
+    invoke<void>("pr_labels_set", {
+      repoRoot,
+      prNumber,
+      names,
+      remoteRepo: remoteRepo ?? null,
+    }),
   /** Edit a PR's title and/or body (`gh pr edit`). Pass `null` for a field
    *  to leave it unchanged, so the title and body can be saved independently. */
   prUpdate: (
@@ -4912,26 +5278,42 @@ export const api = {
     prNumber: number,
     title: string | null,
     body: string | null,
-  ) => invoke<void>("pr_update", { repoRoot, prNumber, title, body }),
-  prDetail: (repoRoot: string, prNumber: number) =>
-    invoke<PrDetail>("pr_detail", { repoRoot, prNumber }),
+    remoteRepo?: string | null,
+  ) =>
+    invoke<void>("pr_update", {
+      repoRoot,
+      prNumber,
+      title,
+      body,
+      remoteRepo: remoteRepo ?? null,
+    }),
+  prDetail: (repoRoot: string, prNumber: number, remoteRepo?: string | null) =>
+    invoke<PrDetail>("pr_detail", { repoRoot, prNumber, remoteRepo: remoteRepo ?? null }),
   /** Flatten every status check on a PR (`gh pr view --json
    *  statusCheckRollup`) into one row per check — GitHub Actions runs,
    *  external CI status contexts, everything. Each row carries a plain
    *  bucket ("success" | "failure" | "pending") the Checks tab colors by,
    *  plus a `url` to the run's logs. Same rollup `pr_list` already reads,
    *  surfaced per-check instead of only summarized to a chip. */
-  prChecks: (repoRoot: string, number: number) =>
-    invoke<PrCheck[]>("pr_checks", { repoRoot, number }),
+  prChecks: (repoRoot: string, number: number, remoteRepo?: string | null) =>
+    invoke<PrCheck[]>("pr_checks", { repoRoot, number, remoteRepo: remoteRepo ?? null }),
   /** Vercel deploy status for a PR's head commit, or null when Vercel isn't
    *  configured (`[vercel]` in `~/.aura/integrations.toml`) or has no
    *  deployment for the commit yet. Drives the deploy chip above the checks
    *  list. Deliberately soft — never blocks the checks view. */
-  prVercelStatus: (repoRoot: string, prNumber: number) =>
-    invoke<VercelDeployment | null>("pr_vercel_status", { repoRoot, prNumber }),
+  prVercelStatus: (repoRoot: string, prNumber: number, remoteRepo?: string | null) =>
+    invoke<VercelDeployment | null>("pr_vercel_status", {
+      repoRoot,
+      prNumber,
+      remoteRepo: remoteRepo ?? null,
+    }),
   // Stage 7B: comments
-  prCommentsList: (repoRoot: string, prNumber: number) =>
-    invoke<PrComment[]>("pr_comments_list", { repoRoot, prNumber }),
+  prCommentsList: (repoRoot: string, prNumber: number, remoteRepo?: string | null) =>
+    invoke<PrComment[]>("pr_comments_list", {
+      repoRoot,
+      prNumber,
+      remoteRepo: remoteRepo ?? null,
+    }),
   prCommentPost: (
     repoRoot: string,
     prNumber: number,
@@ -4940,6 +5322,7 @@ export const api = {
     body: string,
     side?: "RIGHT" | "LEFT",
     startLine?: number,
+    remoteRepo?: string | null,
   ) =>
     invoke<PrComment>("pr_comment_post", {
       repoRoot,
@@ -4949,52 +5332,128 @@ export const api = {
       body,
       side: side ?? null,
       startLine: startLine ?? null,
+      remoteRepo: remoteRepo ?? null,
     }),
-  prCommentPostIssue: (repoRoot: string, prNumber: number, body: string) =>
-    invoke<PrComment>("pr_comment_post_issue", { repoRoot, prNumber, body }),
+  prCommentPostIssue: (
+    repoRoot: string,
+    prNumber: number,
+    body: string,
+    remoteRepo?: string | null,
+  ) =>
+    invoke<PrComment>("pr_comment_post_issue", {
+      repoRoot,
+      prNumber,
+      body,
+      remoteRepo: remoteRepo ?? null,
+    }),
   prCommentReply: (
     repoRoot: string,
     prNumber: number,
     inReplyTo: number,
     body: string,
+    remoteRepo?: string | null,
   ) =>
     invoke<PrComment>("pr_comment_reply", {
       repoRoot,
       prNumber,
       inReplyTo,
       body,
+      remoteRepo: remoteRepo ?? null,
     }),
-  prCommentResolve: (repoRoot: string, threadNodeId: string) =>
-    invoke<void>("pr_comment_resolve", { repoRoot, threadNodeId }),
+  prCommentResolve: (
+    repoRoot: string,
+    threadNodeId: string,
+    remoteRepo?: string | null,
+  ) =>
+    invoke<void>("pr_comment_resolve", {
+      repoRoot,
+      threadNodeId,
+      remoteRepo: remoteRepo ?? null,
+    }),
   // Stage 8M: emoji reactions
   prReactionAdd: (
     repoRoot: string,
     commentNodeId: string,
     content: ReactionContent,
-  ) => invoke<void>("pr_reaction_add", { repoRoot, commentNodeId, content }),
+    remoteRepo?: string | null,
+  ) =>
+    invoke<void>("pr_reaction_add", {
+      repoRoot,
+      commentNodeId,
+      content,
+      remoteRepo: remoteRepo ?? null,
+    }),
   prReactionRemove: (
     repoRoot: string,
     commentNodeId: string,
     content: ReactionContent,
-  ) => invoke<void>("pr_reaction_remove", { repoRoot, commentNodeId, content }),
+    remoteRepo?: string | null,
+  ) =>
+    invoke<void>("pr_reaction_remove", {
+      repoRoot,
+      commentNodeId,
+      content,
+      remoteRepo: remoteRepo ?? null,
+    }),
   // Stage 7D: approval / merge / stack
-  prApprove: (repoRoot: string, prNumber: number, body?: string) =>
-    invoke<void>("pr_approve", { repoRoot, prNumber, body: body ?? null }),
-  prRequestChanges: (repoRoot: string, prNumber: number, body: string) =>
-    invoke<void>("pr_request_changes", { repoRoot, prNumber, body }),
-  prCommentReview: (repoRoot: string, prNumber: number, body: string) =>
-    invoke<void>("pr_comment_review", { repoRoot, prNumber, body }),
+  prApprove: (
+    repoRoot: string,
+    prNumber: number,
+    body?: string,
+    remoteRepo?: string | null,
+  ) =>
+    invoke<void>("pr_approve", {
+      repoRoot,
+      prNumber,
+      body: body ?? null,
+      remoteRepo: remoteRepo ?? null,
+    }),
+  prRequestChanges: (
+    repoRoot: string,
+    prNumber: number,
+    body: string,
+    remoteRepo?: string | null,
+  ) =>
+    invoke<void>("pr_request_changes", {
+      repoRoot,
+      prNumber,
+      body,
+      remoteRepo: remoteRepo ?? null,
+    }),
+  prCommentReview: (
+    repoRoot: string,
+    prNumber: number,
+    body: string,
+    remoteRepo?: string | null,
+  ) =>
+    invoke<void>("pr_comment_review", {
+      repoRoot,
+      prNumber,
+      body,
+      remoteRepo: remoteRepo ?? null,
+    }),
   prMerge: (
     repoRoot: string,
     prNumber: number,
     strategy: "squash" | "merge" | "rebase",
     deleteBranch: boolean,
-  ) => invoke<void>("pr_merge", { repoRoot, prNumber, strategy, deleteBranch }),
-  prStack: (repoRoot: string, prNumber: number) =>
-    invoke<PrStackNode[]>("pr_stack", { repoRoot, prNumber }),
+    remoteRepo?: string | null,
+  ) =>
+    invoke<void>("pr_merge", {
+      repoRoot,
+      prNumber,
+      strategy,
+      deleteBranch,
+      remoteRepo: remoteRepo ?? null,
+    }),
+  prStack: (repoRoot: string, prNumber: number, remoteRepo?: string | null) =>
+    invoke<PrStackNode[]>("pr_stack", { repoRoot, prNumber, remoteRepo: remoteRepo ?? null }),
   // Resource usage popover — CPU + memory totals + per-process breakdown
   // for the aura family (shell, pty daemon, mcp companion, agent CLIs).
-  resourceSnapshot: () => invoke<ResourceSnapshot>("resource_snapshot"),
+  // AURA-1298 — `root` picks the volume the disk figures describe; without
+  // it the backend answers for where managed copies live.
+  resourceSnapshot: (root?: string | null) =>
+    invoke<ResourceSnapshot>("resource_snapshot", { root: root ?? null }),
 
   // Plugin host (W0.3) — thin façade over plugin_host::Registry. Drives
   // the Settings → Plugins surface and the future marketplace list.
@@ -5109,7 +5568,12 @@ export const api = {
   // MCP servers (post-W4 pivot — see `cmd_mcp_servers.rs`). Configs at
   // `~/.aura/mcp/<name>.json`. `mcpToolsList` spawns each enabled server
   // once to read its tools catalog; the renderer caches the result.
-  mcpServersList: () => invoke<McpServerEntry[]>("mcp_servers_list"),
+  /** `repoRoot` keeps project-attached servers in their project; omitting
+   *  it shows only the globally-inherited ones. */
+  mcpServersList: (repoRoot?: string) =>
+    invoke<McpServerEntry[]>("mcp_servers_list", {
+      repoRoot: repoRoot ?? null,
+    }),
   mcpServersAdd: (input: {
     name: string;
     command: string;
@@ -5179,7 +5643,10 @@ export const api = {
    *  can re-authenticate from scratch. No-op if no tokens are stored. */
   mcpServersOauthClear: (name: string) =>
     invoke<void>("mcp_servers_oauth_clear", { name }),
-  mcpToolsList: () => invoke<McpServerToolList[]>("mcp_tools_list"),
+  mcpToolsList: (repoRoot?: string) =>
+    invoke<McpServerToolList[]>("mcp_tools_list", {
+      repoRoot: repoRoot ?? null,
+    }),
   mcpToolInvoke: (
     server: string,
     tool: string,
@@ -5240,7 +5707,10 @@ export const api = {
     // hint for the status codes that mean "voice isn't provisioned here".
     let r: Response;
     try {
-      r = await fetch("https://auravcs.com/api/v1/call/token", {
+      // The cloud this app is talking to — a literal here meant a staging or
+      // self-hosted run asked PRODUCTION to mint its huddle token.
+      const { http: cloudOrigin } = await cloudOrigins();
+      r = await fetch(`${cloudOrigin}/api/v1/call/token`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -5411,6 +5881,20 @@ export type RepoWorktreeSettings = {
   base: string | null;
   copyFiles: string[];
   namedScripts: Array<{ name: string; command: string }>;
+  // AURA-1297 — per-repo agent instructions, GitHub host, binary-copy opt-in.
+  // All optional on the wire so an older backend's payload still loads.
+  /** Let binaries (NUL in the first 8 KiB, or over 20 MiB) through the copy
+   *  list. Off by default: they are skipped with a notice. */
+  copyFilesIncludeBinaries?: boolean;
+  /** How the agent should review this repo — appended to review prompts. */
+  reviewInstructions?: string | null;
+  /** How to write pull requests here — appended to the create-PR prompt. */
+  prInstructions?: string | null;
+  /** How to resolve conflicts here — appended to the resolve-conflicts prompt. */
+  conflictInstructions?: string | null;
+  /** GitHub Enterprise host for this repo's `gh` calls (sets GH_HOST). */
+  ghHost?: string | null;
+  // end AURA-1297
 };
 
 /** Read this project's copy-and-scripts settings. Returns all-null /
@@ -5787,6 +6271,12 @@ export type ResourceSnapshot = {
   app_share_percent: number;
   aura_memory_mb: number;
   processes: ProcessRow[];
+  // AURA-1298 — free space on the workspace's volume. Zero means the
+  // volume could not be asked; `lib/diskWarning` reads that as unknown.
+  disk_free_bytes: number;
+  disk_total_bytes: number;
+  /** The folder every agent's copy of a project lives in. Empty when unknown. */
+  copies_root: string;
 };
 
 // ── PR workspace (Stage 7A) ──────────────────────────────────────────
@@ -5822,6 +6312,12 @@ export type PrSummary = {
   /** Labels attached to this PR (Stage 8D). Includes name + GitHub
    *  colour hex without `#` prefix + optional description. */
   labels: PrLabel[];
+  // AURA-1297 — fork PRs. The head branch lives in another repo, so a
+  // checkout has to fetch `pull/<n>/head` instead of a branch name.
+  is_cross_repository: boolean;
+  /** Owner login of the head repo — the fork's owner for a fork PR. */
+  head_repo_owner: string;
+  // end AURA-1297
 };
 
 export type PrCreated = {
@@ -5973,6 +6469,10 @@ export type PrCheck = {
   /** Workflow name for Actions runs; empty for external status contexts. */
   workflow: string;
   description: string;
+  // AURA-1297 — why an Actions run failed to start (`startup_failure`):
+  // the workflow-file error, missing runner label, etc. Empty otherwise.
+  failure_reason: string;
+  // end AURA-1297
 };
 
 export type PrReviewer = {
@@ -6039,6 +6539,11 @@ export type PrStackNode = {
    *  the branch is part of a `gt`-managed stack. Lets the UI show a
    *  "Graphite stack" chip only when the stack is genuinely Graphite's. */
   gt_managed: boolean;
+  // AURA-1297 — where the stack order came from: "graphite" (branch
+  // metadata), "gh-stack" (GitHub's `gh stack` extension) or "github"
+  // (inferred from head/base refs alone).
+  stack_tool: string;
+  // end AURA-1297
 };
 
 /** A Vercel deployment for a PR's head commit — the deploy chip on the PR
@@ -6100,8 +6605,50 @@ export type MemoryEntry = {
   signer_key_id?: string;
   /** RFC3339 — when this fact became valid. */
   valid_from?: string;
-  /** RFC3339 — reserved for supersession windows. */
+  /** RFC3339 — when this fact stopped being current (superseded or
+   *  soft-forgotten). Live entries omit it; the default view only returns
+   *  live entries. */
   valid_to?: string;
+  /** Id of the entry this one superseded (edit/reconcile chain). */
+  supersedes?: string;
+  /** Importance weight in [0, 1] — the confidence signal. */
+  importance?: number;
+  /** Scope manifest: which repo/checkout/session wrote this memory. */
+  scope?: Record<string, unknown>;
+  /** Ed25519 signature over the canonical entry payload (base64). */
+  sig?: string;
+  /** Full verifying key, base64url — makes the entry self-certifying. */
+  sig_pubkey?: string;
+  /** did:aura:key/… of the identity that signed THIS entry. */
+  sig_key_id?: string;
+  /** Signature verdict computed natively at view time:
+   *  "valid" | "invalid" | "unsigned". */
+  signed?: string;
+  /** RFC3339 of the last successful share to the team. Absent on a fact
+   *  that has never left this machine, which is the common case. */
+  shared_at?: string;
+  /** The server's verdict on that share's signature ("signed" /
+   *  "unsigned"), recorded at push time rather than asserted here. */
+  shared_signature?: string;
+  /** RFC3339 of the last withdrawal. Set once a share has been taken
+   *  back — the team can no longer read it, but somebody may still be
+   *  holding the copy they pulled, which is why this outlives the
+   *  share stamp instead of clearing back to "never shared". */
+  shared_retracted_at?: string;
+};
+
+/** Reconcile envelope from `aura memory add/edit --json`: `op` says what
+ *  actually happened ("added" | "updated" | "deleted" | "noop" | "edited"),
+ *  `entry` is the row as it landed (no embedding vectors), `superseded` /
+ *  `supersedes` name the closed row, `reason` speaks plain language. */
+export type MemoryWriteOutcome = {
+  op: string;
+  id: string;
+  superseded?: string | null;
+  supersedes?: string | null;
+  reason?: string;
+  section?: string | null;
+  entry?: MemoryEntry | null;
 };
 
 export type MemorySection = {
@@ -7519,6 +8066,15 @@ export type BoxSession = {
   attached: number;
 };
 
+/** A session's scrollback, as of the moment it was read (AURA-1308). */
+export type SessionCapture = {
+  /** The pane's text, oldest line first. Empty is a real answer: a session
+   *  that has printed nothing yet. */
+  text: string;
+  /** Unix seconds, on this laptop, when it was read. */
+  captured_at: number;
+};
+
 /** A project the box has a copy of. */
 export type BoxProject = {
   /** Absolute path on the box. */
@@ -7869,6 +8425,15 @@ export type SnapshotEntry = {
   mtime: number;
 };
 
+export type SnapshotDetail = {
+  file_path: string;
+  content: string;
+  timestamp: number;
+  trigger: string;
+  agent_id: string;
+  why: string | null;
+};
+
 export type SnapshotPage = {
   entries: SnapshotEntry[];
   has_more: boolean;
@@ -8181,6 +8746,11 @@ export type IntentChangesetFile = {
    *  from git history. Present → the run is committed, so the diff view fetches
    *  `git show <commit> -- <path>` instead of the (empty) working-tree diff. */
   commit?: string | null;
+  /** When {@link commit} landed, ISO-8601 — what the Changes list orders by
+   *  when it is asked for the newest change first. Absent on a working-tree
+   *  changeset, where nothing has a time yet; such files sort last rather than
+   *  claiming to be oldest. */
+  changed_at?: string | null;
   /** Baseline sha to diff this file against, for a native Aura chat session
    *  whose work never landed as its own commit. Present → the diff view fetches
    *  `git diff <base> -- <path>` (the file's whole change since the session
@@ -8311,7 +8881,18 @@ export type ChangeExplanation = {
   before: string;
   what: string;
   why: string;
-  source: "model" | "fallback" | "cache" | "mixed" | "none";
+  /** Where the `why` came from, on its own — it is the one angle that can be a
+   *  fact rather than a reading. `recorded` means the author stated it against
+   *  this exact file and revision (`aura snapshot-file --why`) and Aura is
+   *  quoting them; `model` / `cache` / `fallback` mean Aura read the diff and
+   *  wrote its own account. `error` means the request failed, which is not the
+   *  same as there being nothing to say. Absent on an older backend. */
+  why_source?: "recorded" | "model" | "cache" | "fallback" | "none" | "error";
+  /** Who recorded the reason, for `why_source: "recorded"`. */
+  why_author?: string;
+  /** When the reason was recorded (unix seconds), for `"recorded"`. */
+  why_stated_at?: number;
+  source: "model" | "fallback" | "cache" | "mixed" | "none" | "recorded" | "error";
   diff_hash: string;
 };
 
@@ -8588,6 +9169,11 @@ export type KgNode = {
   degree: number;
   community_id: number;
   god: boolean;
+  /** "checkpoint" = `id` is the canonical rename-proof node_id the CLI,
+   *  Atlas and rewind all cite (GRF-01); "outline" = positional fallback. */
+  provenance: string;
+  /** Canonical content hash when provenance === "checkpoint". */
+  content_hash: string | null;
 };
 
 export type KgEdge = {
@@ -8606,6 +9192,8 @@ export type KgStats = {
   communities: number;
   gods: number;
   surprises: number;
+  /** Symbol nodes carrying the canonical checkpoint identity. */
+  canonical: number;
 };
 
 export type KgGraph = {
@@ -8614,6 +9202,232 @@ export type KgGraph = {
   built_at: number;
   head_sha: string;
   stats: KgStats;
+  /** 0 = legacy pre-GRF-01 graph; rebuilt on the next ensure. */
+  schema_version: number;
+  /** Worktree root the graph was built for — reads for another root refuse
+   *  it, so two worktrees can never serve each other's graphs. */
+  scope_root: string;
+  /** Checkpoint-view version joined in; "" when no canonical export existed. */
+  graph_version: string;
+};
+
+/** Request shape for a bounded Code Map view (GRF-05). Field names are
+ *  snake_case because the object crosses IPC into serde verbatim. */
+export type KgViewQuery = {
+  query?: string;
+  kinds?: string[];
+  community?: number | null;
+  include_docs?: boolean;
+  /** Expand the neighbourhood around this node id (incremental loading). */
+  focus?: string | null;
+  node_cap?: number | null;
+};
+
+/** A capped, ranked subgraph — the only shape the Code Map ever receives.
+ *  `stats` still describes the whole graph; `matched`/`total_nodes` say
+ *  how much the cap hid. */
+export type KgView = {
+  nodes: KgNode[];
+  edges: KgEdge[];
+  stats: KgStats;
+  total_nodes: number;
+  matched: number;
+  /** How many of `nodes` are only neighbourhood context, not matches.
+   *  `nodes.length - context` is how many matches are on screen. */
+  context: number;
+  /** Some matches did not fit and are not on screen. */
+  truncated: boolean;
+  /** Some edges between the shown nodes were dropped to stay inside the
+   *  payload budget. Says nothing about whether a match was hidden. */
+  edges_truncated: boolean;
+  built_at: number;
+  head_sha: string;
+};
+
+export type KgExplainEdge = {
+  kind: string;
+  confidence: number;
+  surprise: boolean;
+  other: KgNode;
+};
+
+export type KgExplain = {
+  node: KgNode;
+  inbound: KgExplainEdge[];
+  outbound: KgExplainEdge[];
+  inbound_total: number;
+  outbound_total: number;
+  community_size: number;
+  built_at: number;
+  head_sha: string;
+};
+
+export type KgPathHop = {
+  node: KgNode;
+  via_kind: string | null;
+  via_confidence: number | null;
+};
+
+export type KgPath = {
+  found: boolean;
+  directed: boolean;
+  hops: KgPathHop[];
+  confidence: number;
+  from_resolved: KgNode | null;
+  to_resolved: KgNode | null;
+  built_at: number;
+  head_sha: string;
+};
+
+/** One plain-language block on the feature map: a place in the product
+ *  ("Login", "Billing"), not a symbol. `path` is the raw directory
+ *  fragment the pieces view can search to drill in. */
+export type KgFeature = {
+  id: string;
+  name: string;
+  area: string;
+  path: string;
+  symbols: number;
+  files: number;
+  top_symbols: string[];
+  sample_files: string[];
+};
+
+export type KgFeatureLink = {
+  a: string;
+  b: string;
+  /** How many graph edges cross between the two features. */
+  strength: number;
+};
+
+/** The whole-project feature map — bounded (≤40 blocks, ≤120 links), so
+ *  it always crosses IPC whole. `folded` counts features too small to
+ *  show. Null from the command means "no graph yet — ensure first". */
+export type KgFeatureMap = {
+  features: KgFeature[];
+  links: KgFeatureLink[];
+  folded: number;
+  stats: KgStats;
+  built_at: number;
+  head_sha: string;
+};
+
+/** A recent reason from the intent log, joined to a flow step's file. */
+export type KgFlowChange = {
+  /** Unix seconds. */
+  when: number;
+  who: string;
+  why: string;
+};
+
+/** The goal (from `.aura/goals.jsonl`) whose requirements name this
+ *  flow's functions, with the last prover run if one exists. */
+export type KgFlowGoal = {
+  id: string;
+  text: string;
+  /** `verified` | `partial` | `not_wired` | `unknown` — straight from
+   *  the prover; no run means no goal is attached at all. */
+  verdict: string;
+  ok: number;
+  total: number;
+  /** Unix seconds of the run. */
+  at: number;
+};
+
+export type KgFlowTriggerKind =
+  | "you"
+  | "agent"
+  | "app"
+  | "cli"
+  | "server"
+  | "start"
+  | "code";
+
+export type KgFlowTrigger = { kind: KgFlowTriggerKind; text: string };
+
+export type KgFlowCallee = { name: string; file: string; line: number };
+
+export type KgFlowWhere =
+  | "app"
+  | "engine"
+  | "server"
+  | "browser"
+  | "cli"
+  | "mobile"
+  | "shared"
+  | "other";
+
+/** One function on the path, in words. `text` is the plain-language
+ *  sentence; `doc` is the first sentence of the comment above it in the
+ *  working tree, or null when the code left none. */
+export type KgFlowStep = {
+  node_id: string;
+  name: string;
+  text: string;
+  file: string;
+  line: number;
+  where: KgFlowWhere;
+  doc: string | null;
+  /** True when the symbol is pinned to the last checkpoint's identity. */
+  canonical: boolean;
+  also_calls: KgFlowCallee[];
+  also_calls_total: number;
+  changed: KgFlowChange | null;
+  /** Feature id this step lives in — differs from the flow's when the
+   *  path crosses into another part of the product. */
+  feature: string | null;
+};
+
+export type KgFlowOutcome = { kind: "save" | "see" | "end"; text: string };
+
+/** One story: something happens (trigger), a chain of functions runs
+ *  (steps), and it lands somewhere (outcome). `verdict` says how the
+ *  path was found: `traced` over resolved call edges, `seen` when part
+ *  of it rests on symbols the last checkpoint never pinned. */
+export type KgFlow = {
+  id: string;
+  feature: string;
+  name: string;
+  trigger: KgFlowTrigger;
+  steps: KgFlowStep[];
+  outcome: KgFlowOutcome;
+  verdict: "traced" | "seen";
+  goal: KgFlowGoal | null;
+  changed: KgFlowChange | null;
+  /** Functions reachable from the entry over resolved edges. */
+  reach: number;
+};
+
+export type KgFlowFeatureSummary = {
+  feature: string;
+  /** Entry points found for the feature. */
+  entries: number;
+  /** How many of them made it onto the map. */
+  shown: number;
+  /** First sentence of the module doc at the feature's front door. */
+  blurb: string | null;
+};
+
+export type KgFlowTally = {
+  traced: number;
+  seen: number;
+  proved: number;
+  gaps: number;
+  changed: number;
+};
+
+/** Every flow on the map, bounded (≤3 per feature, ≤120 total). Null
+ *  from the command means "no graph yet — ensure first". */
+export type KgFlowMap = {
+  flows: KgFlow[];
+  features: KgFlowFeatureSummary[];
+  tally: KgFlowTally;
+  change_window_days: number;
+  built_at: number;
+  head_sha: string;
+  graph_version: string;
+  canonical_symbols: number;
+  symbols: number;
 };
 
 /** Stable identifier for a logical change. Survives commit-sha
@@ -8679,6 +9493,99 @@ export type OpEntry = {
  *  filters these out at the data boundary before any Trace surface sees them. */
 export const AUTO_CAPTURE_AGENT_ID = "hook_auto";
 
+/** Is this row a tool call a hook recorded, rather than a reason anyone gave?
+ *
+ *  Only the first kind should reach Trace. A session titled "running Bash on
+ *  bash /private/tmp/claude-501/…" is this filter failing: that is a shell
+ *  command, not a piece of work anybody did on purpose.
+ *
+ *  The two obvious rules are both wrong, and one of them shipped:
+ *
+ *  - `agent_id === "hook_auto"` alone misses most of them. The desktop's event
+ *    listener learned to name the CLI that made the change (`AURA_AGENT=Claude`)
+ *    so the console would stop crediting work to a mechanism, which left the
+ *    capture rows looking exactly like real ones. Measured on one worktree's
+ *    log, 5099 of 8290 rows walked straight past this test.
+ *  - `source === "hook_auto"` alone over-corrects and deletes real work.
+ *    `--source` *defaults* to "hook_auto" in `aura log-intent`, so a reason
+ *    typed by hand carries the same mark as a hook capture. That rule throws
+ *    away every stated intent that did not pass the flag.
+ *
+ *  What actually separates them is `tool`: a hook row is written *about* a tool
+ *  call and names it, and nothing else sets the field. The exception is a row
+ *  whose text was displaced by a stated reason — the agent explained the edit
+ *  to `aura snapshot-file --why` and `log-intent` claimed it, parking the
+ *  mechanical sentence in `change`. Those read as prose, they are the best
+ *  material Trace has, and 606 of them in that same log would have been lost.
+ *  So `change` being present is the row's own record that somebody explained
+ *  it, and it wins. */
+export function isMechanicalHookCapture(r: IntentRow): boolean {
+  if (r.agent_id === AUTO_CAPTURE_AGENT_ID) return true;
+  if (r.source !== AUTO_CAPTURE_AGENT_ID) return false;
+  if (!(r.tool ?? "").trim()) return false;
+  return !(r.change ?? "").trim();
+}
+
+/** Drop the tool-call captures, but never drop a whole run.
+ *
+ *  Most runs also contain prose — a stated reason, the agent's closing message
+ *  — so removing their captures costs nothing. A few contain nothing else at
+ *  all: an agent worked for an hour and no one, human or machine, wrote down
+ *  what it was for. Deleting every row of such a run makes it vanish from
+ *  Trace, and a run that happened and left changes behind is not something
+ *  Aura gets to be silent about.
+ *
+ *  So one capture per otherwise-empty run survives, the last one, and the
+ *  surfaces title it "No request was recorded" while keeping its command as
+ *  the evidence it is. A capture that names no session cannot be tied to a run
+ *  at all and goes, because there is nothing truthful to say about it.
+ *
+ *  Measured over two worktree logs: five such runs each, out of ~1260. */
+export function keepOneRowPerCommandOnlyRun(rows: IntentRow[]): IntentRow[] {
+  const explained = new Set<string>();
+  for (const r of rows) {
+    if (isMechanicalHookCapture(r)) continue;
+    const sid = statedSessionIdOf(r);
+    if (sid) explained.add(sid);
+  }
+
+  // The survivor per run is the newest row, whatever order the caller passed.
+  const survivor = new Map<string, IntentRow>();
+  for (const r of rows) {
+    if (!isMechanicalHookCapture(r)) continue;
+    const sid = statedSessionIdOf(r);
+    if (!sid || explained.has(sid)) continue;
+    const held = survivor.get(sid);
+    if (!held || r.timestamp > held.timestamp) survivor.set(sid, r);
+  }
+
+  if (survivor.size === 0) return rows.filter((r) => !isMechanicalHookCapture(r));
+  // Each survivor takes the position of that run's first row, so the list keeps
+  // the order it was given.
+  const placed = new Set<string>();
+  const out: IntentRow[] = [];
+  for (const r of rows) {
+    if (!isMechanicalHookCapture(r)) {
+      out.push(r);
+      continue;
+    }
+    const sid = statedSessionIdOf(r);
+    if (!sid || placed.has(sid)) continue;
+    const keep = survivor.get(sid);
+    if (!keep) continue;
+    placed.add(sid);
+    out.push(keep);
+  }
+  return out;
+}
+
+/** The session id a row states, under either writer's name. Duplicated from
+ *  `sessionMeta.statedSessionId` because that module imports this one; kept to
+ *  three lines so the duplication stays obvious rather than clever. */
+function statedSessionIdOf(r: IntentRow): string {
+  return ((r.claude_session_id ?? "").trim() || (r.session_id ?? "").trim()).trim();
+}
+
 /** Strip Aura's own bookkeeping (`.aura/…`, `.entire/…`) out of a row's
  *  changeset so no Trace surface counts it as project work. Returns the row
  *  unchanged when it has no changeset or nothing to drop, so it stays a cheap
@@ -8706,14 +9613,26 @@ export type IntentRow = {
    *  durable transcript link (exact match), falling back to the time heuristic
    *  when absent (rows written before stamping shipped). */
   claude_session_id?: string | null;
-  /** Present on autonomous agent-event captures (doc 23): the raw tool name
-   *  (Bash/Read/Write/…) and capture source ("hook_auto"). Carried in the
-   *  on-disk JSONL but currently dropped by the Rust `IntentRow` struct, so
-   *  these are usually undefined frontend-side — `agent_id` is the reliable
-   *  signal. Typed so the capture shape is documented and the source filter
-   *  in `auraIntentRecent` stays well-typed. */
+  /** The same thing under the other writer's name. `aura log-intent` — the hook
+   *  path, which writes the overwhelming majority of rows — calls it
+   *  `session_id`, because it holds whichever agent CLI's session id the
+   *  environment named; for Claude Code that value IS the transcript stem. Only
+   *  trusted when it matches a listed Claude session exactly, so a Codex or
+   *  Gemini id can never resolve to somebody's Claude conversation. */
+  session_id?: string | null;
+  /** How the row was written. "hook_auto" is `--source`'s default in
+   *  `aura log-intent`, so it marks hook captures *and* plain stated intents
+   *  alike — never treat it on its own as proof of telemetry. */
   source?: string | null;
+  /** The agent tool call this row records (Bash/Edit/Read/an MCP tool name).
+   *  Set only by a hook writing about a tool call, which is what makes it the
+   *  usable half of `isMechanicalHookCapture`. */
   tool?: string | null;
+  /** The mechanical sentence a hook would have written ("Claude Edit on
+   *  src/main.rs"), parked here when a reason stated to `aura snapshot-file
+   *  --why` displaced it as this row's `intent`. Present ⇒ somebody explained
+   *  this change, so the row is worth reading even though a hook wrote it. */
+  change?: string | null;
   /** Set only on synthetic rows the Sessions list mints from a native Aura
    *  chat (manager) session — there is no intent-log entry for these, so the
    *  Sessions pane projects a `ManagerSummary` into an `IntentRow` and stamps
@@ -8731,6 +9650,13 @@ export type IntentRow = {
   developer_email?: string | null;
   /** The teammate's short handle (email local-part). */
   developer_handle?: string | null;
+  /** Branch this work happened on, stamped at write time. A row recovered
+   *  from a branch blob carries none: an append-only ledger propagates across
+   *  merges, so the ref we read it from is not where it was authored. */
+  branch?: string | null;
+  /** The checkout it happened in — the worktree directory's own name, never
+   *  an absolute path, which would not survive a machine move. */
+  worktree?: string | null;
 };
 
 /** Save & Sync gate uses this to decide whether to fire or pop the dialog
@@ -8887,6 +9813,19 @@ export type UsageReport = {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCacheReadTokens: number;
+  /** The part of `totalCostUsd` that is cache traffic. On a long session
+   *  this is most of it. */
+  cacheCostUsd: number;
+  /** Everything measured on this machine in the window, whether or not a
+   *  session claimed it — the ceiling `totalCostUsd` sits under. */
+  measuredCostUsd: number;
+  /** Measured spend belonging to no session in this report. Zero when the
+   *  report accounts for everything it measured. */
+  unattributedCostUsd: number;
+  /** What the total covers and what it cannot see, in the CLI's own words.
+   *  Read rather than re-written here: two surfaces describing the same
+   *  number differently is how one of them ends up wrong. */
+  measurementNotes: string[];
   sessionCount: number;
   byModel: UsageModel[];
   byDeveloper: UsageDeveloper[];
@@ -8899,8 +9838,12 @@ type RawUsageReport = {
     input_tokens: number;
     output_tokens: number;
     cache_read_tokens: number;
+    cache_cost_usd?: number;
     sessions: number;
   };
+  measured?: { cost_usd: number };
+  unattributed?: { cost_usd?: number };
+  measurement_notes?: string[];
   by_model: Array<{
     model: string;
     input_tokens: number;
@@ -8981,6 +9924,17 @@ export type CloudPollResp = {
   status: CloudPollStatus;
   user?: string | null;
   org_slug?: string | null;
+};
+
+/** One row of the cloud org roster (`cloud_org_members`), flattened from the
+ *  wire's `{ user, role }` nesting by the Rust side. Role is owner|admin|member. */
+export type CloudOrgMember = {
+  user_id: string;
+  github_login: string;
+  github_avatar?: string | null;
+  email?: string | null;
+  display_name?: string | null;
+  role: string;
 };
 
 export type CloudAuthStatus = {
@@ -9637,65 +10591,11 @@ export type ImageAttachment = {
 // Typed union of events the stream backend emits. `kind` is the
 // discriminant — matches the `serde(tag = "kind", rename_all = "snake_case")`
 // in cmd_agent_stream.rs.
-export type StreamEvent =
-  | { kind: "user_prompt"; text: string; turn_id: string; ts: number }
-  | {
-      kind: "system_init";
-      session_id: string;
-      model: string | null;
-      tools: string[];
-      turn_id: string;
-    }
-  | { kind: "assistant_text"; text: string; turn_id: string }
-  | {
-      kind: "usage";
-      context_tokens: number;
-      output_tokens: number;
-      message_id: string;
-      turn_id: string;
-    }
-  | {
-      kind: "tool_use";
-      id: string;
-      name: string;
-      input: unknown;
-      turn_id: string;
-    }
-  | {
-      kind: "tool_result";
-      tool_use_id: string;
-      content: string;
-      is_error: boolean;
-      turn_id: string;
-    }
-  | {
-      kind: "result";
-      success: boolean;
-      duration_ms: number;
-      cost_usd: number | null;
-      total_tokens: number | null;
-      message: string | null;
-      turn_id: string;
-    }
-  | { kind: "raw_error"; message: string; turn_id: string }
-  | {
-      kind: "image";
-      role: "user" | "assistant";
-      data: string;
-      media_type: string;
-      turn_id: string;
-    }
-  // Local-only kinds — never emitted by the backend. Injected by the
-  // frontend store to surface aura-protocol side effects (snapshot
-  // taken, watchdog firing) inline in the same conversation timeline.
-  | { kind: "aura_snapshot"; file_path: string; ts: number; turn_id: string }
-  | {
-      kind: "aura_warning";
-      message: string;
-      file_path: string | null;
-      tool_use_id: string;
-      turn_id: string;
-    };
+// StreamEvent moved to aura-shared/streamEvent.ts — the console folds its
+// cloud rows into the same shape, so the type lives where both apps reach.
+import type { StreamEvent } from "@shared/streamEvent";
+export type { StreamEvent };
+
 
 // Wave C — AuraWatch types. Mirror the Rust serde shapes in
 // cmd_aurawatch.rs + aurawatch_inference.rs. Keep these in sync.
@@ -9871,7 +10771,7 @@ export type SavedPrompt = {
 // scripts (aura-claude / aura-gemini / …) flush a hook. Driven by the
 // OSC 777 sentinel `aura://cli-agent`. Forked clean-room from Warp's
 // MIT plugin scripts with sentinel + env var rebrand — see
-// `aura-shell/plugins/aura-claude/`.
+// `aura-hooks/plugins/aura-claude/`.
 
 export type CliAgentEventName =
   | "session_start"
@@ -9919,6 +10819,36 @@ export type ManagedWorktree = {
   branch: string;
   path: string;
   start_point: string;
+};
+
+// Lost-worktree recovery — mirrors `worktree_recover.rs`.
+/** A checkout on disk under the managed root that git no longer lists —
+ *  what the sidebar loses after a crash corrupts git's registry. */
+export type OrphanWorktree = {
+  path: string;
+  branch: string | null;
+  /** Why it's detached, in the user's terms. */
+  reason: string;
+  /** Whether reattach expects to succeed. */
+  attachable: boolean;
+};
+
+/** The mirror image: git still lists it but the directory is gone. */
+export type GhostWorktree = {
+  path: string;
+  branch: string | null;
+};
+
+export type WorktreeScanReport = {
+  orphans: OrphanWorktree[];
+  ghosts: GhostWorktree[];
+  scanned_root: string | null;
+};
+
+export type ReattachOutcome = {
+  /** "repaired" (git fixed its own pointers) or "reconstructed". */
+  method: string;
+  branch: string | null;
 };
 
 /** One isolated lane (AURA-81) — mirrors `Lane` in `cmd_lane.rs`.

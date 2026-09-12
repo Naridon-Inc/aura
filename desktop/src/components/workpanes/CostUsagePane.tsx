@@ -55,6 +55,50 @@ export function spendFootnote(signedIn: boolean | null): string {
     : "Sign in to Aura Cloud to see the whole team’s spend in one place.";
 }
 
+/** What the hero figure above actually covers.
+ *
+ *  The pane showed a dollar amount and a four-word scope chip, and a
+ *  reader had no way to tell a genuinely small bill from a number that
+ *  simply could not see most of the spending. Which it could not: the
+ *  local report reads Claude Code transcripts on one machine at list
+ *  rates, and is blind to other machines, other coding tools, and any
+ *  turn nothing wrote down.
+ *
+ *  The local wording is the CLI's own (`usage.rs::measurement_notes`),
+ *  carried through `auraUsageReport` rather than restated here — two
+ *  surfaces writing their own account of one number is how they end up
+ *  disagreeing. The cloud wording is written here because the cloud
+ *  total comes from the billing API, which the CLI never sees.
+ *
+ *  An older `aura` on PATH sends no notes; the caller renders nothing
+ *  rather than inventing reassurance it cannot support. */
+export function coverageNotes(
+  cloudAvailable: boolean,
+  local: Pick<UsageReport, "measurementNotes"> | null,
+): string[] {
+  if (cloudAvailable) {
+    return [
+      "Everything your team ran through Aura Cloud, as billed to your org.",
+      "Agents run outside Aura Cloud are not in this figure.",
+    ];
+  }
+  return local?.measurementNotes ?? [];
+}
+
+function CoverageNote({ notes }: { notes: string[] }) {
+  if (notes.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-1 px-0.5">
+      <span className="section-label">What this covers</span>
+      {notes.map((n) => (
+        <span key={n} className="text-xs leading-relaxed text-text-4">
+          {n}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function RefreshIcon() {
   return (
     <svg
@@ -336,6 +380,10 @@ export function CostUsagePane({ repoRoot }: { repoRoot: string }) {
                 accumulatedLabel="Total · all time"
                 scopeNote={heroMonth.scopeNote}
               />
+            ) : null}
+
+            {heroMonth ? (
+              <CoverageNote notes={coverageNotes(cloudAvailable, monthUsage)} />
             ) : null}
 
             {trendPoints.length >= 2 ? (

@@ -63,10 +63,14 @@ describe("the live reads", () => {
 
   test("nothing is published from a read that didn't come back", async () => {
     const block = await readsBlock();
+    // Two of the three now publish through `keepIfSame`, which keeps the
+    // previous array when the poll said the same thing — so the setter is
+    // handed over rather than called. What this test pins is unchanged:
+    // the publish sits inside the guard that proves the read came back.
     for (const [guard, setter] of [
       ["if (agents)", "setLocalRead("],
-      ["if (impacts)", "setIncoming("],
-      ["if (confs)", "setConflicts("],
+      ["if (impacts)", "keepIfSame(setIncoming"],
+      ["if (confs)", "keepIfSame(\n          setConflicts"],
     ] as const) {
       expect(block).toContain(guard);
       const at = block.indexOf(setter);

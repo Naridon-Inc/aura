@@ -19,6 +19,7 @@
 
 import { api } from "./api";
 import type { IntentChangesetFile, StreamEvent } from "./api";
+import { gitDiff, gitDiffAtCommit, gitDiffBase, placeScope } from "./place/workApi";
 
 // ── transcript events ─────────────────────────────────────────────────
 const transcriptCache = new Map<string, Promise<StreamEvent[]>>();
@@ -79,12 +80,15 @@ export function loadFileDiff(
   // to whoever's session is open. Callers render the symbol list instead — this
   // guard is the door, so no future caller can reach git through it.
   if (file.remote_only) return Promise.resolve("");
-  // Committed run — the patch is immutable, so cache it on the sha.
+  // Committed run — the patch is immutable, so cache it on the sha. Keyed by
+  // the place as well as the root: the same sha may not exist on a machine's
+  // copy of the project, and a patch read from one side must not answer for
+  // the other (AURA-1306).
   if (file.commit) {
-    const key = `${repoRoot}@${file.commit}@${file.path}`;
+    const key = `${placeScope(repoRoot)}@${file.commit}@${file.path}`;
     let p = diffCache.get(key);
     if (!p) {
-      p = api.gitDiffAtCommit(repoRoot, file.commit, file.path);
+      p = gitDiffAtCommit(repoRoot, file.commit, file.path);
       p.catch(() => diffCache.delete(key));
       diffCache.set(key, p);
     }
@@ -95,8 +99,8 @@ export function loadFileDiff(
   // cache: the working tree can still move (the session may be live), exactly
   // like the plain working-tree path below.
   if (file.base) {
-    return api.gitDiffBase(repoRoot, file.base, file.path);
+    return gitDiffBase(repoRoot, file.base, file.path);
   }
   // Working-tree claim — read fresh, don't cache (the file can still change).
-  return api.gitDiff(repoRoot, file.path, sinceBase);
+  return gitDiff(repoRoot, file.path, sinceBase);
 }

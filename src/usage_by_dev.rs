@@ -23,7 +23,7 @@
 // one-seat-per-clone model and it makes the feature useful on day one
 // instead of only for future sessions.
 
-use crate::plugins::cost_reporter::cost_per_model;
+use crate::plugins::cost_reporter::breakdown_for;
 use crate::session::{AgentSession, SessionManager};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
@@ -66,6 +66,10 @@ pub struct DevUsageRow {
     /// before this field existed — treated as origin == developer.
     #[serde(default)]
     pub origin: String,
+    /// Canonical scope manifest (AUDIT-CAP-01) — repo/checkout the usage
+    /// was recorded in. Pre-schema rows load as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<serde_json::Value>,
 }
 
 /// The local developer's identity, resolved once from git config.
@@ -166,14 +170,25 @@ pub fn bucket_sessions(
         let month = month_of(s.started_at);
         let agent = s.agent_id.clone();
 
-        let (input, output, cache_read) = s
+        let (input, output, cache_read, cache_created) = s
             .token_usage
             .as_ref()
-            .map(|u| (u.input_tokens, u.output_tokens, u.cache_read_tokens))
-            .unwrap_or((0, 0, 0));
+            .map(|u| {
+                (
+                    u.input_tokens,
+                    u.output_tokens,
+                    u.cache_read_tokens,
+                    u.cache_creation_tokens,
+                )
+            })
+            .unwrap_or((0, 0, 0, 0));
         let model = s.model_name.as_deref().unwrap_or("claude-sonnet");
-        let (in_rate, out_rate) = cost_per_model(model);
-        let cost = (input as f64 / 1000.0) * in_rate + (output as f64 / 1000.0) * out_rate;
+        // Priced by the shared function rather than a local copy of the
+        // rates. The copy that stood here charged nothing for cache
+        // traffic, and these rows are not just printed — they are written
+        // to a git-shared file the desktop and the cloud meter read back,
+        // so the understatement travelled.
+        let cost = breakdown_for(model, input, output, cache_read, cache_created).total_cost;
 
         let row = buckets
             .entry((month.clone(), developer.clone(), agent.clone()))
@@ -189,6 +204,9 @@ pub fn bucket_sessions(
                 sessions: 0,
                 updated_at: now,
                 origin: fallback_email.to_string(),
+                // CAP-01: scope is stamped by `refresh()`, which knows the
+                // repo root — bucket_sessions stays pure (no fs writes).
+                scope: None,
             });
         row.input_tokens += input;
         row.output_tokens += output;
@@ -286,7 +304,17 @@ pub fn refresh() -> Vec<DevUsageRow> {
 
     let identity = dev_identity();
     let sessions = SessionManager::list_sessions();
-    let mine = bucket_sessions(&sessions, &identity.email, &identity.handle, now_secs());
+    let mut mine = bucket_sessions(&sessions, &identity.email, &identity.handle, now_secs());
+    // CAP-01: stamp the canonical scope on the rows THIS clone computed.
+    // Done here, not in bucket_sessions, so the bucketing stays pure and the
+    // identity file is only ever minted inside a repo that opted in (the
+    // `.aura` dir existence was verified above).
+    if let Some(root) = path.parent().and_then(|a| a.parent()).map(Path::to_path_buf) {
+        let scope = crate::scope::scope_value(&root, "usage-refresh", None);
+        for row in &mut mine {
+            row.scope = scope.clone();
+        }
+    }
     let merged = merge_rows(load_rows(&path), mine, &identity.email);
     if let Err(e) = persist_rows(&path, &merged) {
         eprintln!("aura usage: could not persist usage_by_dev.jsonl: {}", e);
@@ -452,6 +480,7 @@ mod tests {
             pid: None,
             project: None,
             developer: developer.map(|d| d.to_string()),
+            scope: None,
             developer_handle: None,
         }
     }
@@ -480,6 +509,29 @@ mod tests {
         assert_eq!(rows[2].agent_id, "codex");
     }
 
+    /// The same session, but with cache traffic on it.
+    fn cached_session(started_at: u64, cache_read: u64) -> AgentSession {
+        let mut s = session("claude", started_at, Some("a@x.com"), 1_000, 0);
+        if let Some(u) = s.token_usage.as_mut() {
+            u.cache_read_tokens = cache_read;
+        }
+        s
+    }
+
+    #[test]
+    fn a_developers_row_charges_for_the_cache_it_read() {
+        // These rows are written to a git-shared file and read back by
+        // the desktop and the cloud meter, so pricing cache at zero here
+        // understated a teammate's spend everywhere it was shown.
+        let plain = bucket_sessions(&[cached_session(JUN_2026, 0)], "f@x.com", "f", 1);
+        let cached =
+            bucket_sessions(&[cached_session(JUN_2026, 1_000_000)], "f@x.com", "f", 1);
+
+        // 1M sonnet reads at a tenth of .003 per 1k = $0.30 on top.
+        assert!((cached[0].cost_usd - (plain[0].cost_usd + 0.3)).abs() < 1e-9);
+        assert_eq!(cached[0].cache_read_tokens, 1_000_000);
+    }
+
     #[test]
     fn legacy_sessions_attribute_to_fallback_identity() {
         let sessions = vec![session("claude", JUN_2026, None, 100, 100)];
@@ -503,6 +555,7 @@ mod tests {
             sessions: 9,
             updated_at: 5,
             origin: "peer@team.dev".into(),
+            scope: None,
         };
         let my_old = DevUsageRow {
             developer: "me@team.dev".into(),
@@ -550,6 +603,7 @@ mod tests {
             sessions: 3,
             updated_at: 9,
             origin: "grace@team.dev".into(),
+            scope: None,
         };
 
         let mine = bucket_sessions(&sessions, "me@team.dev", "me", 1);

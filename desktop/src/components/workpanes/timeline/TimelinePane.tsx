@@ -14,7 +14,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type IntentRow } from "../../../lib/api";
-import { fetchIntentRows, peekIntentRows } from "../../../lib/intentCache";
+import {
+  fetchIntentRows,
+  peekIntentRows,
+  restartIntentRead,
+} from "../../../lib/intentCache";
+import { loadNote, stageAt } from "./timelineLoad";
 import {
   buildTimelineModel,
   dayLabelOf,
@@ -39,12 +44,13 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
 
-  // Load resilience: a manual retry nonce so the user is never stranded on a
-  // stuck read, and a "this is slow" flag so a long load reads as *working*,
-  // not frozen. (The engine occasionally saturates the async runtime; without
-  // an escape hatch the calm "Reading…" line looks like a hung app.)
+  // Load resilience. `loadNonce` past zero means the reader pressed Start over,
+  // which abandons the read in flight rather than joining it — joining is what
+  // made the old Try again a placebo (AURA-267). `waitedMs` ticks only while a
+  // cold read is on screen, so the copy under the loader can stop calling a
+  // stuck read slow.
   const [loadNonce, setLoadNonce] = useState(0);
-  const [slow, setSlow] = useState(false);
+  const [waitedMs, setWaitedMs] = useState(0);
 
   // Chapters rail collapse — persisted, like the app's other side panels.
   const [chaptersOpen, setChaptersOpen] = useState(
@@ -67,23 +73,22 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
   useEffect(() => {
     let alive = true;
     const cached = peekIntentRows(repoRoot);
-    if (cached) {
-      setRows(cached);
-      setSlow(false);
-    } else {
-      setRows(null);
-      setSlow(false);
-    }
+    setRows(cached ?? null);
+    setWaitedMs(0);
     setError(null);
-    // If a COLD read hasn't returned in a few seconds, surface a gentle "still
-    // working + Try again" so the screen never just sits there silently. With
-    // cached rows already on screen there's nothing to wait on visibly.
-    const slowTimer = cached
+    // Count the wait only on a COLD open — with rows already on screen there is
+    // nothing visibly pending, and the refresh behind them is nobody's problem.
+    const startedAt = Date.now();
+    const tick = cached
       ? null
-      : window.setTimeout(() => {
-          if (alive) setSlow(true);
-        }, 6000);
-    fetchIntentRows(repoRoot, 4000)
+      : window.setInterval(() => {
+          if (alive) setWaitedMs(Date.now() - startedAt);
+        }, 1000);
+    const read =
+      loadNonce === 0
+        ? fetchIntentRows(repoRoot, 4000)
+        : restartIntentRead(repoRoot, 4000);
+    read
       .then((r) => {
         if (alive) setRows(r);
       })
@@ -93,11 +98,11 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
         if (alive && !cached) setError(String(e));
       })
       .finally(() => {
-        if (slowTimer) window.clearTimeout(slowTimer);
+        if (tick) window.clearInterval(tick);
       });
     return () => {
       alive = false;
-      if (slowTimer) window.clearTimeout(slowTimer);
+      if (tick) window.clearInterval(tick);
     };
   }, [repoRoot, loadNonce]);
 
@@ -186,25 +191,29 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
   }
 
   if (!model) {
+    // `loadNonce > 0` means Start over has already been pressed at least once,
+    // so the stalled sentence can stop suggesting it again.
+    const note = loadNote(stageAt(waitedMs), loadNonce > 0);
     return (
       <Centered>
         <ScrubberSkeleton />
         <div className="mt-4 text-sm text-text-3">
           Reading the project’s history…
         </div>
-        {slow && (
+        {note.line && (
           <div className="mt-4 flex flex-col items-center gap-2.5">
             <div className="max-w-xs text-xs leading-relaxed text-text-4">
-              Taking longer than usual. A large history or a busy engine. It’ll
-              appear as soon as it’s ready.
+              {note.line}
             </div>
-            <button
-              type="button"
-              onClick={() => setLoadNonce((n) => n + 1)}
-              className="rounded-md border border-line px-3 py-1.5 text-xs text-text-2 transition-colors hover:bg-state-hover hover:text-text-1"
-            >
-              Try again
-            </button>
+            {note.action && (
+              <button
+                type="button"
+                onClick={() => setLoadNonce((n) => n + 1)}
+                className="rounded-md border border-line px-3 py-1.5 text-xs text-text-2 transition-colors hover:bg-state-hover hover:text-text-1"
+              >
+                {note.action}
+              </button>
+            )}
           </div>
         )}
       </Centered>
@@ -233,6 +242,17 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
   const onOpenSession = () => {
     const m = model.moments[selectedIndex];
     if (m) requestOpenSessionDetail(m.row);
+  };
+
+  // W4 — rewind from the scrubber. The parked moment's file rows offer "Bring
+  // back…", which jumps to the Time machine scoped to that file: the one
+  // surface that already owns snapshot-backed, confirm-first restore. The app
+  // closes this overlay on that event, so the jump reads as leaving the
+  // timeline for the machine, not stacking wizards.
+  const onRestoreFile = (path: string) => {
+    window.dispatchEvent(
+      new CustomEvent("aura:open-time-machine", { detail: { file: path } }),
+    );
   };
 
   return (
@@ -332,6 +352,7 @@ export function TimelinePane({ repoRoot }: { repoRoot: string }) {
             index={selectedIndex}
             nowSecs={nowSecs}
             onOpenSession={onOpenSession}
+            onRestoreFile={onRestoreFile}
           />
           <div className="h-44" aria-hidden />
         </div>

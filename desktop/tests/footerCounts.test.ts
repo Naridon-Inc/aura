@@ -30,16 +30,22 @@
 import { describe, expect, test } from "bun:test";
 import { readSrc, stripComments } from "./support/code";
 
-/** The body of the 4s badge poll in App.tsx, and nothing else. A `catch(() =>
+/** The body of the badge poll in App.tsx, and nothing else. A `catch(() =>
  *  [])` is perfectly fine elsewhere; what matters is the handful of calls
- *  whose results are published straight into a chip. */
+ *  whose results are published straight into a chip.
+ *
+ *  The delay is matched as a number rather than pinned to one: how often the
+ *  footer polls is a tuning decision that belongs to whoever is watching the
+ *  main thread's load, and this file has an opinion about what the poll
+ *  *does*, not how often it does it. Pinning the literal meant a cadence
+ *  change turned two unrelated assertions red. */
 async function tickBody(): Promise<string> {
   const src = stripComments(await readSrc("App.tsx"));
   const i = src.indexOf("async function tick()");
   expect(i).toBeGreaterThan(-1);
-  const j = src.indexOf("window.setInterval(tick, 4000)", i);
-  expect(j).toBeGreaterThan(i);
-  return src.slice(i, j);
+  const scheduled = /window\.setInterval\(tick,\s*[\d_]+\)/.exec(src.slice(i));
+  expect(scheduled, "the poll must still be scheduled on an interval").not.toBeNull();
+  return src.slice(i, i + scheduled!.index);
 }
 
 describe("a badge count is a number somebody read", () => {

@@ -25,10 +25,9 @@ pub struct CloudZone {
 
 fn client() -> Result<(reqwest::blocking::Client, String, String), String> {
     let cfg = ConfigManager::load();
-    let url = cfg.cloud_url.ok_or("not connected — run `aura connect`")?;
-    let token = cfg
-        .cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    let url = crate::cloud_endpoint::origin(cfg.cloud_url.as_deref())
+        .ok_or("not connected — run `aura connect`")?;
+    let token = crate::cloud_endpoint::token(cfg.cloud_api_token.as_deref())
         .ok_or("no cloud token — run `aura connect`")?;
     let c = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(20))

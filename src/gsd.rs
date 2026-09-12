@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 use colored::Colorize;
 use serde_json::json;
 use crate::config::ConfigManager;
@@ -685,17 +686,25 @@ impl GsdEngine {
         // decomposition and re-runs only the AST half on every build.
         //
         // A goal already curated in the ledger proves with THAT breakdown —
-        // same rule as `prove_goal_structured_at`. Without it an ad-hoc prove
-        // re-invents the decomposition on every call and can land on a
-        // different `must_call` than the ledger's (e.g. checking the notes
-        // functions against the `NOTES` store instead of `getSession`), so an
-        // agent asking "is this done?" gets a verdict that contradicts the same
-        // goal on the Goals surface. Curated first, decompose live only when
-        // this ask is genuinely new.
+        // same rule as `prove_goal_structured_at`. Reading the ledger was only
+        // half of decompose-once, though, and the missing half is what made
+        // this command unrepeatable: a goal nobody had proven before is not in
+        // the ledger, and nothing on this path ever put it there, so every
+        // ad-hoc prove re-invented the breakdown and could land on a different
+        // `must_call` than the last run's (e.g. checking the notes functions
+        // against the `NOTES` store instead of `getSession`). The same goal at
+        // the same commit then scored differently twice in a row, and an agent
+        // asking "is this done?" got a verdict that contradicted the same goal
+        // on the Goals surface. So a live decomposition is remembered before it
+        // is used: the first prove pays the model once and every prove after
+        // it — here, in the app, on a CI runner — reads that one breakdown.
         let requirements = match Self::curated_requirements(goal) {
             Some(reqs) => reqs,
             None => match Self::decompose_goal(goal) {
-                Some(reqs) if !reqs.is_empty() => reqs,
+                Some(reqs) if !reqs.is_empty() => {
+                    Self::remember_requirements(goal, &reqs);
+                    reqs
+                }
                 _ => {
                     return json!({
                         "goal": goal, "checks": [], "passed": 0, "total": 0,
@@ -752,7 +761,10 @@ impl GsdEngine {
             None => {
                 let catalog = Self::symbol_catalog_from(&snapshot, goal, None);
                 match Self::decompose_goal_grounded(goal, None, catalog) {
-                    Some(reqs) if !reqs.is_empty() => reqs,
+                    Some(reqs) if !reqs.is_empty() => {
+                        Self::remember_requirements(goal, &reqs);
+                        reqs
+                    }
                     _ => {
                         return json!({
                             "goal": goal, "checks": [], "passed": 0, "total": 0,
@@ -774,8 +786,14 @@ impl GsdEngine {
     /// whitespace/case never misses. Returns `None` (→ caller decomposes live)
     /// when no curated goal matches or the match carries no decomposition yet.
     fn curated_requirements(goal: &str) -> Option<Vec<crate::goals::Requirement>> {
+        // The ledger lives at the repository root, so that is where it has to
+        // be read from. Resolving it against the process working directory
+        // meant a prove run from any subdirectory found no ledger at all, fell
+        // through to a fresh model decomposition, and answered the same
+        // question differently than the identical run one directory up.
+        let root = crate::goals::discover_repo_root()?;
         let want = crate::goals::store::id_for_text(goal);
-        let reqs = crate::goals::store::load(std::path::Path::new("."))
+        let reqs = crate::goals::store::load(&root)
             .into_iter()
             .find(|rec| crate::goals::store::id_for_text(&rec.text) == want)
             .and_then(|rec| rec.decomposition)
@@ -783,8 +801,86 @@ impl GsdEngine {
         if reqs.is_empty() {
             None
         } else {
-            Some(reqs)
+            // Rows written before decompositions were canonicalized still carry
+            // whatever order the model listed them in, so canonicalize on the
+            // way out too — otherwise the cache faithfully preserves the drift
+            // it exists to prevent.
+            Some(Self::canonical_requirements(reqs))
         }
+    }
+
+    /// Put a decomposition into one canonical shape: no duplicate checks, and
+    /// an order that comes from the requirements themselves rather than from
+    /// the order the auditor happened to list them in.
+    ///
+    /// Two answers that name the same requirements are the same proof and must
+    /// read as one. Without this they do not: a reordered list reorders the
+    /// report line for line, so a reader diffing two runs sees movement where
+    /// nothing moved, and a requirement the model named twice is counted twice
+    /// in `total`, which shifts the fraction on the last line without a single
+    /// line of code having changed. The order is node name, then the connection
+    /// the node must make, then its kind — a total order over exactly the
+    /// fields that decide a check, so it can never fall back on input order.
+    fn canonical_requirements(
+        requirements: Vec<crate::goals::Requirement>,
+    ) -> Vec<crate::goals::Requirement> {
+        let mut kept: Vec<crate::goals::Requirement> = Vec::new();
+        for req in requirements {
+            // Same node, same connection to make: one check. `node_type` only
+            // labels it in the report, so it cannot split a duplicate in two.
+            let already = kept
+                .iter()
+                .any(|k| k.node_name == req.node_name && k.must_call == req.must_call);
+            if !already {
+                kept.push(req);
+            }
+        }
+        kept.sort_by(|a, b| {
+            a.node_name
+                .cmp(&b.node_name)
+                .then_with(|| a.must_call.cmp(&b.must_call))
+                .then_with(|| a.node_type.cmp(&b.node_type))
+        });
+        kept
+    }
+
+    /// Remember a freshly-decomposed breakdown in the goal ledger so the next
+    /// prove of the same ask reuses it instead of paying for — and drifting
+    /// with — another model call. This is the write half of decompose-once:
+    /// [`Self::curated_requirements`] has always read the ledger, but nothing
+    /// on the ad-hoc path ever put an answer into it, so a goal that had never
+    /// been through `aura goals prove` was re-decomposed on every single run.
+    ///
+    /// The ledger is git-tracked on purpose, and that is what makes this fix
+    /// reach a CI gate: the breakdown travels with the repository, so a
+    /// teammate's machine and a build runner prove the goal against the same
+    /// requirements instead of each inventing their own.
+    ///
+    /// An existing decomposition is never overwritten — the stored one is what
+    /// other surfaces have already reported, and replacing it would let the
+    /// drift back in through the door this closes. Best-effort throughout: a
+    /// proof that could not be cached is still a correct proof, so a ledger
+    /// that cannot be written is silently left alone.
+    fn remember_requirements(goal: &str, requirements: &[crate::goals::Requirement]) {
+        let Some(root) = crate::goals::discover_repo_root() else {
+            return;
+        };
+        let Ok(record) = crate::goals::store::upsert_by_text(&root, goal) else {
+            return;
+        };
+        if record
+            .decomposition
+            .as_ref()
+            .is_some_and(|d| !d.requirements.is_empty())
+        {
+            return;
+        }
+        let decomposition = crate::goals::Decomposition {
+            requirements: requirements.to_vec(),
+            decomposed_at: crate::goals::store::now_millis(),
+            model: Some("auditor".to_string()),
+        };
+        let _ = crate::goals::store::set_decomposition(&root, &record.id, decomposition);
     }
 
     /// The **costed** half of proving: ask the auditor model to break a goal
@@ -848,7 +944,11 @@ impl GsdEngine {
             user_prompt.push_str(cat);
         }
 
-        let text = Self::generate_content(system_prompt, &user_prompt, 0.1, CognitiveLabor::Auditor)?;
+        // Temperature zero. This one answer is cached and then treated as the
+        // definition of the goal by every later prove, so the call that
+        // produces it asks the provider for its most reproducible reading of
+        // the prompt rather than a slightly warm one.
+        let text = Self::generate_content(system_prompt, &user_prompt, 0.0, CognitiveLabor::Auditor)?;
         let clean_json = text.trim_matches(|c| c == '`').trim_start_matches("json").trim();
         let parsed = serde_json::from_str::<Vec<serde_json::Value>>(clean_json).ok()?;
         let requirements: Vec<crate::goals::Requirement> = parsed
@@ -866,6 +966,9 @@ impl GsdEngine {
                 Some(crate::goals::Requirement { node_name, node_type, must_call })
             })
             .collect();
+        // Every decomposition in the system is parsed here, which makes this the
+        // one place worth canonicalizing: see [`Self::canonical_requirements`].
+        let requirements = Self::canonical_requirements(requirements);
         if requirements.is_empty() {
             None
         } else {
@@ -977,47 +1080,31 @@ impl GsdEngine {
     /// the result doubles as a reverse code↔goal index. This is what the goal
     /// ledger re-runs on every build (decompose-once / prove-on-build).
     pub fn prove_requirements(goal: &str, requirements: &[crate::goals::Requirement]) -> serde_json::Value {
-        if requirements.is_empty() {
-            return json!({
-                "goal": goal, "checks": [], "passed": 0, "total": 0,
-                "verdict": "unknown",
-                "error": "Couldn't work out what this goal needs yet.",
-            });
-        }
-
-        let repo = match Repository::open(".") {
-            Ok(r) => r,
-            Err(_) => {
-                return json!({
-                    "goal": goal, "checks": [], "passed": 0, "total": 0,
-                    "verdict": "unknown", "error": "Not a git repository.",
-                });
-            }
-        };
-        let latest = match CheckpointStore::latest_checkpoint(&repo).unwrap_or_default() {
-            Some(latest) => latest,
-            None => {
-                return json!({
-                    "goal": goal, "checks": [], "passed": 0, "total": 0,
-                    "verdict": "unknown",
-                    "error": "No snapshot of the code to check against yet.",
-                });
-            }
-        };
-
-        Self::check_requirements_against(goal, requirements, &latest)
+        Self::prove_requirements_at(Path::new("."), None, goal, requirements)
     }
 
-    /// Same deterministic AST check as [`Self::prove_requirements`], but against
-    /// the snapshot **at a specific commit** rather than the latest checkpoint.
-    /// This is what makes a session's goals prove against the code that session
-    /// produced — even when that code lives on a branch that isn't checked out.
-    /// Falls back through nearest-descendant / nearest-ancestor checkpoints (see
-    /// [`CheckpointStore::get_checkpoint_for_commit`]); "unknown" when none exist.
+    /// As [`Self::prove_requirements`], but against the snapshot taken **on a
+    /// named commit**, in a named repository.
+    ///
+    /// The build path proves work an agent has just committed — often from a
+    /// linked worktree, often while other branches are committing into the same
+    /// shared `refs/notes/aura`. Checking it against "the newest snapshot"
+    /// there proves one branch's goal against another branch's code, and every
+    /// requirement comes back missing: a confident, wrong `not_wired`. Passing
+    /// `commit` pins the check to the snapshot that belongs to the work.
+    ///
+    /// `commit: None` keeps the old meaning — newest snapshot in `repo_root` —
+    /// which is what someone running `aura goals prove` by hand in their own
+    /// checkout is actually asking for.
+    ///
+    /// When the commit carries no snapshot the verdict is `unknown`, never
+    /// `not_wired`: we have no evidence, which is not the same as evidence that
+    /// nothing was built, and the acceptance gate must not discard work over it.
     pub fn prove_requirements_at(
+        repo_root: &Path,
+        commit: Option<&str>,
         goal: &str,
         requirements: &[crate::goals::Requirement],
-        commit_sha: &str,
     ) -> serde_json::Value {
         if requirements.is_empty() {
             return json!({
@@ -1027,7 +1114,7 @@ impl GsdEngine {
             });
         }
 
-        let repo = match Repository::open(".") {
+        let repo = match Repository::open(repo_root) {
             Ok(r) => r,
             Err(_) => {
                 return json!({
@@ -1036,18 +1123,56 @@ impl GsdEngine {
                 });
             }
         };
-        let snapshot = match CheckpointStore::get_checkpoint_for_commit(&repo, commit_sha) {
-            Some(s) => s,
+        // The snapshot taken on this exact commit is the only evidence that is
+        // really this commit's own, so it is asked for first. When there is
+        // none — an agent committed with hooks skipped, or the checkpoint
+        // landed on a later session-log commit — the nearest-descendant /
+        // nearest-ancestor resolution still gives a truthful reading, because a
+        // descendant tree contains this commit's work. What it is not is silent:
+        // `borrowed` below puts whose snapshot was read into the verdict, so a
+        // neighbour's evidence never passes for this commit's own.
+        let (found, borrowed) = match commit {
+            Some(rev) => match CheckpointStore::checkpoint_for_commit(&repo, rev) {
+                Some(cp) => (Some(cp), false),
+                None => (CheckpointStore::get_checkpoint_for_commit(&repo, rev), true),
+            },
+            None => (
+                CheckpointStore::latest_checkpoint(&repo).unwrap_or_default(),
+                false,
+            ),
+        };
+        let latest = match found {
+            Some(l) => l,
             None => {
+                let error = match commit {
+                    Some(rev) => format!(
+                        "No snapshot of {} to check against — not judging this one.",
+                        &rev[..rev.len().min(9)]
+                    ),
+                    None => "No snapshot of the code to check against yet.".to_string(),
+                };
                 return json!({
                     "goal": goal, "checks": [], "passed": 0, "total": 0,
-                    "verdict": "unknown",
-                    "error": "No snapshot of the code at that point to check against.",
+                    "verdict": "unknown", "error": error,
                 });
             }
         };
 
-        Self::check_requirements_against(goal, requirements, &snapshot)
+        let mut out = Self::check_requirements_against(goal, requirements, &latest);
+        if borrowed {
+            if let (Some(obj), Some(rev)) = (out.as_object_mut(), commit) {
+                let short = &rev[..rev.len().min(9)];
+                obj.insert("evidence".into(), json!("nearest_snapshot"));
+                obj.insert(
+                    "evidence_note".into(),
+                    json!(format!(
+                        "{} carries no snapshot of its own — judged against the nearest one instead.",
+                        short
+                    )),
+                );
+            }
+        }
+        out
     }
 
     /// The per-requirement AST evaluation shared by [`Self::prove_requirements`]
@@ -1253,5 +1378,173 @@ mod tests {
         // Sub-words under 3 chars are dropped so they never spuriously match.
         let noisy = words(&["a", "id"]);
         assert_eq!(GsdEngine::symbol_relevance("a_id", &noisy), 0);
+    }
+
+    // ── Determinism of the proof itself ─────────────────────────────────────
+    //
+    // `aura prove` is only worth reading if the same goal, against the same
+    // code, answers the same way every time — otherwise nobody can tell a real
+    // regression from the auditor having phrased its breakdown differently, and
+    // a gate built on the fraction flaps. These fixtures stand in for the two
+    // answers one unchanged goal plausibly gets from two model calls: the same
+    // requirements, listed in a different order, one of them repeated.
+
+    fn req(node_name: &str, must_call: Option<&str>) -> crate::goals::Requirement {
+        crate::goals::Requirement {
+            node_name: node_name.to_string(),
+            node_type: "Function".to_string(),
+            must_call: must_call.map(|s| s.to_string()),
+        }
+    }
+
+    fn node(identifier: &str, calls: &[&str]) -> crate::models::AstNode {
+        crate::models::AstNode {
+            node_id: format!("n:{identifier}"),
+            kind: "function_definition".to_string(),
+            identifier: Some(identifier.to_string()),
+            content_hash: format!("h:{identifier}"),
+            children: Vec::new(),
+            dependencies: calls
+                .iter()
+                .map(|c| crate::models::DependencyUri { name: c.to_string(), uri: None })
+                .collect(),
+            contains_secret: false,
+            is_stub: false,
+            derived_from: None,
+            confidence: 1.0,
+            file_path: Some("src/auth.rs".to_string()),
+            start_line: Some(1),
+            end_line: Some(9),
+            signature: None,
+            doc_comment: None,
+            top_level: true,
+        }
+    }
+
+    fn snapshot(nodes: Vec<crate::models::AstNode>) -> CheckpointData {
+        CheckpointData {
+            id: "cp-test".to_string(),
+            agent_id: "claude".to_string(),
+            intent: "test".to_string(),
+            ast_nodes: nodes,
+            timestamp: 1_700_000_000_000,
+            intent_vector: None,
+            intent_vector_model: None,
+            env_fingerprint: None,
+            file_oids: Default::default(),
+            scope: None,
+        }
+    }
+
+    /// One answer, listed two ways, is one answer.
+    #[test]
+    fn a_reordered_decomposition_is_the_same_decomposition() {
+        let first = vec![
+            req("authenticate", Some("google_oauth")),
+            req("SessionStore", None),
+            req("sign_in_handler", Some("authenticate")),
+        ];
+        let second = vec![
+            req("sign_in_handler", Some("authenticate")),
+            req("authenticate", Some("google_oauth")),
+            req("SessionStore", None),
+        ];
+        assert_eq!(
+            GsdEngine::canonical_requirements(first),
+            GsdEngine::canonical_requirements(second),
+        );
+    }
+
+    /// A requirement the auditor happens to name twice is still one thing the
+    /// code has to do. Counting it twice inflates `total` and drops the
+    /// fraction the report ends on, with no change to the code being checked.
+    #[test]
+    fn a_requirement_named_twice_is_one_check() {
+        let canonical = GsdEngine::canonical_requirements(vec![
+            req("authenticate", Some("google_oauth")),
+            req("authenticate", Some("google_oauth")),
+            req("SessionStore", None),
+        ]);
+        assert_eq!(canonical.len(), 2);
+        // Sorted by name, so the order is a property of the requirements and
+        // not of the order they arrived in.
+        assert_eq!(canonical[0].node_name, "SessionStore");
+        assert_eq!(canonical[1].node_name, "authenticate");
+    }
+
+    /// The defect, stated as an assertion: handed straight to the checker, two
+    /// equivalent auditor answers produce two different reports for one
+    /// unchanged repository — a different `total`, a different fraction, and
+    /// the checks in a different order.
+    #[test]
+    fn two_equivalent_answers_disagree_before_they_are_canonicalized() {
+        let code = snapshot(vec![
+            node("authenticate", &["google_oauth"]),
+            node("sign_in_handler", &[]),
+            node("SessionStore", &[]),
+        ]);
+        let goal = "users can sign in via Google";
+
+        let first = GsdEngine::check_requirements_against(
+            goal,
+            &[
+                req("authenticate", Some("google_oauth")),
+                req("SessionStore", None),
+                req("sign_in_handler", Some("authenticate")),
+            ],
+            &code,
+        );
+        let second = GsdEngine::check_requirements_against(
+            goal,
+            &[
+                req("sign_in_handler", Some("authenticate")),
+                req("authenticate", Some("google_oauth")),
+                req("authenticate", Some("google_oauth")),
+                req("SessionStore", None),
+            ],
+            &code,
+        );
+
+        assert_ne!(first, second);
+        assert_eq!(first["total"], 3);
+        assert_eq!(second["total"], 4, "the repeated requirement was counted twice");
+    }
+
+    /// And the fix: canonicalized first, the same two answers prove the same
+    /// way — same verdict, same fraction, same checks in the same order.
+    #[test]
+    fn the_same_goal_at_the_same_commit_proves_the_same_way_twice() {
+        let code = snapshot(vec![
+            node("authenticate", &["google_oauth"]),
+            node("sign_in_handler", &[]),
+            node("SessionStore", &[]),
+        ]);
+        let goal = "users can sign in via Google";
+
+        let first = GsdEngine::check_requirements_against(
+            goal,
+            &GsdEngine::canonical_requirements(vec![
+                req("authenticate", Some("google_oauth")),
+                req("SessionStore", None),
+                req("sign_in_handler", Some("authenticate")),
+            ]),
+            &code,
+        );
+        let second = GsdEngine::check_requirements_against(
+            goal,
+            &GsdEngine::canonical_requirements(vec![
+                req("sign_in_handler", Some("authenticate")),
+                req("authenticate", Some("google_oauth")),
+                req("authenticate", Some("google_oauth")),
+                req("SessionStore", None),
+            ]),
+            &code,
+        );
+
+        assert_eq!(first, second);
+        assert_eq!(first["total"], 3);
+        // `sign_in_handler` exists but is not wired to `authenticate` yet.
+        assert_eq!(first["passed"], 2);
+        assert_eq!(first["verdict"], "partial");
     }
 }

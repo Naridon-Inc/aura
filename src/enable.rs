@@ -101,9 +101,21 @@ pub fn run(quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!();
-    println!("  {}   inspect what's captured", "aura status".cyan());
-    println!("  {}  see the semantic history", "aura history".cyan());
-    println!("  {}  turn capture back off", "aura disable".cyan());
+    println!("  {}", "Next steps — Trace · Crew · Control:".dimmed());
+    println!(
+        "  {}   what's captured  {}",
+        "aura status".cyan(),
+        "· aura explain · aura rewind".dimmed()
+    );
+    println!("  {}     let agents do the work", "aura crew".cyan());
+    println!(
+        "  {}   scoped access  {}",
+        "aura access".cyan(),
+        "· aura pr-review".dimmed()
+    );
+    println!();
+    println!("  {}  the full command reference", "aura commands".cyan());
+    println!("  {}   turn capture back off", "aura disable".cyan());
     println!();
     Ok(())
 }
@@ -138,17 +150,40 @@ pub fn disable() -> Result<(), Box<dyn std::error::Error>> {
     // Symmetric with `enable`'s radar wire: also unhook Claude Code's
     // PreToolUse so live `editing` events stop. Best-effort — leaves any other
     // hooks the developer configured untouched.
-    let _ = crate::awareness::agent_hook::remove(Path::new("."));
+    // Counted, not discarded. The tool gate is the half a person is most
+    // likely to be asking about when they type `aura disable` — it is what
+    // interrupts them — and reporting only the git hooks meant a repo with the
+    // gate and nothing else was told "Aura capture wasn't enabled here" while
+    // this very call switched the gate off. A disable that understates what it
+    // just did reads as a disable that didn't work.
+    let gate_removed = crate::awareness::agent_hook::remove(Path::new(".")).unwrap_or(false);
+
+    // REL-04: undo every agent integration this repo's manifest records,
+    // restoring what the developer had before (their status line, their MCP
+    // entries, their hook arrays). A repo that never opted in has no manifest
+    // and this is a silent no-op.
+    if let Some(ctx) = crate::agent_integrations::InstallCtx::current() {
+        match crate::agent_integrations::uninstall_all(&ctx) {
+            Ok(lines) => {
+                for line in &lines {
+                    println!("  {} {}", "✓".green(), line);
+                }
+            }
+            Err(e) => println!("  {} could not fully remove agent integrations: {}", "⚠".yellow(), e),
+        }
+    }
 
     println!();
-    if cleaned == 0 {
-        println!("{} Aura capture wasn't enabled here — no hooks to remove.", "ℹ".blue());
+    if cleaned == 0 && !gate_removed {
+        println!("{} Aura capture wasn't enabled here — nothing to remove.", "ℹ".blue());
     } else {
-        println!(
-            "{} Aura capture is off — cleaned Aura's block from {} git hook(s).",
-            "✓".green().bold(),
-            cleaned
-        );
+        println!("{} Aura capture is off.", "✓".green().bold());
+        if cleaned > 0 {
+            println!("  {} Cleaned Aura's block from {} git hook(s).", "↳".dimmed(), cleaned);
+        }
+        if gate_removed {
+            println!("  {} Removed the tool gate from .claude/settings.json.", "↳".dimmed());
+        }
         println!("  Your semantic history is preserved. Run {} to resume.", "aura enable".cyan());
     }
     println!();

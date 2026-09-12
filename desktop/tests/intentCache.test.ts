@@ -23,12 +23,23 @@ let answer: { timestamp: number }[] = [];
 let failWith: string | null = null;
 /** Held open when set, so "still in flight" is a state the test controls. */
 let hold: { promise: Promise<unknown>; settle: () => void } | null = null;
+/** Like `hold`, but a separate gate per call — so a test can settle the first
+ *  read and the second one independently, which is what abandoning a read for
+ *  a fresh one requires. */
+let gates: { settle: () => void }[] | null = null;
 
 mock.module("../src/lib/api", () => ({
   api: {
     auraIntentRecent: async (_repoRoot: string, limit?: number) => {
       asks.push(limit);
-      if (hold) await hold.promise;
+      if (gates) {
+        let settle!: () => void;
+        const gate = new Promise<void>((res) => {
+          settle = res;
+        });
+        gates.push({ settle });
+        await gate;
+      } else if (hold) await hold.promise;
       if (failWith !== null) throw new Error(failWith);
       return answer;
     },
@@ -38,6 +49,8 @@ mock.module("../src/lib/api", () => ({
 const {
   fetchIntentRows,
   refreshIntentRows,
+  restartIntentRead,
+  isIntentReadInFlight,
   peekIntentRows,
   invalidateIntentRows,
 } = await import("../src/lib/intentCache");
@@ -56,6 +69,7 @@ beforeEach(() => {
   answer = rows(1200);
   failWith = null;
   hold = null;
+  gates = null;
   invalidateIntentRows(REPO);
 });
 
@@ -244,6 +258,82 @@ describe("a failed read", () => {
     await fetchIntentRows(REPO).catch(() => {});
     // A refresh that fails must not blank a surface that was already painted.
     expect(peekIntentRows(REPO)?.length).toBe(1200);
+  });
+});
+
+describe("starting over when a read will not come back", () => {
+  // AURA-267. Trace → Project timeline sat on "Reading the project's history…"
+  // past 22 seconds and came back about 12 seconds after a single Try again,
+  // which read as the retry working. It wasn't: the button called into the
+  // sharing above, so it joined the stuck read, and the pane recovered only
+  // because the original read finally landed.
+  //
+  // Sharing is right for the ten surfaces that mount together and wrong for
+  // the one person pressing a button that says it will try again. So both
+  // exist, and these pin which is which.
+
+  /** Let every pending microtask run, so a settled read's own `.then` has. */
+  const drain = () => new Promise((r) => setTimeout(r, 0));
+
+  it("reports whether a read is running, so a pane can tell", async () => {
+    gates = [];
+    const p = refreshIntentRows(REPO);
+    await drain();
+    expect(isIntentReadInFlight(REPO)).toBe(true);
+    gates[0].settle();
+    await p;
+    expect(isIntentReadInFlight(REPO)).toBe(false);
+  });
+
+  it("starts a genuinely new read instead of joining the stuck one", async () => {
+    gates = [];
+    const stuck = refreshIntentRows(REPO);
+    await drain();
+    const retry = restartIntentRead(REPO, 10);
+    await drain();
+    // The defect, exactly: `refreshIntentRows` here would have returned the
+    // first promise and pressing the button would have changed nothing.
+    expect(asks.length).toBe(2);
+
+    gates[1].settle();
+    expect((await retry).length).toBe(10);
+
+    // The abandoned read is not cancelled — nothing can cancel it — but its
+    // rows are still valid, so letting it land is harmless.
+    gates[0].settle();
+    await stuck;
+  });
+
+  it("does not let the abandoned read evict the read that replaced it", async () => {
+    // The latent bug underneath: the in-flight slot was cleared by whichever
+    // read settled first, so the abandoned one freed the slot belonging to its
+    // own replacement — and the next surface to mount would start a third read
+    // against a repo that already had two running.
+    gates = [];
+    const stuck = refreshIntentRows(REPO);
+    await drain();
+    const retry = restartIntentRead(REPO);
+    await drain();
+
+    gates[0].settle();
+    await stuck;
+    await drain();
+
+    expect(isIntentReadInFlight(REPO)).toBe(true);
+    void refreshIntentRows(REPO);
+    await drain();
+    expect(asks.length).toBe(2);
+
+    gates[1].settle();
+    await retry;
+    await drain();
+    expect(isIntentReadInFlight(REPO)).toBe(false);
+  });
+
+  it("frees the slot when the read it started fails", async () => {
+    failWith = "git exploded";
+    await restartIntentRead(REPO).catch(() => {});
+    expect(isIntentReadInFlight(REPO)).toBe(false);
   });
 });
 

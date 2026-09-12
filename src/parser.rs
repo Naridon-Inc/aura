@@ -1,16 +1,37 @@
 use crate::models::{AstNode, SemanticHash, DependencyUri};
 use crate::lsp::LspClient;
 use crate::ecosystem::Ecosystem;
-use std::collections::hash_map::DefaultHasher;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
 use tree_sitter::{Node, Parser};
+
+/// Sentinel emitted in place of a node's own name inside its structural-id
+/// token stream, so a rename leaves the id unchanged.
+const IDENTIFIER_MASK: &str = "__ASL_IDENTIFIER__";
+
+/// Canonical-form version prefixes. Bumped whenever the token-stream rules
+/// change, so a stored hash from another format can never silently compare
+/// equal (or unequal) against one computed under different rules.
+const CONTENT_HASH_PREFIX: &str = "ast1_";
+const NODE_ID_PREFIX: &str = "node1_";
+
+fn sha256_hex16(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        hex.push_str(&format!("{:02x}", byte));
+    }
+    hex
+}
 
 /// The semantic engine that translates human source code into Aura's AST Graph.
 pub struct SemanticParser {
     python_parser: Parser,
     rust_parser: Parser,
     ts_parser: Parser,
+    tsx_parser: Parser,
     js_parser: Parser,
     go_parser: Parser,
     java_parser: Parser,
@@ -34,6 +55,14 @@ impl SemanticParser {
 
         let mut ts_parser = Parser::new();
         ts_parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())?;
+
+        // TSX is a separate grammar, not a flag on the TypeScript one. Sharing the
+        // plain grammar makes every file containing a tag fail to parse, and a file
+        // that fails to parse yields no nodes — which downstream reads as "every
+        // symbol in it was deleted". That is how rewind came to append a duplicate
+        // of a component instead of restoring it.
+        let mut tsx_parser = Parser::new();
+        tsx_parser.set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())?;
 
         let mut js_parser = Parser::new();
         js_parser.set_language(&tree_sitter_javascript::LANGUAGE.into())?;
@@ -68,7 +97,7 @@ impl SemanticParser {
         let lsp_client = Some(LspClient::new(Ecosystem::detect()));
 
         Ok(Self {
-            python_parser, rust_parser, ts_parser, js_parser,
+            python_parser, rust_parser, ts_parser, tsx_parser, js_parser,
             go_parser, java_parser, csharp_parser, ruby_parser,
             cpp_parser, c_parser, php_parser, swift_parser, kotlin_parser,
             lsp_client,
@@ -85,11 +114,15 @@ impl SemanticParser {
         Ok(nodes)
     }
 
-    pub fn parse_file(&mut self, source_code: &str, ext: &str) -> Result<Vec<AstNode>, Box<dyn std::error::Error>> {
+    /// The one place an extension chooses a grammar. Both `parse_file` and
+    /// `retrieve_node_source` route through here, so a language can never be
+    /// wired to two different grammars in two different code paths.
+    fn parse_tree(&mut self, source_code: &str, ext: &str) -> Result<tree_sitter::Tree, Box<dyn std::error::Error>> {
         let tree = match ext {
             "py" => self.python_parser.parse(source_code, None).ok_or("Failed to parse Python tree")?,
             "rs" => self.rust_parser.parse(source_code, None).ok_or("Failed to parse Rust tree")?,
-            "ts" | "tsx" => self.ts_parser.parse(source_code, None).ok_or("Failed to parse TypeScript tree")?,
+            "ts" => self.ts_parser.parse(source_code, None).ok_or("Failed to parse TypeScript tree")?,
+            "tsx" => self.tsx_parser.parse(source_code, None).ok_or("Failed to parse TSX tree")?,
             "js" | "jsx" => self.js_parser.parse(source_code, None).ok_or("Failed to parse JavaScript tree")?,
             "go" => self.go_parser.parse(source_code, None).ok_or("Failed to parse Go tree")?,
             "java" => self.java_parser.parse(source_code, None).ok_or("Failed to parse Java tree")?,
@@ -102,6 +135,11 @@ impl SemanticParser {
             "kt" | "kts" => self.kotlin_parser.parse(source_code, None).ok_or("Failed to parse Kotlin tree")?,
             _ => return Err(format!("Unsupported file extension: .{}", ext).into()),
         };
+        Ok(tree)
+    }
+
+    pub fn parse_file(&mut self, source_code: &str, ext: &str) -> Result<Vec<AstNode>, Box<dyn std::error::Error>> {
+        let tree = self.parse_tree(source_code, ext)?;
 
         let root_node = tree.root_node();
         let mut extracted_nodes = Vec::new();
@@ -162,6 +200,41 @@ impl SemanticParser {
         }
 
         changes
+    }
+
+    /// Canonical token stream for a subtree. Only leaf tokens contribute
+    /// (tree-sitter never materializes whitespace, so layout is invisible by
+    /// construction), comments are skipped entirely, and each token is written
+    /// as `kind US text RS` so token boundaries can never be confused with
+    /// token content. Two bodies that differ only in formatting or comments
+    /// therefore produce byte-identical streams; any real token change — an
+    /// operator, a literal, a name — produces a different one.
+    ///
+    /// `mask_token` masks leaf tokens whose text equals the node's own
+    /// identifier, at token granularity: `fn add` masks the `add` tokens but
+    /// leaves an `address` local untouched, which substring replacement on raw
+    /// text used to mangle.
+    fn canonical_token_stream(node: &Node, source_code: &str, mask_token: Option<&str>, out: &mut String) {
+        let kind = node.kind();
+        if matches!(kind, "comment" | "line_comment" | "block_comment" | "doc_comment") {
+            return;
+        }
+        if node.child_count() == 0 {
+            out.push_str(kind);
+            out.push('\u{1f}');
+            let text = &source_code[node.byte_range()];
+            if mask_token == Some(text) {
+                out.push_str(IDENTIFIER_MASK);
+            } else {
+                out.push_str(text);
+            }
+            out.push('\u{1e}');
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            Self::canonical_token_stream(&child, source_code, mask_token, out);
+        }
     }
 
     fn extract_dependencies(&self, node: &Node, source_code: &str, dependencies: &mut Vec<DependencyUri>) {
@@ -274,20 +347,24 @@ impl SemanticParser {
                 }
             }
 
-            let mut hasher = DefaultHasher::new();
-            content.hash(&mut hasher);
-            let content_hash: SemanticHash = format!("ast_{:x}", hasher.finish());
+            // Canonical semantic hash: sha256 over the comment-free leaf-token
+            // stream, so formatting and comments never register as a semantic
+            // change, and the value is identical on every platform and Rust
+            // version (std's DefaultHasher promises neither).
+            let mut token_stream = String::new();
+            Self::canonical_token_stream(node, source_code, None, &mut token_stream);
+            let content_hash: SemanticHash =
+                format!("{}{}", CONTENT_HASH_PREFIX, sha256_hex16(&token_stream));
 
-            // KILL SHOT FIX: Two-Stage Rename-Proof Identity
-            // Stage 1: Generate Structural ID by masking the identifier name
-            let mut skeleton = content.replace(|c: char| c.is_whitespace(), "");
-            if let Some(ref id) = identifier {
-                skeleton = skeleton.replace(id, "__ASL_IDENTIFIER__");
-            }
-            
-            let mut id_hasher = DefaultHasher::new();
-            format!("{}_{}", kind, skeleton).hash(&mut id_hasher);
-            let node_id = format!("node_{:x}", id_hasher.finish());
+            // Rename-proof structural id: the same canonical stream with the
+            // node's own name masked at token granularity.
+            let mut masked_stream = String::new();
+            Self::canonical_token_stream(node, source_code, identifier.as_deref(), &mut masked_stream);
+            let node_id = format!(
+                "{}{}",
+                NODE_ID_PREFIX,
+                sha256_hex16(&format!("{}\u{1f}{}", kind, masked_stream))
+            );
 
             let mut dependencies = Vec::new();
             self.extract_dependencies(&node, source_code, &mut dependencies);
@@ -404,28 +481,59 @@ impl SemanticParser {
     /// Finds a specific node by its identifier and returns its full source code string and byte range.
     /// Used for Semantic Rewind.
     pub fn retrieve_node_source(&mut self, source_code: &str, ext: &str, target_identifier: &str) -> Result<Option<(String, std::ops::Range<usize>)>, Box<dyn std::error::Error>> {
-        let tree = match ext {
-            "py" => self.python_parser.parse(source_code, None).ok_or("Failed to parse Python tree")?,
-            "rs" => self.rust_parser.parse(source_code, None).ok_or("Failed to parse Rust tree")?,
-            "ts" | "tsx" => self.ts_parser.parse(source_code, None).ok_or("Failed to parse TypeScript tree")?,
-            "js" | "jsx" => self.js_parser.parse(source_code, None).ok_or("Failed to parse JavaScript tree")?,
-            "go" => self.go_parser.parse(source_code, None).ok_or("Failed to parse Go tree")?,
-            "java" => self.java_parser.parse(source_code, None).ok_or("Failed to parse Java tree")?,
-            "cs" => self.csharp_parser.parse(source_code, None).ok_or("Failed to parse C# tree")?,
-            "rb" => self.ruby_parser.parse(source_code, None).ok_or("Failed to parse Ruby tree")?,
-            "cpp" | "cc" | "cxx" | "hpp" => self.cpp_parser.parse(source_code, None).ok_or("Failed to parse C++ tree")?,
-            "c" | "h" => self.c_parser.parse(source_code, None).ok_or("Failed to parse C tree")?,
-            "php" => self.php_parser.parse(source_code, None).ok_or("Failed to parse PHP tree")?,
-            "swift" => self.swift_parser.parse(source_code, None).ok_or("Failed to parse Swift tree")?,
-            "kt" | "kts" => self.kotlin_parser.parse(source_code, None).ok_or("Failed to parse Kotlin tree")?,
-            _ => return Err(format!("Unsupported file extension: .{}", ext).into()),
-        };
-
-        let root_node = tree.root_node();
-        Ok(self.find_node_source(&root_node, source_code, ext, target_identifier))
+        Ok(self
+            .retrieve_node_matches(source_code, ext, target_identifier)?
+            .into_iter()
+            .next())
     }
 
-    fn find_node_source(&self, node: &Node, source_code: &str, ext: &str, target_identifier: &str) -> Option<(String, std::ops::Range<usize>)> {
+    /// Every node in the file carrying this name, in source order.
+    ///
+    /// `retrieve_node_source` answers with the first and cannot say whether
+    /// there was a second. One name can belong to more than one thing in a
+    /// single file — a Rust struct and its `impl` block, two methods on
+    /// different classes, an overload pair — and a caller that rewrites "the"
+    /// node is then rewriting whichever the walk happened to reach first,
+    /// having made a choice nobody asked it to make. Recovery has to be able
+    /// to see the ambiguity so it can decline it.
+    ///
+    /// A match is not descended into: a nested thing sharing its parent's name
+    /// is not the collision this exists to surface, and descending would make
+    /// an `impl` block report itself twice.
+    pub fn retrieve_node_matches(
+        &mut self,
+        source_code: &str,
+        ext: &str,
+        target_identifier: &str,
+    ) -> Result<Vec<(String, std::ops::Range<usize>)>, Box<dyn std::error::Error>> {
+        let tree = self.parse_tree(source_code, ext)?;
+        let root_node = tree.root_node();
+        let mut out = Vec::new();
+        self.collect_node_sources(&root_node, source_code, ext, target_identifier, &mut out);
+        Ok(out)
+    }
+
+    fn collect_node_sources(
+        &self,
+        node: &Node,
+        source_code: &str,
+        ext: &str,
+        target_identifier: &str,
+        out: &mut Vec<(String, std::ops::Range<usize>)>,
+    ) {
+        if let Some(found) = self.node_source_here(node, source_code, ext, target_identifier) {
+            out.push(found);
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.collect_node_sources(&child, source_code, ext, target_identifier, out);
+        }
+    }
+
+    /// This node itself, when it is a named block called `target_identifier`.
+    /// Children are the caller's business.
+    fn node_source_here(&self, node: &Node, source_code: &str, ext: &str, target_identifier: &str) -> Option<(String, std::ops::Range<usize>)> {
         let kind = node.kind();
         let is_target_block = match ext {
             "py" => kind == "function_definition" || kind == "class_definition",
@@ -462,12 +570,6 @@ impl SemanticParser {
             }
         }
 
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if let Some(found) = self.find_node_source(&child, source_code, ext, target_identifier) {
-                return Some(found);
-            }
-        }
         None
     }
 }
@@ -575,5 +677,64 @@ impl SemanticParser {
         out.push_str(&node_src);
         out.push('\n');
         Ok(Some(out))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SemanticParser;
+
+    const COMPONENT: &str = r#"
+export function Card({ title }: { title: string }) {
+  return <View style={{ flex: 1 }}><Text>{title}</Text></View>;
+}
+
+export function Separator() {
+  return <View />;
+}
+"#;
+
+    /// The bug this pins: a .tsx file parsed with the plain TypeScript grammar
+    /// produces an error tree and therefore no nodes, and a file with no nodes
+    /// reads downstream as a file whose every symbol was deleted.
+    #[test]
+    fn tsx_components_are_found_not_reported_missing() {
+        let mut parser = SemanticParser::new().expect("parser");
+
+        let nodes = parser.parse_file(COMPONENT, "tsx").expect("parse tsx");
+        assert!(
+            !nodes.is_empty(),
+            "a .tsx file with two components parsed to no nodes at all"
+        );
+
+        let found = parser
+            .retrieve_node_source(COMPONENT, "tsx", "Card")
+            .expect("retrieve");
+        let (src, _) = found.expect("Card should be found in its own file");
+        assert!(src.contains("title"), "retrieved the wrong node: {src}");
+    }
+
+    /// TSX and TypeScript are different languages, not one language with a flag.
+    /// Routing both at the same grammar is what caused the above.
+    #[test]
+    fn tsx_keeps_its_own_grammar_and_ts_keeps_the_plain_one() {
+        let mut parser = SemanticParser::new().expect("parser");
+
+        // Plain TypeScript has no JSX, so the tag is a parse error there. Asking
+        // the ts grammar for a component in a tagged file must not succeed —
+        // if it does, the two grammars have been collapsed into one again.
+        let via_tsx = parser.parse_file(COMPONENT, "tsx").expect("parse tsx");
+        let via_ts = parser.parse_file(COMPONENT, "ts").expect("parse ts");
+        assert_eq!(via_tsx.len(), 2, "tsx grammar lost its JSX support");
+        assert!(
+            via_ts.len() < via_tsx.len(),
+            "the plain TypeScript grammar read a tagged file as completely as the \
+             TSX one did, which means both extensions are pointed at one grammar again"
+        );
+
+        // And a genuinely plain TypeScript file still parses through the ts arm.
+        let plain = "export function add(a: number, b: number): number { return a + b; }";
+        let nodes = parser.parse_file(plain, "ts").expect("parse ts");
+        assert!(!nodes.is_empty(), "plain TypeScript stopped parsing");
     }
 }

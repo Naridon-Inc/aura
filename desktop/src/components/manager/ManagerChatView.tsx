@@ -129,7 +129,11 @@ import {
 } from "./chat/spend";
 import type { StreamBlock, TurnSpend } from "./chat/types";
 import { MarkdownBody } from "./chat/Markdown";
-import { StreamingBubble } from "./chat/ToolCard";
+import {
+  StreamingBlocks,
+  createStreamStore,
+  useStreamCoarse,
+} from "./chat/StreamingBlocks";
 import { TurnActivity } from "./chat/TurnActivity";
 import { TurnChanges } from "./chat/TurnChanges";
 import { extractTurnChanges } from "./chat/turnChangeSummary";
@@ -160,8 +164,15 @@ import { useDismiss } from "../../lib/useDismiss";
 import { formatDuration, formatLiveDuration } from "../../lib/duration";
 import { buildTurnCost } from "../../lib/turnCost";
 import { TurnCostTip } from "../TurnCostTip";
-import { sentenceCase } from "../../lib/textCase";
+import { sentenceCase } from "@shared/textCase";
 import { percent } from "../../lib/percent";
+// AURA-1298
+import { ImageLightbox } from "../media/ImageLightbox";
+// AURA-1296 — Concise output style on the turn, "finished 3:42 PM" beside the
+// duration, and a Restart-and-resend for a message that never got through.
+import { outputStyleArg, readOutputStyle } from "../../lib/outputStyle";
+import { TurnCompletedAt } from "./TurnCompletedAt";
+import { UndeliverableMessage } from "./UndeliverableMessage";
 
 type LocalSlashEntry = {
   at: number;
@@ -422,6 +433,23 @@ export function ManagerChatView({ session }: Props) {
   // the live chunk channel re-subscribes and resumes feeding this bubble.
   const [busy, setBusy] = useState(() => isManagerTurnInFlight(session.id));
   const [error, setError] = useState<string | null>(null);
+  // AURA-1296 — a message whose dispatch was rejected (the agent behind the
+  // chat had stopped). Holds the exact send arguments so "Restart and resend"
+  // replays it under the same settings.
+  const [undelivered, setUndelivered] = useState<{
+    text: string;
+    reason: string;
+    args: [
+      string,
+      ComposerAttachment[],
+      "auto" | "plan" | "build" | "ask",
+      string | null,
+      ReasoningEffort | null,
+      boolean,
+      ApprovalPolicy | null,
+      boolean,
+    ];
+  } | null>(null);
   // Seed from — and write through to — the durable per-session block mirror.
   // `busy` above already survived the workspace-switch unmount, but the turn's
   // actual OUTPUT didn't: streamed prose, tool rows and the live "Running …"
@@ -432,20 +460,38 @@ export function ManagerChatView({ session }: Props) {
   // live session id through a ref — ManagerSurface reuses ONE instance and
   // swaps `session.id` in place, and a stale capture would write one session's
   // blocks into another's slot.
-  const [streamBlocks, setStreamBlocksState] = useState<StreamBlock[]>(() =>
-    getManagerLiveBlocks(session.id),
-  );
+  //
+  // They do NOT live in this component's state. A streamed token used to call
+  // `setStreamBlocks` here — on a 5,000-line component that also maps the whole
+  // settled timeline — so appending two characters re-rendered, and re-parsed
+  // the markdown of, every prior turn. The blocks now live in a small external
+  // store that only `<StreamingBlocks>` subscribes to; this component watches
+  // the coarse summary instead, which moves a handful of times per turn (first
+  // block, tool start, tool end, turn end) rather than once per token.
+  const [streamStore] = useState(() => {
+    const store = createStreamStore();
+    const seed = getManagerLiveBlocks(session.id);
+    if (seed.length > 0) store.apply(() => seed);
+    return store;
+  });
   const blocksSidRef = useRef(session.id);
   blocksSidRef.current = session.id;
+  const { hasBlocks: hasStreamBlocks, runningTool: liveRunningTool } =
+    useStreamCoarse(streamStore);
   const setStreamBlocks = useCallback(
     (update: React.SetStateAction<StreamBlock[]>) => {
-      setStreamBlocksState((prev) => {
+      streamStore.apply((prev) => {
         const next = typeof update === "function" ? update(prev) : update;
+        if (next === prev) return prev;
         setManagerLiveBlocks(blocksSidRef.current, next);
+        // The stall watchdog's input. It used to be an effect keyed on the
+        // blocks array; with the blocks out of this component's render there
+        // is no such effect to run, and this is the same moment it fired.
+        lastActivityRef.current = Date.now();
         return next;
       });
     },
-    [],
+    [streamStore],
   );
   // Last-turn context fill from the native brain's `usage` chunk. Overwritten
   // each turn (the count is the full running context, not a per-turn delta), so
@@ -771,16 +817,6 @@ export function ManagerChatView({ session }: Props) {
       lastActivityRef.current = Date.now();
     }
   }, [busy, planBuilding, session.id]);
-
-  // Stall watchdog input — refresh the last-activity stamp on every streamed
-  // delta (text, reasoning, or tool block; each produces a fresh `streamBlocks`
-  // reference). A turn that keeps producing output stays "active" and never
-  // trips the StallNotice; only true silence (a hung CLI wrapper like Kimi with
-  // zero bytes for minutes) lets the idle gap grow past the threshold. Ref
-  // write only — no render cost per token.
-  useEffect(() => {
-    lastActivityRef.current = Date.now();
-  }, [streamBlocks]);
 
   // Resolve the currently-active brain so `send` can pick legacy
   // (CLI wrapper PTY) vs new (Brain-trait stream). Re-runs on session
@@ -1239,7 +1275,7 @@ export function ManagerChatView({ session }: Props) {
     // still live. Blocks RESTORED from the durable mirror on mount are the
     // pre-switch snapshot of precisely the turn this reconcile is here to
     // check, so they must not disarm it.
-    if (streamBlocks.length > 0 && sawLiveChunkRef.current) return;
+    if (hasStreamBlocks && sawLiveChunkRef.current) return;
     const chat = session.chat ?? [];
     const last = chat[chat.length - 1];
     if (last && last.role === "manager") {
@@ -1249,7 +1285,7 @@ export function ManagerChatView({ session }: Props) {
       setStreamBlocks([]);
       setBusy(false);
     }
-  }, [session.id, session.chat, streamBlocks.length]);
+  }, [session.id, session.chat, hasStreamBlocks]);
 
   // Self-healing dedupe for the live-stream → persisted-turn handoff. The live
   // `streamBlocks` copy is meant to be wiped the instant the settled turn lands
@@ -1269,7 +1305,8 @@ export function ManagerChatView({ session }: Props) {
   //     contains (equal, or a prefix once the final chunk was folded in
   //     server-side) — an interrupted partial whose text diverges is kept.
   useEffect(() => {
-    if (streamBlocks.length === 0) return;
+    if (!hasStreamBlocks) return;
+    const streamBlocks = streamStore.getBlocks();
     // Compare on whitespace-normalized text. The backend joins a turn's text
     // blocks with "\n\n" when it persists them (and streams paragraph breaks as
     // "\n\n" deltas), while the live buffer concatenates block text directly —
@@ -1302,7 +1339,10 @@ export function ManagerChatView({ session }: Props) {
         busy ? prev.filter((b) => b.kind !== "text") : [],
       );
     }
-  }, [session.chat, streamBlocks, busy]);
+    // Keyed on the SETTLED transcript, not on the live blocks: what this
+    // compares against only changes when a turn persists, and re-running it
+    // per token was one more reason a token re-rendered this component.
+  }, [session.chat, busy, hasStreamBlocks, streamStore]);
 
   // Adopt a turn started OUTSIDE this view. When a message reaches the brain by
   // any path other than this component's own `send` — the floating HUD or a
@@ -1335,7 +1375,7 @@ export function ManagerChatView({ session }: Props) {
     setVisibleCount(CHAT_WINDOW_INITIAL);
   }, [session.id]);
 
-  useEffect(() => {
+  const pinToBottom = useCallback(() => {
     if (!atBottomRef.current) return;
     const el = scrollRef.current;
     if (!el) return;
@@ -1359,10 +1399,16 @@ export function ManagerChatView({ session }: Props) {
     // exactly what makes WebKit paint the scroller blank. Jumping the
     // scrollTop is stable and keeps us pinned to the newest line.
     el.scrollTop = el.scrollHeight;
+  }, []);
+
+  // The live bubble re-pins itself as it grows (see `<StreamingBlocks>` below),
+  // so this only has to cover the things THIS component renders.
+  useEffect(() => {
+    pinToBottom();
   }, [
+    pinToBottom,
     timeline.length,
     busy,
-    streamBlocks,
     session.pending_plan?.id,
     session.pending_scout?.id,
   ]);
@@ -1655,6 +1701,9 @@ export function ManagerChatView({ session }: Props) {
               // Native brains carry it but run their own tool loop; CLI
               // wrappers map it to a real per-agent permission flag.
               approval,
+              // AURA-1296 — the composer's Concise chip. Null → nothing added
+              // to the request; "concise" → Claude Code's `--output-style`.
+              output_style: outputStyleArg(readOutputStyle()),
             },
             // Engine for this turn. `brainOverride` is ephemeral (resets to
             // null on reload/remount) while `modelOverride` is disk-persisted
@@ -1681,6 +1730,13 @@ export function ManagerChatView({ session }: Props) {
         clearManagerTurnInFlight(session.id);
         setError(e instanceof Error ? e.message : String(e));
         setBusy(false);
+        // AURA-1296 — nothing was persisted, so the words are only here. Keep
+        // them, with the settings they were sent under, for Restart and resend.
+        setUndelivered({
+          text: trimmed,
+          reason: e instanceof Error ? e.message : String(e),
+          args: [msg, attachments, mode, pipeTargetSessionId, effort, fast, approval, goal],
+        });
       }
     },
     [
@@ -2056,14 +2112,7 @@ export function ManagerChatView({ session }: Props) {
   // "Running …" status row beneath the stream, with its own elapsed timer. The
   // running label comes from the registry so it matches the eventual tool card
   // ("Running `aura propose-plan`"). null when nothing is mid-flight.
-  const runningTool = useMemo(() => {
-    if (!busy) return null;
-    for (let i = streamBlocks.length - 1; i >= 0; i--) {
-      const b = streamBlocks[i];
-      if (b.kind === "tool" && !b.result) return b;
-    }
-    return null;
-  }, [streamBlocks, busy]);
+  const runningTool = busy ? liveRunningTool : null;
 
   // Brain of the most recent PERSISTED assistant turn (nearest-first). Native
   // brain_chat_turn turns don't persist a brain, so this can be null even mid-
@@ -2101,7 +2150,7 @@ export function ManagerChatView({ session }: Props) {
 
   const hasLiveContent =
     timeline.length > 0 ||
-    streamBlocks.length > 0 ||
+    hasStreamBlocks ||
     busy ||
     planBuilding ||
     !!session.pending_question ||
@@ -2406,20 +2455,16 @@ export function ManagerChatView({ session }: Props) {
           // persist (which never happens when that brain hangs with no output).
           <BrainHandoffDivider brain={liveHandoffBrain} chat={session.chat ?? []} />
         )}
-        {streamBlocks.length > 0 && (
-          // Polite, non-atomic live region: screen readers announce the
-          // assistant's reply as it streams in (WCAG 2.2 § 4.1.3 Status
-          // Messages) without re-reading the whole turn on every token.
-          <div aria-live="polite" aria-atomic="false" aria-relevant="additions text">
-            <StreamingBubble
-              blocks={streamBlocks}
-              streaming={busy}
-              // No "Aura" brand row — kept off the live turn too so the stream
-              // reads identically to a settled one (the tab carries the brand).
-              identity={false}
-            />
-          </div>
-        )}
+        {/* Subscribes to the stream store itself, so a token re-renders this
+            subtree alone — the settled timeline above stays mounted and
+            untouched. It renders nothing until a block lands, and owns the
+            scroll re-pin at the same post-commit moment this component's own
+            blocks-keyed effect used to run it. */}
+        <StreamingBlocks
+          store={streamStore}
+          streaming={busy}
+          onAdvance={pinToBottom}
+        />
         {/* #3 — the live "Running …" status for the in-flight command no
             longer floats loose here in the stream; it's now DOCKED as a slim
             strip flush atop the composer (see <RunningCommandStatus docked />
@@ -2473,7 +2518,7 @@ export function ManagerChatView({ session }: Props) {
               // status, so suppress the generic "Working…" line here to avoid
               // two near-identical in-flight rows stacked on each other.
               null
-            ) : streamBlocks.length > 0 ? (
+            ) : hasStreamBlocks ? (
               // The answer is already streaming above — keep a quiet, timed
               // "Working…" line beneath it so the turn never looks finished
               // while the brain is still producing tokens or running tools.
@@ -2504,7 +2549,28 @@ export function ManagerChatView({ session }: Props) {
               onStop={stopTurn}
             />
           )}
-        {error && (
+        {/* AURA-1296 — the undeliverable notice carries the error text
+            itself, so the plain red line steps aside while it is showing. */}
+        {undelivered && (
+          <UndeliverableMessage
+            text={undelivered.text}
+            reason={undelivered.reason}
+            onDismiss={() => {
+              setUndelivered(null);
+              setError(null);
+            }}
+            onRestart={async () => {
+              const args = undelivered.args;
+              // Bring the session back first; a session that is already
+              // running answers with an error we don't care about.
+              await api.managerResume(session.id).catch(() => {});
+              setUndelivered(null);
+              setError(null);
+              await send(...args);
+            }}
+          />
+        )}
+        {error && !undelivered && (
           <div
             role="alert"
             aria-live="assertive"
@@ -4180,7 +4246,8 @@ function ChatAttachmentCards({
         ))}
       </div>
       {open && (
-        <img
+        // AURA-1298 — same picture, now clickable to full size with copy/save.
+        <ImageLightbox
           src={`data:${open.media_type};base64,${open.data_base64}`}
           alt={open.name ?? "attached image"}
           className="rounded-lg border object-contain"
@@ -4622,6 +4689,8 @@ const ChatBubble = memo(function ChatBubble({
             </span>
           </TurnCostTip>
         )}
+        {/* AURA-1296 — WHEN it finished, next to how long it took. */}
+        {durationSec != null && <TurnCompletedAt atSec={turn.at} />}
         {showSavings &&
           typeof turn.saved_tokens === "number" &&
           turn.saved_tokens > 0 && (

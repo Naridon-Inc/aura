@@ -121,8 +121,8 @@ as the first message to the next agent.",
                 },
             ],
             notes: "The payload is XML on stdout — capture it and start the \
-next conversation with it. Saves roughly 90% of the context tokens versus \
-re-reading the codebase.",
+next conversation with it. Far more compact than re-reading the codebase — \
+the exact savings depend on repo size and are an estimate, not a measured count.",
         },
         SkillDef {
             name: "aura-prove",
@@ -203,4 +203,40 @@ this errors — fall back to `aura-search` for local-only history.",
 /// Look up one skill by name. Returns `None` if no bundled skill matches.
 pub fn find(name: &str) -> Option<SkillDef> {
     catalog().into_iter().find(|s| s.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AUDIT-CTX-01: no skill copy may state a hard token-savings percentage as
+    /// fact. The savings are a byte-based estimate, so a naked "90%" (or any
+    /// "N% … tokens" claim) presented without an estimate/depends qualifier is a
+    /// truthfulness regression. Every mention must be hedged.
+    #[test]
+    fn no_skill_presents_a_naked_token_savings_percentage() {
+        for skill in catalog() {
+            for (field, text) in [
+                ("description", skill.description),
+                ("when_to_use", skill.when_to_use),
+                ("notes", skill.notes),
+            ] {
+                let lower = text.to_lowercase();
+                let claims_pct_saving = lower.contains('%')
+                    && (lower.contains("token") || lower.contains("context"))
+                    && (lower.contains("sav") || lower.contains("fewer") || lower.contains("less"));
+                if claims_pct_saving {
+                    let hedged = lower.contains("estimat")
+                        || lower.contains("not a measured")
+                        || lower.contains("not measured")
+                        || lower.contains("depend");
+                    assert!(
+                        hedged,
+                        "skill `{}` field `{field}` states a token-savings % without an estimate qualifier: {text}",
+                        skill.name
+                    );
+                }
+            }
+        }
+    }
 }

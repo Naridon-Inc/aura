@@ -18,7 +18,7 @@
 // ContributesSummary the Rust side derived from the manifest.
 
 import type { ContributesSummary } from "./vsixTypes";
-import { countOf } from "../plural";
+import { countOf } from "@shared/plural";
 
 /** How runnable a contribution kind is in Aura today. Drives the accent: only
  *  "active" earns the arctic-blue primary accent; the rest read muted/amber. */

@@ -1,9 +1,9 @@
 // jj-style operation log + undo. Lists the most recent engine ops
 // (intent log appends, snapshots, intent attribute/split/merge, zone
-// claims). Click a row → inverse-op preview → confirm → backend
-// reverses it and stamps `undone_at` on the entry. The most recent
-// un-undone op that CAN be reversed is highlighted as the ⌘Z target so the
-// keymap (W1.4) stays consistent with the dialog.
+// claims). Click a row → confirm → backend reverses it and stamps
+// `undone_at` on the entry. The most recent un-undone op that CAN be reversed
+// is highlighted as the ⌘Z target so the keymap (W1.4) stays consistent with
+// the dialog.
 //
 // "that CAN be reversed" is load-bearing. This used to target the most recent
 // un-undone op of any kind, and three of the eight kinds the engine records —
@@ -13,21 +13,36 @@
 // answered the press with the engine's own "no inverse implemented for op kind
 // 'conflict_resolve'". Whether a thing can be undone is knowable before you
 // press it, so it's said before you press it. See lib/opKinds.
+//
+// What the rows SAY lives in ./opLog/describe — the engine's summary strings
+// ("Attributed 1 path(s) to intent #1788769912") are written for a log file
+// and were going straight onto the screen. One action recorded as ten steps is
+// now one line, and the reason is looked up from the intent log by the
+// timestamp the payload already carries, so it reads in full instead of as an
+// id. Undo is untouched by that folding: a line selects its newest step, which
+// is the same op the same click selected when every step had its own row.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Undo2 } from "lucide-react";
 import { Dialog } from "../Dialog";
 import { relativeAgeFromSecs } from "../../lib/relativeTime";
-import { isUndoable, opKindLabel } from "../../lib/opKinds";
+import { isUndoable } from "../../lib/opKinds";
 import { Button } from "../ui/button";
 import { EmptyState, ErrorNote, LoadingState } from "../ui/state";
-import { api, type OpEntry } from "../../lib/api";
+import { api, type IntentRow, type OpEntry } from "../../lib/api";
+import { refreshIntentRows } from "../../lib/intentCache";
+import { describeGroup, groupOps } from "./opLog/describe";
+import { OpGroupRow } from "./opLog/OpGroupRow";
 
 type OpLogDialogProps = {
   open: boolean;
   repoRoot: string;
   onClose: () => void;
 };
+
+/** How far back to read the intent log for the reasons the ops point at. The
+ *  op list is capped at 50, and each op names at most one intent. */
+const INTENT_LOOKBACK = 200;
 
 /** What the footer may claim, given how much of the list it has actually read.
  *
@@ -45,6 +60,11 @@ export function undoCopy(s: {
   hasTarget: boolean;
   selected: boolean;
   busy: boolean;
+  /** Recorded steps behind the selected line. A line can stand for several —
+   *  ten files filed under one reason is ten steps — and undo still takes back
+   *  one. Saying which one is the difference between a promise kept and a
+   *  person thinking all ten came back. */
+  steps?: number;
 }): { footnote: string; label: string; title: string } {
   if (s.loading)
     return {
@@ -65,9 +85,12 @@ export function undoCopy(s: {
       label: s.busy ? "undoing…" : "Nothing to undo",
       title: "Nothing here can be undone",
     };
+  const steps = s.steps ?? 1;
   return {
     footnote: s.selected
-      ? "The step you picked will be undone."
+      ? steps > 1
+        ? `The most recent of those ${steps} steps will be undone.`
+        : "The step you picked will be undone."
       : "Undoes the most recent step that can be reversed.",
     label: s.busy ? "undoing…" : s.selected ? "Undo this step" : "Undo the last step",
     title: "",
@@ -76,6 +99,7 @@ export function undoCopy(s: {
 
 export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
   const [ops, setOps] = useState<OpEntry[]>([]);
+  const [intents, setIntents] = useState<IntentRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
@@ -87,8 +111,21 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
     setLoading(true);
     setErr(null);
     try {
-      const rows = await api.auraOpRecent(repoRoot, 50);
+      // The reasons are a nicety on top of the list, so they're read alongside
+      // it and never allowed to fail it: no intents just means the rows quote
+      // the shorter copy each op recorded for itself.
+      const [rows, reasons] = await Promise.all([
+        api.auraOpRecent(repoRoot, 50),
+        // Through the shared cache, not `api` directly: every surface that
+        // reads this log reads it once between them. Past the freshness
+        // window, because this window opens right after the steps it lists
+        // were recorded and an intent logged a moment ago has to be joinable.
+        refreshIntentRows(repoRoot, INTENT_LOOKBACK).catch(
+          (): IntentRow[] => [],
+        ),
+      ]);
       setOps(rows);
+      setIntents(reasons);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -105,6 +142,21 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
     }
   }, [open, refresh]);
 
+  // `intent_ts` on an op payload is the `timestamp` of the intent row it
+  // belongs to — the same number, which is what makes the join exact rather
+  // than a time-window guess.
+  const reasonByTs = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const r of intents) {
+      if (typeof r.timestamp === "number" && typeof r.intent === "string") {
+        m.set(r.timestamp, r.intent);
+      }
+    }
+    return m;
+  }, [intents]);
+
+  const groups = useMemo(() => groupOps(ops), [ops]);
+
   // A row you can't press is a row you can't select, so `selected` is already
   // reversible by construction — the `isUndoable` guard here is belt and braces
   // for a list that refreshed under a stale selection.
@@ -116,6 +168,11 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
     }
     return ops.find(reversible) ?? null;
   }, [ops, selected]);
+
+  const selectedGroup = useMemo(
+    () => (selected ? (groups.find((g) => g.lead.op_id === selected) ?? null) : null),
+    [groups, selected],
+  );
 
   async function undo() {
     if (!target) return;
@@ -140,7 +197,17 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
     hasTarget: target !== null,
     selected: selected !== null,
     busy,
+    steps: selectedGroup?.ops.length ?? 1,
   });
+
+  // The hover named the step by its engine tag and its id — "Undo op
+  // 5f3a1c04" — neither of which is a thing anybody recognises. When there IS
+  // a target the line's own words beat any generic sentence.
+  const targetTitle = useMemo(() => {
+    if (!target) return copy.title;
+    const g = groups.find((x) => x.ops.some((o) => o.op_id === target.op_id));
+    return g ? `Undo: ${describeGroup(g, repoRoot, reasonByTs).title}` : copy.title;
+  }, [target, groups, repoRoot, reasonByTs, copy.title]);
 
   return (
     <Dialog
@@ -158,14 +225,7 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
             size="xs"
             onClick={undo}
             disabled={busy || !target}
-            // The hover named the step by its engine tag and its id — "Undo op
-            // 5f3a1c04" — neither of which is a thing anybody recognises. When
-            // there IS a target the step's own name beats any generic line.
-            title={
-              target
-                ? `Undo "${opKindLabel(target.kind)}" · ${target.summary}`
-                : copy.title
-            }
+            title={targetTitle}
           >
             {copy.label}
           </Button>
@@ -173,6 +233,13 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
       }
     >
       <div className="space-y-2 text-sm">
+        {/* Eight things reach this list and not one of them is an agent editing
+            your code. Someone frightened by what an AI just did to their files
+            would otherwise read these rows as the edits themselves. */}
+        <div className="text-text-4 text-2xs">
+          Aura's own record: the reasons it wrote down, the copies it kept, the clashes it
+          settled. Your agents' edits to your files aren't in this list.
+        </div>
         {err && <ErrorNote className="text-xs">{err}</ErrorNote>}
         {result && (
           <div className="text-text-2 text-xs bg-bg-2 border border-line-soft rounded px-2 py-1.5">
@@ -186,69 +253,38 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
           <EmptyState
             icon={Undo2}
             title="Nothing to undo yet"
-            // Was "Every change Aura makes on your behalf is recorded here so
-            // you can take it back." Eight things reach this list and not one of
-            // them is an agent editing your code: snapshot, log_intent,
-            // intent_attribute, intent_split, intent_merge, conflict_open,
-            // conflict_resolve, guard_revert (the `record_op` call sites in
-            // cmd_aura.rs, cmd_conflicts.rs and agent_mutation_guard.rs). They
-            // are Aura's own bookkeeping. Someone frightened by what an AI did
-            // to their files would open this on that sentence, find it empty,
-            // and conclude nothing had happened.
-            body="Aura's own bookkeeping shows up here (reasons it logged, backups it took, conflicts it settled) each with a way to reverse it. Your agents' edits to your files aren't in this list. Nothing yet."
+            body="Aura's own record shows up here (reasons it logged, copies it kept, clashes it settled) each with a way to reverse it. Your agents' edits to your files aren't in this list. Nothing yet."
             size="sm"
           />
         )}
-        <div className="max-h-[55vh] overflow-y-auto border border-line-soft rounded">
-          {ops.map((op) => {
-            const isSelected = selected === op.op_id;
-            const isUndoTarget = !selected && target?.op_id === op.op_id;
-            const undone = op.undone_at !== null;
-            // Three of the eight kinds have no inverse. Those rows are history
-            // to read, not history to arm the button with — so they're dimmed
-            // and inert exactly like an already-undone row, and say why.
-            const reversible = isUndoable(op.kind);
-            const inert = undone || !reversible;
-            return (
-              <button
-                key={op.op_id}
-                type="button"
-                onClick={() => setSelected(isSelected ? null : op.op_id)}
-                disabled={inert}
-                className={[
-                  "w-full text-left px-2.5 py-1.5 border-b border-line-soft last:border-b-0 transition-colors",
-                  inert
-                    ? "opacity-50 cursor-not-allowed"
-                    : isSelected
-                    ? "bg-bg-3"
-                    : isUndoTarget
-                    ? "bg-bg-2 hover:bg-bg-3"
-                    : "hover:bg-state-hover",
-                ].join(" ")}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="meta-tag shrink-0">{opKindLabel(op.kind)}</span>
-                  <span className="text-text-1 text-sm truncate flex-1">
-                    {op.summary}
-                  </span>
-                  <span className="text-text-4 text-2xs shrink-0">
-                    {formatAge(op.ts)}
-                  </span>
-                  {undone ? (
-                    <span className="section-label shrink-0">undone</span>
-                  ) : !reversible ? (
-                    <span className="section-label shrink-0">can’t be undone</span>
-                  ) : null}
-                </div>
-                {isSelected && (
-                  <pre className="mt-1.5 text-2xs font-mono text-text-3 bg-bg-1 border border-line-soft rounded p-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-all">
-                    {JSON.stringify(op.undo_payload, null, 2)}
-                  </pre>
-                )}
-              </button>
-            );
-          })}
-        </div>
+        {ops.length > 0 && (
+          <div className="max-h-[55vh] overflow-y-auto border border-line-soft rounded">
+            {groups.map((g) => {
+              const lead = g.lead;
+              const isSelected = selected === lead.op_id;
+              const isUndoTarget = !selected && target?.op_id === lead.op_id;
+              const undone = lead.undone_at !== null;
+              // Three of the eight kinds have no inverse. Those lines are
+              // history to read, not history to arm the button with — so
+              // they're dimmed and inert exactly like an already-undone line,
+              // and say why.
+              const reversible = isUndoable(lead.kind);
+              return (
+                <OpGroupRow
+                  key={g.id}
+                  story={describeGroup(g, repoRoot, reasonByTs)}
+                  age={formatAge(lead.ts)}
+                  inert={undone || !reversible}
+                  undone={undone}
+                  reversible={reversible}
+                  selected={isSelected}
+                  isUndoTarget={isUndoTarget}
+                  onToggle={() => setSelected(isSelected ? null : lead.op_id)}
+                />
+              );
+            })}
+          </div>
+        )}
         <div className="text-text-4 text-2xs">
           {/* Said "the most recent un-undone op", which was both the engine's
               words and a description of the bug — it targeted the newest row
@@ -271,6 +307,7 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
 
 function formatAge(ts: number): string {
   // One ladder for the whole app — see lib/relativeTime. This copy stopped at
-  // days, so an operation from a year ago read "412d".
-  return relativeAgeFromSecs(ts, { style: "compact" });
+  // days, so an operation from a year ago read "412d". Prose, not compact:
+  // "1d ago" is a time, "1d" is a token.
+  return relativeAgeFromSecs(ts, { style: "prose" });
 }

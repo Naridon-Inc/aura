@@ -43,6 +43,18 @@ export {
 
 export { isGrantedHandle, parseGrantedHandle } from "./grant";
 
+export type { SeenStore } from "./catchUp";
+export {
+  STALE_AFTER_MS,
+  awayLabel,
+  isStale,
+  markSeen,
+  readSeen,
+  seenKey,
+  shouldCatchUp,
+  trimTrailingBlank,
+} from "./catchUp";
+
 export type { PlaceAddress, PlaceOpen } from "./boot";
 export {
   askBoot,

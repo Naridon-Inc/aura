@@ -57,7 +57,7 @@ import { TabMark, projectName } from "../TabMark";
 import { EmptyState } from "../ui/state";
 import { Input } from "../ui/input";
 import { Segment } from "../ui/segment";
-import { titleCaseName } from "../../lib/textCase";
+import { titleCaseName } from "@shared/textCase";
 import { toast } from "../../lib/toast";
 import { EarlierBody, useEarlierSessions } from "./earlierSessions";
 import { Group, PickRow, type Row } from "./row";

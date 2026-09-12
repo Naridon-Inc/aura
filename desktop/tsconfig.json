@@ -18,13 +18,22 @@
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["../aura-shared/*"]
+    }
   },
-  "include": ["src"],
+  "include": ["src", "../aura-shared"],
   /* Tests run under `bun test` and import `bun:test`, whose types ship with
      the Bun runtime rather than node_modules — tsc can't resolve them and
      fails the app's typecheck on a module the app never bundles. Bun
      typechecks them itself when it runs them. */
-  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "../aura-shared/**/*.test.ts"
+  ],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

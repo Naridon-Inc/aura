@@ -36,7 +36,9 @@ import {
   cachedList,
   lastOpenPageKey,
   setLastOpenPageKey,
+  asNoteConflict,
   type Note,
+  type NoteConflict,
   type NoteSummary,
 } from "./pagesApi";
 import {
@@ -48,10 +50,12 @@ import {
 } from "./mentionSources";
 import {
   createPagesProvider,
+  forgetPersistedDoc,
   hashHandleToColor,
   type PagesProvider,
 } from "../../lib/pages_collab";
 import { usePagesSync, useOnPagesSynced } from "../../lib/usePagesSync";
+import { trackFeature } from "../../lib/track";
 
 type Props = {
   repoRoot: string;
@@ -88,6 +92,18 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
   const [title, setTitle] = useState(() => seedNote()?.frontmatter.title ?? "");
   const [pageView, setPageView] = useState<PageView>("blocks");
   const [saveState, setSaveState] = useState<SaveState>("saved");
+  // Set when a save was refused because the page moved on under us. Holds the
+  // newer copy so the reader can take it, and our own text stays untouched in
+  // the editor until they choose. Null whenever the two agree.
+  const [conflict, setConflict] = useState<
+    { detail: NoteConflict; theirs: Note | null } | null
+  >(null);
+  // Bumped when we deliberately throw away the local CRDT doc for a page and
+  // rebuild it from the copy on disk. In collab mode the Y.Doc — not `body` —
+  // is what the editor renders, so a page rewritten under us (MCP, a teammate,
+  // a pull) cannot be shown by changing `body` alone; the doc has to be
+  // replaced, and the epoch is what remounts it.
+  const [docEpoch, setDocEpoch] = useState(0);
   // Outline/context rail is hidden by default — the editor takes full width
   // until the reader opts into the rail from the header kebab.
   const [railOpen, setRailOpen] = useState(false);
@@ -103,6 +119,10 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
   // overrides so we never lose a keystroke between debounce ticks.
   const pendingRef = useRef<{ title: string; body: string } | null>(null);
   const activeNoteRef = useRef<Note | null>(null);
+  // Which page the current editing stretch was already reported for. The
+  // autosave fires on every pause in typing; usage wants "edited a page",
+  // not one event per keystroke burst, so one per page until you move on.
+  const editTrackedRef = useRef<string | null>(null);
   activeNoteRef.current = activeNote;
   // Latest active key, read inside async restores to bail if the reader has
   // since opened a different page (avoids a late revalidate clobbering it).
@@ -126,7 +146,7 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
   const noteId = activeNote?.id;
   const pageCollabKey =
     noteId && noteScope != null && noteBucket != null
-      ? `${noteScope}|${noteBucket}|${noteId}|${authorHandle ?? ""}`
+      ? `${noteScope}|${noteBucket}|${noteId}|${authorHandle ?? ""}|${docEpoch}`
       : null;
   // Author-independent page identity — the local instant-open cache key. Same
   // page = same key whoever opens it, so the doc rehydrates from disk on every
@@ -281,8 +301,55 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
   // from App), because a page has to reach a machine whether or not this
   // screen happens to be open — joining here rather than starting a second
   // interval keeps the two off the same on-disk cursor.
+  /** Show `fresh` — the copy that is on disk now — and forget ours.
+   *
+   *  Clearing the persisted CRDT doc is the load-bearing part. Without it the
+   *  editor keeps rendering the Y.Doc it hydrated at open, so a page rewritten
+   *  underneath us looks unchanged and the next keystroke writes the old body
+   *  straight back over the new one. */
+  const adoptRevision = useCallback((fresh: Note) => {
+    forgetPersistedDoc(`${fresh.scope}|${fresh.bucket}|${fresh.id}`);
+    setDocEpoch((n) => n + 1);
+    setActiveNote(fresh);
+    setBody(fresh.body);
+    setTitle(fresh.frontmatter.title ?? "");
+    setSaveState("saved");
+    setConflict(null);
+    pendingRef.current = null;
+  }, []);
+
+  // A page that changed elsewhere has to reach the open editor too, not just
+  // the tree. Before this the list showed the new title while the editor kept
+  // rendering the old body — and that stale body is what got saved back.
+  const revalidateOpenPage = useCallback(async () => {
+    await refreshList();
+    const note = activeNoteRef.current;
+    if (!note) return;
+    let fresh: Note;
+    try {
+      fresh = await notesRead(repoRoot, note.scope, note.bucket, note.id);
+    } catch {
+      return;
+    }
+    // The reader may have moved on while the read was in flight.
+    if (activeNoteRef.current?.id !== note.id) return;
+    const theirs = fresh.frontmatter.updated_at ?? null;
+    const ours = note.frontmatter.updated_at ?? null;
+    if (theirs === ours) return;
+    if (!pendingRef.current) {
+      // Nothing of ours is unsaved, so there is nothing to weigh — show it.
+      adoptRevision(fresh);
+      return;
+    }
+    // We have unsaved text and they have a newer page: the reader decides.
+    setConflict({
+      detail: { id: note.id, diskUpdatedAt: theirs, baseUpdatedAt: ours },
+      theirs: fresh,
+    });
+  }, [repoRoot, refreshList, adoptRevision]);
+
   usePagesSync(repoRoot);
-  useOnPagesSynced(repoRoot, refreshList);
+  useOnPagesSynced(repoRoot, revalidateOpenPage);
 
   // ── Open a page ─────────────────────────────────────────────────────────
   const openSummary = useCallback(
@@ -362,18 +429,94 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
           parentId: note.frontmatter.parent_id ?? null,
           archivedAt: note.frontmatter.archived_at ?? null,
           icon: note.frontmatter.icon ?? null,
+          // What this edit was made against. A newer copy on disk means an
+          // MCP write, a teammate, or another window landed since we loaded —
+          // the backend refuses rather than putting our older body back.
+          baseUpdatedAt: note.frontmatter.updated_at ?? null,
         });
+        if (editTrackedRef.current !== note.id) {
+          editTrackedRef.current = note.id;
+          trackFeature("page_edit");
+        }
         setActiveNote(saved);
         setSaveState("saved");
+        setConflict(null);
         pendingRef.current = null;
         // Reflect the (possibly retitled) page in the tree.
         await refreshList();
-      } catch {
+      } catch (e) {
+        const clash = asNoteConflict(e);
+        if (clash) {
+          // Someone else's version is newer. Keep ours in the editor and in
+          // `pendingRef` — nothing typed is lost — and stop the debounce from
+          // retrying a save that can only fail, until the reader decides.
+          let theirs: Note | null = null;
+          try {
+            theirs = await notesRead(repoRoot, note.scope, note.bucket, note.id);
+          } catch {
+            /* show the banner without a preview rather than not at all */
+          }
+          setConflict({ detail: clash, theirs });
+          pendingRef.current = { title: nextTitle, body: nextBody };
+        }
         setSaveState("dirty");
       }
     },
     [repoRoot, authorHandle, title, body, refreshList],
   );
+
+  /** Take the newer copy and drop ours. */
+  const takeTheirs = useCallback(() => {
+    const theirs = conflict?.theirs;
+    if (theirs) {
+      adoptRevision(theirs);
+      return;
+    }
+    // We never managed to read it — re-read from disk instead of guessing.
+    const note = activeNoteRef.current;
+    setConflict(null);
+    if (!note) return;
+    void notesRead(repoRoot, note.scope, note.bucket, note.id)
+      .then(adoptRevision)
+      .catch(() => {
+        /* leave the editor as it is; the save stays refused */
+      });
+  }, [conflict, repoRoot, adoptRevision]);
+
+  /** Keep ours: save it over theirs, this time stating their revision as the
+   *  base so the write is accepted. Deliberate, and only from a click. */
+  const keepMine = useCallback(async () => {
+    const note = activeNoteRef.current;
+    const pending = pendingRef.current;
+    if (!note) return;
+    const base = conflict?.detail.diskUpdatedAt ?? conflict?.theirs?.frontmatter.updated_at;
+    setSaveState("saving");
+    try {
+      const saved = await notesWrite({
+        repoRoot,
+        scope: note.scope,
+        bucket: note.bucket,
+        id: note.id,
+        body: pending?.body ?? body,
+        title: pending?.title ?? title,
+        author: authorHandle,
+        visibility: note.frontmatter.visibility ?? undefined,
+        locked: note.frontmatter.locked ?? undefined,
+        tags: note.frontmatter.tags,
+        parentId: note.frontmatter.parent_id ?? null,
+        archivedAt: note.frontmatter.archived_at ?? null,
+        icon: note.frontmatter.icon ?? null,
+        baseUpdatedAt: base ?? null,
+      });
+      setActiveNote(saved);
+      setSaveState("saved");
+      setConflict(null);
+      pendingRef.current = null;
+      await refreshList();
+    } catch {
+      setSaveState("dirty");
+    }
+  }, [conflict, repoRoot, authorHandle, body, title, refreshList]);
 
   const flushSave = useCallback(async () => {
     if (saveTimer.current) {
@@ -483,6 +626,7 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
           title: initialTitle ?? "Untitled",
           author: authorHandle,
         });
+        trackFeature("page_create");
         await refreshList();
         const key = pageKey(created);
         setActiveKey(key);
@@ -631,6 +775,16 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
           view={pageView}
           mentionSources={mentionSources}
           collab={collabProvider}
+          docEpoch={docEpoch}
+          banner={
+            conflict ? (
+              <ConflictBar
+                changedAt={conflict.detail.diskUpdatedAt}
+                onTakeTheirs={takeTheirs}
+                onKeepMine={() => void keepMine()}
+              />
+            ) : null
+          }
           onTitleChange={onTitleChange}
           onBodyChange={onBodyChange}
           onViewChange={setPageView}
@@ -681,6 +835,42 @@ export function PagesSurface({ repoRoot, authorHandle }: Props) {
           onOpenSummary={(s) => void openSummary(s)}
         />
       )}
+    </div>
+  );
+}
+
+/** Shown when a page changed elsewhere while we had unsaved edits. Nothing is
+ *  written until the reader picks — their copy is safe on disk, ours is still
+ *  in the editor. Deliberately a bar, not a modal: the text they are about to
+ *  decide over has to stay readable underneath. */
+function ConflictBar({
+  changedAt,
+  onTakeTheirs,
+  onKeepMine,
+}: {
+  changedAt: string | null;
+  onTakeTheirs: () => void;
+  onKeepMine: () => void;
+}) {
+  const when = changedAt ? new Date(changedAt) : null;
+  const stamp =
+    when && !Number.isNaN(when.getTime())
+      ? when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : null;
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border-1 bg-bg-2 px-4 py-2">
+      <span className="text-[13px] text-text-2">
+        This page was changed somewhere else{stamp ? ` at ${stamp}` : ""}. Your
+        edits haven't been saved over it.
+      </span>
+      <div className="ml-auto flex items-center gap-2">
+        <Button variant="ghost" size="sm" onClick={onTakeTheirs}>
+          Load their version
+        </Button>
+        <Button variant="accentSoft" size="sm" onClick={onKeepMine}>
+          Keep mine
+        </Button>
+      </div>
     </div>
   );
 }

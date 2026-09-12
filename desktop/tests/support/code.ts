@@ -76,9 +76,26 @@ export function stripComments(src: string): string {
   );
 }
 
-/** Read a file under `aura-shell/src` with its comments removed. */
+/** Read a file under `aura-shell/src` with its comments removed.
+ *
+ *  A handful of ui files are no longer sources but addresses: they re-export
+ *  a module from `aura-shared/ui`, where the console reads the very same
+ *  bytes. A scan pinning "the tab strip still does X" must read the strip,
+ *  not the forwarding line — so a pure re-export shim is followed to the
+ *  shared file, exactly the way the bundler follows it. */
 export async function readSrc(rel: string): Promise<string> {
-  return stripComments(
+  const stripped = stripComments(
     await Bun.file(`${import.meta.dir}/../../src/${rel}`).text(),
   );
+  const shim = stripped
+    .trim()
+    .match(/^export \* from "@shared\/(ui\/[\w-]+)";$/);
+  if (shim) {
+    return stripComments(
+      await Bun.file(
+        `${import.meta.dir}/../../../aura-shared/${shim[1]}.tsx`,
+      ).text(),
+    );
+  }
+  return stripped;
 }

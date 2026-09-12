@@ -202,7 +202,11 @@ pub struct Pattern {
 /// Run `aura atlas`. Resolves the repo root from CWD, builds the atlas, writes
 /// `.aura/atlas.json` + `.aura/atlas.md`, optionally LLM-polishes summaries, and
 /// prints a concise terminal story. Returns a process exit code.
-pub fn run(ai: bool, json_only: bool) -> i32 {
+///
+/// `full` lifts the per-section caps on the written `atlas.md`; the JSON
+/// registry is always complete (it's the machine contract, and `--json`
+/// is already an explicit flag).
+pub fn run(ai: bool, json_only: bool, full: bool) -> i32 {
     let repo_root = match discover_repo_root() {
         Some(r) => r,
         None => {
@@ -265,7 +269,7 @@ pub fn run(ai: bool, json_only: bool) -> i32 {
         }
     }
 
-    let markdown = render_markdown(&atlas);
+    let markdown = render_markdown(&atlas, full);
     if let Err(e) = fs::write(&md_path, &markdown) {
         eprintln!("{} could not write atlas.md: {e}", "atlas:".red().bold());
         return 1;
@@ -443,7 +447,12 @@ fn load_nodes(repo_root: &Path) -> (Vec<AstNode>, GraphSource, Option<u64>) {
 
 /// Bounded recursive scan of the worktree, parsing every source file into AST
 /// nodes. Honors a file cap + wall-clock budget; partial results are fine.
-fn scan_worktree(repo_root: &Path) -> Vec<AstNode> {
+///
+/// Shared with [`crate::sync::GlobalSync::sync_graph_worktree`], which pushes
+/// the same nodes to the cloud. A second walker would be a second answer to
+/// "what counts as source here" — the skip list and the extension list are the
+/// definition, and there should only be one of them.
+pub(crate) fn scan_worktree(repo_root: &Path) -> Vec<AstNode> {
     let start = Instant::now();
     let mut out: Vec<AstNode> = Vec::new();
     let mut files_seen = 0usize;
@@ -1045,8 +1054,29 @@ fn parse_summary_map(raw: &str) -> Option<HashMap<String, String>> {
 // Rendering — the human "story".
 // ---------------------------------------------------------------------------
 
-/// Render the full long-form directory as Markdown for `.aura/atlas.md`.
-fn render_markdown(atlas: &Atlas) -> String {
+/// Default per-section entry caps for `.aura/atlas.md`. On a large repo an
+/// uncapped directory runs to megabytes — useless as context. Each capped
+/// section says what it left out and how to expand (`aura atlas --full`).
+const MD_FEATURES_CAP: usize = 40;
+const MD_COMPONENTS_CAP: usize = 60;
+const MD_ATOMS_CAP: usize = 80;
+const MD_PATTERNS_CAP: usize = 30;
+
+/// Note appended when a section was capped.
+fn elision_note(out: &mut String, total: usize, cap: usize) {
+    if total > cap {
+        out.push_str(&format!(
+            "\n_… +{} more not shown — run `aura atlas --full` for the complete directory._\n",
+            total - cap
+        ));
+    }
+}
+
+/// Render the long-form directory as Markdown for `.aura/atlas.md`.
+/// Sections are capped unless `full` — the JSON registry stays complete
+/// either way, so nothing is lost, only elided from the prose face.
+fn render_markdown(atlas: &Atlas, full: bool) -> String {
+    let cap = |n: usize| if full { usize::MAX } else { n };
     let mut out = String::new();
     out.push_str(&format!("# Code Atlas — {}\n\n", atlas.repo));
 
@@ -1081,19 +1111,25 @@ fn render_markdown(atlas: &Atlas) -> String {
 
     out.push_str(&format!("## 🎯 Features ({})\n\n", atlas.features.len()));
     out.push_str("_What a person can actually do with this project._\n\n");
-    for e in &atlas.features {
+    for e in atlas.features.iter().take(cap(MD_FEATURES_CAP)) {
         render_entry_md(&mut out, e, true);
+    }
+    if !full {
+        elision_note(&mut out, atlas.features.len(), MD_FEATURES_CAP);
     }
 
     out.push_str(&format!("\n## 🧩 Components ({})\n\n", atlas.components.len()));
     out.push_str("_Reusable building blocks — types, modules, UI, and the glue between them._\n\n");
-    for e in &atlas.components {
+    for e in atlas.components.iter().take(cap(MD_COMPONENTS_CAP)) {
         render_entry_md(&mut out, e, false);
+    }
+    if !full {
+        elision_note(&mut out, atlas.components.len(), MD_COMPONENTS_CAP);
     }
 
     out.push_str(&format!("\n## ⚛ Atoms ({})\n\n", atlas.atoms.len()));
     out.push_str("_Small leaf helpers at the bottom of the stack._\n\n");
-    for e in &atlas.atoms {
+    for e in atlas.atoms.iter().take(cap(MD_ATOMS_CAP)) {
         out.push_str(&format!(
             "- **{}** `{}` — {}{}\n",
             e.title,
@@ -1102,10 +1138,13 @@ fn render_markdown(atlas: &Atlas) -> String {
             location_suffix(e),
         ));
     }
+    if !full {
+        elision_note(&mut out, atlas.atoms.len(), MD_ATOMS_CAP);
+    }
 
     out.push_str(&format!("\n## 🔁 Patterns ({})\n\n", atlas.patterns.len()));
     out.push_str("_Recurring shapes — the grammar of the codebase._\n\n");
-    for p in &atlas.patterns {
+    for p in atlas.patterns.iter().take(cap(MD_PATTERNS_CAP)) {
         let mut members = p.members.join(", ");
         if p.count > p.members.len() {
             members.push_str(&format!(", +{} more", p.count - p.members.len()));
@@ -1114,6 +1153,9 @@ fn render_markdown(atlas: &Atlas) -> String {
             "- **{}** ×{} — {}\n  <sub>{}</sub>\n",
             p.label, p.count, p.description, members,
         ));
+    }
+    if !full {
+        elision_note(&mut out, atlas.patterns.len(), MD_PATTERNS_CAP);
     }
 
     out
@@ -1312,7 +1354,9 @@ fn layer_of(file: Option<&str>, _kind: &str) -> &'static str {
     if f.ends_with(".tsx") || f.ends_with(".jsx") || f.contains("/components/") {
         return "UI (React)";
     }
-    if f.ends_with(".ts") || f.ends_with(".js") {
+    if f.ends_with(".ts") || f.ends_with(".js") || f.ends_with(".mjs") || f.ends_with(".cjs")
+        || f.ends_with(".mts") || f.ends_with(".cts")
+    {
         return "Frontend (TS)";
     }
     if f.ends_with(".rs") {
@@ -1439,6 +1483,51 @@ mod tests {
             tags: tags.iter().map(|s| s.to_string()).collect(),
             doc: None,
         }
+    }
+
+    fn mk_atlas(atoms: usize) -> Atlas {
+        let atoms: Vec<AtlasEntry> = (0..atoms)
+            .map(|i| mk_entry("atom", &format!("helper_{i}"), &["leaf"], 0, 0))
+            .collect();
+        Atlas {
+            version: 1,
+            generated_at: 0,
+            repo: "demo".to_string(),
+            graph_source: "worktree".to_string(),
+            staleness_secs: None,
+            counts: AtlasCounts {
+                total: atoms.len(),
+                atoms: atoms.len(),
+                ..AtlasCounts::default()
+            },
+            layers: Vec::new(),
+            features: Vec::new(),
+            components: Vec::new(),
+            atoms,
+            patterns: Vec::new(),
+            summary_source: "structural".to_string(),
+        }
+    }
+
+    #[test]
+    fn markdown_default_caps_sections_and_says_so() {
+        let atlas = mk_atlas(MD_ATOMS_CAP + 25);
+        let md = render_markdown(&atlas, false);
+        assert!(
+            md.contains("+25 more not shown") && md.contains("aura atlas --full"),
+            "capped section must say what it left out and how to expand"
+        );
+        // The last entries past the cap must not render.
+        assert!(!md.contains(&format!("helper_{}", MD_ATOMS_CAP)));
+        assert!(md.contains("helper_0"));
+    }
+
+    #[test]
+    fn markdown_full_renders_everything_with_no_elision_note() {
+        let atlas = mk_atlas(MD_ATOMS_CAP + 25);
+        let md = render_markdown(&atlas, true);
+        assert!(!md.contains("more not shown"));
+        assert!(md.contains(&format!("helper_{}", MD_ATOMS_CAP + 24)));
     }
 
     #[test]

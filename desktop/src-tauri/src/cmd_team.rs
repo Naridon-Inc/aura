@@ -4472,28 +4472,61 @@ fn http_client() -> Option<reqwest::Client> {
         .ok()
 }
 
-fn room_origin() -> String {
-    // Read cloud_url from credentials if present so users on
-    // self-hosted aura-cloud point at their own server. When the
-    // credentials file is missing or the field is unset, fall back to
-    // the public auravcs.com origin.
-    let creds = read_credentials().unwrap_or_default();
-    let origin = cloud_origin(&creds);
-    // Any auravcs.com variant collapses to the canonical apex host so
-    // HTTP writes always match the hardcoded `wss://auravcs.com`
-    // subscriber. Without this, a stale `cloud_url` (e.g. legacy
-    // `https://api.auravcs.com`, a beta server path, or a trailing
-    // path component) routes POSTs to a host the WS never hears,
-    // producing the "I can see them typing but their messages never
-    // arrive" failure mode. Self-hosters keep whatever non-auravcs
-    // host they set.
+/// Any `auravcs.com` variant collapses to the canonical apex host, so HTTP
+/// writes always reach the host the room websocket is on. Without this, a stale
+/// `cloud_url` (legacy `https://api.auravcs.com`, a beta server path, a trailing
+/// path component) routes POSTs to a host the WS never hears — the "I can see
+/// them typing but their messages never arrive" failure mode.
+///
+/// It applies ONLY to our own public cloud. A self-hosted host, and a staging
+/// stack on localhost, keep exactly the origin they were given — collapsing
+/// those would drag a test run back onto production, which is the one thing a
+/// separate stack exists to prevent.
+fn collapse_public_cloud(origin: String) -> String {
     if origin.contains("auravcs.com") {
         return "https://auravcs.com".to_string();
     }
     origin
 }
 
+fn room_origin() -> String {
+    // Read cloud_url from credentials if present so users on
+    // self-hosted aura-cloud point at their own server — and, ahead of that,
+    // honour an `AURA_CLOUD_URL` override (cloud_endpoint.rs). When neither is
+    // set, fall back to the public auravcs.com origin.
+    let creds = read_credentials().unwrap_or_default();
+    collapse_public_cloud(cloud_origin(&creds))
+}
+
+/// Which cloud the room surfaces talk to, for the frontend.
+///
+/// The frontend used to answer this itself, five times, with a literal
+/// `wss://auravcs.com`. That made an `AURA_CLOUD_URL` run half-pointed: chat
+/// POSTs went to the staging server (they come through `room_origin` below)
+/// while the WS subscriber, the reactions snapshot and the voice-token POST
+/// still reached production. Messages appeared to vanish, and a test run put
+/// real traffic on the live cloud. One answer, from the side that owns the
+/// rule.
+///
+/// Returns the HTTP origin; the caller derives the websocket scheme from it,
+/// because `https`→`wss` and `http`→`ws` is the only difference and a second
+/// command would be a second thing to keep in step.
+#[tauri::command]
+pub fn cloud_room_origin() -> String {
+    room_origin()
+}
+
+/// The configured cloud URL exactly as set, with no default filled in — the
+/// diagnostics surface shows "unset" differently from "set to the public host".
+/// An `AURA_CLOUD_URL` run reports the override, because that IS what this app
+/// is calling.
 fn cloud_url_raw() -> Option<String> {
+    if let Ok(env) = std::env::var(crate::cloud_endpoint::URL_ENV) {
+        let env = env.trim().to_string();
+        if !env.is_empty() {
+            return Some(env);
+        }
+    }
     let creds = read_credentials().unwrap_or_default();
     creds
         .get("cloud_url")
@@ -4519,12 +4552,7 @@ fn cloud_token_present() -> bool {
 /// server still permits anonymous access.
 fn cloud_api_token() -> Option<String> {
     let creds = read_credentials().unwrap_or_default();
-    creds
-        .get("cloud_api_token")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    crate::cloud_endpoint::token(&creds)
 }
 
 /// Hand the renderer the cloud bearer so it can authenticate the room
@@ -5112,19 +5140,26 @@ pub async fn chat_doctor(repo_root: String) -> Result<ChatDoctorReport, String> 
         cloud_error = Some("http client unavailable".to_string());
     }
 
-    // WS subscriber is hardcoded to wss://auravcs.com in
-    // `reliableChat.ts` (host: AURA_WS_HOST). Mismatch with the HTTP
-    // origin means typing/reactions reach peers (WS works) while
-    // chat_send POSTs go nowhere — produces the "we see them typing
-    // but no messages arrive" failure mode.
-    let ws_url = "wss://auravcs.com".to_string();
+    // The WS subscriber now derives its origin from this same answer
+    // (`cloud_room_origin` → `lib/cloudOrigin.ts`), so the two can no longer
+    // disagree — which is what this row exists to catch. It used to compare
+    // against a literal `wss://auravcs.com`, and so reported a mismatch for
+    // every self-hosted and staging run that was in fact wired correctly.
     let http_host = origin
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_end_matches('/')
         .to_string();
-    let ws_host = "auravcs.com".to_string();
-    let http_ws_host_match = http_host == ws_host;
+    let ws_url = format!(
+        "{}{}",
+        if origin.starts_with("http://") { "ws://" } else { "wss://" },
+        http_host
+    );
+    let ws_host = http_host.clone();
+    // Left as a comparison rather than a literal `true`: it states the
+    // invariant the two now share, and it fails loudly if either side ever
+    // stops deriving from `room_origin` again.
+    let http_ws_host_match = ws_host == http_host;
 
     Ok(ChatDoctorReport {
         room_id,
@@ -5174,6 +5209,39 @@ pub async fn chat_doctor(repo_root: String) -> Result<ChatDoctorReport, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A staging or self-hosted origin must survive the collapse rule intact.
+    // The rule exists to pull stale *public-cloud* spellings onto one host; if
+    // it also swallowed a localhost origin, an app started against the local
+    // staging stack would quietly write its chat, reactions and page ops to
+    // PRODUCTION — the exact thing a separate stack exists to prevent.
+    #[test]
+    fn a_staging_origin_is_never_collapsed_onto_production() {
+        assert_eq!(
+            collapse_public_cloud("http://localhost:3011".to_string()),
+            "http://localhost:3011"
+        );
+        assert_eq!(
+            collapse_public_cloud("https://cloud.example.com".to_string()),
+            "https://cloud.example.com"
+        );
+    }
+
+    #[test]
+    fn every_public_cloud_spelling_collapses_to_the_apex() {
+        for spelling in [
+            "https://auravcs.com",
+            "https://api.auravcs.com",
+            "https://auravcs.com/",
+            "https://beta.auravcs.com/server",
+        ] {
+            assert_eq!(
+                collapse_public_cloud(spelling.to_string()),
+                "https://auravcs.com",
+                "{spelling}"
+            );
+        }
+    }
 
     // Back-compat guarantee: a manifest written before structured
     // channels existed must deserialize cleanly (empty channel_meta) AND

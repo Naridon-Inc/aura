@@ -65,6 +65,9 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { label: "New chat", keys: "⌘N" },
       { label: "New parallel copy", keys: "⌘⇧N" },
       { label: "Log task intent", keys: "⌘⇧I" },
+      // AURA-1296 — bound in lib/keymap.ts (`fork_chat`, `cycle_effort`).
+      { label: "Fork this chat", keys: "⌘⌥Enter" },
+      { label: "Change how hard Aura thinks", keys: "⌘⇧/" },
     ],
   },
   {
@@ -77,6 +80,12 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { label: "New browser tab", keys: "⌘⇧B" },
       { label: "Close tab", keys: "⌘W" },
       { label: "Reopen closed tab", keys: "⌘⇧T" },
+      // AURA-1296 — bound in lib/keymap.ts (`next_tab`, `prev_tab`,
+      // `next_attention`, `toggle_changes`).
+      { label: "Next tab", keys: "⌘⌥→" },
+      { label: "Previous tab", keys: "⌘⌥←" },
+      { label: "Jump to a tab that needs you", keys: "⌘⌥L" },
+      { label: "Show / hide uncommitted changes", keys: "⌘⌥U" },
     ],
   },
   {

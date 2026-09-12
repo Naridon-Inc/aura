@@ -99,20 +99,15 @@ pub(crate) fn read_credentials() -> Result<serde_json::Map<String, Value>, Strin
     }
 }
 
+/// The relay host. Same resolver as every other cloud call, with the apex
+/// (not the API subdomain) as this surface's own default — see
+/// [`crate::cloud_endpoint`].
 pub(crate) fn cloud_origin(map: &serde_json::Map<String, Value>) -> String {
-    map.get("cloud_url")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("https://auravcs.com")
-        .trim_end_matches('/')
-        .to_string()
+    crate::cloud_endpoint::origin(map, "https://auravcs.com")
 }
 
 pub(crate) fn cloud_token(map: &serde_json::Map<String, Value>) -> Option<String> {
-    map.get("cloud_api_token")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
+    crate::cloud_endpoint::token(map)
 }
 
 /// Convert an `https://` (or `http://`) origin to the matching
@@ -144,6 +139,30 @@ impl RemoteRelayState {
                 public_url: None,
             },
         }
+    }
+
+    /// Take the relay down and tell the window it is down.
+    ///
+    /// Shared by the `remote_relay_stop` command (the user turned it off) and
+    /// by the presence heartbeat, which drops a relay the cloud has just said
+    /// it cannot route. Idempotent: stopping a relay that is already off emits
+    /// the same "off" status and does nothing else.
+    pub(crate) async fn stop(&self, app: &AppHandle) -> RemoteRelayStatus {
+        {
+            let mut g = self.inner.lock().await;
+            if let Some(mut running) = g.running.take() {
+                if let Some(tx) = running.shutdown.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        let status = RemoteRelayStatus {
+            running: false,
+            code: None,
+            public_url: None,
+        };
+        let _ = app.emit("remote-relay:status", status.clone());
+        status
     }
 
     /// Idempotently bring the relay up: returns the running relay if one
@@ -250,18 +269,68 @@ impl RemoteRelayState {
         // Cancel signal — drop the sender to ask the session task to exit.
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
 
+        let code = registered.code.clone();
+        let public_url = registered.public_url.clone();
+
         let app_for_session = app.clone();
-        let _session_task = tokio::spawn(async move {
+        let session_task = tokio::spawn(async move {
             tokio::select! {
                 _ = run_protocol_session(app_for_session, snapshot, peer_rx_in, peer_tx_out) => {}
                 _ = cancel_rx => {}
             }
-            let _ = read_pump.abort();
-            let _ = write_pump.abort();
         });
 
-        let code = registered.code.clone();
-        let public_url = registered.public_url.clone();
+        // When the socket goes, this relay is over — say so.
+        //
+        // Nothing used to clear `running`. The read pump breaks the moment the
+        // socket closes, and the cloud closes it on every restart and every
+        // network drop, so a desktop went on believing it held a live relay
+        // under a code the cloud had already forgotten. Everything downstream
+        // then jammed: the heartbeat kept reporting that dead code, so the
+        // console saw a machine "running" with no reachable relay; the wake it
+        // sent back was cleared by that same heartbeat as already answered;
+        // and `ensure_started` returned the corpse rather than dialling. Web
+        // chat said the Mac was running but not accepting remote connections,
+        // and pressing Connect did nothing, for as long as the app stayed
+        // open.
+        //
+        // The read pump is what is watched, not the protocol session: the
+        // session's own loop only ends when both its channels close, and its
+        // event bus holds sender clones for as long as there are listeners, so
+        // it can outlive the socket indefinitely.
+        //
+        // The code is compared before clearing so a relay that has already
+        // been replaced by a newer one is not torn out from under it, and a
+        // relay the user stopped (which takes `running` itself) reports
+        // nothing twice.
+        let inner_for_exit = Arc::clone(&self.inner);
+        let app_for_exit = app.clone();
+        let code_for_exit = code.clone();
+        tokio::spawn(async move {
+            let _ = read_pump.await;
+            write_pump.abort();
+            session_task.abort();
+
+            let was_ours = {
+                let mut g = inner_for_exit.lock().await;
+                let ours = g.running.as_ref().is_some_and(|r| r.code == code_for_exit);
+                if ours {
+                    g.running = None;
+                }
+                ours
+            };
+            if was_ours {
+                tracing::info!("[relay] socket closed — relay {code_for_exit} is no longer live");
+                let _ = app_for_exit.emit(
+                    "remote-relay:status",
+                    RemoteRelayStatus {
+                        running: false,
+                        code: None,
+                        public_url: None,
+                    },
+                );
+            }
+        });
 
         {
             let mut g = self.inner.lock().await;
@@ -302,19 +371,7 @@ pub async fn remote_relay_stop(
     app: AppHandle,
     state: State<'_, RemoteRelayState>,
 ) -> Result<RemoteRelayStatus, String> {
-    let mut g = state.inner.lock().await;
-    if let Some(mut running) = g.running.take() {
-        if let Some(tx) = running.shutdown.take() {
-            let _ = tx.send(());
-        }
-    }
-    let status = RemoteRelayStatus {
-        running: false,
-        code: None,
-        public_url: None,
-    };
-    let _ = app.emit("remote-relay:status", status.clone());
-    Ok(status)
+    Ok(state.stop(&app).await)
 }
 
 #[tauri::command]

@@ -1,7 +1,13 @@
 // Live Semantic Graph (graphify port) — physics-based, pannable, zoomable.
 //
-// Renders the project knowledge graph from `.aura/kg/graph.json` (built
-// by `aura_kg_build`) as a force-directed SVG with d3-force underneath:
+// Renders *bounded views* of the project knowledge graph (built server-side
+// into `.aura/kg/graph.json`). The full graph never crosses IPC: the pane
+// asks `aura_kg_view` for a capped, ranked subgraph (overview = top hubs,
+// search = confidence-ranked matches + their neighbours, focus = BFS
+// neighbourhood), so opening a huge production repo costs one small payload
+// instead of a freeze. Selection details come from `aura_kg_explain` and
+// call chains from `aura_kg_path` — both computed against the whole graph
+// server-side. Rendered as a force-directed SVG with d3-force underneath:
 //
 //   • Continuous rAF tick loop with alpha decay (Verlet-style)
 //   • Barnes-Hut O(N log N) repulsion via d3-quadtree
@@ -50,8 +56,19 @@ import {
   RotateCcw,
   X,
 } from "lucide-react";
-import { api, type KgGraph, type KgNode, type KgEdge } from "../../lib/api";
+import {
+  api,
+  type KgEdge,
+  type KgExplain,
+  type KgExplainEdge,
+  type KgNode,
+  type KgPath,
+  type KgView,
+  type KgViewQuery,
+} from "../../lib/api";
 import { Button } from "../ui/button";
+import { Segment } from "../ui/segment";
+import { FeatureMapView } from "./FeatureMapView";
 import { GraphErrorBoundary } from "./GraphErrorBoundary";
 
 type Props = { repoRoot: string; onClose: () => void };
@@ -78,7 +95,16 @@ type SelectedLink = {
   direction: "in" | "out";
 };
 
-const NODE_CAP = 800;
+/** A rendered edge group plus the endpoints the tick loop needs to re-curve
+ *  it — enough to repaint geometry without consulting React. */
+type EdgeHandle = {
+  el: SVGGElement;
+  from: string;
+  to: string;
+  /** Render index — decides which side of the pair the curve bows to. */
+  index: number;
+};
+
 const ZOOM_MIN = 0.15;
 const ZOOM_MAX = 6;
 const HOLO = {
@@ -96,6 +122,29 @@ const HOLO = {
   muted: "var(--color-text-4, #6b7280)",
 };
 
+/** What the header says about how much of the map is on screen.
+ *
+ *  Three separate facts, kept separate: how many pieces matched, how many of
+ *  those fit, and how many extra pieces are drawn around them for context.
+ *  The header used to subtract the last from the first and print
+ *  `showing 350 of 16` — a search that found sixteen things, drawn with the
+ *  neighbours of all sixteen, reported as though it were hiding matches. */
+function countLabel(view: KgView, searching: boolean): string {
+  const shown = Math.max(0, view.nodes.length - view.context);
+  const n = (v: number) => v.toLocaleString();
+  let label: string;
+  if (!searching) {
+    label = view.truncated
+      ? `showing the ${n(shown)} most connected of ${n(view.matched)}`
+      : `showing all ${n(shown)}`;
+  } else if (view.truncated) {
+    label = `showing ${n(shown)} of ${n(view.matched)} matches`;
+  } else {
+    label = `${n(view.matched)} ${view.matched === 1 ? "match" : "matches"}`;
+  }
+  return view.context > 0 ? `${label} + ${n(view.context)} connected` : label;
+}
+
 export function SemanticGraphPane(props: Props) {
   const [resetKey, setResetKey] = useState(0);
   return (
@@ -106,7 +155,12 @@ export function SemanticGraphPane(props: Props) {
 }
 
 function SemanticGraphInner({ repoRoot, onClose }: Props) {
-  const [graph, setGraph] = useState<KgGraph | null>(null);
+  // The map lands on FEATURES — plain-language blocks anyone can read.
+  // "Pieces" is the raw symbol network underneath, reached by toggling or
+  // by drilling into a feature.
+  const [mode, setMode] = useState<"features" | "pieces">("features");
+  const [featureRebuild, setFeatureRebuild] = useState(0);
+  const [view, setView] = useState<KgView | null>(null);
   const [loading, setLoading] = useState(true);
   const [building, setBuilding] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -116,103 +170,159 @@ function SemanticGraphInner({ repoRoot, onClose }: Props) {
   );
   const [communityFilter, setCommunityFilter] = useState<number | null>(null);
   const [search, setSearch] = useState("");
+  // Incremental loading: when set, the view is the BFS neighbourhood of
+  // this node instead of the global ranking.
+  const [focusId, setFocusId] = useState<string | null>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [fitSelectionSignal, setFitSelectionSignal] = useState(0);
+  const [explain, setExplain] = useState<KgExplain | null>(null);
+  const [pathResult, setPathResult] = useState<KgPath | null>(null);
+  const [pathBusy, setPathBusy] = useState(false);
 
-  const refresh = useCallback(
-    async (force: boolean) => {
-      setErr(null);
-      try {
-        if (force) {
-          setBuilding(true);
-          const g = await api.auraKgBuild(repoRoot, true);
-          setGraph(g);
-        } else {
-          setLoading(true);
-          const cached = await api.auraKgLoad(repoRoot);
-          if (cached) {
-            setGraph(cached);
-          } else {
-            setBuilding(true);
-            const g = await api.auraKgBuild(repoRoot, false);
-            setGraph(g);
-          }
-        }
-      } catch (e) {
-        setErr(String(e));
-      } finally {
-        setLoading(false);
-        setBuilding(false);
-      }
-    },
-    [repoRoot],
+  // Monotonic request sequence so a slow response can never clobber a
+  // newer one; hasViewRef separates first-load from filter refinement.
+  const requestSeq = useRef(0);
+  const hasViewRef = useRef(false);
+
+  const buildViewQuery = useCallback(
+    (): KgViewQuery => ({
+      query: search.trim(),
+      // The backend's kind filter is a plain allow-list, so the docs
+      // toggle rides in as extra kinds.
+      kinds: [...kindFilter, ...(includeDocs ? ["doc", "section"] : [])],
+      community: communityFilter,
+      include_docs: includeDocs,
+      focus: focusId,
+    }),
+    [search, kindFilter, communityFilter, includeDocs, focusId],
   );
 
-  useEffect(() => {
-    void refresh(false);
-  }, [refresh]);
-
-  const filtered = useMemo(() => {
-    if (!graph) return null;
-    const q = search.trim().toLowerCase();
-    const allowedDocs = includeDocs
-      ? new Set(["doc", "section"])
-      : new Set<string>();
-    let visibleNodes = graph.nodes.filter((n) => {
-      if (n.kind === "doc" || n.kind === "section") {
-        if (!allowedDocs.has(n.kind)) return false;
-      } else if (!kindFilter.has(n.kind)) {
-        return false;
+  const fetchView = useCallback(
+    async (opts?: { rebuild?: boolean }) => {
+      const seq = ++requestSeq.current;
+      setErr(null);
+      try {
+        if (opts?.rebuild) {
+          setBuilding(true);
+          await api.auraKgEnsure(repoRoot, true);
+        }
+        let v = await api.auraKgView(repoRoot, buildViewQuery());
+        if (v === null) {
+          // No graph on disk yet: build once (stats-only handshake — the
+          // graph itself stays server-side), then ask again.
+          setBuilding(true);
+          await api.auraKgEnsure(repoRoot, false);
+          v = await api.auraKgView(repoRoot, buildViewQuery());
+        }
+        if (seq !== requestSeq.current) return;
+        if (v) {
+          setView(v);
+          hasViewRef.current = true;
+        }
+      } catch (e) {
+        if (seq === requestSeq.current) setErr(String(e));
+      } finally {
+        if (seq === requestSeq.current) {
+          setLoading(false);
+          setBuilding(false);
+        }
       }
-      if (communityFilter !== null && n.community_id !== communityFilter)
-        return false;
-      if (
-        q &&
-        !n.name.toLowerCase().includes(q) &&
-        !n.file.toLowerCase().includes(q)
-      )
-        return false;
-      return true;
-    });
-    let truncated = false;
-    if (visibleNodes.length > NODE_CAP) {
-      // Keep highest-degree nodes — they're the most informative anchor
-      // points; user can subset via filters to see the rest.
-      visibleNodes = [...visibleNodes]
-        .sort((a, b) => b.degree - a.degree)
-        .slice(0, NODE_CAP);
-      truncated = true;
+    },
+    [repoRoot, buildViewQuery],
+  );
+
+  // First load fires immediately; later filter/search changes debounce so
+  // a keystroke burst costs one IPC round-trip, not one per key. The pieces
+  // view only fetches while it is the one on screen — the feature map owns
+  // its own loading.
+  useEffect(() => {
+    if (mode !== "pieces") return;
+    if (!hasViewRef.current) {
+      void fetchView();
+      return;
     }
-    const ids = new Set(visibleNodes.map((n) => n.id));
-    const visibleEdges = graph.edges.filter(
-      (e) => ids.has(e.from) && ids.has(e.to),
-    );
-    return { nodes: visibleNodes, edges: visibleEdges, truncated };
-  }, [graph, includeDocs, kindFilter, communityFilter, search]);
+    const t = setTimeout(() => void fetchView(), 250);
+    return () => clearTimeout(t);
+  }, [fetchView, mode]);
+
+  const refresh = useCallback(
+    (force: boolean) => void fetchView({ rebuild: force }),
+    [fetchView],
+  );
 
   const gods = useMemo(() => {
-    if (!graph) return [];
-    return [...graph.nodes]
+    if (!view) return [];
+    return [...view.nodes]
       .filter((n) => n.god)
       .sort((a, b) => b.degree - a.degree)
       .slice(0, 10);
-  }, [graph]);
+  }, [view]);
 
   const surprises = useMemo(() => {
-    if (!graph) return [];
-    return graph.edges.filter((e) => e.surprise).slice(0, 10);
-  }, [graph]);
+    if (!view) return [];
+    return view.edges.filter((e) => e.surprise).slice(0, 10);
+  }, [view]);
 
   const graphNodeById = useMemo(() => {
-    return new Map((graph?.nodes ?? []).map((n) => [n.id, n] as const));
-  }, [graph]);
+    return new Map((view?.nodes ?? []).map((n) => [n.id, n] as const));
+  }, [view]);
 
-  const selectedNode = selectedId ? graphNodeById.get(selectedId) ?? null : null;
+  const selectedNode =
+    (selectedId ? graphNodeById.get(selectedId) : null) ??
+    (explain && explain.node.id === selectedId ? explain.node : null);
+
+  // Selection details come from the backend — explain sees every edge in
+  // the whole graph, not just the loaded slice.
+  useEffect(() => {
+    setPathResult(null);
+    if (!selectedId) {
+      setExplain(null);
+      return;
+    }
+    let alive = true;
+    api
+      .auraKgExplain(repoRoot, selectedId)
+      .then((ex) => {
+        if (alive) setExplain(ex);
+      })
+      .catch(() => {
+        /* keep the local fallback below */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [repoRoot, selectedId]);
 
   const selectedLinks = useMemo<SelectedLink[]>(() => {
-    if (!graph || !selectedId) return [];
-    return graph.edges
+    if (!selectedId) return [];
+    if (explain && explain.node.id === selectedId) {
+      const toLinks = (edges: KgExplainEdge[], direction: "in" | "out") =>
+        edges.map(
+          (e) =>
+            ({
+              edge: {
+                from: direction === "out" ? selectedId : e.other.id,
+                to: direction === "out" ? e.other.id : selectedId,
+                kind: e.kind,
+                surprise: e.surprise,
+              },
+              other: e.other,
+              direction,
+            }) satisfies SelectedLink,
+        );
+      return [...toLinks(explain.inbound, "in"), ...toLinks(explain.outbound, "out")]
+        .sort((a, b) => {
+          if (a.edge.surprise !== b.edge.surprise) {
+            return a.edge.surprise ? -1 : 1;
+          }
+          return b.other.degree - a.other.degree;
+        })
+        .slice(0, 24);
+    }
+    // Fallback while explain is in flight: the bounded view's own edges.
+    if (!view) return [];
+    return view.edges
       .map((edge) => {
         if (edge.from !== selectedId && edge.to !== selectedId) return null;
         const isOut = edge.from === selectedId;
@@ -232,13 +342,13 @@ function SemanticGraphInner({ repoRoot, onClose }: Props) {
         return b.other.degree - a.other.degree;
       })
       .slice(0, 12);
-  }, [graph, graphNodeById, selectedId]);
+  }, [explain, view, graphNodeById, selectedId]);
 
   const selectNode = useCallback(
     (id: string, opts?: { fit?: boolean }) => {
       setSelectedId(id);
       if (opts?.fit) setFitSelectionSignal((n) => (n + 1) & 0xffff);
-      const n = graph?.nodes.find((x) => x.id === id);
+      const n = graphNodeById.get(id);
       if (!n) return;
       window.dispatchEvent(
         new CustomEvent("aura:open-file", {
@@ -246,7 +356,23 @@ function SemanticGraphInner({ repoRoot, onClose }: Props) {
         }),
       );
     },
-    [graph],
+    [graphNodeById],
+  );
+
+  const runPath = useCallback(
+    async (to: string) => {
+      if (!selectedId || !to.trim()) return;
+      setPathBusy(true);
+      try {
+        const p = await api.auraKgPath(repoRoot, selectedId, to.trim(), 8);
+        setPathResult(p);
+      } catch (e) {
+        setErr(String(e));
+      } finally {
+        setPathBusy(false);
+      }
+    },
+    [repoRoot, selectedId],
   );
 
   const focusNode = useCallback(
@@ -257,22 +383,35 @@ function SemanticGraphInner({ repoRoot, onClose }: Props) {
   return (
     <div className="h-full w-full flex flex-col bg-bg-content">
       <header className="h-9 flex items-center px-4 border-b border-line-soft flex-shrink-0 gap-3">
-        <span className="section-label">
+        <span className="text-text-2 text-sm font-medium uppercase tracking-wider">
           Code Map
         </span>
-        {graph && (
+        <Segment
+          size="xs"
+          value={mode}
+          onChange={setMode}
+          ariaLabel="View"
+          options={[
+            { value: "features", label: "Features", title: "The map, in words" },
+            { value: "pieces", label: "Pieces", title: "The raw symbol network" },
+          ]}
+        />
+        {mode === "pieces" && view && (
           <span className="text-text-4 text-xs tabular-nums">
-            {graph.stats.symbols} pieces · {graph.stats.files} files ·{" "}
-            {graph.stats.communities} clusters · {graph.stats.gods} hubs ·{" "}
-            {graph.stats.surprises} unexpected links
-            {filtered?.truncated &&
-              ` · showing top ${NODE_CAP} (filter to see more)`}
+            {view.stats.symbols} pieces · {view.stats.files} files ·{" "}
+            {view.stats.communities} clusters · {view.stats.gods} hubs ·{" "}
+            {view.stats.surprises} unexpected links
+            {view.matched > 0 &&
+              ` · ${countLabel(view, search.trim().length > 0 || focusId !== null)}`}
           </span>
         )}
         <Button
           variant="ghost"
           size="xs"
-          onClick={() => refresh(true)}
+          onClick={() => {
+            if (mode === "features") setFeatureRebuild((n) => n + 1);
+            else refresh(true);
+          }}
           disabled={building}
         >
           {building ? "rebuilding…" : "Rebuild"}
@@ -281,7 +420,7 @@ function SemanticGraphInner({ repoRoot, onClose }: Props) {
           type="button"
           onClick={onClose}
           title="Close"
-          className="ml-auto w-6 h-6 rounded text-text-4 hover:text-text-1 hover:bg-state-hover flex items-center justify-center"
+          className="ml-auto w-6 h-6 rounded text-text-4 hover:text-text-1 hover:bg-bg-2 flex items-center justify-center"
         >
           ×
         </button>
@@ -293,7 +432,10 @@ function SemanticGraphInner({ repoRoot, onClose }: Props) {
         </div>
       )}
 
-      <div className="flex-shrink-0 border-b border-line-soft px-3 py-2 flex items-center gap-2 flex-wrap text-xs">
+      <div
+        className="flex-shrink-0 border-b border-line-soft px-3 py-2 flex items-center gap-2 flex-wrap text-xs"
+        hidden={mode !== "pieces"}
+      >
         <input
           type="search"
           value={search}
@@ -318,25 +460,49 @@ function SemanticGraphInner({ repoRoot, onClose }: Props) {
           />
           include docs
         </label>
-        {graph && graph.stats.communities > 1 && (
+        {view && view.stats.communities > 1 && (
           <CommunityFilter
             current={communityFilter}
-            count={graph.stats.communities}
+            count={view.stats.communities}
             onPick={setCommunityFilter}
           />
         )}
+        {focusId && (
+          <button
+            type="button"
+            onClick={() => setFocusId(null)}
+            title="Back to the overview"
+            className="px-1.5 py-0.5 text-xs rounded border border-line bg-bg-3 text-text-1 hover:bg-bg-2"
+          >
+            focused: {graphNodeById.get(focusId)?.name ?? focusId} ×
+          </button>
+        )}
       </div>
 
+      {mode === "features" ? (
+        <div className="flex-1 min-h-0 overflow-hidden bg-bg-1 relative">
+          <FeatureMapView
+            repoRoot={repoRoot}
+            rebuildSignal={featureRebuild}
+            onDrillDown={(q) => {
+              setSelectedId(null);
+              setFocusId(null);
+              setSearch(q);
+              setMode("pieces");
+            }}
+          />
+        </div>
+      ) : (
       <div className="flex-1 min-h-0 flex">
         <div className="flex-1 min-w-0 overflow-hidden bg-bg-1 relative">
           {loading || building ? (
             <div className="absolute inset-0 flex items-center justify-center text-text-4 text-sm">
               {building ? "building graph…" : "loading…"}
             </div>
-          ) : filtered ? (
+          ) : view ? (
             <GraphCanvas
-              nodes={filtered.nodes}
-              edges={filtered.edges}
+              nodes={view.nodes}
+              edges={view.edges}
               hoverId={hoverId}
               selectedId={selectedId}
               fitSelectionSignal={fitSelectionSignal}
@@ -350,25 +516,43 @@ function SemanticGraphInner({ repoRoot, onClose }: Props) {
           <SelectionPanel
             node={selectedNode}
             links={selectedLinks}
+            linkTotals={
+              explain && explain.node.id === selectedId
+                ? explain.inbound_total + explain.outbound_total
+                : null
+            }
             onPick={focusNode}
             onFocus={() => {
               if (selectedNode) focusNode(selectedNode.id);
             }}
             onClear={() => setSelectedId(null)}
+            onExpand={
+              selectedNode ? () => setFocusId(selectedNode.id) : undefined
+            }
+            onRunPath={runPath}
+            pathBusy={pathBusy}
           />
+          {pathResult && (
+            <PathPanel
+              path={pathResult}
+              onPick={focusNode}
+              onClear={() => setPathResult(null)}
+            />
+          )}
           <SidePanel
             label="Hubs"
             nodes={gods}
             onPick={focusNode}
-            empty="No hubs here yet, not enough connections to form one."
+            empty="No hubs here yet — not enough connections to form one."
           />
           <SurprisesPanel
             edges={surprises}
-            allNodes={graph?.nodes ?? []}
+            allNodes={view?.nodes ?? []}
             onPick={focusNode}
           />
         </aside>
       </div>
+      )}
     </div>
   );
 }
@@ -398,7 +582,12 @@ function GraphCanvas({
 }) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [size, setSize] = useState({ w: 800, h: 560 });
-  const [, forceTick] = useState(0);
+  // Bumped exactly once per simulation REBUILD, never per tick. React needs
+  // one render to materialise the <g> elements for a new node/edge set; from
+  // then on the tick loop writes x/y straight into those elements (see
+  // `paintPositions`). Ticking through React state instead meant a settling
+  // graph re-rendered every visible node + every edge ~60×/s.
+  const [, bumpLayout] = useState(0);
   const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
   const transformRef = useRef(transform);
   transformRef.current = transform;
@@ -406,12 +595,41 @@ function GraphCanvas({
 
   // Track sim node objects in a ref so React state changes don't recreate
   // the simulation on every render. The sim is the source of truth for
-  // x/y positions; we just trigger re-renders on rAF tick.
+  // x/y positions; the rAF tick paints them into the DOM directly.
   const simRef = useRef<Simulation<SimNode, SimLink> | null>(null);
   const simNodesRef = useRef<Map<string, SimNode>>(new Map());
+  // Live DOM handles for everything the sim moves, registered by ref
+  // callbacks on the rendered elements. React still owns structure and
+  // styling — only the geometry comes from these writes.
+  const nodeElsRef = useRef<Map<string, SVGGElement>>(new Map());
+  const edgeElsRef = useRef<Map<string, EdgeHandle>>(new Map());
   const nodeById = useMemo(() => {
     return new Map(nodes.map((n) => [n.id, n] as const));
   }, [nodes]);
+
+  // Push the sim's current positions into the DOM. Runs on every tick, so it
+  // allocates nothing beyond the path string and never touches React state.
+  const paintPositions = useCallback(() => {
+    const sims = simNodesRef.current;
+    for (const [id, el] of nodeElsRef.current) {
+      const sn = sims.get(id);
+      if (!sn || sn.x == null || sn.y == null) continue;
+      el.setAttribute("transform", `translate(${sn.x} ${sn.y})`);
+    }
+    for (const h of edgeElsRef.current.values()) {
+      const a = sims.get(h.from);
+      const b = sims.get(h.to);
+      if (!a || !b || a.x == null || a.y == null || b.x == null || b.y == null)
+        continue;
+      const d = edgeGeometry(a.x, a.y, b.x, b.y, h.index).d;
+      // One or two <path> children — the base curve plus the animated
+      // "surprise" overlay — and both ride the same geometry.
+      for (let i = 0; i < h.el.children.length; i++) {
+        const child = h.el.children[i];
+        if (child.tagName === "path") child.setAttribute("d", d);
+      }
+    }
+  }, []);
 
   // ResizeObserver — fill the parent container, react to layout shifts.
   useLayoutEffect(() => {
@@ -511,12 +729,13 @@ function GraphCanvas({
       .alphaDecay(0.025)
       .velocityDecay(0.3);
 
-    sim.on("tick", () => {
-      forceTick((t) => (t + 1) & 0xffff);
-    });
+    sim.on("tick", paintPositions);
 
     simRef.current?.stop();
     simRef.current = sim;
+    // The node/edge set just changed, so let React render it once against the
+    // seeded positions; every frame after this is a direct DOM write.
+    bumpLayout((t) => (t + 1) & 0xffff);
 
     return () => {
       sim.stop();
@@ -631,6 +850,10 @@ function GraphCanvas({
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
     if (d.kind === "node") {
+      // Drop the drag's heat floor. `onNodePointerDown` raises alphaTarget so
+      // the layout stays fluid under the cursor; leaving it raised means alpha
+      // can never decay past it and the sim runs forever after one drag.
+      simRef.current?.alphaTarget(0);
       // Drag-released node stays pinned. Double-click to free.
       setPinned((prev) => {
         const next = new Set(prev);
@@ -881,8 +1104,21 @@ function GraphCanvas({
               const stroke = relationColor(e);
               const sw = (e.surprise ? 1.35 : 0.85) / Math.sqrt(t.k);
               const geom = edgeGeometry(a.x, a.y, b.x, b.y, i);
+              const handleKey = `${e.from}-${e.to}-${i}`;
               return (
-                <g key={`${e.from}-${e.to}-${i}`}>
+                <g
+                  key={handleKey}
+                  ref={(el) => {
+                    if (el)
+                      edgeElsRef.current.set(handleKey, {
+                        el,
+                        from: e.from,
+                        to: e.to,
+                        index: i,
+                      });
+                    else edgeElsRef.current.delete(handleKey);
+                  }}
+                >
                   <path
                     d={geom.d}
                     fill="none"
@@ -934,6 +1170,10 @@ function GraphCanvas({
                 <g
                   key={n.id}
                   data-node-id={n.id}
+                  ref={(el) => {
+                    if (el) nodeElsRef.current.set(n.id, el);
+                    else nodeElsRef.current.delete(n.id);
+                  }}
                   transform={`translate(${sn.x} ${sn.y})`}
                   opacity={opacity}
                   onPointerDown={(e) => onNodePointerDown(e, n.id)}
@@ -1110,7 +1350,7 @@ function IconButton({
       aria-label={title}
       disabled={disabled || !onClick}
       onClick={onClick}
-      className="w-6 h-6 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-state-hover disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-text-3"
+      className="w-6 h-6 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-bg-2 disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-text-3"
     >
       {children}
     </button>
@@ -1128,16 +1368,26 @@ function Divider() {
 function SelectionPanel({
   node,
   links,
+  linkTotals,
   onPick,
   onFocus,
   onClear,
+  onExpand,
+  onRunPath,
+  pathBusy,
 }: {
   node: KgNode | null;
   links: SelectedLink[];
+  /** True whole-graph connection count from explain; null while loading. */
+  linkTotals: number | null;
   onPick: (id: string) => void;
   onFocus: () => void;
   onClear: () => void;
+  onExpand?: () => void;
+  onRunPath: (to: string) => void;
+  pathBusy: boolean;
 }) {
+  const [pathTo, setPathTo] = useState("");
   return (
     <div className="flex-shrink-0 max-h-[46%] flex flex-col border-b border-line-soft">
       <div className="section-label px-3 py-1.5 border-b border-line-soft flex items-center gap-2">
@@ -1150,7 +1400,7 @@ function SelectionPanel({
         </IconButton>
       </div>
       {!node ? (
-        <div className="text-text-4 text-xs px-3 py-2">Nothing selected. Click a piece to see what it connects to.</div>
+        <div className="text-text-4 text-xs px-3 py-2">Nothing selected — click a piece to see what it connects to.</div>
       ) : (
         <>
           <div className="px-3 py-2 border-b border-line-soft">
@@ -1167,16 +1417,65 @@ function SelectionPanel({
             <div className="text-text-4 text-2xs truncate mt-1" title={node.file}>
               {node.kind} · {compactPath(node.file, node.line)}
             </div>
+            {node.provenance === "checkpoint" && (
+              <div
+                className="text-text-4 text-2xs font-mono truncate mt-0.5"
+                title="Canonical id — the same identity Aura's history, Atlas and rewind cite for this symbol"
+              >
+                {node.id}
+              </div>
+            )}
             <div className="flex items-center gap-1.5 mt-2 text-2xs">
               <span title="How many other pieces connect to this one">
-                <Badge>{node.degree} {node.degree === 1 ? "link" : "links"}</Badge>
+                <Badge>
+                  {linkTotals ?? node.degree}{" "}
+                  {(linkTotals ?? node.degree) === 1 ? "link" : "links"}
+                </Badge>
               </span>
+              {node.provenance === "checkpoint" && (
+                <span title="Verified identity — this piece is tracked in Aura's semantic history under the id shown above">
+                  <Badge tone="teal">tracked</Badge>
+                </span>
+              )}
               {node.god && (
-                <span title="A hub. Lots of other pieces depend on this one, so changes here ripple wide">
+                <span title="A hub — lots of other pieces depend on this one, so changes here ripple wide">
                   <Badge tone="gold">hub</Badge>
                 </span>
               )}
+              {onExpand && (
+                <button
+                  type="button"
+                  onClick={onExpand}
+                  title="Load this piece's neighbourhood into the map"
+                  className="px-1.5 py-0.5 rounded border border-line-soft bg-bg-2 text-text-3 hover:text-text-1 hover:bg-bg-3"
+                >
+                  expand
+                </button>
+              )}
             </div>
+            <form
+              className="flex items-center gap-1 mt-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                onRunPath(pathTo);
+              }}
+            >
+              <input
+                type="text"
+                value={pathTo}
+                onChange={(e) => setPathTo(e.target.value)}
+                placeholder="path to…"
+                title="Find the shortest chain of links from this piece to another"
+                className="bg-bg-1 border border-line-soft rounded px-1.5 py-0.5 text-xs text-text-1 outline-none focus:border-text-4 flex-1 min-w-0"
+              />
+              <button
+                type="submit"
+                disabled={pathBusy || !pathTo.trim()}
+                className="px-1.5 py-0.5 text-xs rounded border border-line-soft bg-bg-2 text-text-3 hover:text-text-1 hover:bg-bg-3 disabled:opacity-40"
+              >
+                {pathBusy ? "…" : "go"}
+              </button>
+            </form>
           </div>
           <div className="overflow-y-auto min-h-0">
             {links.length === 0 ? (
@@ -1189,14 +1488,14 @@ function SelectionPanel({
                   key={`${edge.from}-${edge.to}-${i}`}
                   type="button"
                   onClick={() => onPick(other.id)}
-                  className="w-full text-left px-3 py-1.5 hover:bg-state-hover border-b border-line-soft last:border-b-0"
+                  className="w-full text-left px-3 py-1.5 hover:bg-bg-2 border-b border-line-soft last:border-b-0"
                   title={`${edge.kind} ${direction === "out" ? "to" : "from"} ${other.id}`}
                 >
                   <div className="flex items-center gap-1.5 text-xs">
                     <span className="text-text-4">{direction === "out" ? "->" : "<-"}</span>
                     <span className="text-text-1 truncate flex-1">{other.name}</span>
                     {edge.surprise && (
-                      <span className="text-amber-400 text-2xs" title="An unexpected link. These two pieces sit in different clusters but still depend on each other">unexpected</span>
+                      <span className="text-amber-400 text-2xs" title="An unexpected link — these two pieces sit in different clusters but still depend on each other">unexpected</span>
                     )}
                   </div>
                   <div className="text-text-4 text-2xs truncate">
@@ -1217,7 +1516,7 @@ function Badge({
   tone,
 }: {
   children: React.ReactNode;
-  tone?: "gold";
+  tone?: "gold" | "teal";
 }) {
   return (
     <span
@@ -1225,7 +1524,9 @@ function Badge({
         "px-1.5 py-0.5 rounded border tabular-nums",
         tone === "gold"
           ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
-          : "border-line-soft bg-bg-2 text-text-3",
+          : tone === "teal"
+            ? "border-teal-500/30 bg-teal-500/10 text-teal-300"
+            : "border-line-soft bg-bg-2 text-text-3",
       ].join(" ")}
     >
       {children}
@@ -1259,7 +1560,7 @@ function KindFilter({
               "px-1.5 py-0.5 text-xs rounded border",
               active
                 ? "bg-bg-3 border-line text-text-1"
-                : "bg-bg-1 border-line-soft text-text-4 hover:bg-state-hover",
+                : "bg-bg-1 border-line-soft text-text-4 hover:bg-bg-2",
             ].join(" ")}
           >
             {label}
@@ -1400,7 +1701,7 @@ function SidePanel({
             key={n.id}
             type="button"
             onClick={() => onPick(n.id)}
-            className="w-full text-left px-3 py-1.5 hover:bg-state-hover border-b border-line-soft last:border-b-0"
+            className="w-full text-left px-3 py-1.5 hover:bg-bg-2 border-b border-line-soft last:border-b-0"
             title={n.id}
           >
             <div className="flex items-center gap-1.5">
@@ -1443,7 +1744,7 @@ function SurprisesPanel({
       <div className="overflow-y-auto flex-1">
         {edges.length === 0 && (
           <div className="text-text-4 text-xs px-3 py-2">
-            Nothing unexpected. The clusters stay nicely separate.
+            Nothing unexpected — the clusters stay nicely separate.
           </div>
         )}
         {edges.map((e, i) => {
@@ -1478,6 +1779,77 @@ function SurprisesPanel({
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+function PathPanel({
+  path,
+  onPick,
+  onClear,
+}: {
+  path: KgPath;
+  onPick: (id: string) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="flex-1 min-h-0 flex flex-col border-b border-line-soft">
+      <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-line-soft">
+        <span className="section-label flex-1">
+          Connection chain
+        </span>
+        {path.found && (
+          <span
+            className="text-text-4 text-2xs tabular-nums"
+            title="Confidence — the product of every link's confidence along the chain"
+          >
+            {Math.round(path.confidence * 100)}%
+            {!path.directed && " · either direction"}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onClear}
+          title="Dismiss this chain"
+          className="text-text-4 hover:text-text-1 text-xs leading-none"
+        >
+          ×
+        </button>
+      </div>
+      <div className="overflow-y-auto flex-1">
+        {!path.found && (
+          <div className="text-text-4 text-xs px-3 py-2">
+            No chain of links found between those two pieces.
+          </div>
+        )}
+        {path.hops.map((hop, i) => (
+          <button
+            key={hop.node.id}
+            type="button"
+            onClick={() => onPick(hop.node.id)}
+            className="w-full text-left px-3 py-1.5 hover:bg-bg-2 border-b border-line-soft last:border-b-0"
+            title={hop.node.id}
+          >
+            <div className="flex items-center gap-1.5">
+              {i > 0 && (
+                <span className="text-text-4 text-2xs">
+                  {hop.via_kind ?? "linked"}
+                  {hop.via_confidence != null &&
+                    ` ${Math.round(hop.via_confidence * 100)}%`}{" "}
+                  →
+                </span>
+              )}
+              <span className="text-text-1 text-sm font-medium truncate flex-1">
+                {hop.node.name}
+              </span>
+            </div>
+            <div className="text-text-4 text-2xs truncate">
+              {hop.node.kind} · {hop.node.file}
+              {hop.node.line > 0 && `:${hop.node.line}`}
+            </div>
+          </button>
+        ))}
       </div>
     </div>
   );

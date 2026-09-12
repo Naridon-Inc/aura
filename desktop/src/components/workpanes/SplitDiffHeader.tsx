@@ -32,11 +32,15 @@ import type { AtlasHoverEntry, ChangedSymbol, FileChangeNote } from "../../lib/a
 import { relativeAgeAuto } from "../../lib/relativeTime";
 import { loadAtlasIndex, lookupEntry, type AtlasIndex } from "../../lib/atlasHover";
 import { humanizeIdentifier as humanizeWords } from "../../lib/prove";
-import { sentenceCase } from "../../lib/textCase";
-import { countOf } from "../../lib/plural";
+import { sentenceCase } from "@shared/textCase";
+import { countOf } from "@shared/plural";
 import {
+  explanationFailed,
+  forgetExplanation,
+  isInferredFromDiff,
   loadExplanation,
   loadSymbolExplanations,
+  whyIsRecorded,
   type ChangeExplanation,
   type SymbolMeanings,
 } from "../../lib/changeExplain";
@@ -209,6 +213,51 @@ function whereParts(file: string): { folder: string; base: string } {
   return { folder: norm.slice(0, i + 1), base: norm.slice(i + 1) };
 }
 
+/** The piece's real-world name: the Code Atlas title when we have one, else the
+ *  identifier humanized with the SAME helper the Goals surface uses. */
+function pieceTitle(s: ChangedSymbol, entry: AtlasHoverEntry | undefined): string {
+  return entry?.title?.trim() || titleize(s.identifier);
+}
+
+/** Meaning precedence, most-specific first: this piece's own model line for
+ *  this side → the file-level generated line when it is the lone changed piece
+ *  → the atlas summary → a plain "what kind of thing changed" fallback. Every
+ *  path lands on real words, never an empty placeholder.
+ *
+ *  Shared with the focused-piece caption in the diff below, so clicking a piece
+ *  shows down there exactly the sentence it shows up here. */
+function pieceLine(
+  s: ChangedSymbol,
+  symbolMeaning: string | undefined,
+  meaningOverride: string | undefined,
+  entry: AtlasHoverEntry | undefined,
+): string {
+  return (
+    symbolMeaning?.trim() ||
+    meaningOverride?.trim() ||
+    entry?.summary?.trim() ||
+    pieceMeaning(s)
+  );
+}
+
+/** Which side-column a piece appears in. A `modified` piece is on both. */
+function onSide(s: ChangedSymbol, side: "previous" | "next"): boolean {
+  return side === "previous"
+    ? s.change === "deleted" || s.change === "modified"
+    : s.change === "added" || s.change === "modified";
+}
+
+/** The piece the reader clicked, handed up so the diff below can highlight its
+ *  lines and carry its plain-language line down there with it. Re-sent whenever
+ *  the model finishes writing that line, so the caption upgrades in place
+ *  exactly as the node above does. */
+export type FocusPick = {
+  side: "previous" | "next";
+  symbol: ChangedSymbol;
+  title: string;
+  meaning: string;
+};
+
 /** One piece inside a side-column, meaning-first. `showSignature` gates the raw
  *  signature (into the mechanism line's hover) so it only annotates the side it
  *  truthfully belongs to. `entry` is the atlas meaning when we have it. When
@@ -226,6 +275,8 @@ function SideSymbol({
   meaningOverride,
   onBringBack,
   busySymbol,
+  selected,
+  onSelect,
 }: {
   s: ChangedSymbol;
   tone: string;
@@ -248,19 +299,19 @@ function SideSymbol({
   meaningOverride?: string;
   onBringBack?: (symbol: string, relFile: string) => void;
   busySymbol?: string | null;
+  /** This piece is the one currently highlighted in the diff below. */
+  selected?: boolean;
+  /** Show me this piece in the code: highlight its lines below and caption
+   *  them with the same words this node shows. Clicking the selected piece
+   *  again clears it. Absent on a surface with no diff underneath. */
+  onSelect?: () => void;
 }) {
-  const title = entry?.title?.trim() || titleize(s.identifier);
+  const title = pieceTitle(s, entry);
   // This piece's own model line for this side (the caller passed the right-era
   // map). Empty until the model writes it — the reader-facing node NEVER shows a
   // mined variable name, so while this is empty the node falls through to a
   // plain generic placeholder, then swaps to these words when they land.
-  const ownLine = symbolMeaning?.trim() || "";
-  // Meaning precedence, most-specific first: this piece's own model line →
-  // the file-level generated line for a lone piece → the atlas summary → a
-  // plain "what kind of thing changed" fallback. Every path lands on real
-  // words, never an empty placeholder.
-  const meaning =
-    ownLine || meaningOverride?.trim() || entry?.summary?.trim() || pieceMeaning(s);
+  const meaning = pieceLine(s, symbolMeaning, meaningOverride, entry);
   const why = s.rationale?.trim() || "";
   // A modified piece has a prior version to restore (shown on the new side); a
   // deleted one can be brought back (shown on the old side). An added piece has
@@ -271,38 +322,70 @@ function SideSymbol({
       (side === "previous" && s.change === "deleted"));
   const busy = busySymbol === s.identifier;
 
+  // The reader-facing part of the node: name, plain meaning, why, mechanism.
+  // Lifted out so it can be wrapped in a button where there is a diff below to
+  // point at, and left as plain markup where there isn't.
+  const body = (
+    <>
+      {/* Meaning-first headline: the real-world name + a plain change word. */}
+      <div className="flex items-baseline gap-1.5">
+        <span className="text-sm font-medium text-text-1">{title}</span>
+        <span className="section-label">{changeWord(s.change)}</span>
+      </div>
+      {/* What it does / what happened to it, in plain English. */}
+      <div className="text-xs leading-snug text-text-3">{meaning}</div>
+      {/* Why this specific change, when a reason was recorded for the piece. */}
+      {why ? (
+        <div className="text-xs leading-snug text-text-3">
+          <span className="text-text-5">Why: </span>
+          {why}
+        </div>
+      ) : null}
+      {/* Mechanism on demand: the raw identifier + kind, muted. The full
+          signature (the noisiest, most code-shaped part) lives in the hover so
+          it's there for an engineer without shouting at everyone else. */}
+      <div
+        className="mt-0.5 break-words font-mono text-2xs text-text-5"
+        title={showSignature && s.signature ? s.signature : undefined}
+      >
+        {s.identifier}
+        <span className="ml-1.5">{prettyKind(s.kind)}</span>
+      </div>
+    </>
+  );
+
   return (
     <li className="flex min-w-0 gap-1.5 leading-snug">
       <span className={"mt-1 w-2 shrink-0 text-center font-mono text-xs " + tone}>
-        {s.change === "deleted" ? "−" : s.change === "added" ? "+" : "~"}
+        {s.change === "deleted" ? "\u2212" : s.change === "added" ? "+" : "~"}
       </span>
-      <div className="min-w-0">
-        {/* Meaning-first headline: the real-world name + a plain change word. */}
-        <div className="flex items-baseline gap-1.5">
-          <span className="text-sm font-medium text-text-1">{title}</span>
-          <span className="section-label">
-            {changeWord(s.change)}
-          </span>
-        </div>
-        {/* What it does / what happened to it, in plain English. */}
-        <div className="text-xs leading-snug text-text-3">{meaning}</div>
-        {/* Why this specific change, when a reason was recorded for the piece. */}
-        {why ? (
-          <div className="text-xs leading-snug text-text-3">
-            <span className="text-text-5">Why: </span>
-            {why}
-          </div>
-        ) : null}
-        {/* Mechanism on demand: the raw identifier + kind, muted. The full
-            signature (the noisiest, most code-shaped part) lives in the hover so
-            it's there for an engineer without shouting at everyone else. */}
-        <div
-          className="mt-0.5 break-words font-mono text-2xs text-text-5"
-          title={showSignature && s.signature ? s.signature : undefined}
-        >
-          {s.identifier}
-          <span className="ml-1.5">{prettyKind(s.kind)}</span>
-        </div>
+      <div className="min-w-0 flex-1">
+        {/* Click the piece, see the piece: its lines light up in the code below
+            and the same sentence is pinned over them. The rail is the accent
+            that also marks those lines, so the two reads as one selection. A
+            transparent rail when unpicked keeps the text from shifting. */}
+        {onSelect ? (
+          <button
+            type="button"
+            onClick={onSelect}
+            aria-pressed={!!selected}
+            title={
+              selected
+                ? "Stop highlighting this piece in the code below"
+                : "Show this piece in the code below"
+            }
+            className={
+              "-ml-1.5 block w-full rounded border-l-2 pl-1.5 pr-1 text-left hover:bg-state-hover " +
+              (selected
+                ? "border-[var(--color-accent)] bg-state-hover"
+                : "border-transparent")
+            }
+          >
+            {body}
+          </button>
+        ) : (
+          body
+        )}
         {/* Surgical undo, right where you see the change. Only a piece with a
             prior saved version (a changed piece on the new side, a removed one
             on the old side) offers it — an added piece has nothing to go back
@@ -315,7 +398,7 @@ function SideSymbol({
             className="mt-1 rounded border border-line-soft px-1.5 py-px text-xs text-text-3 hover:border-blue hover:text-blue disabled:opacity-60"
             title="Bring just this one piece back to its previous saved version"
           >
-            {busy ? "Bringing back…" : "Bring this back"}
+            {busy ? "Bringing back\u2026" : "Bring this back"}
           </button>
         ) : null}
       </div>
@@ -340,6 +423,8 @@ function SideColumn({
   symbolMeanings,
   onBringBack,
   busySymbol,
+  selectedIdentifier,
+  onSelect,
 }: {
   label: string;
   symbols: ChangedSymbol[];
@@ -360,6 +445,9 @@ function SideColumn({
   symbolMeanings?: Map<string, string>;
   onBringBack?: (symbol: string, relFile: string) => void;
   busySymbol?: string | null;
+  /** The piece currently highlighted in the diff below, if it is on this side. */
+  selectedIdentifier?: string | null;
+  onSelect?: (identifier: string) => void;
 }) {
   const lone = symbols.length === 1;
   return (
@@ -380,6 +468,8 @@ function SideColumn({
               meaningOverride={lone ? sideLine : undefined}
               onBringBack={onBringBack}
               busySymbol={busySymbol}
+              selected={selectedIdentifier === s.identifier}
+              onSelect={onSelect ? () => onSelect(s.identifier) : undefined}
             />
           ))}
         </ul>
@@ -442,6 +532,7 @@ export function SplitDiffHeader({
    *  right where you see what changed. Omitted on read-only diff views. */
   onBringBack,
   busySymbol,
+  onFocusPiece,
 }: {
   note: FileChangeNote;
   /** When this change landed (commit time, unix seconds). Omitted → no "when". */
@@ -455,6 +546,11 @@ export function SplitDiffHeader({
   stacked: boolean;
   onBringBack?: (symbol: string, relFile: string) => void;
   busySymbol?: string | null;
+  /** Told which piece the reader picked, so the diff below can highlight it and
+   *  caption those lines with the same words this header shows. Re-sent when
+   *  the model finishes writing that line. Must be referentially stable — it is
+   *  an effect dependency. Omit on a surface with no diff underneath. */
+  onFocusPiece?: (pick: FocusPick | null) => void;
 }) {
   // The Code Atlas meaning index for this repo (one shared read per repo).
   // Degrades to null → the side-columns fall back to humanized identifiers.
@@ -474,6 +570,10 @@ export function SplitDiffHeader({
   // header paints immediately from the change-note; this silently upgrades it in
   // place once the words arrive (no spinner the reader notices).
   const [exp, setExp] = useState<ChangeExplanation | null>(null);
+  // Bumped by the retry control after a failure. It is the only thing retry
+  // touches: the picked piece, the open pieces index and the diff's scroll all
+  // belong to other state and are left exactly where the reader put them.
+  const [retry, setRetry] = useState(0);
   useEffect(() => {
     let alive = true;
     setExp(null);
@@ -483,7 +583,11 @@ export function SplitDiffHeader({
     return () => {
       alive = false;
     };
-  }, [repoRoot, note.file, commit]);
+  }, [repoRoot, note.file, commit, retry]);
+  const retryExplanation = () => {
+    forgetExplanation(repoRoot, note.file, commit);
+    setRetry((n) => n + 1);
+  };
 
   // Per-piece meanings — what EACH changed function/class does NOW and what it
   // USED TO DO, in plain words, always model-written (never a mined variable
@@ -523,6 +627,57 @@ export function SplitDiffHeader({
     };
   }, [repoRoot, note.file, commit, note.symbols]);
 
+  // Which piece the reader picked, if any. Held here because this is where the
+  // pieces are listed; the diff below is told about it rather than owning it.
+  const [pick, setPick] = useState<{ side: "previous" | "next"; identifier: string } | null>(
+    null,
+  );
+  // A different file (or a different commit's version of it) is a different set
+  // of pieces — carrying a selection across would highlight a name that happens
+  // to match in code nobody picked.
+  useEffect(() => {
+    setPick(null);
+  }, [note.file, commit]);
+
+  // Publish the pick, and keep republishing it: this piece's plain-language
+  // line is written by the model AFTER the first paint, and the caption pinned
+  // over the code below has to upgrade in place exactly as the node here does.
+  useEffect(() => {
+    if (!onFocusPiece) return;
+    if (!pick) {
+      onFocusPiece(null);
+      return;
+    }
+    const sideSymbols = note.symbols.filter((x) => onSide(x, pick.side));
+    const picked = sideSymbols.find((x) => x.identifier === pick.identifier);
+    if (!picked) {
+      onFocusPiece(null);
+      return;
+    }
+    const entry = index ? lookupEntry(index, picked.identifier, note.file) : undefined;
+    const sideMap = pick.side === "previous" ? symbolMeanings.before : symbolMeanings.now;
+    // The file-level line only speaks for a piece when it is the ONLY one that
+    // changed on that side — the same rule the column applies.
+    const override =
+      sideSymbols.length === 1
+        ? (pick.side === "previous" ? exp?.before : exp?.what) || undefined
+        : undefined;
+    onFocusPiece({
+      side: pick.side,
+      symbol: picked,
+      title: pieceTitle(picked, entry),
+      meaning: pieceLine(picked, sideMap.get(picked.identifier), override, entry),
+    });
+  }, [pick, note.symbols, note.file, index, symbolMeanings, exp, onFocusPiece]);
+
+  /** Clicking the picked piece again clears it, so the diff goes back to plain. */
+  const choose = (side: "previous" | "next") => (identifier: string) =>
+    setPick((prev) =>
+      prev && prev.side === side && prev.identifier === identifier
+        ? null
+        : { side, identifier },
+    );
+
   // Collapse the pieces index so a power user can reclaim the full diff height.
   const [open, setOpen] = useState(true);
 
@@ -551,6 +706,21 @@ export function SplitDiffHeader({
   // the whole-file summary the per-piece rows break down), or the index is
   // collapsed (the pair is then the only place the before/now story lives).
   const showPair = (hasBefore || nowDoes.length > 0) && (pieceCount !== 1 || !open);
+
+  // WHY — why this change was made, and how it now works.
+  //
+  // This band used to exist here and had gone missing, so a reviewer got the
+  // before/after of a change with no account of the reason for it. It is back,
+  // and it now says WHOSE account it is. `aura snapshot-file --why` records the
+  // author's own words against a file; when one is recorded for this exact
+  // revision the backend returns it verbatim and Aura quotes it. Otherwise Aura
+  // wrote the sentence by reading the diff, which is a different kind of claim
+  // and is marked as one. Nothing is invented for a change nobody explained:
+  // with no words at all, the band simply isn't there.
+  const why = exp?.why?.trim() || "";
+  const whyRecorded = whyIsRecorded(exp);
+  const whyAuthor = (exp?.why_author ?? "").trim();
+  const failed = explanationFailed(exp);
 
   return (
     <div className="shrink-0 border-b border-line-soft bg-bg-1/60">
@@ -607,6 +777,47 @@ export function SplitDiffHeader({
           )
         ) : null}
 
+        {why ? (
+          <p className="mt-2 text-sm leading-snug text-text-2">
+            <span className="text-text-5">
+              {whyRecorded ? "Why · " : "Why & how · "}
+            </span>
+            {why}
+            <span
+              className="ml-1.5 whitespace-nowrap text-xs text-text-4"
+              title={
+                whyRecorded
+                  ? "The person or agent who made this change wrote this reason down against this file."
+                  : isInferredFromDiff(exp)
+                    ? "Nobody recorded a reason, and no model was reachable, so Aura worked this out from the change itself."
+                    : "Nobody recorded a reason, so Aura worked this out by reading the change itself."
+              }
+            >
+              {whyRecorded
+                ? whyAuthor
+                  ? `stated by ${whyAuthor}`
+                  : "stated"
+                : "Aura's reading"}
+            </span>
+          </p>
+        ) : null}
+
+        {/* A failed request is not "nothing to say". The diff below stays fully
+            usable either way, and retrying costs the reader nothing they had
+            already done — see `retryExplanation`. */}
+        {failed ? (
+          <p className="mt-2 flex flex-wrap items-baseline gap-1.5 text-sm leading-snug text-text-3">
+            <span>Aura couldn&apos;t write an account of this change.</span>
+            <button
+              type="button"
+              onClick={retryExplanation}
+              className="rounded px-1.5 py-px text-xs text-text-2 underline decoration-dotted underline-offset-2 hover:bg-state-hover hover:text-text-1"
+            >
+              Try again
+            </button>
+          </p>
+        ) : null}
+
         {/* WHEN · WHERE · WHO — the reality, dead-visible. Every fact is real or
             omitted: the commit time, the file it's in, who made it. */}
         <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-text-4">
@@ -648,6 +859,8 @@ export function SplitDiffHeader({
               symbolMeanings={symbolMeanings.before}
               onBringBack={onBringBack}
               busySymbol={busySymbol}
+              selectedIdentifier={pick?.side === "previous" ? pick.identifier : null}
+              onSelect={onFocusPiece ? choose("previous") : undefined}
             />
             <div
               className={
@@ -671,6 +884,8 @@ export function SplitDiffHeader({
               symbolMeanings={symbolMeanings.now}
               onBringBack={onBringBack}
               busySymbol={busySymbol}
+              selectedIdentifier={pick?.side === "next" ? pick.identifier : null}
+              onSelect={onFocusPiece ? choose("next") : undefined}
             />
           </div>
         </div>

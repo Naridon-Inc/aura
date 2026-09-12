@@ -805,6 +805,11 @@ async fn exec_post_to_page(
     // otherwise mint a new page.
     let existing_id = page.id.clone().filter(|s| !s.trim().is_empty());
 
+    // What the append was composed against, so a page that changes between the
+    // read and the write is a refused save rather than a lost paragraph.
+    // Overwrite states no base on purpose — replacing the page is the point.
+    let mut base_updated_at: Option<String> = None;
+
     let body = match (mode, &existing_id) {
         (WriteMode::Overwrite, _) | (WriteMode::Append, None) => stamped.clone(),
         (WriteMode::Append, Some(id)) => {
@@ -817,6 +822,7 @@ async fn exec_post_to_page(
             })
             .await
             .map_err(|e| format!("read page: {e}"))?;
+            base_updated_at = current.frontmatter.updated_at.clone();
             format!("{}\n\n{}", current.body.trim_end(), stamped)
         }
     };
@@ -836,6 +842,7 @@ async fn exec_post_to_page(
         archived_at: None,
         icon: None,
         folder: None,
+        base_updated_at,
     })
     .await
     .map_err(|e| format!("write page: {e}"))?;

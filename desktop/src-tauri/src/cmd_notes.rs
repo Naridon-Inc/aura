@@ -387,6 +387,17 @@ pub struct NoteWriteInput {
     /// ordinary body save.
     #[serde(default)]
     pub folder: Option<Option<String>>,
+    /// The `updated_at` the caller loaded, i.e. the revision it believes it is
+    /// editing. When the copy on disk is *newer* than this, someone else
+    /// changed the page since — MCP, a teammate over the live rail, another
+    /// window — and writing would silently drop their work. The save is
+    /// refused with [`NOTE_CONFLICT`] instead.
+    ///
+    /// Absent means "no opinion", which is how the read-modify-write callers
+    /// (archive, set-parent, folder moves) and the automations behave: they
+    /// take the disk copy first, so there is nothing stale to protect.
+    #[serde(default)]
+    pub base_updated_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -493,6 +504,26 @@ pub async fn notes_read(input: NoteReadInput) -> Result<Note, String> {
     })
 }
 
+/// Prefix of the error `notes_write` returns when the page on disk moved on
+/// under the caller. The rest of the string is a JSON object carrying both
+/// timestamps, so the surface can say *what* changed rather than "save
+/// failed". Kept a plain string because the command's success type is `Note`
+/// and every existing caller depends on that.
+pub const NOTE_CONFLICT: &str = "note-conflict:";
+
+/// Does writing over `disk` lose work the caller never saw?
+///
+/// Only a *strictly newer* disk copy is a conflict. Equal timestamps are the
+/// normal case — the caller loaded exactly what is there — and a disk copy
+/// with no timestamp at all (hand-written file, pre-frontmatter page) has
+/// nothing to compare, so it is not treated as newer.
+fn write_would_clobber(base: Option<&str>, disk: Option<&str>) -> bool {
+    match (base, disk) {
+        (Some(base), Some(disk)) => rfc3339_cmp(disk, base) == std::cmp::Ordering::Greater,
+        _ => false,
+    }
+}
+
 #[tauri::command]
 pub async fn notes_write(input: NoteWriteInput) -> Result<Note, String> {
     let repo = PathBuf::from(&input.repo_root);
@@ -512,6 +543,24 @@ pub async fn notes_write(input: NoteWriteInput) -> Result<Note, String> {
             ..NoteFrontmatter::default()
         }
     };
+    // Refuse before touching anything: a page the editor loaded minutes ago is
+    // not a licence to overwrite what has landed since. This is the whole of
+    // AURA-268 — an MCP edit was reverted by a desktop window that still held
+    // the older body, keeping only the fields it did not send.
+    if write_would_clobber(
+        input.base_updated_at.as_deref(),
+        frontmatter.updated_at.as_deref(),
+    ) {
+        return Err(format!(
+            "{NOTE_CONFLICT}{}",
+            serde_json::json!({
+                "id": id,
+                "disk_updated_at": frontmatter.updated_at,
+                "base_updated_at": input.base_updated_at,
+            })
+        ));
+    }
+
     // Who the *previous* version tagged — captured before we overwrite the
     // field — so we can DM only the people freshly added by this save.
     let prev_mentions = frontmatter.mentioned_handles.clone();
@@ -1204,6 +1253,116 @@ mod tests {
     fn body_on_disk(repo: &Path, scope: &NoteScope, bucket: &str, id: &str) -> String {
         let bytes = fs::read(note_path(repo, scope, bucket, id)).unwrap();
         split_frontmatter(&String::from_utf8_lossy(&bytes)).1
+    }
+
+    /// The write input a Pages editor sends for an ordinary body save.
+    fn edit(repo: &Path, id: &str, title: &str, body: &str, base: Option<&str>) -> NoteWriteInput {
+        NoteWriteInput {
+            repo_root: repo.display().to_string(),
+            scope: NoteScope::Team,
+            bucket: String::new(),
+            id: Some(id.to_string()),
+            body: body.to_string(),
+            title: Some(title.to_string()),
+            author: None,
+            visibility: None,
+            locked: None,
+            tags: None,
+            parent_id: None,
+            archived_at: None,
+            icon: None,
+            folder: None,
+            base_updated_at: base.map(|s| s.to_string()),
+        }
+    }
+
+    fn title_on_disk(repo: &Path, id: &str) -> Option<String> {
+        let bytes = fs::read(note_path(repo, &NoteScope::Team, "", id)).unwrap();
+        split_frontmatter(&String::from_utf8_lossy(&bytes)).0.title
+    }
+
+    #[tokio::test]
+    async fn a_save_against_a_stale_revision_is_refused() {
+        // AURA-268, exactly: MCP rewrote the page while a desktop window held
+        // the older copy, and the window's next save put the old title and old
+        // body back — keeping only the fields it had not sent, which is why
+        // the externally-added tags survived and made the loss look partial.
+        let repo = tmp_repo("stale");
+        seed(&repo, &NoteScope::Team, "", "n1", "the newer body", "2026-08-23T17:54:10Z");
+
+        let err = notes_write(edit(
+            &repo,
+            "n1",
+            "the older title",
+            "the older body",
+            Some("2026-08-23T17:40:00Z"),
+        ))
+        .await
+        .expect_err("a stale save must not be written");
+
+        assert!(err.starts_with(NOTE_CONFLICT), "unexpected error: {err}");
+        assert!(err.contains("2026-08-23T17:54:10"), "the error must name the newer revision: {err}");
+        assert_eq!(
+            body_on_disk(&repo, &NoteScope::Team, "", "n1").trim(),
+            "the newer body",
+            "the newer body must survive"
+        );
+        assert_eq!(title_on_disk(&repo, "n1").as_deref(), Some("n1"));
+    }
+
+    #[tokio::test]
+    async fn a_save_against_the_current_revision_goes_through() {
+        let repo = tmp_repo("current");
+        seed(&repo, &NoteScope::Team, "", "n1", "before", "2026-08-23T17:54:10Z");
+
+        let saved = notes_write(edit(
+            &repo,
+            "n1",
+            "Still mine",
+            "after",
+            Some("2026-08-23T17:54:10Z"),
+        ))
+        .await
+        .expect("an in-sync save must be written");
+
+        assert_eq!(saved.body, "after");
+        assert_eq!(body_on_disk(&repo, &NoteScope::Team, "", "n1").trim(), "after");
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_states_no_revision_is_not_blocked() {
+        // Archive, set-parent, folder moves and the automations all read the
+        // page off disk immediately before writing it back, so they have
+        // nothing stale to protect and must keep working unchanged.
+        let repo = tmp_repo("nobase");
+        seed(&repo, &NoteScope::Team, "", "n1", "before", "2026-08-23T17:54:10Z");
+
+        notes_write(edit(&repo, "n1", "t", "after", None))
+            .await
+            .expect("a caller with no stated revision writes as before");
+
+        assert_eq!(body_on_disk(&repo, &NoteScope::Team, "", "n1").trim(), "after");
+    }
+
+    #[test]
+    fn only_a_strictly_newer_disk_copy_is_a_conflict() {
+        assert!(write_would_clobber(
+            Some("2026-08-23T17:40:00Z"),
+            Some("2026-08-23T17:54:10Z")
+        ));
+        assert!(!write_would_clobber(
+            Some("2026-08-23T17:54:10Z"),
+            Some("2026-08-23T17:54:10Z")
+        ));
+        assert!(!write_would_clobber(
+            Some("2026-08-23T17:54:10Z"),
+            Some("2026-08-23T17:40:00Z")
+        ));
+        // A page with no timestamp on disk — hand-written, or from before the
+        // frontmatter existed — has nothing to compare, and refusing to save
+        // it would strand the writer with no way forward.
+        assert!(!write_would_clobber(Some("2026-08-23T17:54:10Z"), None));
+        assert!(!write_would_clobber(None, Some("2026-08-23T17:54:10Z")));
     }
 
     #[test]

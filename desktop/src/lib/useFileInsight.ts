@@ -14,7 +14,13 @@
 // CLI bridge.
 
 import { useEffect, useMemo, useState } from "react";
-import { api, type ChangeSummary, type IntentEntry, type OutlineNode } from "./api";
+import {
+  api,
+  type AskHit,
+  type ChangeSummary,
+  type IntentEntry,
+  type OutlineNode,
+} from "./api";
 import { useDocumentVisibility } from "./useDocumentVisibility";
 
 const POLL_MS = 8000;
@@ -70,6 +76,7 @@ export function useFileInsight(
   const [outline, setOutline] = useState<OutlineNode[]>([]);
   const [intents, setIntents] = useState<IntentEntry[]>([]);
   const [sessionIntent, setSessionIntent] = useState<IntentEntry | null>(null);
+  const [askHits, setAskHits] = useState<IntentEntry[]>([]);
   const [snapshotCount, setSnapshotCount] = useState<number>(0);
   const [whatSummary, setWhatSummary] = useState<ChangeSummary | null>(null);
   const visible = useDocumentVisibility();
@@ -84,6 +91,34 @@ export function useFileInsight(
     if (!relPath) return null;
     return relPath.split("/").pop() ?? relPath;
   }, [relPath]);
+
+  // The pass above can only see the newest fifty rows, and the mutation guard
+  // writes one per agent tool call — on a busy repo that is minutes of
+  // history, so anything edited last week reads as "no notes mention this
+  // file" however carefully its reason was written. This asks the whole log
+  // instead, through the same ranking `aura ask` and the MCP tool use, so a
+  // stated reason outranks a hook row that only restates the edit. Keyed on
+  // the path rather than the 8s poll: it reads every row, and the answer for a
+  // file does not change between two ticks.
+  useEffect(() => {
+    if (!repoRoot || !relPath) {
+      setAskHits([]);
+      return;
+    }
+    let cancelled = false;
+    void api
+      .auraAsk(repoRoot, relPath, 5)
+      .then((answer) => {
+        if (cancelled) return;
+        setAskHits(answer.hits.map((h, i) => askHitToIntent(h, relPath, i)));
+      })
+      .catch(() => {
+        if (!cancelled) setAskHits([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repoRoot, relPath]);
 
   useEffect(() => {
     if (!repoRoot || !absPath || !relPath) return;
@@ -223,13 +258,32 @@ export function useFileInsight(
     deletions,
     whatSummary,
     symbols,
-    relatedIntents: intents,
+    // The bound-changeset match is authoritative when it finds anything: it
+    // knows the note touched this file rather than inferring it. The ranked
+    // answer covers everything older than the window that pass can see.
+    relatedIntents: intents.length > 0 ? intents : askHits,
     sessionIntent,
     snapshotCount,
     refresh: () => {
       // Toggling absPath via a state key is overkill — consumers
       // re-mount on path change, and the 8s poll covers everything else.
     },
+  };
+}
+
+/** Render a ranked answer as the entry shape this panel already draws.
+ *  `id` is derived from the record rather than invented, so the same hit keeps
+ *  the same key across refreshes and React does not remount the row. */
+function askHitToIntent(hit: AskHit, relPath: string, index: number): IntentEntry {
+  return {
+    id: `ask:${relPath}:${hit.when}:${index}`,
+    timestamp: hit.when,
+    agent: hit.who,
+    intent: hit.what,
+    branch: "",
+    commit: "",
+    status: hit.tier,
+    changeset: null,
   };
 }
 

@@ -6,7 +6,15 @@
 // its own chrome over the same state machine.
 
 import { useEffect, useState } from "react";
-import { api, type GitBranchInfo } from "../../lib/api";
+import type { GitBranchInfo } from "../../lib/api";
+// Through the place seam, not `api` directly: a workspace standing in a
+// machine switches branches on the box's checkout (AURA-1306).
+import {
+  gitBranch,
+  gitBranches,
+  gitCheckout,
+  gitCreateBranch,
+} from "../../lib/place/workApi";
 
 export interface UseBranches {
   /** Current branch name (null for detached HEAD / non-repo). */
@@ -50,7 +58,7 @@ export function useBranches(
     let cancelled = false;
     const read = async () => {
       try {
-        const b = (await api.gitBranch(repoRoot)).trim();
+        const b = (await gitBranch(repoRoot)).trim();
         if (!cancelled) setCurrent(b || null);
       } catch {
         if (!cancelled) setCurrent(null);
@@ -58,7 +66,9 @@ export function useBranches(
     };
     void read();
     if (!poll) return () => void (cancelled = true);
-    const id = window.setInterval(read, 5000);
+    // In-app checkouts set `current` optimistically below, so this cadence
+    // only covers branch moves made outside the app.
+    const id = window.setInterval(read, 10000);
     return () => {
       cancelled = true;
       window.clearInterval(id);
@@ -70,7 +80,7 @@ export function useBranches(
     setLoading(true);
     setError(null);
     try {
-      setBranches(await api.gitBranches(repoRoot));
+      setBranches(await gitBranches(repoRoot));
     } catch (e) {
       setError(humanizeGitError(String(e)));
     } finally {
@@ -83,7 +93,7 @@ export function useBranches(
     setBusy(name);
     setError(null);
     try {
-      await api.gitCheckout(repoRoot, name);
+      await gitCheckout(repoRoot, name);
       // Optimistically reflect the switch; the poll (when on) confirms it.
       setCurrent(name.replace(/^origin\//, ""));
       // Tell every git pane (Changes / diff / summary / history) to re-read —
@@ -104,7 +114,7 @@ export function useBranches(
     setBusy(name);
     setError(null);
     try {
-      await api.gitCreateBranch(repoRoot, name);
+      await gitCreateBranch(repoRoot, name);
       setCurrent(name);
       window.dispatchEvent(new CustomEvent("aura:git-changed"));
       return true;

@@ -15,6 +15,10 @@
 
 pub mod beads;
 pub mod config;
+// AURA-1297: GitHub's `gh stack` extension + Actions startup-failure reasons.
+pub mod gh_actions;
+pub mod gh_stack;
+// end AURA-1297
 pub mod graphite;
 pub mod jira;
 pub mod jira_sync;

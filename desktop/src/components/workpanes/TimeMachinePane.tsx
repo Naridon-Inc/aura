@@ -25,11 +25,13 @@ import {
   type ClaudeSession,
   type FileChangeNote,
   type IntentChangesetFile,
+  type IntentRow,
   type SnapshotEntry,
   type SymbolImpact,
 } from "../../lib/api";
-import { fetchSessions } from "../../lib/sessionsCache";
-import { fetchIntentRows } from "../../lib/intentCache";
+import { fetchSessions, peekSessions } from "../../lib/sessionsCache";
+import { fetchIntentRows, peekIntentRows } from "../../lib/intentCache";
+import { peekCache, writeCache } from "../../lib/resourceCache";
 import { fetchChangeNoteReport } from "../../lib/changeNoteCache";
 import { AgentBadge } from "../agent/AgentBadge";
 import { relativeAgeFromDelta } from "../../lib/relativeTime";
@@ -95,6 +97,20 @@ function matchSnapshotsForFile(entries: SnapshotEntry[], absFile: string): Snaps
 
 // ═══════════════════════════════════════════════════════════════════════
 
+// Newest-first recovery moments, folded per session. Only moments that
+// actually touched files belong on a recovery timeline — telemetry / empty
+// intents would be dead ends. Pure, so the cached seed and the live refresh
+// derive the timeline identically.
+function buildTimeline(
+  rows: IntentRow[],
+  claude: ClaudeSession[],
+): SessionDisplayRow[] {
+  const sorted = [...rows].sort((a, b) => b.timestamp - a.timestamp);
+  return collapseAutoStubSessions(sorted, claude).filter(
+    (d) => (d.row.changeset?.files?.length ?? 0) > 0,
+  );
+}
+
 export function TimeMachinePane({
   repoRoot,
   defaultIdentifier,
@@ -109,12 +125,30 @@ export function TimeMachinePane({
    *  (the wizard renders it without this). */
   onExpand?: () => void;
 }) {
-  const [displayRows, setDisplayRows] = useState<SessionDisplayRow[]>([]);
-  const [sessions, setSessions] = useState<ClaudeSession[]>([]);
-  const [snapshots, setSnapshots] = useState<SnapshotEntry[]>([]);
+  // Last-known bundle for this root, read once at mount. A tab switch fully
+  // unmounts the pane, so without this every visit re-shells three IPC calls
+  // behind "loading…" before the first moment appears. `load` revalidates
+  // immediately underneath and re-anchors the selection.
+  const [seed] = useState(() => {
+    const claude = peekSessions(repoRoot) ?? [];
+    return {
+      display: buildTimeline(peekIntentRows(repoRoot, 120) ?? [], claude),
+      claude,
+      snaps: peekCache<SnapshotEntry[]>(`snapshots:${repoRoot}`) ?? [],
+    };
+  });
+  const [displayRows, setDisplayRows] = useState<SessionDisplayRow[]>(
+    seed.display,
+  );
+  const [sessions, setSessions] = useState<ClaudeSession[]>(seed.claude);
+  const [snapshots, setSnapshots] = useState<SnapshotEntry[]>(seed.snaps);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedTs, setSelectedTs] = useState<number | null>(null);
+  const [selectedTs, setSelectedTs] = useState<number | null>(
+    seed.display[0]?.row.timestamp ?? null,
+  );
+  // Mount-time clock. Every row's age is rendered from its own absolute
+  // timestamp against this, so a cached moment still reads its true age.
   const [nowSecs, setNowSecs] = useState(() => Math.floor(Date.now() / 1000));
   const aliveRef = useRef(true);
   // Mirror of the current selection so a refresh can keep the user on the
@@ -141,25 +175,13 @@ export function TimeMachinePane({
     }
     setLoading(true);
     setError(null);
-    try {
-      const [data, cs, snaps] = await Promise.all([
-        fetchIntentRows(repoRoot, 120),
-        fetchSessions(repoRoot).catch(() => [] as ClaudeSession[]),
-        api.auraListSnapshots(repoRoot).catch(() => [] as SnapshotEntry[]),
-      ]);
-      if (!aliveRef.current) return;
-      const rows = Array.isArray(data) ? data : [];
-      const claude = Array.isArray(cs) ? cs : [];
-      const sorted = [...rows].sort((a, b) => b.timestamp - a.timestamp);
-      // Only moments that actually touched files belong on a recovery
-      // timeline — telemetry / empty intents would be dead ends.
-      const display = collapseAutoStubSessions(sorted, claude).filter(
-        (d) => (d.row.changeset?.files?.length ?? 0) > 0,
-      );
+
+    // Re-anchor the selection on top of a freshly derived timeline. Shared by
+    // the cached paint and the fresh one so both land on the same moment.
+    const applyTimeline = (rows: IntentRow[], claude: ClaudeSession[]) => {
+      const display = buildTimeline(rows, claude);
       setDisplayRows(display);
       setSessions(claude);
-      setSnapshots(Array.isArray(snaps) ? snaps : []);
-      setNowSecs(Math.floor(Date.now() / 1000));
       // A fresh prefill (tab opened on a new symbol/file) wins; a plain
       // refresh keeps the user on the moment they were reading if it still
       // exists; otherwise fall back to the prefill match, else the newest.
@@ -176,10 +198,42 @@ export function TimeMachinePane({
       const keepPrev =
         !prefillChanged && prevSel != null && display.some((d) => d.row.timestamp === prevSel);
       setSelectedTs(keepPrev ? prevSel : ((prefMatch ?? display[0])?.row.timestamp ?? null));
+    };
+
+    // Stale-while-revalidate. The rows and the session list come off the
+    // caches the other Trace panes fill, so a cached paint is instant and the
+    // refresh below runs underneath. Ages are computed from each row's own
+    // absolute timestamp, so a cached row is never dated as if it just
+    // happened. The snapshot list has no shared reader — this is its only
+    // caller — so it keeps its own cache entry.
+    const snapsKey = `snapshots:${repoRoot}`;
+    const cachedRows = peekIntentRows(repoRoot, 120);
+    const cachedSnaps = peekCache<SnapshotEntry[]>(snapsKey);
+    if (cachedRows) applyTimeline(cachedRows, peekSessions(repoRoot) ?? []);
+    if (cachedSnaps) setSnapshots(cachedSnaps);
+
+    try {
+      const [data, cs, snaps] = await Promise.all([
+        fetchIntentRows(repoRoot, 120),
+        fetchSessions(repoRoot).catch(() => [] as ClaudeSession[]),
+        api.auraListSnapshots(repoRoot).catch(() => [] as SnapshotEntry[]),
+      ]);
+      const rows = Array.isArray(data) ? data : [];
+      const claude = Array.isArray(cs) ? cs : [];
+      const snapList = Array.isArray(snaps) ? snaps : [];
+      writeCache(snapsKey, snapList);
+      if (!aliveRef.current) return;
+      applyTimeline(rows, claude);
+      setSnapshots(snapList);
+      setNowSecs(Math.floor(Date.now() / 1000));
     } catch (e) {
       if (!aliveRef.current) return;
-      setError(e instanceof Error ? e.message : String(e));
-      setDisplayRows([]);
+      // Keep a cached timeline on screen — those moments are still real and
+      // still recoverable; replacing them with an error would strand the user.
+      if (!cachedRows) {
+        setError(e instanceof Error ? e.message : String(e));
+        setDisplayRows([]);
+      }
     } finally {
       if (aliveRef.current) setLoading(false);
     }
@@ -454,6 +508,8 @@ function MomentDetail({
   const {
     state: bringBack,
     run: runBringBack,
+    confirm: confirmBringBack,
+    undo: undoBringBack,
     reset: resetBringBack,
     busySymbol,
   } = useBringBack(repoRoot);
@@ -502,7 +558,12 @@ function MomentDetail({
 
       {/* Bring-back result */}
       {bringBack.kind !== "idle" && (
-        <BringBackResult state={bringBack} onDismiss={resetBringBack} />
+        <BringBackResult
+          state={bringBack}
+          onConfirm={confirmBringBack}
+          onUndo={undoBringBack}
+          onDismiss={resetBringBack}
+        />
       )}
 
       {/* What changed here */}

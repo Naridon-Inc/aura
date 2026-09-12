@@ -16,8 +16,10 @@
 import { useEffect, useState } from "react";
 import { GitBranch, RefreshCw } from "lucide-react";
 
-import { api } from "../../lib/api";
 import { fetchAheadBehind, invalidateGitState } from "../../lib/gitStateCache";
+// Through the place seam: a workspace standing in a machine publishes and
+// pulls the box's checkout, not the laptop's copy (AURA-1306).
+import { gitFetch, gitPull, gitPush, gitSync } from "../../lib/place/workApi";
 import { Button } from "../ui/button";
 import { useBranches } from "./branches";
 import { BranchSwitcherModal } from "./BranchSwitcherModal";
@@ -117,13 +119,13 @@ function SyncControl({ repoRoot }: { repoRoot: string }) {
     setBusy(true);
     setError(null);
     try {
-      if (action.kind === "publish") await api.gitPush(repoRoot, true);
-      else if (action.kind === "push") await api.gitPush(repoRoot, false);
-      else if (action.kind === "pull") await api.gitPull(repoRoot);
-      else if (action.kind === "sync") await api.gitSync(repoRoot);
+      if (action.kind === "publish") await gitPush(repoRoot, true);
+      else if (action.kind === "push") await gitPush(repoRoot, false);
+      else if (action.kind === "pull") await gitPull(repoRoot);
+      else if (action.kind === "sync") await gitSync(repoRoot);
       // "retry" falls here too: re-reading is exactly what it offers, and
       // `git fetch` doesn't move anything.
-      else await api.gitFetch(repoRoot);
+      else await gitFetch(repoRoot);
       // We just moved the thing the cache remembers, so drop it before asking:
       // a shared answer from a second ago describes the branch as it was before
       // this button pressed, and this refresh is the one the user is watching

@@ -1,5 +1,5 @@
 use crate::config::ConfigManager;
-use crate::plugins::cost_reporter::{calculate_session_cost, cost_per_model, CostBreakdown};
+use crate::plugins::cost_reporter::{breakdown_for, calculate_session_cost};
 use crate::session::{AgentSession, SessionManager, SessionPhase};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,83 @@ pub struct UsageReport {
     pub by_model: HashMap<String, ModelUsage>,
     pub by_day: Vec<DayUsage>,
     pub by_project: Vec<ProjectUsage>,
+    /// Measured provider usage in this window that the sessions above do not
+    /// account for: work done outside an Aura session, before any session
+    /// started in that checkout, or under a session too old to be listed here.
+    ///
+    /// It is the measured total minus what this report shows, so the two
+    /// always add up to what the provider actually recorded. Carried so the
+    /// report can name what it could not attribute rather than quietly
+    /// understating the machine's spend by exactly that much.
+    pub unattributed_input_tokens: u64,
+    pub unattributed_output_tokens: u64,
+    /// Tokens written into the cache in this window.
+    pub total_cache_creation: u64,
+    /// What the cache traffic above cost. Part of `total_cost`, carried
+    /// separately because "the cache is most of your bill" is the single
+    /// most useful thing this report can tell someone.
+    pub total_cache_cost: f64,
+    /// Priced from [`crate::usage_attrib`]'s per-model measured totals:
+    /// everything the provider recorded on this machine in the window,
+    /// whether or not a session claimed it.
+    pub measured_cost_usd: f64,
+    /// `measured_cost_usd` minus what the sessions above account for.
+    ///
+    /// The token counts beside it said *how much* went unclaimed but
+    /// never what it cost, which left the one number the reader came for
+    /// missing from the only line that admitted the report is partial.
+    pub unattributed_cost_usd: f64,
+    /// Whether this report covers one project or every project on the
+    /// machine. The reader cannot tell a small bill from a narrow window
+    /// without it.
+    pub project_scoped: bool,
+}
+
+/// Everything the total does and does not include, in the order a reader
+/// needs it.
+///
+/// The report printed a dollar figure and left every one of these to be
+/// guessed at: whether it is an invoice (it is not), whose machine it
+/// covers (this one), and which tools it can see (the ones that write a
+/// Claude Code transcript). A cost report that does not say what it
+/// measured is not being read, it is being trusted — and it was wrong in
+/// at least three directions at once.
+pub fn measurement_notes(report: &UsageReport) -> Vec<String> {
+    let mut notes = Vec::new();
+    notes.push(format!(
+        "Counts every Claude Code turn recorded on this machine{}, priced at published list rates.",
+        if report.project_scoped {
+            " for this project"
+        } else {
+            ""
+        }
+    ));
+    notes.push(
+        "Not a bill: a subscription plan, credits or negotiated rates charge differently."
+            .to_string(),
+    );
+    notes.push(
+        "Cannot see: other machines, other coding tools, or a turn no transcript recorded."
+            .to_string(),
+    );
+    if report.unattributed_cost_usd > 0.0 {
+        notes.push(format!(
+            "{} of the measured {} belongs to no session listed here.",
+            format_money(report.unattributed_cost_usd),
+            format_money(report.measured_cost_usd),
+        ));
+    }
+    notes
+}
+
+/// Money, rounded to where it stops being noise. Sub-cent figures keep
+/// four places so a cheap session does not read as free.
+fn format_money(usd: f64) -> String {
+    if usd > 0.0 && usd < 0.01 {
+        format!("${:.4}", usd)
+    } else {
+        format!("${:.2}", usd)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +134,11 @@ pub struct SessionCost {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub api_calls: u32,
+    /// Everything this session cost, cache traffic included.
     pub cost_usd: f64,
+    /// The part of `cost_usd` that is cache reads and writes.
+    pub cache_cost_usd: f64,
+    pub cache_read_tokens: u64,
     pub files_touched: usize,
     pub phase: String,
 }
@@ -149,9 +230,8 @@ fn session_to_cost(s: &AgentSession) -> SessionCost {
         .as_deref()
         .unwrap_or("claude-sonnet")
         .to_string();
-    let (input_rate, output_rate) = cost_per_model(&model);
 
-    let (input_tokens, output_tokens, api_calls, cache_read) = s
+    let (input_tokens, output_tokens, api_calls, cache_read, cache_created) = s
         .token_usage
         .as_ref()
         .map(|u| {
@@ -160,12 +240,17 @@ fn session_to_cost(s: &AgentSession) -> SessionCost {
                 u.output_tokens,
                 u.api_call_count,
                 u.cache_read_tokens,
+                u.cache_creation_tokens,
             )
         })
-        .unwrap_or((0, 0, 0, 0));
+        .unwrap_or((0, 0, 0, 0, 0));
 
-    let cost_usd =
-        (input_tokens as f64 / 1000.0) * input_rate + (output_tokens as f64 / 1000.0) * output_rate;
+    // Priced by the same function that prices a single session on screen,
+    // rather than by a second copy of the arithmetic that sat here and had
+    // already drifted: this one charges for cache traffic, and the copy it
+    // replaces did not. A session whose every token came from cache — most
+    // of a long one — was reported as costing exactly nothing.
+    let breakdown = breakdown_for(&model, input_tokens, output_tokens, cache_read, cache_created);
 
     let duration_secs = if s.last_activity > s.started_at {
         s.last_activity - s.started_at
@@ -198,7 +283,9 @@ fn session_to_cost(s: &AgentSession) -> SessionCost {
         input_tokens,
         output_tokens,
         api_calls,
-        cost_usd,
+        cost_usd: breakdown.total_cost,
+        cache_cost_usd: breakdown.cache_cost,
+        cache_read_tokens: cache_read,
         files_touched: s.files_touched.len(),
         phase: phase.to_string(),
     }
@@ -239,7 +326,7 @@ pub fn build_report_project(since_secs: u64, label: &str) -> UsageReport {
 }
 
 fn build_report_scoped(since_secs: u64, label: &str, project_only: bool) -> UsageReport {
-    let sessions = if project_only {
+    let mut sessions = if project_only {
         SessionManager::list_sessions()
     } else {
         let global = list_global_sessions();
@@ -252,6 +339,12 @@ fn build_report_scoped(since_secs: u64, label: &str, project_only: bool) -> Usag
     };
     let cutoff = now_secs().saturating_sub(since_secs);
 
+    // Sessions record everything about themselves except what they spent. The
+    // provider's own per-turn counts are on disk beside them and were never
+    // read, so this report answered `$0.00` for a machine spending real money.
+    // Join them on before anything is totalled — see [`crate::usage_attrib`].
+    let attribution = crate::usage_attrib::fill(&mut sessions, cutoff);
+
     let filtered: Vec<&AgentSession> = sessions
         .iter()
         .filter(|s| s.started_at >= cutoff)
@@ -263,6 +356,8 @@ fn build_report_scoped(since_secs: u64, label: &str, project_only: bool) -> Usag
     let mut total_input = 0u64;
     let mut total_output = 0u64;
     let mut total_cache = 0u64;
+    let mut total_cache_created = 0u64;
+    let mut total_cache_cost = 0.0f64;
     let mut total_cost = 0.0f64;
     let mut session_costs = Vec::new();
 
@@ -272,8 +367,10 @@ fn build_report_scoped(since_secs: u64, label: &str, project_only: bool) -> Usag
         total_input += sc.input_tokens;
         total_output += sc.output_tokens;
         total_cost += sc.cost_usd;
+        total_cache_cost += sc.cache_cost_usd;
         if let Some(u) = s.token_usage.as_ref() {
             total_cache += u.cache_read_tokens;
+            total_cache_created += u.cache_creation_tokens;
         }
 
         // Aggregate by model
@@ -322,6 +419,11 @@ fn build_report_scoped(since_secs: u64, label: &str, project_only: bool) -> Usag
     let mut by_project: Vec<ProjectUsage> = by_project_map.into_values().collect();
     by_project.sort_by(|a, b| b.cost_usd.partial_cmp(&a.cost_usd).unwrap_or(std::cmp::Ordering::Equal));
 
+    // What the provider recorded in this window, priced per model. The
+    // split matters: totalling everything and pricing it at one rate would
+    // be wrong by up to 5x depending on the day's mix.
+    let measured_cost_usd = price_by_model(&attribution.measured_by_model);
+
     UsageReport {
         period_label: label.to_string(),
         sessions: session_costs,
@@ -332,16 +434,83 @@ fn build_report_scoped(since_secs: u64, label: &str, project_only: bool) -> Usag
         by_model,
         by_day,
         by_project,
+        unattributed_input_tokens: attribution
+            .measured
+            .input_tokens
+            .saturating_sub(total_input),
+        unattributed_output_tokens: attribution
+            .measured
+            .output_tokens
+            .saturating_sub(total_output),
+        total_cache_creation: total_cache_created,
+        total_cache_cost,
+        measured_cost_usd,
+        // Clamped rather than signed. The two halves are priced from
+        // different records — the sessions from what each recorded about
+        // itself, the measured total from the transcripts — so a session
+        // carrying a model name the transcripts spell differently can put
+        // the subtraction slightly the wrong way. A negative gap would
+        // read as a refund, which it is not; zero says "nothing missing",
+        // which is the honest reading of a difference that small.
+        unattributed_cost_usd: (measured_cost_usd - total_cost).max(0.0),
+        project_scoped: project_only,
     }
+}
+
+/// Whether an already-built report can answer the daily cap.
+///
+/// Only one that covers what the cap covers: the whole machine, today. A
+/// project-scoped report would under-report against a machine-wide cap,
+/// and a week-long one would blow through it on the first day.
+fn reusable_daily(built: Option<&UsageReport>) -> Option<&UsageReport> {
+    built.filter(|r| {
+        !r.project_scoped && matches!(r.period_label.as_str(), "today" | "day")
+    })
+}
+
+/// Price a per-model usage split at that model's own rates.
+pub fn price_by_model(by_model: &HashMap<String, crate::session::TokenUsage>) -> f64 {
+    by_model
+        .iter()
+        .map(|(model, u)| {
+            breakdown_for(
+                model,
+                u.input_tokens,
+                u.output_tokens,
+                u.cache_read_tokens,
+                u.cache_creation_tokens,
+            )
+            .total_cost
+        })
+        .sum()
 }
 
 /// Check budget alerts for the current session and daily/weekly totals
 pub fn check_budget(budget: &BudgetConfig) -> Vec<BudgetAlert> {
+    check_budget_with(budget, None)
+}
+
+/// As [`check_budget`], reusing a daily report the caller has already built.
+///
+/// `aura usage` printed a total and then, two lines down, a budget alert
+/// quoting a *different* total for the same day — $177.3347 against
+/// $177.5887 — because this rebuilt the report from scratch a moment
+/// later and caught the turns that had landed in between. Both numbers
+/// were right; one screen showing two answers to "what did today cost?"
+/// is not. Given the report already on screen, the alert quotes it.
+pub fn check_budget_with(budget: &BudgetConfig, built: Option<&UsageReport>) -> Vec<BudgetAlert> {
     let mut alerts = Vec::new();
 
     // Daily check
     if budget.daily_cap_usd > 0.0 {
-        let daily = build_report(86400, "today");
+        let rebuilt;
+        let daily = match reusable_daily(built) {
+            Some(r) => r,
+            None => {
+                rebuilt = build_report(86400, "today");
+                &rebuilt
+            }
+        };
         let exceeded = daily.total_cost >= budget.daily_cap_usd;
         let warning = daily.total_cost >= budget.daily_cap_usd * budget.warn_at_pct;
         if warning || exceeded {
@@ -442,18 +611,32 @@ pub fn print_report(report: &UsageReport) {
         report.total_input_tokens.to_string().yellow(),
         report.total_output_tokens.to_string().yellow(),
     );
-    if report.total_cache_read > 0 {
+    if report.total_cache_read > 0 || report.total_cache_creation > 0 {
         let total_reads = report.total_input_tokens + report.total_cache_read;
         let cache_pct = if total_reads > 0 {
             (report.total_cache_read as f64 / total_reads as f64) * 100.0
         } else {
             0.0
         };
+        // The cache line used to stop at "100% hit rate", which reads as
+        // good news and says nothing about money. On a cache-heavy day
+        // this is most of the bill, so it carries its share of the total.
         println!(
-            "  {} {} tokens from cache ({:.0}% hit rate)",
+            "  {} {} read / {} written — {} of the total ({:.0}% of what was read came from cache)",
             "Cache:".bold(),
             report.total_cache_read.to_string().green(),
+            report.total_cache_creation.to_string().green(),
+            format_money(report.total_cache_cost).green(),
             cache_pct,
+        );
+    }
+    if report.unattributed_input_tokens + report.unattributed_output_tokens > 0 {
+        println!(
+            "  {} {} more measured in this window belongs to no session below ({} in / {} out)",
+            "Not counted above:".bold(),
+            format_money(report.unattributed_cost_usd).yellow(),
+            report.unattributed_input_tokens.to_string().dimmed(),
+            report.unattributed_output_tokens.to_string().dimmed(),
         );
     }
 
@@ -568,6 +751,12 @@ pub fn print_report(report: &UsageReport) {
         );
     }
 
+    // ── What the number above is ──
+    println!("\n  {} {}", "🔎".bold(), "What this covers".bold());
+    for note in measurement_notes(report) {
+        println!("    {} {}", "↳".dimmed(), note.dimmed());
+    }
+
     println!("{}\n", "─".repeat(60).dimmed());
 }
 
@@ -611,6 +800,8 @@ pub fn report_to_json(report: &UsageReport) -> serde_json::Value {
                 "output_tokens": sc.output_tokens,
                 "api_calls": sc.api_calls,
                 "cost_usd": (sc.cost_usd * 10000.0).round() / 10000.0,
+                "cache_cost_usd": (sc.cache_cost_usd * 10000.0).round() / 10000.0,
+                "cache_read_tokens": sc.cache_read_tokens,
                 "files_touched": sc.files_touched,
                 "project": sc.project,
                 "phase": sc.phase,
@@ -665,11 +856,182 @@ pub fn report_to_json(report: &UsageReport) -> serde_json::Value {
             "input_tokens": report.total_input_tokens,
             "output_tokens": report.total_output_tokens,
             "cache_read_tokens": report.total_cache_read,
+            "cache_creation_tokens": report.total_cache_creation,
+            // Part of cost_usd above, not an addition to it.
+            "cache_cost_usd": (report.total_cache_cost * 10000.0).round() / 10000.0,
             "sessions": report.sessions.len(),
+        },
+        // Everything the provider recorded on this machine in the window,
+        // priced per model — the ceiling the total above sits under.
+        "measured": {
+            "cost_usd": (report.measured_cost_usd * 10000.0).round() / 10000.0,
+        },
+        "project_scoped": report.project_scoped,
+        // Said in the same words the terminal says them, so a surface
+        // rendering this JSON cannot invent its own account of what the
+        // number means.
+        "measurement_notes": measurement_notes(report),
+        // What the provider recorded in this window that no session could claim.
+        // Reported rather than dropped, so a consumer that adds these to the
+        // totals above lands on the same number `aura usage --plan` reads off
+        // the transcripts. Zero when every measured turn found an owner.
+        "unattributed": {
+            "input_tokens": report.unattributed_input_tokens,
+            "output_tokens": report.unattributed_output_tokens,
+            "cost_usd": (report.unattributed_cost_usd * 10000.0).round() / 10000.0,
         },
         "by_model": models_json,
         "by_day": days_json,
         "by_project": projects_json,
         "sessions": sessions_json,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::TokenUsage;
+
+    fn report() -> UsageReport {
+        UsageReport {
+            period_label: "today".to_string(),
+            sessions: Vec::new(),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_read: 0,
+            total_cost: 0.0,
+            by_model: HashMap::new(),
+            by_day: Vec::new(),
+            by_project: Vec::new(),
+            unattributed_input_tokens: 0,
+            unattributed_output_tokens: 0,
+            total_cache_creation: 0,
+            total_cache_cost: 0.0,
+            measured_cost_usd: 0.0,
+            unattributed_cost_usd: 0.0,
+            project_scoped: false,
+        }
+    }
+
+    fn tokens(input: u64, output: u64, cache_read: u64) -> TokenUsage {
+        TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: cache_read,
+            cache_creation_tokens: 0,
+            api_call_count: 0,
+        }
+    }
+
+    #[test]
+    fn each_model_is_priced_at_its_own_rate() {
+        // 10k opus input is five times 10k sonnet input. Pricing the sum
+        // at either rate is wrong for half of it.
+        let mut by_model = HashMap::new();
+        by_model.insert("claude-opus-4".to_string(), tokens(10_000, 0, 0));
+        by_model.insert("claude-sonnet-4".to_string(), tokens(10_000, 0, 0));
+
+        let priced = price_by_model(&by_model);
+        assert!((priced - (0.15 + 0.03)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cache_reads_carry_a_price_into_the_measured_total() {
+        let mut by_model = HashMap::new();
+        by_model.insert("claude-sonnet-4".to_string(), tokens(0, 0, 1_000_000));
+
+        // A million cached sonnet tokens: 1000 × .003 × .1.
+        assert!((price_by_model(&by_model) - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_report_says_it_is_not_an_invoice_and_names_what_it_cannot_see() {
+        let notes = measurement_notes(&report()).join(" ");
+        assert!(notes.contains("this machine"));
+        assert!(notes.contains("Not a bill"));
+        assert!(notes.contains("other coding tools"));
+    }
+
+    #[test]
+    fn a_whole_machine_report_does_not_claim_to_be_about_one_project() {
+        let machine = measurement_notes(&report()).join(" ");
+        assert!(!machine.contains("for this project"));
+
+        let mut scoped = report();
+        scoped.project_scoped = true;
+        assert!(measurement_notes(&scoped)
+            .join(" ")
+            .contains("for this project"));
+    }
+
+    #[test]
+    fn what_went_unattributed_is_stated_in_money_not_only_tokens() {
+        let mut r = report();
+        r.total_cost = 12.0;
+        r.measured_cost_usd = 50.0;
+        r.unattributed_cost_usd = 38.0;
+
+        let notes = measurement_notes(&r).join(" ");
+        assert!(notes.contains("$38.00"));
+        assert!(notes.contains("$50.00"));
+    }
+
+    #[test]
+    fn a_complete_report_does_not_apologise_for_a_gap_it_does_not_have() {
+        // Every measured turn found an owner: no fourth note.
+        let notes = measurement_notes(&report());
+        assert_eq!(notes.len(), 3);
+    }
+
+    #[test]
+    fn a_cheap_session_is_not_rounded_down_to_free() {
+        // Two cents of a cent still reads as money, not as zero.
+        assert_eq!(format_money(0.0002), "$0.0002");
+        assert_eq!(format_money(0.0), "$0.00");
+        assert_eq!(format_money(177.3347), "$177.33");
+    }
+
+    #[test]
+    fn the_daily_alert_quotes_the_report_already_on_screen() {
+        // Two totals for one day on one screen was the bug: the alert
+        // rebuilt the report a moment after the header printed it.
+        let budget = BudgetConfig {
+            daily_cap_usd: 5.0,
+            weekly_cap_usd: 0.0,
+            session_cap_usd: 0.0,
+            warn_at_pct: 0.8,
+        };
+        let mut daily = report();
+        daily.total_cost = 177.3347;
+
+        let alerts = check_budget_with(&budget, Some(&daily));
+        assert_eq!(alerts.len(), 1);
+        assert!((alerts[0].spent - 177.3347).abs() < 1e-9);
+        assert!(alerts[0].is_exceeded);
+    }
+
+    #[test]
+    fn a_project_report_is_never_compared_against_the_machine_wide_cap() {
+        // One project's spend held against a cap covering every project
+        // would under-report, so this one is not reused and the caller
+        // builds the machine-wide report instead.
+        let mut scoped = report();
+        scoped.project_scoped = true;
+        assert!(reusable_daily(Some(&scoped)).is_none());
+    }
+
+    #[test]
+    fn a_week_long_report_is_not_quoted_at_the_daily_cap() {
+        let mut weekly = report();
+        weekly.period_label = "week".to_string();
+        assert!(reusable_daily(Some(&weekly)).is_none());
+
+        // "day" and "today" are the same window under two labels; both
+        // are the right answer to a daily cap.
+        let mut day = report();
+        day.period_label = "day".to_string();
+        assert!(reusable_daily(Some(&day)).is_some());
+        assert!(reusable_daily(Some(&report())).is_some());
+        assert!(reusable_daily(None).is_none());
+    }
 }

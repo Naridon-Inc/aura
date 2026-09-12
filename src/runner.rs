@@ -86,11 +86,17 @@ pub struct RegisterOpts {
 /// `serve` can run even before `aura cloud login` (heartbeat just no-ops
 /// without a runner token).
 fn cloud_base() -> String {
-    let url = recall_cloud_creds()
-        .map(|(u, _)| u)
-        .or_else(|_| std::env::var("AURA_CLOUD_URL"))
-        .unwrap_or_else(|_| "https://api.auravcs.com".to_string());
-    url.trim_end_matches('/').to_string()
+    // `recall_cloud_creds` already resolves the environment override ahead of
+    // the signed-in config, but it fails outright when there is no token —
+    // which is the normal state here, since a runner heartbeats with its own
+    // AURA_RUNNER_TOKEN. So fall through to the same resolution without the
+    // token requirement rather than jumping straight to production.
+    match recall_cloud_creds() {
+        Ok((url, _)) => url.trim_end_matches('/').to_string(),
+        Err(_) => crate::cloud_endpoint::origin_or_public(
+            crate::config::ConfigManager::load().cloud_url.as_deref(),
+        ),
+    }
 }
 
 fn runner_token() -> Option<String> {
@@ -753,13 +759,59 @@ fn resolve_repo_id(
         .map(|s| s.to_string())
 }
 
+/// A fleet name nobody in this org is already using.
+///
+/// Nothing upstream enforces one: the server takes whatever name it is given,
+/// and `aura-runner/aws/provision.sh` handed every box it built the same
+/// default — so an org that provisioned six runners ended up with six rows all
+/// called `aura-runner`, and every surface that names a machine (the fleet
+/// page, the console's machine picker, `aura runner status`) stopped being
+/// able to tell them apart.
+///
+/// Registering is usually something a script does, so refusing a collision
+/// would break the run that hit it. Taking the next free suffix and saying so
+/// keeps the script going and leaves the fleet readable.
+fn unique_name(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    token: &str,
+    wanted: &str,
+) -> String {
+    // The list is a courtesy, not a gate: a runner still registers if this
+    // read fails, it just registers under the name it asked for.
+    let Ok(body) = recall_get(client, &format!("{base}/api/v2/runners"), token) else {
+        return wanted.to_string();
+    };
+    let taken: Vec<&str> = body
+        .as_array()
+        .map(|rows| rows.iter().filter_map(|r| r.get("name")?.as_str()).collect())
+        .unwrap_or_default();
+    if !taken.contains(&wanted) {
+        return wanted.to_string();
+    }
+    for n in 2..=99 {
+        let candidate = format!("{wanted}-{n}");
+        if !taken.contains(&candidate.as_str()) {
+            println!(
+                "{} this org already has a runner called {} — registering as {}",
+                "·".dimmed(),
+                wanted.bold(),
+                candidate.cyan()
+            );
+            return candidate;
+        }
+    }
+    wanted.to_string()
+}
+
 /// `aura runner register` — mint a runner + its one-time token.
 pub fn register(opts: &RegisterOpts) -> Result<(), Box<dyn std::error::Error>> {
     let (cloud_url, token) = recall_cloud_creds()?;
     let base = cloud_url.trim_end_matches('/');
     let client = cloud_http_client();
 
-    let mut body = json!({ "name": opts.name });
+    let name = unique_name(&client, base, &token, &opts.name);
+    let mut body = json!({ "name": name });
     if !opts.agent_kinds.is_empty() {
         body["agent_kinds"] = json!(opts.agent_kinds);
     }
@@ -793,7 +845,7 @@ pub fn register(opts: &RegisterOpts) -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let runner_tok = resp.get("token").and_then(|v| v.as_str()).unwrap_or("");
-    let name = resp.get("name").and_then(|v| v.as_str()).unwrap_or(&opts.name);
+    let name = resp.get("name").and_then(|v| v.as_str()).unwrap_or(&name);
 
     println!("{} runner {} registered", "✓".green().bold(), name.cyan());
     println!();

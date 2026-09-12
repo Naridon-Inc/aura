@@ -102,7 +102,16 @@ impl Provisioner for ByoProvider {
             .map_err(|e| ProvisionError::CliSpawn(format!("run aura runner status: {e}")))?;
 
         if !out.status.success() {
-            return Err(status_failure(&String::from_utf8_lossy(&out.stderr)));
+            let err = String::from_utf8_lossy(&out.stderr);
+            // AUDIT-UI-04 — "no token / not registered" is a setup state,
+            // not an error: the transport worked, the runner just isn't
+            // configured where we asked. Everything else stays a typed
+            // failure so callers can distinguish it from a real answer.
+            let lower = err.trim().to_lowercase();
+            if lower.contains("token") || lower.contains("register") {
+                return Ok(TargetStatus::Unconfigured);
+            }
+            return Err(status_failure(&err));
         }
 
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -256,14 +265,29 @@ fn parse_status_line(stdout: &str) -> TargetStatus {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("")
         .trim();
+    // AUDIT-UI-04 — the status word refines the glyph: a filled dot with
+    // "busy"/"draining" is a box that's alive but not taking new work, and
+    // calling it Online used to hand it assignments it would never pick up.
+    let word = line
+        .split('·')
+        .nth(1)
+        .map(str::trim)
+        .unwrap_or("")
+        .to_lowercase();
+    match word.as_str() {
+        "busy" | "draining" => return TargetStatus::Draining,
+        "unconfigured" | "unregistered" => return TargetStatus::Unconfigured,
+        "unreachable" => return TargetStatus::Unreachable,
+        _ => {}
+    }
     if line.contains('●') {
         return TargetStatus::Online;
     }
     if line.contains('○') {
         return TargetStatus::Offline;
     }
-    match line.split('·').nth(1).map(str::trim).unwrap_or("") {
-        "online" | "running" | "busy" => TargetStatus::Online,
+    match word.as_str() {
+        "online" | "running" => TargetStatus::Online,
         "offline" => TargetStatus::Offline,
         _ => TargetStatus::Unknown,
     }
@@ -485,5 +509,27 @@ mod tests {
             TargetStatus::Online
         );
         assert_eq!(parse_status_line("garbage\n"), TargetStatus::Unknown);
+    }
+
+    // AUDIT-UI-04 — a busy box is Draining, not Online, even when the
+    // glyph says "alive"; the setup/transport states parse distinctly.
+    #[test]
+    fn status_word_refines_the_glyph() {
+        assert_eq!(
+            parse_status_line("● home-server · busy · task-42\n"),
+            TargetStatus::Draining
+        );
+        assert_eq!(
+            parse_status_line("● home-server · draining · task-42\n"),
+            TargetStatus::Draining
+        );
+        assert_eq!(
+            parse_status_line("home-server · unconfigured · idle\n"),
+            TargetStatus::Unconfigured
+        );
+        assert_eq!(
+            parse_status_line("home-server · unreachable · idle\n"),
+            TargetStatus::Unreachable
+        );
     }
 }

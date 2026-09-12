@@ -75,18 +75,27 @@ import { languageSlugForPath } from "../../lib/monacoLanguage";
 import { configureMonacoDiagnostics } from "../../lib/monacoDiagnostics";
 import { useResolvedTheme, useThemeVariant } from "../../lib/themeStore";
 import { auraThemeName, ensureAuraThemes } from "../../lib/monacoTheme";
-import {
-  api,
-  type PrComment,
-  type PrCommentReaction,
-  type ReactionContent,
+import type {
+  PrComment,
+  PrCommentReaction,
+  ReactionContent,
 } from "../../lib/api";
+import {
+  prCommentPost,
+  prCommentReply,
+  prCommentResolve,
+  prReactionAdd,
+  prReactionRemove,
+} from "../../lib/prApi";
 import { usePrThreadActive } from "./PrThreadColumn";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { FixWithAgentButton } from "../agent/FixWithAgentButton";
 import { relativeAgeFromIso } from "../../lib/relativeTime";
 import { useDismiss } from "../../lib/useDismiss";
+import { mentionQueryAt } from "../collab/MentionPicker";
+import { fetchPrDetail, getPrDetailCached } from "../../lib/prDetailCache";
+import { PrFileMentionPicker, fileMentionText } from "./PrFileMentionPicker";
 
 installMonacoEnvironment();
 
@@ -601,7 +610,7 @@ export function PrDiffBody({
     }
     try {
       setPostError(null);
-      const c = await api.prCommentPost(
+      const c = await prCommentPost(
         repoRoot,
         prNumber,
         filePath,
@@ -777,6 +786,8 @@ export function PrDiffBody({
 
       {composer && (
         <ComposerHost
+          repoRoot={repoRoot}
+          prNumber={prNumber}
           start={composer.start}
           end={composer.end}
           kind={composer.kind}
@@ -823,6 +834,8 @@ function buildSides(lines: Line[]): Sides {
 // ── composer ───────────────────────────────────────────────────────
 
 function ComposerHost({
+  repoRoot,
+  prNumber,
   start,
   end,
   kind,
@@ -830,6 +843,8 @@ function ComposerHost({
   onCancel,
   error,
 }: {
+  repoRoot: string;
+  prNumber: number;
   start: number;
   end: number;
   kind: "comment" | "suggestion";
@@ -846,6 +861,8 @@ function ComposerHost({
           : `Add a review comment on ${target}`}
       </div>
       <ComposerBody
+        repoRoot={repoRoot}
+        prNumber={prNumber}
         kind={kind}
         onSubmit={onSubmit}
         onCancel={onCancel}
@@ -855,12 +872,45 @@ function ComposerHost({
   );
 }
 
+/** The paths this PR changed, for "@" mentions in the composer. Instant
+ *  from the detail cache when the PR has been opened (it always has — the
+ *  diff being commented on came from the same detail), refreshed in the
+ *  background otherwise. */
+function usePrChangedFiles(repoRoot: string, prNumber: number) {
+  const [files, setFiles] = useState<string[]>(
+    () => getPrDetailCached(repoRoot, prNumber)?.files.map((f) => f.path) ?? [],
+  );
+  const [loading, setLoading] = useState(files.length === 0);
+  useEffect(() => {
+    let alive = true;
+    fetchPrDetail(repoRoot, prNumber)
+      .then((d) => {
+        if (alive) setFiles(d.files.map((f) => f.path));
+      })
+      .catch(() => {
+        // Keep whatever the cache gave us; the picker says "no files"
+        // honestly when that is nothing.
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [repoRoot, prNumber]);
+  return { files, loading };
+}
+
 function ComposerBody({
+  repoRoot,
+  prNumber,
   kind,
   onSubmit,
   onCancel,
   error,
 }: {
+  repoRoot: string;
+  prNumber: number;
   kind: "comment" | "suggestion";
   onSubmit: (body: string) => Promise<void>;
   onCancel: () => void;
@@ -872,6 +922,40 @@ function ComposerBody({
   useEffect(() => {
     ref.current?.focus();
   }, []);
+
+  // "@" mentions over the PR's changed files. `mention` is the "@word" the
+  // caret sits in (offset of the "@" + what follows), recomputed on every
+  // edit and caret move; null closes the picker. Picking replaces exactly
+  // that span with the backticked path.
+  const { files: prFiles, loading: prFilesLoading } = usePrChangedFiles(repoRoot, prNumber);
+  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
+  const [mentionDismissed, setMentionDismissed] = useState<number | null>(null);
+  const syncMention = (el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    const m = mentionQueryAt(el.value, el.selectionStart ?? el.value.length);
+    // Esc closed the picker for THIS "@"; it stays closed until a new one.
+    if (m && mentionDismissed === m.start) {
+      setMention(null);
+      return;
+    }
+    setMention(m);
+  };
+  const pickFile = (path: string) => {
+    const el = ref.current;
+    if (!el || !mention) return;
+    const caret = el.selectionStart ?? el.value.length;
+    const before = el.value.slice(0, mention.start);
+    const after = el.value.slice(caret);
+    const inserted = fileMentionText(path);
+    const next = `${before}${inserted}${after}`;
+    setText(next);
+    setMention(null);
+    requestAnimationFrame(() => {
+      el.focus();
+      const at = before.length + inserted.length;
+      el.setSelectionRange(at, at);
+    });
+  };
   const submit = async () => {
     if (!text.trim() && kind === "comment") return;
     setSubmitting(true);
@@ -895,15 +979,36 @@ function ComposerBody({
       <Toolbar
         onWrap={(prefix, suffix) => wrap(ref.current, prefix, suffix, setText)}
       />
+      <div className="relative">
+        {mention && (
+          <PrFileMentionPicker
+            files={prFiles}
+            query={mention.query}
+            loading={prFilesLoading}
+            onPick={pickFile}
+            onClose={() => {
+              setMentionDismissed(mention.start);
+              setMention(null);
+            }}
+            className="absolute left-0 bottom-full mb-1"
+          />
+        )}
       <textarea
         ref={ref}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          setMentionDismissed(null);
+          syncMention(e.target);
+        }}
+        onKeyUp={(e) => syncMention(e.currentTarget)}
+        onClick={(e) => syncMention(e.currentTarget)}
+        onBlur={() => setMention(null)}
         rows={4}
         placeholder={
           kind === "suggestion"
             ? "Explain the change (the anchored line will be appended as a suggestion block)…"
-            : "Leave a review comment…"
+            : "Leave a review comment… Type @ to mention a changed file"
         }
         onKeyDown={(e) => {
           const meta = e.metaKey || e.ctrlKey;
@@ -926,8 +1031,9 @@ function ComposerBody({
         }}
         className="w-full bg-bg-content border border-line-soft rounded-md p-2 text-sm text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent font-mono resize-y"
       />
+      </div>
       <div className="flex items-center gap-2 text-xs text-text-4">
-        <span>⌘ + Enter to submit · markdown supported</span>
+        <span>⌘ + Enter to submit · markdown supported · @ mentions a file</span>
         <div className="flex-1" />
         <Button variant="ghost" size="xs" onClick={onCancel}>
           Cancel
@@ -1206,7 +1312,7 @@ export function FloatingThreadCard({
     if (!replyText.trim()) return;
     setSubmitting(true);
     try {
-      const c = await api.prCommentReply(
+      const c = await prCommentReply(
         repoRoot,
         prNumber,
         thread.root.id,
@@ -1226,7 +1332,7 @@ export function FloatingThreadCard({
     if (!thread.root.thread_node_id) return;
     setResolving(true);
     try {
-      await api.prCommentResolve(repoRoot, thread.root.thread_node_id);
+      await prCommentResolve(repoRoot, thread.root.thread_node_id);
       setResolved((v) => !v);
     } catch (e) {
       console.error("resolve toggle failed", e);
@@ -1239,9 +1345,9 @@ export function FloatingThreadCard({
     const existing = target.reactions.find((r) => r.content === content);
     try {
       if (existing?.viewer_reacted) {
-        await api.prReactionRemove(repoRoot, target.node_id, content);
+        await prReactionRemove(repoRoot, target.node_id, content);
       } else {
-        await api.prReactionAdd(repoRoot, target.node_id, content);
+        await prReactionAdd(repoRoot, target.node_id, content);
       }
       onPosted?.(thread.root);
     } catch (e) {

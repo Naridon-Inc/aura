@@ -25,7 +25,8 @@ import {
   type IntentChangesetFile,
 } from "../../lib/api";
 import { useEditorStore } from "../../lib/editorStore";
-import { resumeCwdOf } from "../../lib/agentSessionScope";
+import { planLaunchesAgent, resumePlan } from "../../lib/resumePlan";
+import { startResume } from "../../lib/resumeLaunch";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import { Popover, PopoverTrigger, PopoverContent } from "../ui/popover";
@@ -169,6 +170,8 @@ export function SessionActions({
   managerLabel,
   files,
   symbolsByFile,
+  agentId,
+  worktree,
   onDismiss,
 }: {
   repoRoot: string;
@@ -181,6 +184,12 @@ export function SessionActions({
   managerSessionId?: string | null;
   /** Plain title for the chat tab when it re-homes (the session objective). */
   managerLabel?: string;
+  /** Which agent did this work, from the record — so a run by an agent Aura
+   *  cannot reopen says so by name instead of showing no button and no reason. */
+  agentId?: string | null;
+  /** The folder the record says the work happened in. Used only to name the
+   *  folder that has since gone missing; never resolved as a path. */
+  worktree?: string | null;
   /** This run's changed files — drives "Rewind". */
   files: IntentChangesetFile[];
   /** Changed symbols grouped by file (from the change-note), for per-function
@@ -194,27 +203,35 @@ export function SessionActions({
   const [busy, setBusy] = useState<null | "resume" | "checkout">(null);
   const [confirmCheckout, setConfirmCheckout] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The underlying failure, kept for the hover title so the plain sentence
+   *  above it doesn't have to carry a stack trace. */
+  const [errorDetail, setErrorDetail] = useState("");
   // Resume explain-and-confirm popover.
   const [confirmResume, setConfirmResume] = useState(false);
   const [dontAskResume, setDontAskResume] = useState(false);
   const [skipResumeConfirm, setSkipResumeConfirm] = useState(readResumeSkip);
 
   const mgrId = (managerSessionId ?? "").trim() || null;
-  // A native Aura chat carries on through the manager store, never a Claude
-  // resume — so the two paths are mutually exclusive by construction.
-  const canResume = !mgrId && !!sess?.session_id;
-  const canContinueChat = !!mgrId;
+  // Where this would land and whether it is a continuation at all, worked out
+  // once, in the words the popover prints. A native Aura chat carries on
+  // through the manager store, never a Claude resume, so the two paths stay
+  // mutually exclusive by construction.
+  const plan = useMemo(
+    () =>
+      resumePlan({
+        repoRoot,
+        session: sess,
+        managerSessionId: mgrId,
+        agentId,
+        worktree,
+      }),
+    [repoRoot, sess, mgrId, agentId, worktree],
+  );
+  const canResume = planLaunchesAgent(plan);
+  const canContinueChat = plan.kind === "chat";
   const commit = sessionCommit(files);
   const shortSha = commit ? commit.slice(0, 7) : null;
   const canRewind = files.length > 0;
-
-  // Claude resolves `--resume <id>` by the cwd it was launched from, so we
-  // spawn from the session's own cwd — which may be a sibling worktree on a
-  // different branch than the workspace the user is currently looking at.
-  // That divergence is the load-bearing thing to confirm before launching.
-  const spawnRoot = sess ? resumeCwdOf(sess, repoRoot) : repoRoot;
-  const divergentRoot =
-    spawnRoot.replace(/\/$/, "") !== repoRoot.replace(/\/$/, "");
 
   const targets = useMemo<RewindTarget[]>(
     () =>
@@ -241,36 +258,40 @@ export function SessionActions({
   }
 
   async function resume() {
-    if (!sess?.session_id || busy) return;
+    if (!canResume || busy) return;
     setBusy("resume");
     setError(null);
-    try {
-      // Spawn an interactive Claude REPL resumed onto this session. forceNew
-      // so it's a fresh second tab, not a reattach to some live (claude,root).
-      const handle = await api.agentPtyOpen(
-        "claude",
-        spawnRoot,
-        80,
-        24,
-        sess.session_id,
-        true,
-      );
-      store.openAgent({
-        sessionId: handle.id,
-        agentId: "claude",
-        agentLabel: "Claude",
-        agentMonogram: "C",
-        repoRoot: spawnRoot,
-        mode: "pty",
-      });
-      store.setActiveAgent(handle.id);
-      // The detail is a fullscreen overlay; closing it reveals the build
-      // surface, which now auto-follows the freshly-active agent tab.
-      onDismiss();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+    setErrorDetail("");
+    // Spawns an interactive Claude REPL, resumed onto this conversation when
+    // the plan says it can be, brand new when it can't. The launch is claimed
+    // across the spawn, so a second press — or the launcher opening the same
+    // conversation at the same moment — waits instead of starting a twin.
+    const started = await startResume({
+      repoRoot,
+      cwd: plan.cwd,
+      sessionId: plan.sessionId,
+    });
+    if (!started.ok) {
+      // Nothing opened. Say that, rather than leaving a button that read
+      // "Resuming…" as the last word on the subject.
+      setError(started.message);
+      setErrorDetail(started.detail);
       setBusy(null);
+      return;
     }
+    store.openAgent({
+      sessionId: started.handleId,
+      agentId: "claude",
+      agentLabel: "Claude",
+      agentMonogram: "C",
+      repoRoot: plan.cwd,
+      mode: "pty",
+      resumeSessionId: plan.sessionId ?? undefined,
+    });
+    store.setActiveAgent(started.handleId);
+    // The detail is a fullscreen overlay; closing it reveals the build
+    // surface, which now auto-follows the freshly-active agent tab.
+    onDismiss();
   }
 
   /** Continue a native Aura chat where it left off: re-home its session into a
@@ -308,16 +329,31 @@ export function SessionActions({
     }
   }
 
-  if (!canResume && !canContinueChat && !canRewind) return null;
+  const unsupportedNote = plan.kind === "none" && !!plan.warning;
+  if (!canResume && !canContinueChat && !canRewind && !unsupportedNote) {
+    return null;
+  }
 
   return (
     <div className="flex items-center gap-2">
       {error ? (
         <span
           className="max-w-[180px] truncate text-xs text-red"
-          title={error}
+          title={errorDetail || error}
         >
           {error}
+        </span>
+      ) : null}
+
+      {/* Nothing to resume, and a reason worth saying: a run by an agent whose
+          history lives in its own store. Silence here reads as a missing
+          button rather than an unsupported one. */}
+      {unsupportedNote ? (
+        <span
+          className="max-w-[220px] truncate text-xs text-text-5"
+          title={plan.warning}
+        >
+          {plan.warning}
         </span>
       ) : null}
 
@@ -326,7 +362,7 @@ export function SessionActions({
           size="sm"
           variant="secondary"
           onClick={continueChat}
-          title="Reopen this Aura chat and keep going where it left off"
+          title={plan.headline}
         >
           <ResumeGlyph />
           Continue chat
@@ -355,10 +391,10 @@ export function SessionActions({
               size="sm"
               variant="secondary"
               disabled={busy !== null}
-              title="Resume this Claude conversation as a live terminal session"
+              title={plan.headline}
             >
               <ResumeGlyph />
-              {busy === "resume" ? "Resuming…" : "Resume"}
+              {busy === "resume" ? "Starting…" : plan.verb}
             </Button>
           </PopoverTrigger>
           <PopoverContent
@@ -368,14 +404,16 @@ export function SessionActions({
           >
             <div className="border-b border-line-soft px-3.5 pb-2.5 pt-3">
               <div className="text-sm font-medium text-text-1">
-                Resume this conversation
+                {plan.kind === "fresh"
+                  ? "Start a new conversation"
+                  : "Resume this conversation"}
               </div>
+              {/* What it does, in the plan's own words — a continuation and a
+                  fresh start are different acts and say so. Either way this is
+                  a real running agent that uses tokens. */}
               <p className="mt-1 text-xs leading-relaxed text-text-4">
-                Aura launches a{" "}
-                <span className="text-text-2">live Claude session</span> that
-                picks up this exact conversation where it left off. A real
-                running agent that uses tokens. It opens as a new terminal tab
-                and you&apos;ll land on it.
+                {plan.headline} It opens as a new terminal tab and you&apos;ll
+                land on it. A live agent, using tokens.
               </p>
             </div>
 
@@ -396,20 +434,22 @@ export function SessionActions({
                 ) : null}
               </div>
 
-              {/* Where it runs — the load-bearing confirmation. */}
+              {/* Where it runs — the load-bearing confirmation, inspectable
+                  before anything starts (the full path on hover). */}
               <div className="mt-2 flex items-center gap-1.5">
                 <span className="shrink-0 text-text-5">runs in</span>
-                <span
-                  className="truncate font-mono text-text-3"
-                  title={spawnRoot}
-                >
-                  {basename(spawnRoot)}
+                <span className="truncate font-mono text-text-3" title={plan.cwd}>
+                  {basename(plan.cwd)}
                 </span>
               </div>
-              {divergentRoot ? (
+
+              {/* What comes with it — the request, the decisions, the
+                  unfinished items, or plainly where they are instead. */}
+              <p className="mt-2 leading-relaxed text-text-4">{plan.carries}</p>
+
+              {plan.warning ? (
                 <p className="mt-1.5 rounded-[var(--radius-sm)] border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs leading-relaxed text-amber-300">
-                  This conversation ran in a different workspace than the one
-                  you&apos;re in now. Resuming launches Claude there, not here.
+                  {plan.warning}
                 </p>
               ) : null}
             </div>
@@ -430,7 +470,7 @@ export function SessionActions({
                 Cancel
               </Button>
               <Button size="xs" variant="secondary" onClick={confirmResumeNow}>
-                Resume
+                {plan.verb}
               </Button>
             </div>
           </PopoverContent>
@@ -466,7 +506,15 @@ export function SessionActions({
               </p>
             </div>
 
-            <div className="max-h-[300px] overflow-y-auto px-1.5 py-1.5">
+            {/* Capped by the room the window leaves, not by a number chosen
+                against a big screen — see components/ui/popover. */}
+            <div
+              className="overflow-y-auto px-1.5 py-1.5"
+              style={{
+                maxHeight:
+                  "min(300px, var(--radix-popover-content-available-height, 300px))",
+              }}
+            >
               {targets.map((t) => (
                 <div key={t.path} className="mb-1 last:mb-0">
                   {/* File row — whole-file rewind, and the group header for its

@@ -13,6 +13,7 @@ import { Input } from "../ui/input";
 import { Select } from "../ui/select";
 import { EmptyState, ErrorState, LoadingState } from "../ui/state";
 import { CloudInviteRow } from "./CloudInviteRow";
+import { CloudOrgRoster } from "./CloudOrgRoster";
 import { CloudGitIdentityRow } from "./CloudGitIdentityRow";
 import {
   api,
@@ -40,6 +41,9 @@ import {
   fetchBillingUsage,
   invalidateBillingUsage,
 } from "../../lib/billingCache";
+import { useCloudOrgs, orgLabel } from "../../lib/cloudOrgs";
+import { humanizeWorkspaceName } from "../../lib/workspaceLabel";
+import { rosterCountLine, rosterSourceNote } from "./teamRoster";
 
 type TeamSubTab = "members" | "channels" | "activity" | "usage";
 
@@ -47,7 +51,11 @@ export function TeamTab({ repoRoot }: { repoRoot: string }) {
   const [sub, setSub] = useState<TeamSubTab>("members");
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-3 border-b border-line-soft pb-2">
+      <div
+        role="tablist"
+        aria-label="Team"
+        className="flex items-center gap-3 border-b border-line-soft"
+      >
         <SubTabButton
           active={sub === "members"}
           onClick={() => setSub("members")}
@@ -86,15 +94,23 @@ function SubTabButton({
   onClick: () => void;
   label: string;
 }) {
+  // Selection is drawn with a rule under the tab, which hover deliberately
+  // cannot produce. The two used to differ only by `font-medium` against
+  // near-identical tints, so a pointer resting on Usage looked exactly like
+  // Usage being open — and the report that followed was "the tab highlights
+  // but the previous pane is still there" (AURA-265).
   return (
     <button
       type="button"
+      role="tab"
+      aria-selected={active}
       onClick={onClick}
-      className={`text-sm px-2 py-1 rounded transition-colors ${
-        active
-          ? "bg-bg-2 text-text-1 font-medium"
-          : "text-text-3 hover:text-text-1 hover:bg-state-hover"
+      className={`text-sm px-2 pt-1 pb-1.5 -mb-px transition-colors ${
+        active ? "text-text-1 font-medium" : "text-text-3 hover:text-text-2"
       }`}
+      style={{
+        borderBottom: `2px solid ${active ? "var(--color-accent)" : "transparent"}`,
+      }}
     >
       {label}
     </button>
@@ -178,6 +194,9 @@ type CachedTeam = {
 };
 
 function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
+  // Cheap: the org list is cached and shared, and this pane is already
+  // making two reads of its own. Used for one sentence, and for nothing else.
+  const { orgs } = useCloudOrgs(true);
   const cacheKey = `settings-team-members:${repoRoot}`;
   const [members, setMembers] = useState<TeamMember[] | null>(
     () => peekCache<CachedTeam>(cacheKey)?.members ?? null,
@@ -394,6 +413,7 @@ function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
             own note is the whole story. */}
         <CloudGitIdentityRow repoRoot={repoRoot} />
         <CloudInviteRow />
+      <CloudOrgRoster />
         <EmptyState
           icon={Users}
           title="No team members yet"
@@ -408,18 +428,16 @@ function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
   const myEmail = (identity?.email ?? "").toLowerCase();
   const hasAdmin = members.some((m) => m.admin);
   const adminCount = members.filter((m) => m.admin).length;
+  // Named only so the note can explain the other number the reader may be
+  // holding — the Console's org member list, which is a different population.
+  // Signed out there is no other number, and `currentOrg` is null.
+  const currentOrg = orgs.find((o) => o.current) ?? null;
 
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2 mb-0.5">
         <div className="text-xs font-medium text-text-4">
-          {members.length} member{members.length === 1 ? "" : "s"}
-          {hasAdmin && (
-            <span className="text-text-5">
-              {" · "}
-              {adminCount} admin{adminCount === 1 ? "" : "s"}
-            </span>
-          )}
+          {rosterCountLine(members.length, hasAdmin ? adminCount : 0)}
         </div>
         {!hasAdmin && (
           <button
@@ -435,6 +453,16 @@ function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
         )}
       </div>
 
+      {/* Which people these are. The count above used to read `6 members`
+          beside a Console reporting 9 — two true numbers over two different
+          populations, with nothing on screen saying so (AURA-265). */}
+      <div className="text-xs text-text-5 leading-snug px-0.5 pb-0.5">
+        {rosterSourceNote(
+          humanizeWorkspaceName(repoRoot),
+          currentOrg ? orgLabel(currentOrg) : null,
+        )}
+      </div>
+
       {!hasAdmin && (
         <div className="text-xs text-text-4 leading-snug px-0.5 pb-1">
           This team has no admin yet. Any member can claim it; the admin can
@@ -444,6 +472,7 @@ function TeamMembersPane({ repoRoot }: { repoRoot: string }) {
       <WhoAmINote identity={identity} />
       <CloudGitIdentityRow repoRoot={repoRoot} />
       <CloudInviteRow />
+        <CloudOrgRoster />
       {actionErr && (
         <div
           className="text-xs rounded px-2 py-1 leading-snug"

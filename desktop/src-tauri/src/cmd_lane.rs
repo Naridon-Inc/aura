@@ -42,6 +42,8 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 use uuid::Uuid;
 
+use aura_loop::worktree_name;
+
 use crate::cmd_agent_pty::{agent_pty_open, AgentPtyRegistry};
 use crate::worktree::{create_managed_worktree, remove_managed_worktree, resolve_start_point};
 
@@ -59,7 +61,8 @@ pub struct Lane {
     /// (it's unique by construction and survives a shell restart, so the
     /// frontend can address a lane across reloads without extra state).
     pub id: String,
-    /// The auto-named `lane/{agent}-{uuid8}` branch this lane lives on.
+    /// The auto-named branch this lane lives on: `lane/{agent}/{label-slug}`
+    /// when the lane was labelled, else `lane/{agent}-{uuid8}`.
     pub branch: String,
     /// Absolute path to the lane's worktree (the agent PTY's cwd).
     pub path: String,
@@ -89,14 +92,48 @@ pub enum DiscardResult {
     Dirty { changed_files: usize },
 }
 
-/// Auto-name a fresh lane branch: `lane/{agent}-{uuid8}`. The 8-char uuid
-/// slice keeps it short enough to read in the UI while staying unique in
-/// practice (collision odds are negligible and `create_managed_worktree`
-/// rejects a path that already exists, so a freak collision fails loudly
-/// rather than silently reusing a lane).
+/// Name a fresh lane branch after the work it is for: `lane/{agent}/{slug}`,
+/// where the slug is what the user called this lane ("auth refactor" →
+/// `lane/claude/auth-refactor`). A lane the user didn't label has nothing to
+/// be named after, so it keeps the old `lane/{agent}-{uuid8}` shape — a
+/// readable, unique placeholder rather than an invented description.
+///
+/// `taken` answers "is this branch already there", so a second "auth
+/// refactor" becomes `auth-refactor-2` instead of failing the worktree add.
+/// The agent stays its own path segment: agent ids contain dashes
+/// (`cursor-agent`) and so do slugs, so a `/` is the only separator
+/// [`lane_agent_from_branch`] can split on without guessing.
+pub fn lane_branch(agent: &str, label: Option<&str>, taken: impl Fn(&str) -> bool) -> String {
+    match label.and_then(worktree_name::from_label) {
+        Some(base) => {
+            let head = format!("{LANE_BRANCH_PREFIX}{agent}/");
+            let slug = worktree_name::unique(&base, |c| taken(&format!("{head}{c}")));
+            format!("{head}{slug}")
+        }
+        None => auto_lane_branch(agent),
+    }
+}
+
+/// The un-labelled lane name: `lane/{agent}-{uuid8}`. The 8-char uuid slice
+/// keeps it short enough to read in the UI while staying unique in practice
+/// (collision odds are negligible and `create_managed_worktree` rejects a
+/// path that already exists, so a freak collision fails loudly rather than
+/// silently reusing a lane).
 pub fn auto_lane_branch(agent: &str) -> String {
     let id = Uuid::new_v4().simple().to_string();
     format!("{LANE_BRANCH_PREFIX}{agent}-{}", &id[..8])
+}
+
+/// Does `refs/heads/<branch>` already exist in `repo_root`? Best-effort — a
+/// git failure reads as "no" and leaves the real complaint to the worktree
+/// add, which is the layer that can actually explain it.
+fn branch_exists(repo_root: &str, branch: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+        .current_dir(repo_root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Count uncommitted changes in a worktree via `git status --porcelain`.
@@ -156,29 +193,38 @@ fn enumerate_lane_worktrees(repo_root: &str) -> Vec<(String, String, String)> {
     out_lanes
 }
 
-/// Parse the agent id out of a `lane/{agent}-{uuid8}` branch. Returns
-/// `None` when the branch isn't a lane branch. The agent slice is
-/// everything between the `lane/` prefix and the final `-{uuid8}` tail.
+/// Parse the agent id out of a lane branch — `lane/{agent}/{slug}` for a
+/// named lane, `lane/{agent}-{uuid8}` for an un-named one. Returns `None`
+/// when the branch isn't a lane branch at all.
 fn lane_agent_from_branch(branch: &str) -> Option<String> {
     let rest = branch.strip_prefix(LANE_BRANCH_PREFIX)?;
-    // Strip the trailing `-{uuid8}` to recover the agent id. Agents can
-    // themselves contain a `-` (e.g. `cursor-agent`), so we split off only
-    // the LAST `-` segment and treat the head as the agent.
+    // A named lane keeps the agent in its own path segment, so the split is
+    // exact — no guessing where a dashed agent id ends and the name begins.
+    if let Some((agent, _slug)) = rest.split_once('/') {
+        if !agent.is_empty() {
+            return Some(agent.to_string());
+        }
+    }
+    // Un-named lane: strip the trailing `-{uuid8}` to recover the agent id.
+    // Agents can themselves contain a `-` (e.g. `cursor-agent`), so we split
+    // off only the LAST `-` segment and treat the head as the agent.
     match rest.rsplit_once('-') {
         Some((agent, _uuid)) if !agent.is_empty() => Some(agent.to_string()),
-        // No `-` at all → the whole tail is the agent (defensive; our own
-        // naming always appends `-{uuid8}`).
+        // No separator at all → the whole tail is the agent (defensive; our
+        // own naming always appends `-{uuid8}` or a `/{slug}`).
         _ => Some(rest.to_string()),
     }
 }
 
 // ── tauri commands ──────────────────────────────────────────────────────
 
-/// Spawn a fresh lane: create a managed worktree on an auto-named
-/// `lane/{agent}-{uuid8}` branch off `repo_root`'s HEAD, then open the
-/// agent's PTY with `cwd = lane_path` so the session is fully isolated
-/// from the main checkout (different working tree, index, HEAD, cwd, and
-/// PTY dedup key). Returns the `Lane` descriptor the frontend tracks.
+/// Spawn a fresh lane: create a managed worktree on a branch named after
+/// what the lane is for (`lane/{agent}/{label-slug}`, or
+/// `lane/{agent}-{uuid8}` when the user gave it no label) off `repo_root`'s
+/// HEAD, then open the agent's PTY with `cwd = lane_path` so the session is
+/// fully isolated from the main checkout (different working tree, index,
+/// HEAD, cwd, and PTY dedup key). Returns the `Lane` descriptor the frontend
+/// tracks.
 #[tauri::command]
 pub async fn lane_spawn(
     app: AppHandle,
@@ -187,7 +233,9 @@ pub async fn lane_spawn(
     agent: String,
     label: Option<String>,
 ) -> Result<Lane, String> {
-    let branch = auto_lane_branch(&agent);
+    // Name the lane after the work, not after a uuid: the label is the one
+    // thing anyone can read in the switcher, and it is already here.
+    let branch = lane_branch(&agent, label.as_deref(), |b| branch_exists(&repo_root, b));
 
     // Branch off the current HEAD of the main checkout — a lane starts
     // from wherever the user is, so its first commit threads cleanly back.
@@ -376,6 +424,57 @@ mod tests {
         let a = auto_lane_branch("gemini");
         let b = auto_lane_branch("gemini");
         assert_ne!(a, b, "two lanes must not collide");
+    }
+
+    #[test]
+    fn lane_branch_is_named_after_the_label() {
+        assert_eq!(
+            lane_branch("claude", Some("auth refactor"), |_| false),
+            "lane/claude/auth-refactor"
+        );
+        // A dashed agent id keeps its own segment, so the name can't eat it.
+        assert_eq!(
+            lane_branch("cursor-agent", Some("Fix the login bug!"), |_| false),
+            "lane/cursor-agent/fix-the-login-bug"
+        );
+        // Branch-flow prefixes say nothing about the work.
+        assert_eq!(
+            lane_branch("claude", Some("feat/worktree-control-plane"), |_| false),
+            "lane/claude/worktree-control-plane"
+        );
+    }
+
+    #[test]
+    fn lane_branch_suffixes_a_taken_label() {
+        let taken = |b: &str| b == "lane/claude/auth-refactor";
+        assert_eq!(
+            lane_branch("claude", Some("auth refactor"), taken),
+            "lane/claude/auth-refactor-2"
+        );
+    }
+
+    #[test]
+    fn lane_branch_without_a_usable_label_falls_back_to_the_uuid_shape() {
+        // Nothing to name it after → the readable placeholder, never an
+        // invented description.
+        for label in [None, Some(""), Some("   "), Some("★★★")] {
+            let b = lane_branch("claude", label, |_| false);
+            assert!(b.starts_with("lane/claude-"), "got {b}");
+            assert_eq!(b.len(), "lane/claude-".len() + 8);
+        }
+    }
+
+    #[test]
+    fn parses_agent_from_a_named_lane_branch() {
+        assert_eq!(
+            lane_agent_from_branch("lane/claude/auth-refactor").as_deref(),
+            Some("claude")
+        );
+        // The dashed agent id survives because it has its own segment.
+        assert_eq!(
+            lane_agent_from_branch("lane/cursor-agent/fix-the-login-bug").as_deref(),
+            Some("cursor-agent")
+        );
     }
 
     #[test]

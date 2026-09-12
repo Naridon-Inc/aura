@@ -26,7 +26,7 @@ import { describeTool } from "./toolDescribe";
 import { ToolCard } from "./ToolCard";
 import { ReasoningBlock } from "./ReasoningBlock";
 import type { StreamBlock } from "./types";
-import { countOf } from "../../../lib/plural";
+import { countOf } from "@shared/plural";
 
 type ToolBlock = Extract<StreamBlock, { kind: "tool" }>;
 

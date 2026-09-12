@@ -177,6 +177,11 @@ pub struct WorkingTreeDiff {
     pub deletions: usize,
     #[serde(default)]
     pub files: Vec<FileDiffStat>,
+    /// Entries the assembler's per-file cap left out of `files` — the line
+    /// stats above still count them. Renderers say "+N more" instead of
+    /// silently shrinking the list.
+    #[serde(default)]
+    pub files_elided: usize,
 }
 
 /// One changed path + its single-letter status (M/A/D/R/?).

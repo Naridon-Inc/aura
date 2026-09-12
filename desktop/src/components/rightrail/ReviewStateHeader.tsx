@@ -25,6 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, type AheadBehind, type PrSummary } from "../../lib/api";
+import { prMerge } from "../../lib/prApi";
 import { fetchAheadBehind, fetchDiffStats } from "../../lib/gitStateCache";
 import {
   fetchPrList,
@@ -223,7 +224,7 @@ export function ReviewStateHeader({
             break;
           case "merge":
             if (pr) {
-              await api.prMerge(repoRoot, pr.number, "squash", false);
+              await prMerge(repoRoot, pr.number, "squash", false);
               await invalidatePrList(repoRoot).catch(() => {});
             }
             break;

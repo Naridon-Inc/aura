@@ -79,6 +79,43 @@ name, do NOT name other functions, classes, variables, or files, and never use \
 code or git jargon. Past tense, max 16 words. No filler, no quotes. Output ONLY \
 the sentence.";
 
+/// The SAME job as {@link SYMBOL_PROMPT}, asked once for a whole file's worth of
+/// pieces instead of once per piece.
+///
+/// One model call per piece was correct and unbearably slow: a file with a
+/// dozen changed pieces is twenty-odd cold agent-CLI spawns, and the reader
+/// watched generic placeholders for minutes. The pieces all live in the same
+/// diff and are read from the same context, so asking about them together costs
+/// one call and reads better — the model can tell them apart instead of meeting
+/// each one alone. The reply is one `name: sentence` line per piece, which the
+/// caller splits back out and caches under each piece's own key, so nothing
+/// downstream can tell a batched line from a singly-generated one.
+pub(crate) const SYMBOL_BATCH_PROMPT: &str =
+    "You describe what each named part of a project does, in plain, everyday \
+language a non-programmer would understand. You are given a list of pieces. \
+Read the diff and write ONE line per piece, in the order listed, formatted \
+exactly as `name: sentence` — the piece's name, a colon, then one sentence \
+saying what that piece does now, its real-world job as of this change. Cover \
+every name in the list and invent no others. Do NOT repeat a piece's name \
+inside its sentence, do NOT name other functions, classes, variables, or \
+files, and never use code or git jargon. Present tense, max 16 words per \
+sentence. No filler, no quotes, no numbering, no blank lines. Output ONLY the \
+lines.";
+
+/// Past-tense counterpart to {@link SYMBOL_BATCH_PROMPT} — a whole file's
+/// "Previous was this" lines in one call.
+pub(crate) const SYMBOL_BATCH_BEFORE_PROMPT: &str =
+    "You describe what each named part of a project USED TO DO before a change, \
+in plain, everyday language a non-programmer would understand. You are given a \
+list of pieces. Read the diff and write ONE line per piece, in the order \
+listed, formatted exactly as `name: sentence` — the piece's name, a colon, \
+then one sentence saying what that piece did before this change, its old \
+real-world job. Cover every name in the list and invent no others. Do NOT \
+repeat a piece's name inside its sentence, do NOT name other functions, \
+classes, variables, or files, and never use code or git jargon. Past tense, \
+max 16 words per sentence. No filler, no quotes, no numbering, no blank \
+lines. Output ONLY the lines.";
+
 /// Which one-line summary the caller wants from the model. `Why` is the
 /// original commit-intent statement (the reason); `What` is the
 /// plain-language description of the change for a non-engineer; `Before`
@@ -98,6 +135,24 @@ pub enum InferTask {
     /// Describe what a single named piece USED TO DO before the change — the
     /// per-node "Previous was this" blurb. Past-tense counterpart to `Symbol`.
     SymbolBefore,
+    /// Describe MANY named pieces at once — a whole file's "New is this" lines
+    /// in a single call, one `name: sentence` line per piece.
+    SymbolBatch,
+    /// Past-tense counterpart to `SymbolBatch` — a file's "Previous was this"
+    /// lines in one call.
+    SymbolBatchBefore,
+}
+
+impl InferTask {
+    /// How much of the diff this task may see, in bytes. A single-piece task is
+    /// pointed at one named piece and needs only its neighbourhood; a batch
+    /// answers for every changed piece in the file and must be shown all of them.
+    fn diff_budget(self) -> usize {
+        match self {
+            InferTask::SymbolBatch | InferTask::SymbolBatchBefore => 6000,
+            _ => 1500,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +190,8 @@ impl InferContext {
             InferTask::Reason => REASON_PROMPT,
             InferTask::Symbol => SYMBOL_PROMPT,
             InferTask::SymbolBefore => SYMBOL_BEFORE_PROMPT,
+            InferTask::SymbolBatch => SYMBOL_BATCH_PROMPT,
+            InferTask::SymbolBatchBefore => SYMBOL_BATCH_BEFORE_PROMPT,
         }
     }
 
@@ -148,6 +205,12 @@ impl InferContext {
             InferTask::Symbol => "In one plain sentence, say what the piece named above does now.",
             InferTask::SymbolBefore => {
                 "In one plain sentence, say what the piece named above used to do before this change."
+            }
+            InferTask::SymbolBatch => {
+                "Write one `name: sentence` line per piece listed above, saying what each does now."
+            }
+            InferTask::SymbolBatchBefore => {
+                "Write one `name: sentence` line per piece listed above, saying what each used to do."
             }
         }
     }
@@ -163,8 +226,18 @@ impl InferContext {
             joined
         };
         let mut diff = self.diff_excerpt.clone();
-        if diff.len() > 1500 {
-            diff.truncate(1500);
+        // A batch task speaks for every changed piece in a file, so it has to
+        // SEE all of them: cutting at the single-piece budget would leave the
+        // pieces near the end of the file undescribed — which is exactly what
+        // the batch exists to fix.
+        let budget = self.task.diff_budget();
+        if diff.len() > budget {
+            // Never split a char boundary — truncating mid-character panics.
+            let mut cut = budget;
+            while cut > 0 && !diff.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            diff.truncate(cut);
         }
         let mut tail = self.assistant_tail.clone();
         if tail.len() > 200 {

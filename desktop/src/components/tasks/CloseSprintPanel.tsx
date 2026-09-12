@@ -18,7 +18,7 @@ import { Button } from "../ui/button";
 import { Field } from "../ui/field";
 import { Select } from "../ui/select";
 import type { Sprint } from "../../lib/api";
-import { plural } from "../../lib/plural";
+import { plural } from "@shared/plural";
 
 /** Sentinel destination = send unfinished items back to the backlog
  *  (clear their cycle pointer). Any other value is a target sprint id. */

@@ -78,7 +78,7 @@ pub fn project_id_for(repo_root: &str) -> String {
 /// component. Slashes get flattened to dashes (so `feat/foo` becomes
 /// `feat-foo`) and any non-alnum/-/_/. chars get dropped. Empty input
 /// is rejected by the caller.
-fn sanitise_branch_for_path(branch: &str) -> String {
+pub(crate) fn sanitise_branch_for_path(branch: &str) -> String {
     branch
         .chars()
         .map(|c| match c {
@@ -94,7 +94,9 @@ fn sanitise_branch_for_path(branch: &str) -> String {
 /// `~/.aura/credentials.json` overrides it (settable from the Settings
 /// dialog). Returned absolute so the traversal check in
 /// `safe_resolve_managed_path` stays reliable.
-fn managed_root() -> Option<PathBuf> {
+// AURA-1298: crate-visible so the resource snapshot can name the folder its
+// low-disk warning opens — the one that fills up.
+pub(crate) fn managed_root() -> Option<PathBuf> {
     if let Some(custom) = read_worktree_base_override() {
         return Some(custom);
     }
@@ -203,14 +205,72 @@ pub fn is_git_work_tree(repo_root: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// A pull-request head spelled as the refspec the picker hands us for a fork:
+/// `pull/<n>/head[:<local-branch>]`. The head branch of a fork PR has no ref
+/// in this clone, so the only way to start from it is to fetch GitHub's
+/// synthetic `pull/<n>/head` ref into a local branch first.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PullHeadSpec {
+    pub number: u64,
+    pub local_branch: String,
+}
+
+/// PURE: parse `pull/<n>/head` or `pull/<n>/head:<local>` (also accepted with
+/// a `refs/` prefix). Anything else is `None`. Without an explicit local name
+/// the branch is `pr-<n>`.
+pub(crate) fn parse_pull_head_spec(raw: &str) -> Option<PullHeadSpec> {
+    let raw = raw.trim().trim_start_matches("refs/");
+    let (src, local) = match raw.split_once(':') {
+        Some((s, l)) => (s, Some(l.trim())),
+        None => (raw, None),
+    };
+    let rest = src.strip_prefix("pull/")?;
+    let (num, tail) = rest.split_once('/')?;
+    if tail != "head" {
+        return None;
+    }
+    let number: u64 = num.parse().ok()?;
+    let local_branch = match local {
+        Some(l) if !l.is_empty() => l.to_string(),
+        _ => format!("pr-{number}"),
+    };
+    if local_branch.contains("..") || local_branch.starts_with('-') {
+        return None;
+    }
+    Some(PullHeadSpec {
+        number,
+        local_branch,
+    })
+}
+
 /// Resolve a user-supplied start-point string into a `ResolvedRef`.
-/// Lookup order: local branch → tag → remote-tracking branch → HEAD.
+/// Lookup order: local branch → tag → remote-tracking branch (`origin/foo`,
+/// or a bare `foo` that only exists on `origin`) → HEAD. A `pull/<n>/head`
+/// spec is fetched from `origin` into a local branch and resolved as that
+/// branch — how a fork's PR becomes something you can start work from.
 /// Returns `Err` when nothing matches.
 pub fn resolve_start_point(repo_root: &str, raw: &str) -> Result<ResolvedRef, String> {
     let cwd = PathBuf::from(repo_root);
     let trimmed = raw.trim();
     if trimmed.eq_ignore_ascii_case("HEAD") || trimmed.is_empty() {
         return Ok(ResolvedRef::Head);
+    }
+
+    // Fork PR: `pull/<n>/head:<local>` — fetch first, then it's a local branch.
+    if let Some(spec) = parse_pull_head_spec(trimmed) {
+        let refspec = format!(
+            "+pull/{}/head:refs/heads/{}",
+            spec.number, spec.local_branch
+        );
+        run_git(&cwd, &["fetch", "origin", &refspec]).map_err(|e| {
+            format!(
+                "couldn't fetch pull request #{} from origin: {e}",
+                spec.number
+            )
+        })?;
+        return Ok(ResolvedRef::Local {
+            name: spec.local_branch,
+        });
     }
 
     // Prefer the most specific, least-ambiguous match first.
@@ -233,6 +293,15 @@ pub fn resolve_start_point(repo_root: &str, raw: &str) -> Result<ResolvedRef, St
                 name: name.to_string(),
             });
         }
+    }
+    // A PR's head branch that was never checked out here still exists as
+    // `origin/<branch>` — start from that rather than failing on a name the
+    // picker showed as perfectly real.
+    if ref_exists(&cwd, &format!("refs/remotes/origin/{trimmed}")) {
+        return Ok(ResolvedRef::RemoteTracking {
+            remote: "origin".to_string(),
+            name: trimmed.to_string(),
+        });
     }
     Err(format!(
         "could not resolve start-point '{trimmed}' (not a local branch, tag, or remote-tracking ref)"
@@ -338,6 +407,32 @@ pub fn remove_managed_worktree(repo_root: &str, worktree_path: &str) -> Result<(
             &["worktree", "prune"],
         );
         return Ok(());
+    }
+
+    // Guard: only ever delete a path git actually registers as a *linked*
+    // worktree of this repo, and never the main checkout. `worktree_path`
+    // arrives straight from a Tauri command / lane record with no validation;
+    // without this, a stale or wrong value — the repo root itself, $HOME, any
+    // directory — would be renamed and `rm -rf`'d. Creation is already fenced
+    // to managed_root via safe_resolve_managed_path; removal must be fenced too.
+    let canon_target = target
+        .canonicalize()
+        .map_err(|e| format!("resolve {}: {e}", target.display()))?;
+    let listing = run_git(Path::new(repo_root), &["worktree", "list", "--porcelain"])?;
+    let registered: Vec<PathBuf> = listing
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .filter_map(|p| PathBuf::from(p.trim()).canonicalize().ok())
+        .collect();
+    // `git worktree list` prints the main worktree first; refuse to touch it.
+    let is_main = registered.first() == Some(&canon_target);
+    let is_linked = registered.iter().any(|p| *p == canon_target);
+    if !is_linked || is_main {
+        return Err(format!(
+            "refusing to remove {}: not a linked worktree of {}",
+            target.display(),
+            repo_root
+        ));
     }
 
     // Sibling temp path under the same parent so `rename` stays atomic.
@@ -482,5 +577,111 @@ mod tests {
             .as_start_point(),
             "refs/tags/v1.0"
         );
+    }
+
+    #[test]
+    fn pull_head_spec_parses_fork_pr_refspecs_only() {
+        // The picker's spelling for a fork PR: explicit local branch.
+        assert_eq!(
+            parse_pull_head_spec("pull/41/head:pr-41-feat/login"),
+            Some(PullHeadSpec {
+                number: 41,
+                local_branch: "pr-41-feat/login".into()
+            })
+        );
+        // Bare `pull/<n>/head` gets a default local name; `refs/` prefix ok.
+        assert_eq!(
+            parse_pull_head_spec("refs/pull/7/head"),
+            Some(PullHeadSpec {
+                number: 7,
+                local_branch: "pr-7".into()
+            })
+        );
+        // Ordinary start points are not pull specs.
+        assert_eq!(parse_pull_head_spec("main"), None);
+        assert_eq!(parse_pull_head_spec("origin/feat"), None);
+        assert_eq!(parse_pull_head_spec("pull/x/head"), None);
+        assert_eq!(parse_pull_head_spec("pull/3/merge"), None);
+        // Unsafe local names are refused rather than handed to git.
+        assert_eq!(parse_pull_head_spec("pull/3/head:-bad"), None);
+        assert_eq!(parse_pull_head_spec("pull/3/head:a..b"), None);
+    }
+
+    // ── remove_managed_worktree containment ──────────────────────────
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("spawn git")
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed in {}", cwd.display());
+    }
+
+    /// A real repo with one linked worktree. Returns (repo_root, worktree_path).
+    fn repo_with_linked_worktree() -> (PathBuf, PathBuf) {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!(
+            "aura-wt-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            n
+        ));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "t@t.t"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        let wt = base.join("wt");
+        git(
+            &repo,
+            &["worktree", "add", "-q", "-b", "feature", wt.to_str().unwrap()],
+        );
+        (repo, wt)
+    }
+
+    #[test]
+    fn removes_a_genuine_linked_worktree() {
+        let (repo, wt) = repo_with_linked_worktree();
+        assert!(wt.exists());
+        remove_managed_worktree(repo.to_str().unwrap(), wt.to_str().unwrap()).unwrap();
+        // The atomic rename happens synchronously before the detached rm, so
+        // the original path is already gone even though the rm runs in the bg.
+        assert!(!wt.exists(), "the linked worktree was removed");
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
+    fn refuses_to_remove_the_main_checkout() {
+        let (repo, wt) = repo_with_linked_worktree();
+        let err = remove_managed_worktree(repo.to_str().unwrap(), repo.to_str().unwrap())
+            .unwrap_err();
+        assert!(err.contains("not a linked worktree"), "got: {err}");
+        assert!(repo.exists(), "the main checkout must survive");
+        assert!(wt.exists(), "and its linked worktree is untouched");
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
+    fn refuses_to_remove_an_unrelated_directory() {
+        let (repo, _wt) = repo_with_linked_worktree();
+        // A directory that exists but git has never heard of.
+        let stranger = repo.parent().unwrap().join("not-a-worktree");
+        std::fs::create_dir_all(&stranger).unwrap();
+        std::fs::write(stranger.join("keep.txt"), "keep").unwrap();
+        let err = remove_managed_worktree(repo.to_str().unwrap(), stranger.to_str().unwrap())
+            .unwrap_err();
+        assert!(err.contains("not a linked worktree"), "got: {err}");
+        assert!(stranger.exists(), "an unmanaged directory must never be rm -rf'd");
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
     }
 }

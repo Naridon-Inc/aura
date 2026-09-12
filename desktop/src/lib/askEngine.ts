@@ -16,7 +16,7 @@
 import { api } from "./api";
 import { relativeAgeFromSecs } from "./relativeTime";
 import { agentName } from "./agentNames";
-import { sentenceCase } from "./textCase";
+import { sentenceCase } from "@shared/textCase";
 
 export type AskSource = {
   /** Who recorded it (already humanized, e.g. "Claude"). */

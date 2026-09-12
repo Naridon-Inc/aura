@@ -71,6 +71,7 @@ import {
   type AgentProfile,
   type CaptureStatus,
   type GitProfile,
+  type PendingGrant,
   type SettingsView,
   type TerminalProfile,
   type TelemetryView,
@@ -92,7 +93,7 @@ import {
 import { isChimeMuted, setChimeMuted, playChime } from "../../lib/chime";
 import { InstalledModesPane } from "../marketplace/InstalledModesPane";
 import { AuraWatchPanel } from "./AuraWatchSettingsDialog";
-import { IntegrationsTab } from "../settings/IntegrationsTab";
+import { ConnectedServicesTab } from "../settings/connected/ConnectedServicesTab";
 import { McpServersTab } from "../settings/McpServersTab";
 import { AgentsTab } from "../settings/AgentsTab";
 import { BrainTab } from "../settings/BrainTab";
@@ -104,12 +105,21 @@ import { CloudRunnerPanel } from "../commons/crew/CloudRunnerPanel";
 import { IdentityPanel } from "../identity/IdentityPanel";
 import { RepoWorktreeSettingsPane } from "../settings/RepoWorktreeSettingsPane";
 import { WorkspaceLandingRow } from "../settings/WorkspaceLandingRow";
+// AURA-1298
+import { PlaceEnvPane } from "../settings/PlaceEnvPane";
+import { PlaceBasePane } from "../settings/PlaceBasePane";
+import { ZOOM_MAX, ZOOM_MIN, useZoomLevel, zoomPercent } from "../../lib/zoomStore";
 import {
   setThemePreference,
   isDarkOnlyVariant,
   setThemeVariant,
   useThemePreference,
   useThemeVariant,
+  // AURA-1298
+  setThemeContrast,
+  useResolvedTheme,
+  useThemeContrast,
+  type ThemeContrast,
   type ThemePreference,
   type ThemeVariant,
 } from "../../lib/themeStore";
@@ -180,16 +190,18 @@ type PaneKey =
   | "local-models"
   | "terminal"
   | "copies"
-  | "keys"
   | "plugins"
   | "mcp"
-  | "integrations"
+  | "connected"
   | "cloud"
   | "mobile"
   | "policy"
   | "profiles"
   | "identity"
   | "team"
+  // AURA-1298
+  | "vault"
+  | "base"
   | "telemetry"
   | "experimental"
   | "help";
@@ -264,12 +276,11 @@ const PANE_GROUPS: PaneGroup[] = [
   {
     label: "Connections",
     items: [
-      { id: "integrations", label: "Integrations", icon: <Plug className="h-4 w-4" />, keywords: ["jira", "linear", "atlassian", "sync", "tasks", "issues", "oauth", "tracker"] },
+      { id: "connected", label: "Connected services", icon: <Plug className="h-4 w-4" />, keywords: ["jira", "linear", "atlassian", "sync", "tasks", "issues", "oauth", "tracker", "beads", "import", "anthropic", "openai", "gemini", "mercury", "secret", "key", "api key", "provider", "connect", "integration", "integrations", "store"] },
       { id: "cloud", label: "Cloud machine", icon: <Cloud className="h-4 w-4" />, keywords: ["cloud", "always-on", "always on", "machine", "runner", "connect", "remote", "vm", "box", "send", "offload", "background"] },
       { id: "mobile", label: "Aura on your phone", icon: <Smartphone className="h-4 w-4" />, keywords: ["mobile", "phone", "iphone", "ios", "android", "app", "waitlist", "invite", "testflight", "beta", "notify"] },
       { id: "mcp", label: "MCP servers", icon: <Plug className="h-4 w-4" />, keywords: ["mcp", "atlassian", "linear", "github", "sentry", "model context protocol", "tools"] },
       { id: "plugins", label: "Plugins", icon: <Puzzle className="h-4 w-4" />, keywords: ["plugin", "skill", "mcp", "marketplace", "extension"] },
-      { id: "keys", label: "API keys", icon: <Key className="h-4 w-4" />, keywords: ["anthropic", "openai", "gemini", "mercury", "secret", "key"] },
     ],
   },
   // Team and "advanced" were one group, which the scope filter then split
@@ -281,6 +292,15 @@ const PANE_GROUPS: PaneGroup[] = [
     label: "Team",
     items: [
       { id: "team", label: "Team", icon: <Users className="h-4 w-4" />, keywords: ["team", "members", "admin", "standup", "activity", "tokens", "usage", "billing", "report", "rollup", "channels"] },
+    ],
+  },
+  // AURA-1298 — what an agent finds on a machine: the secrets in its
+  // environment, the tools the project asks for, and the team's built base.
+  {
+    label: "Machines",
+    items: [
+      { id: "vault", label: "Secrets & tools", icon: <Key className="h-4 w-4" />, keywords: ["secret", "secrets", "vault", "env", "environment", "variable", "token", "api key", "credential", ".env", "toolchain", "install", "spec", "machine", "place"] },
+      { id: "base", label: "Base builds", icon: <Boxes className="h-4 w-4" />, keywords: ["base", "build", "warm", "team environment", "shared", "machine", "install", "cache", "place"] },
     ],
   },
   {
@@ -302,7 +322,6 @@ const REPO_SCOPED_PANES: ReadonlySet<PaneKey> = new Set<PaneKey>([
   "capture",
   "aurawatch",
   "policy",
-  "integrations",
   "cloud",
   "mcp",
   "copies",
@@ -311,7 +330,9 @@ const REPO_SCOPED_PANES: ReadonlySet<PaneKey> = new Set<PaneKey>([
 /** Panes that configure the cloud organization / team you belong to
  *  (members, usage, billing, channels) rather than your personal setup or a
  *  single repository. Filed under the Organization tab. */
-const ORG_SCOPED_PANES: ReadonlySet<PaneKey> = new Set<PaneKey>(["team"]);
+// AURA-1298 — "vault" and "base" are per-machine, per-project; filed under
+// Organization with Team since they are what a shared box's members share.
+const ORG_SCOPED_PANES: ReadonlySet<PaneKey> = new Set<PaneKey>(["team", "vault", "base"]);
 
 type SettingsScope = "user" | "org" | "repo";
 
@@ -516,6 +537,13 @@ export function SettingsDialog({
 
   return (
     <div
+      // A full-screen surface that covers the app and swallows Escape is a
+      // modal whatever it looks like, so it says so. `aria-label` rather than
+      // a heading: the surface deliberately shows no title (the scope tabs and
+      // the rail carry that), and a screen reader still needs a name.
+      role="dialog"
+      aria-modal="true"
+      aria-label="Settings"
       className="fixed inset-0 z-40 flex flex-col"
       style={{ background: "var(--color-bg-content)" }}
     >
@@ -830,7 +858,11 @@ export function SettingsDialog({
               {error}
             </div>
           )}
-          <div className="max-w-[722px] px-11 pb-16 pt-9">
+          {/* Which pane is on screen, in the DOM. The panes are switched by a
+              chain of `pane === "…" &&` below, so from the outside they are
+              indistinguishable — a headless driver, or anything else reading
+              the page, otherwise has to guess from the copy inside. */}
+          <div data-pane={pane} className="max-w-[722px] px-11 pb-16 pt-9">
             <PaneHeader title={paneLabel(pane)} />
             {pane === "appearance" && <AppearanceTab />}
             {pane === "themes" && <EditorThemesTab />}
@@ -840,9 +872,6 @@ export function SettingsDialog({
             {pane === "brain" && <BrainTab />}
             {pane === "modes" && <InstalledModesPane />}
             {pane === "aurawatch" && <AuraWatchPanel repoRoot={activeRepoRoot} />}
-            {pane === "keys" && view && (
-              <KeysTab view={view} onChanged={reload} />
-            )}
             {pane === "policy" && view && (
               <PolicyTab view={view} repoRoot={activeRepoRoot} onChanged={reload} />
             )}
@@ -867,7 +896,13 @@ export function SettingsDialog({
             )}
             {pane === "plugins" && <PluginsTab />}
             {pane === "mcp" && <McpServersTab repoRoot={activeRepoRoot} />}
-            {pane === "integrations" && <IntegrationsTab repoRoot={activeRepoRoot} />}
+            {pane === "connected" && view && (
+              <ConnectedServicesTab
+                view={view}
+                repoRoot={activeRepoRoot}
+                onChanged={reload}
+              />
+            )}
             {pane === "mobile" && <MobileWaitlistTab />}
             {pane === "cloud" && <CloudRunnerPanel repoRoot={activeRepoRoot} />}
             {pane === "profiles" && <ProfilesTab repoRoot={repoRoot} />}
@@ -878,6 +913,23 @@ export function SettingsDialog({
               ) : (
                 <div className="py-6 text-sm text-text-3">
                   Open a project to see its team.
+                </div>
+              ))}
+            {/* AURA-1298 */}
+            {pane === "vault" &&
+              (activeRepoRoot ? (
+                <PlaceEnvPane repoRoot={activeRepoRoot} />
+              ) : (
+                <div className="py-6 text-sm text-text-3">
+                  Open a project to manage its secrets and tools.
+                </div>
+              ))}
+            {pane === "base" &&
+              (activeRepoRoot ? (
+                <PlaceBasePane repoRoot={activeRepoRoot} />
+              ) : (
+                <div className="py-6 text-sm text-text-3">
+                  Open a project to see its base builds.
                 </div>
               ))}
             {pane === "telemetry" && <TelemetryTab />}
@@ -903,6 +955,12 @@ function AppearanceTab() {
   // drifted to include Amber, which ships a real light palette — so light
   // mode was unreachable on the one pack everybody is on.
   const schemeDisabled = isDarkOnlyVariant(variant);
+  // AURA-1298 — zoom is the same level ⌘+ / ⌘− move; contrast only has an
+  // effect in dark, so the row says so instead of silently doing nothing.
+  const [zoom, setZoom] = useZoomLevel();
+  const contrast = useThemeContrast();
+  const resolved = useResolvedTheme();
+  const contrastInert = resolved !== "dark";
   return (
     <>
       <PaneIntro text="Customize how Aura looks on your device." />
@@ -942,6 +1000,47 @@ function AppearanceTab() {
               setThemePreference(next);
             }}
           />
+        </Row>
+        {/* AURA-1298 */}
+        <Row
+          label="Contrast"
+          description="Low softens the dark palette — a little less white on black — for long sessions or dim rooms. The green accent stays as it is."
+          hint={contrastInert ? "Only affects dark mode; you are in light right now." : undefined}
+        >
+          <SegControl<ThemeContrast>
+            value={contrast}
+            options={[
+              { value: "normal", label: "Normal" },
+              { value: "low", label: "Low" },
+            ]}
+            onChange={setThemeContrast}
+          />
+        </Row>
+      </Section>
+      {/* AURA-1298 */}
+      <Section title="Zoom">
+        <Row
+          label="Zoom level"
+          description="Makes everything in the window bigger or smaller. ⌘+ and ⌘− do the same thing; ⌘0 puts it back."
+        >
+          <div className="flex items-center gap-2">
+            <Stepper
+              value={zoomPercent(zoom)}
+              onChange={(pct) => setZoom(pct / 100)}
+              min={Math.round(ZOOM_MIN * 100)}
+              max={Math.round(ZOOM_MAX * 100)}
+              step={10}
+              suffix="%"
+            />
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={() => setZoom(1)}
+              disabled={zoomPercent(zoom) === 100}
+            >
+              Reset
+            </Button>
+          </div>
         </Row>
       </Section>
       <Section title="Editor font">
@@ -2055,191 +2154,6 @@ function ExperimentalTab() {
   );
 }
 
-// ── Keys ──────────────────────────────────────────────────────────────
-
-function KeysTab({
-  view,
-  onChanged,
-}: {
-  view: SettingsView;
-  onChanged: () => void;
-}) {
-  return (
-    <Section title="Provider API keys">
-      <p className="text-sm text-text-3 mb-2">
-        Stored in <code>~/.aura/credentials.json</code> (mode 0600). Cleared
-        keys also clear the env-var fallback from <code>aura</code>'s point
-        of view.
-      </p>
-      <KeyRow
-        provider="anthropic"
-        label="Anthropic"
-        last4={view.anthropic_key_last4}
-        active={view.ai_provider === "anthropic"}
-        onChanged={onChanged}
-      />
-      <KeyRow
-        provider="openai"
-        label="OpenAI"
-        last4={view.openai_key_last4}
-        active={view.ai_provider === "openai"}
-        onChanged={onChanged}
-      />
-      <KeyRow
-        provider="gemini"
-        label="Gemini"
-        last4={view.gemini_key_last4}
-        active={view.ai_provider === "gemini"}
-        onChanged={onChanged}
-      />
-      <KeyRow
-        provider="mercury"
-        label="Mercury"
-        last4={view.mercury_key_last4}
-        active={view.ai_provider === "mercury"}
-        onChanged={onChanged}
-      />
-    </Section>
-  );
-}
-
-function KeyRow({
-  provider,
-  label,
-  last4,
-  active,
-  onChanged,
-}: {
-  provider: string;
-  label: string;
-  last4: string | null;
-  active: boolean;
-  onChanged: () => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState("");
-  const [busy, setBusy] = useState(false);
-  const save = async () => {
-    setBusy(true);
-    try {
-      await api.settingsSetProviderKey(provider, value);
-      setValue("");
-      setEditing(false);
-      onChanged();
-    } finally {
-      setBusy(false);
-    }
-  };
-  const clear = async () => {
-    setBusy(true);
-    try {
-      await api.settingsSetProviderKey(provider, "");
-      onChanged();
-    } finally {
-      setBusy(false);
-    }
-  };
-  const setActive = async () => {
-    setBusy(true);
-    try {
-      await api.settingsSetActiveProvider(provider);
-      onChanged();
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div className="flex items-center gap-2 py-1.5 border-b border-line-soft">
-      <div className="w-24 text-sm text-text-2">{label}</div>
-      <div className="flex-1 min-w-0">
-        {editing ? (
-          <div className="flex items-center gap-1.5">
-            <Input
-              type="password"
-              autoFocus
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              placeholder="paste key…"
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && value.trim()) save();
-                if (e.key === "Escape") {
-                  setEditing(false);
-                  setValue("");
-                }
-              }}
-              className="flex-1 font-mono"
-            />
-            <button
-              type="button"
-              onClick={save}
-              disabled={!value.trim() || busy}
-              className="text-sm px-2 py-1 rounded bg-accent-green text-bg-deep disabled:opacity-40"
-            >
-              save
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setEditing(false);
-                setValue("");
-              }}
-              className="text-sm px-2 py-1 rounded text-text-3 hover:text-text-1"
-            >
-              cancel
-            </button>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2 text-sm">
-            <span className="font-mono text-text-3">
-              {last4 ? `••••${last4}` : "—"}
-            </span>
-            {active && (
-              <span className="text-2xs text-accent-green border border-accent-green/40 rounded px-1.5 py-0.5">
-                active
-              </span>
-            )}
-          </div>
-        )}
-      </div>
-      {!editing && (
-        <div className="flex items-center gap-1">
-          {!active && last4 && (
-            <Button
-              variant="ghost"
-              size="xs"
-              onClick={setActive}
-              disabled={busy}
-              title="Set as active provider"
-            >
-              activate
-            </Button>
-          )}
-          <Button
-            variant="ghost"
-            size="xs"
-            onClick={() => setEditing(true)}
-            disabled={busy}
-          >
-            {last4 ? "replace" : "set"}
-          </Button>
-          {last4 && (
-            <Button
-              variant="ghost"
-              size="xs"
-              onClick={clear}
-              disabled={busy}
-              className="text-red hover:text-red"
-              title="Remove this key"
-            >
-              clear
-            </Button>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Policy ────────────────────────────────────────────────────────────
 
 function PolicyTab({
@@ -2367,7 +2281,40 @@ function PolicyTab({
             )}
           </div>
         </Row>
+        {/* The other half of the guard, and the half nothing in the app
+            mentioned. Everything above happens at commit time, after the
+            work is done; these three happen the moment an agent asks, and
+            they are the only ones a written-down reason can never buy —
+            the agent writes that reason itself. A person reading this pane
+            should not have to find that out from a refusal. */}
+        <Row
+          label="Three things an agent cannot decide alone"
+          description={
+            locked ? (
+              <>
+                Deleting a file, throwing away work you have not committed, and
+                overwriting the shared history on the server. An agent asking
+                for one of these is refused outright — writing down a reason
+                first changes nothing, because the agent writes the reason. A
+                person at a terminal allows one, once, with{" "}
+                <code className="text-text-2">aura grant issue</code>.
+              </>
+            ) : (
+              <>
+                Deleting a file, throwing away work you have not committed, and
+                overwriting the shared history on the server. Today Aura asks
+                you before each one. Lock strict mode with a passcode and the
+                question becomes a refusal, unless a person has allowed that
+                exact action ahead of time with{" "}
+                <code className="text-text-2">aura grant issue</code>.
+              </>
+            )
+          }
+        >
+          {null}
+        </Row>
       </Section>
+      <GrantsSection repoRoot={repoRoot} />
       {/* There used to be a second telemetry switch here — "Anonymous
           telemetry", hinted "Per-command usage counts." It was the SAME
           boolean as Telemetry → Usage analytics: `settings_set_telemetry`
@@ -2428,6 +2375,93 @@ function PolicyTab({
       <TemplatesSection repoRoot={repoRoot} />
     </>
   );
+}
+
+/// A grant is one person, at a terminal, allowing one delete / discard /
+/// force-push, once, for about fifteen minutes. Until now the only place
+/// it existed was `aura grant list` in a shell: the app could not tell
+/// you that a standing permission was sitting in the repository, and
+/// could not take it back. That is the residual risk the grant design
+/// names out loud — a forgotten grant is a hole that closes on a timer.
+///
+/// "Standing" here means only that it has not run out yet. Whether it
+/// still matches this repository, this copy and the file it was issued
+/// against is decided by the guard at the moment the action is tried, so
+/// a row can show a permission that would in fact be refused. That way
+/// round is the safe one: it makes a reader look, never relax.
+function GrantsSection({ repoRoot }: { repoRoot: string }) {
+  const [grants, setGrants] = useState<PendingGrant[] | null>(null);
+  const load = useCallback(async () => {
+    if (!repoRoot) return;
+    try {
+      setGrants(await api.auraGrantsPending(repoRoot));
+    } catch {
+      // A repository with no grant store is the normal case, and the
+      // command already answers it with an empty list — anything else
+      // here is a read failure worth showing as "nothing" rather than
+      // as an error the reader cannot act on.
+      setGrants([]);
+    }
+  }, [repoRoot]);
+  useEffect(() => {
+    void load();
+    // They expire in minutes, so a pane left open would otherwise show a
+    // permission that lapsed while it was being read.
+    const t = setInterval(() => void load(), 20_000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const live = (grants ?? []).filter((g) => g.expires_in > 0);
+  return (
+    <Section title="One-off permissions">
+      {live.length === 0 ? (
+        <Row
+          label="None right now"
+          description="Nobody has allowed an agent to delete anything, throw away uncommitted work, or overwrite the shared history. When someone does, it appears here until it is used or runs out."
+        >
+          {null}
+        </Row>
+      ) : (
+        live.map((g) => (
+          <Row
+            key={g.id}
+            label={`${grantVerb(g.operation)} — ${g.target}`}
+            description={`Allowed by ${g.issued_by}. ${remainingText(g.expires_in)}, or until it is used once.`}
+          >
+            <Button
+              variant="ghost"
+              size="xs"
+              className="text-red hover:text-red"
+              onClick={async () => {
+                await api.auraGrantRevoke(repoRoot, g.id);
+                await load();
+              }}
+            >
+              take back
+            </Button>
+          </Row>
+        ))
+      )}
+    </Section>
+  );
+}
+
+/// The operation in the words a person would use for it. Unknown values
+/// pass through rather than being flattened into "something", because a
+/// permission whose name Aura does not recognise is the one a reader
+/// most needs to see verbatim.
+function grantVerb(op: string): string {
+  if (op === "delete") return "Delete";
+  if (op === "reset") return "Throw away uncommitted work";
+  if (op === "force-push") return "Overwrite the shared history";
+  return op;
+}
+
+function remainingText(secs: number): string {
+  if (secs < 90) return `${secs} seconds left`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 90) return `${mins} minutes left`;
+  return `${Math.floor(mins / 60)} hours left`;
 }
 
 // Worktree base-path override. Default is ~/.aura/worktrees; teams with

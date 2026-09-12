@@ -44,7 +44,13 @@ type Props = {
   view: PageView;
   mentionSources?: MentionSources;
   collab?: PagesProvider | null;
+  /** Bumped when the surface replaces this page's collaborative document with
+   *  the copy on disk. Part of the editor's key, so the editor remounts onto
+   *  the fresh doc instead of re-rendering the old one. */
+  docEpoch?: number;
   railOpen: boolean;
+  /** Rendered above the document — the "someone else changed this" choice. */
+  banner?: ReactNode;
   onTitleChange: (title: string) => void;
   onBodyChange: (markdown: string) => void;
   onViewChange: (view: PageView) => void;
@@ -110,7 +116,9 @@ export function PageEditorPane({
   view,
   mentionSources,
   collab,
+  docEpoch,
   railOpen,
+  banner,
   onTitleChange,
   onBodyChange,
   onViewChange,
@@ -204,11 +212,13 @@ export function PageEditorPane({
         </div>
       </div>
 
+      {banner}
+
       <div className="pages-doc-body min-h-0 flex-1 overflow-hidden">
         {view === "blocks" && (
           <div className="pages-doc-scroll h-full overflow-auto">
             <TiptapEditor
-              key={note.id}
+              key={`${note.id}:${docEpoch ?? 0}`}
               value={body}
               onChange={onBodyChange}
               onLinkClick={handleLinkClick}

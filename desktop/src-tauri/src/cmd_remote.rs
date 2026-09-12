@@ -195,6 +195,21 @@ pub async fn remote_stop(state: State<'_, RemoteState>) -> Result<RemoteStatus, 
     })
 }
 
+impl RemoteState {
+    /// The renderer's latest workspace snapshot, or `None` before the first
+    /// push. Exposed so background beacons (team presence) can answer "which
+    /// project is open right now" from the same cache the phone reads, rather
+    /// than keeping a second, drifting idea of the active project.
+    pub async fn snapshot(&self) -> Option<Value> {
+        let arc = {
+            let g = self.inner.lock().await;
+            g.snapshot.clone()
+        };
+        let v = arc.read().await;
+        v.clone()
+    }
+}
+
 /// Renderer mirror — pushes a JSON snapshot of {projects, sessions} to
 /// the cache so any phone that connects sees the up-to-date list of
 /// running agent / manager / terminal tabs without reaching back into

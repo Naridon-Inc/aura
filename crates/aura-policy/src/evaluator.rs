@@ -51,9 +51,38 @@ pub fn evaluate(
 
     // Agent-capability precheck: if the actor isn't allowed to propose this
     // block kind at all, that's a Deny before any rules run.
-    if let Some(deny) = check_kind_capability(policy, block, ctx) {
-        return deny;
+    let actor_grant = policy
+        .agents
+        .iter()
+        .find(|g| g.did_matcher.matches(&ctx.actor.0));
+    if let Some(grant) = actor_grant {
+        if !grant.can_propose_kinds.iter().any(|k| k == &block.kind) {
+            return PolicyDecision {
+                verdict: CapabilityGrade::Deny,
+                rules_fired: vec!["agent-kind-capability".into()],
+                reason: format!(
+                    "Agent {} not permitted to propose blocks of kind {:?}.",
+                    ctx.actor.0, block.kind
+                ),
+                decided_by: AgentRef("did:aura:policy-engine/v1".into()),
+                decided_at: ctx.now,
+                gate_reviewer: None,
+            };
+        }
+    } else if !policy.agents.is_empty() {
+        // An actor no grant recognizes is not ungoverned — it is gated.
+        // Seeded as a fired rule rather than an early return so a Deny rule
+        // below can still escalate past it.
+        fired.push(MatchedRule {
+            id: "agent-grant-unmatched".into(),
+            verdict: CapabilityGrade::Gate,
+            priority: 950,
+            reason: "No capability grant matches this actor; a human must review its proposals."
+                .into(),
+            detail: Some(format!("actor {}", ctx.actor.0)),
+        });
     }
+    let actor_grant_id = actor_grant.map(|g| g.id.as_str());
 
     // AURA-505: Cedar Integration
     // If a Cedar policy is loaded, evaluate it first.
@@ -100,9 +129,12 @@ pub fn evaluate(
     // Running "tentative verdict so far" so human-state rules can condition
     // on it without recomputing.
     let mut tentative = CapabilityGrade::Auto;
+    for f in &fired {
+        tentative = most_restrictive(tentative, f.verdict);
+    }
 
     for rule in &policy.rules {
-        if !rule_applies_to_actor(rule, ctx) {
+        if !rule_applies_to_actor(rule, ctx, actor_grant_id) {
             continue;
         }
         if let Some(m) = rule_matches(rule, block, ctx, rate, tentative) {
@@ -119,7 +151,7 @@ pub fn evaluate(
 
     // Resolve
     let (verdict, winning_rule_id, winning_reason) = if fired.is_empty() {
-        let (v, r) = structural_default(block);
+        let (v, r) = structural_default(block, &ctx.repo_root);
         (v, None, r)
     } else {
         let winner = pick_winner(&fired);
@@ -144,40 +176,20 @@ pub fn evaluate(
 // Pre-checks
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn check_kind_capability(
-    policy: &CompiledPolicy,
-    block: &Block,
+fn rule_applies_to_actor(
+    rule: &CompiledRule,
     ctx: &EvalContext,
-) -> Option<PolicyDecision> {
-    let grant = policy
-        .agents
-        .iter()
-        .find(|g| g.did_matcher.matches(&ctx.actor.0))?;
-
-    if grant.can_propose_kinds.iter().any(|k| k == &block.kind) {
-        return None;
-    }
-
-    Some(PolicyDecision {
-        verdict: CapabilityGrade::Deny,
-        rules_fired: vec!["agent-kind-capability".into()],
-        reason: format!(
-            "Agent {} not permitted to propose blocks of kind {:?}.",
-            ctx.actor.0, block.kind
-        ),
-        decided_by: AgentRef("did:aura:policy-engine/v1".into()),
-        decided_at: ctx.now,
-        gate_reviewer: None,
-    })
-}
-
-fn rule_applies_to_actor(rule: &CompiledRule, ctx: &EvalContext) -> bool {
+    actor_grant_id: Option<&str>,
+) -> bool {
     if rule.applies_to_agents.is_empty() {
         return true;
     }
-    // The supervisor would ideally pass the resolved agent grant ID; for now,
-    // match by suffix of the DID after the last slash. Supervisor refines later.
-    let actor_id = ctx.actor.0.split('/').nth(2).unwrap_or("");
+    // `applies_to_agents` names grant ids from [[agents]]. Resolve through the
+    // grant that matched this actor's DID; when no grant matched, fall back to
+    // the agent segment of `did:aura:agent/<agent>/<session>`.
+    let actor_id = actor_grant_id
+        .or_else(|| ctx.actor.0.split('/').nth(1))
+        .unwrap_or("");
     rule.applies_to_agents.iter().any(|a| a == actor_id)
 }
 
@@ -219,8 +231,15 @@ fn match_path_write(m: &PathMatcher, block: &Block, ctx: &EvalContext) -> Option
     }
 
     for w in &writes {
-        let path = Path::new(w);
-        let inside = is_inside_repo(path, &ctx.repo_root);
+        let path = Path::new(w.as_str());
+        let norm = normalize_repo_relative(path, &ctx.repo_root);
+        let inside = norm.is_some();
+        // Globs match the normalized repo-relative form, so `src/../.aura/x`
+        // can't slip past a `.aura/**` rule by spelling the path differently.
+        let cand: &str = match &norm {
+            Some(n) => n.to_str().unwrap_or(w.as_str()),
+            None => w.as_str(),
+        };
 
         if m.paths_outside_repo && !inside {
             return Some(MatchResult {
@@ -229,7 +248,7 @@ fn match_path_write(m: &PathMatcher, block: &Block, ctx: &EvalContext) -> Option
         }
         if m.paths_inside_repo && inside {
             // But check exclusions
-            if m.paths_exclude.iter().any(|g| glob_match(g, w)) {
+            if m.paths_exclude.iter().any(|g| glob_match(g, cand)) {
                 continue;
             }
             if m.paths.is_empty() {
@@ -244,10 +263,10 @@ fn match_path_write(m: &PathMatcher, block: &Block, ctx: &EvalContext) -> Option
         let mut any_negative_hit = false;
         for g in &m.paths {
             if g.negated {
-                if glob_match(g, w) {
+                if glob_match(g, cand) {
                     any_negative_hit = true;
                 }
-            } else if glob_match(g, w) {
+            } else if glob_match(g, cand) {
                 any_positive = true;
             }
         }
@@ -469,13 +488,31 @@ fn match_human_state(
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn is_inside_repo(p: &Path, repo_root: &Path) -> bool {
-    let p_abs = if p.is_absolute() {
-        p.to_path_buf()
+/// Lexically resolve a declared path against the repo root. Returns the
+/// normalized repo-relative path when it stays inside the repo, and `None`
+/// when it is absolute-outside or escapes via `..`. Declared paths come from
+/// an agent and may not exist yet — no filesystem calls, pure string logic.
+fn normalize_repo_relative(p: &Path, repo_root: &Path) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let rel = if p.is_absolute() {
+        p.strip_prefix(repo_root).ok()?.to_path_buf()
     } else {
-        repo_root.join(p)
+        p.to_path_buf()
     };
-    p_abs.starts_with(repo_root)
+    let mut stack: Vec<std::ffi::OsString> = Vec::new();
+    for c in rel.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if stack.pop().is_none() {
+                    return None; // walked above the repo root
+                }
+            }
+            Component::Normal(seg) => stack.push(seg.to_os_string()),
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(stack.iter().collect())
 }
 
 fn glob_match(g: &GlobPattern, s: &str) -> bool {
@@ -522,9 +559,17 @@ fn impacts_exceed(actual: &DeclaredImpacts, declared: &DeclaredImpacts) -> bool 
             .iter()
             .any(|s| !declared.mutates_secrets.contains(s))
         || actual.deploys.iter().any(|d| !declared.deploys.contains(d))
+        || actual
+            .installs_packages
+            .iter()
+            .any(|p| !declared.installs_packages.contains(p))
+        || actual
+            .touches_zones
+            .iter()
+            .any(|z| !declared.touches_zones.contains(z))
 }
 
-fn is_reversible(block: &Block) -> bool {
+fn is_reversible(block: &Block, repo_root: &Path) -> bool {
     let d = &block.declared_impacts;
     if !d.network.is_empty()
         || !d.installs_packages.is_empty()
@@ -533,13 +578,21 @@ fn is_reversible(block: &Block) -> bool {
     {
         return false;
     }
-    d.writes_paths
-        .iter()
-        .all(|p| !p.starts_with(".aura/") && !p.starts_with(".git/"))
+    d.writes_paths.iter().all(|p| {
+        match normalize_repo_relative(Path::new(p), repo_root) {
+            // Outside the repo (or escaping it via `..`) — rewind can't
+            // restore what it never snapshotted.
+            None => false,
+            Some(rel) => !matches!(
+                rel.components().next(),
+                Some(std::path::Component::Normal(seg)) if seg == ".aura" || seg == ".git"
+            ),
+        }
+    })
 }
 
-fn structural_default(block: &Block) -> (CapabilityGrade, String) {
-    if is_reversible(block) {
+fn structural_default(block: &Block, repo_root: &Path) -> (CapabilityGrade, String) {
+    if is_reversible(block, repo_root) {
         (
             CapabilityGrade::Auto,
             "No rule matched; block is structurally reversible.".into(),
@@ -877,5 +930,217 @@ mod tests {
             &mut rate,
         );
         assert_eq!(dec.verdict, CapabilityGrade::Deny);
+    }
+
+    #[test]
+    fn a_dotdot_traversal_cannot_pose_as_an_in_repo_write() {
+        // Before normalization, `src/../../../etc/cron.d/evil` joined onto the
+        // repo root started with the root and counted as "inside" — the
+        // out-of-repo gate never saw it and the write auto-approved.
+        let pol = policy_from_str(include_str!("../policy.toml"));
+        let block = mk_block(
+            BlockPayload::Command {
+                command: "install cron job".into(),
+                shell: Some("zsh".into()),
+                cwd: "/repo".into(),
+            },
+            DeclaredImpacts {
+                writes_paths: vec!["src/../../../etc/cron.d/evil".into()],
+                ..Default::default()
+            },
+            BlockKind::Command,
+        );
+        let mut rate = RateState::new();
+        let dec = evaluate(
+            &pol,
+            &block,
+            &ctx("did:aura:agent/claude-code/s1", TrustTier::Standard),
+            &mut rate,
+        );
+        assert_eq!(dec.verdict, CapabilityGrade::Gate, "{}", dec.reason);
+        assert!(
+            dec.rules_fired.iter().any(|r| r == "out-of-repo-writes"),
+            "escape must hit the out-of-repo rule; fired = {:?}",
+            dec.rules_fired
+        );
+    }
+
+    #[test]
+    fn a_dotdot_detour_into_aura_is_still_denied() {
+        // `.aura/**` globs match the normalized form, so spelling the path
+        // `src/../.aura/…` can't slip past the sanctity rule.
+        let pol = policy_from_str(include_str!("../policy.toml"));
+        let block = mk_block(
+            BlockPayload::Command {
+                command: "echo x > src/../.aura/policy.toml".into(),
+                shell: Some("zsh".into()),
+                cwd: "/repo".into(),
+            },
+            DeclaredImpacts {
+                writes_paths: vec!["src/../.aura/policy.toml".into()],
+                ..Default::default()
+            },
+            BlockKind::Command,
+        );
+        let mut rate = RateState::new();
+        let dec = evaluate(
+            &pol,
+            &block,
+            &ctx("did:aura:agent/claude-code/s1", TrustTier::Standard),
+            &mut rate,
+        );
+        assert_eq!(dec.verdict, CapabilityGrade::Deny, "{}", dec.reason);
+        assert!(
+            dec.rules_fired.iter().any(|r| r == "system-aura-sanctity"),
+            "detour must hit the sanctity rule; fired = {:?}",
+            dec.rules_fired
+        );
+    }
+
+    #[test]
+    fn an_actor_no_grant_recognizes_is_gated_not_ungoverned() {
+        // With grants configured, an unmatched DID used to sail through the
+        // capability precheck entirely and auto-approve reversible writes.
+        let pol = policy_from_str(include_str!("../policy.toml"));
+        let block = mk_block(
+            BlockPayload::Command {
+                command: "touch src/new.rs".into(),
+                shell: Some("zsh".into()),
+                cwd: "/repo".into(),
+            },
+            DeclaredImpacts {
+                writes_paths: vec!["src/new.rs".into()],
+                ..Default::default()
+            },
+            BlockKind::Command,
+        );
+        let mut rate = RateState::new();
+        let dec = evaluate(
+            &pol,
+            &block,
+            &ctx("did:aura:mystery/thing/x", TrustTier::Standard),
+            &mut rate,
+        );
+        assert_eq!(dec.verdict, CapabilityGrade::Gate, "{}", dec.reason);
+        assert!(
+            dec.rules_fired.iter().any(|r| r == "agent-grant-unmatched"),
+            "fired = {:?}",
+            dec.rules_fired
+        );
+    }
+
+    #[test]
+    fn agent_scoped_rules_fire_for_the_named_agent_and_only_it() {
+        // `applies_to_agents` names grant ids. The old code compared against
+        // the DID's *session* segment, so scoped rules never fired for anyone.
+        let pol = policy_from_str(include_str!("../policy.toml"));
+        let mk = || {
+            mk_block(
+                BlockPayload::Command {
+                    command: "touch src/new.rs".into(),
+                    shell: Some("zsh".into()),
+                    cwd: "/repo".into(),
+                },
+                DeclaredImpacts {
+                    writes_paths: vec!["src/new.rs".into()],
+                    ..Default::default()
+                },
+                BlockKind::Command,
+            )
+        };
+        let mut rate = RateState::new();
+
+        let dec = evaluate(
+            &pol,
+            &mk(),
+            &ctx("did:aura:agent/claude-code/s1", TrustTier::Standard),
+            &mut rate,
+        );
+        assert_eq!(dec.verdict, CapabilityGrade::Auto, "{}", dec.reason);
+        assert!(
+            dec.rules_fired
+                .iter()
+                .any(|r| r == "in-repo-reversible-writes"),
+            "the scoped auto rule must fire for claude-code; fired = {:?}",
+            dec.rules_fired
+        );
+
+        // gemini's grant id is "gemini-retrieval" — not in the rule's list.
+        let dec = evaluate(
+            &pol,
+            &mk(),
+            &ctx("did:aura:agent/gemini/s1", TrustTier::Standard),
+            &mut rate,
+        );
+        assert_eq!(dec.verdict, CapabilityGrade::Auto, "{}", dec.reason);
+        assert!(
+            !dec.rules_fired
+                .iter()
+                .any(|r| r == "in-repo-reversible-writes"),
+            "the scoped rule must NOT fire for gemini; fired = {:?}",
+            dec.rules_fired
+        );
+    }
+
+    #[test]
+    fn divergence_sees_undeclared_installs_and_zone_touches() {
+        let declared = DeclaredImpacts::default();
+        let installs = DeclaredImpacts {
+            installs_packages: vec!["leftpad".into()],
+            ..Default::default()
+        };
+        let zones = DeclaredImpacts {
+            touches_zones: vec!["payments".into()],
+            ..Default::default()
+        };
+        assert!(impacts_exceed(&installs, &declared));
+        assert!(impacts_exceed(&zones, &declared));
+        assert!(!impacts_exceed(&declared, &installs));
+        assert!(!impacts_exceed(&installs, &installs));
+    }
+
+    #[test]
+    fn paths_normalize_lexically_against_the_repo_root() {
+        let root = Path::new("/repo");
+        assert_eq!(
+            normalize_repo_relative(Path::new("src/../../etc/x"), root),
+            None
+        );
+        assert_eq!(
+            normalize_repo_relative(Path::new("src/../.aura/x"), root),
+            Some(PathBuf::from(".aura/x"))
+        );
+        assert_eq!(
+            normalize_repo_relative(Path::new("./src/./a.rs"), root),
+            Some(PathBuf::from("src/a.rs"))
+        );
+        assert_eq!(
+            normalize_repo_relative(Path::new("/repo/src/x"), root),
+            Some(PathBuf::from("src/x"))
+        );
+        assert_eq!(normalize_repo_relative(Path::new("/etc/x"), root), None);
+        assert_eq!(
+            normalize_repo_relative(Path::new("/repo/src/../../escape"), root),
+            None
+        );
+    }
+
+    #[test]
+    fn an_outside_repo_write_is_not_structurally_reversible() {
+        let block = mk_block(
+            BlockPayload::Command {
+                command: "touch ../sibling/file".into(),
+                shell: Some("zsh".into()),
+                cwd: "/repo".into(),
+            },
+            DeclaredImpacts {
+                writes_paths: vec!["../sibling/file".into()],
+                ..Default::default()
+            },
+            BlockKind::Command,
+        );
+        assert!(!is_reversible(&block, Path::new("/repo")));
+        let (verdict, _) = structural_default(&block, Path::new("/repo"));
+        assert_eq!(verdict, CapabilityGrade::Gate);
     }
 }

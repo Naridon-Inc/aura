@@ -35,7 +35,7 @@ use aura_loop::run_log::{RunLedger, RunRecord};
 use aura_loop::{
     crews_summary, goals_summary, ready_set, ready_view, BoardProjection, CrewSummary, GoalSummary,
     LoopGraph, LoopTask, RunScope, UpsertKind, STATE_COMPLETED, STATE_FAILED, STATE_PAUSED,
-    STATE_SUBMITTED, STATE_WORKING,
+    STATE_PLANNED, STATE_SUBMITTED, STATE_WORKING,
 };
 
 use crate::cmd_tasks::Task;
@@ -61,7 +61,21 @@ pub struct ReadyCounts {
     pub done: usize,
     /// W-B: nodes parked out of the ready set by a pause.
     pub paused: usize,
+    /// WRK-02: draft/planned plan-of-record rows — visible, not in the queue.
+    pub planned: usize,
+    /// WRK-02: submitted rows the execution gate refuses (containers,
+    /// acceptance-less nodes) — never dispatched.
+    pub unrunnable: usize,
     pub other: usize,
+}
+
+/// A submitted node no runner will pick up, with the gate's reason —
+/// surfaced so the flow can show "why isn't this running" instead of a
+/// silent hole (WRK-02).
+#[derive(Serialize)]
+pub struct UnrunnableNode {
+    pub task: LoopTask,
+    pub reason: String,
 }
 
 #[derive(Serialize)]
@@ -72,6 +86,11 @@ pub struct ReadyViewDto {
     pub done: Vec<LoopTask>,
     /// W-B: paused nodes (held back from the ready set, resumable).
     pub paused: Vec<LoopTask>,
+    /// WRK-02: draft/planned plan-of-record rows (board projections, plan
+    /// mirrors) — the visibility lane; `offer` is their only door into work.
+    pub planned: Vec<LoopTask>,
+    /// WRK-02: queued-by-state but refused by the execution gate.
+    pub unrunnable: Vec<UnrunnableNode>,
     pub other: Vec<LoopTask>,
     pub counts: ReadyCounts,
     /// W-B: per-goal rollup so each goal node can carry its own Run/Pause
@@ -91,6 +110,8 @@ fn read_view(graph: &LoopGraph) -> ReadyViewDto {
         working: view.working.len(),
         done: view.done.len(),
         paused: view.paused.len(),
+        planned: view.planned.len(),
+        unrunnable: view.unrunnable.len(),
         other: view.other.len(),
     };
     ReadyViewDto {
@@ -103,6 +124,12 @@ fn read_view(graph: &LoopGraph) -> ReadyViewDto {
         working: view.working,
         done: view.done,
         paused: view.paused,
+        planned: view.planned,
+        unrunnable: view
+            .unrunnable
+            .into_iter()
+            .map(|(task, reason)| UnrunnableNode { task, reason })
+            .collect(),
         other: view.other,
         counts,
         goals: goals_summary(&all),
@@ -179,9 +206,14 @@ pub struct LoopSyncResult {
 /// This matters for Jira-imported cards: the import sets `state_id` (the
 /// column the board shows) but can leave `status` stale, so a Closed ticket
 /// pulled in as a dependency must still resolve as `completed` (and unblock
-/// its dependents) rather than re-appear as ready work. A human's
-/// `in_progress` is NOT a runner lease, so it maps to `submitted` — `working`
-/// is reserved for nodes a loop lease owns.
+/// its dependents) rather than re-appear as ready work.
+///
+/// WRK-02: every active card maps to `planned` — the visibility state — and
+/// NEVER to `submitted`, which is the execution queue every runner drains.
+/// This sync exists so the canvas/console can SHOW the board, and showing a
+/// board must start zero agents; the whole backlog used to land `submitted`
+/// here, which is exactly how one Build click once dispatched the entire
+/// board. Queue admission is a separate, explicit act: `offer()`.
 fn map_status(t: &Task) -> String {
     match t.state_id.as_str() {
         // A cancelled blocker will never complete; treat it as resolved so it
@@ -189,12 +221,12 @@ fn map_status(t: &Task) -> String {
         "completed" | "cancelled" => STATE_COMPLETED,
         "backlog" | "unstarted" | "started" => match t.status.as_str() {
             "done" => STATE_COMPLETED,
-            _ => STATE_SUBMITTED,
+            _ => STATE_PLANNED,
         },
         // Unknown / custom state — defer to the legacy string.
         _ => match t.status.as_str() {
             "done" => STATE_COMPLETED,
-            _ => STATE_SUBMITTED,
+            _ => STATE_PLANNED,
         },
     }
     .to_string()
@@ -335,6 +367,9 @@ pub async fn loop_sync_board(repo_root: String) -> Result<LoopSyncResult, String
             // The crew the card belongs to — carried onto the node so the crew
             // graph can group and scope it. `None` leaves the node's crew as-is.
             crew_id: t.crew_id.clone(),
+            // WRK-02: the card's structured acceptance rides into the graph —
+            // it's what lets this node pass the execution gate when offered.
+            acceptance_criteria: t.acceptance.clone(),
         };
         let (node, kind) = graph
             .upsert_from_board(proj)
@@ -645,6 +680,10 @@ async fn run_external_crew(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    // The runner is a parent of the real agents — every dispatched `claude`,
+    // `codex`, `gemini` is its child. Signalling the runner alone leaves them
+    // running, which is what "Stop the crew" used to do.
+    crate::child_reaper::own_process_group(&mut cmd);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -657,6 +696,10 @@ async fn run_external_crew(
             return;
         }
     };
+
+    // Tracked from here so quitting the app stops the whole crew, not just the
+    // runner process — and disarmed below once it has been waited on.
+    let mut tree = crate::child_reaper::TreeGuard::named(child.id(), "crew loop runner");
 
     let mut settled: HashSet<String> = HashSet::new();
     if let Some(stderr) = child.stderr.take() {
@@ -672,7 +715,20 @@ async fn run_external_crew(
                 // "Stop this agent" (or "Stop the crew") fired the wave's
                 // cancel — kill the child so the real agents actually stop.
                 _ = cancel.notified() => {
-                    let _ = child.start_kill();
+                    // The whole group, not just the runner: SIGTERM lets the
+                    // runner record why each node stopped, then SIGKILL takes
+                    // anything that ignored it. Blocking work, so off-thread.
+                    match child.id() {
+                        Some(pid) => {
+                            let _ = tokio::task::spawn_blocking(move || {
+                                crate::child_reaper::terminate_tree(pid)
+                            })
+                            .await;
+                        }
+                        None => {
+                            let _ = child.start_kill();
+                        }
+                    }
                     break;
                 }
                 next = reader.next_line() => {
@@ -747,6 +803,7 @@ async fn run_external_crew(
     }
 
     let _ = child.wait().await;
+    tree.disarm();
 
     // Reconcile every lane a marker didn't settle against the live graph — the
     // CLI is the single writer of node status + commit, so it's the truth.
@@ -1062,11 +1119,7 @@ pub async fn loop_runs(repo_root: String, limit: Option<usize>) -> Result<Vec<Ru
 /// One crew as the surface shows it: its durable identity joined to live
 /// lifecycle counts from the graph. A crew present in the graph but not the
 /// registry (raw `crew_id` on some node) still surfaces, titled by its id.
-#[derive(Serialize)]
-pub struct CrewRow {
-    pub meta: CrewMeta,
-    pub summary: CrewSummary,
-}
+pub use aura_loop::crew::CrewRow;
 
 /// Every crew (registry ∪ crews live in the graph), "main" first. Each row
 /// carries the crew's identity and its current ready/working/done/paused tally
@@ -1076,36 +1129,7 @@ pub async fn loop_crews(repo_root: String) -> Result<Vec<CrewRow>, String> {
     let root = Path::new(&repo_root);
     let graph = LoopGraph::at(root);
     let registry = CrewRegistry::at(root);
-    let summaries = crews_summary(&graph.list());
-
-    let mut rows: Vec<CrewRow> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-
-    // Registry order first (main, then spawned in creation order).
-    for meta in registry.list() {
-        let summary = summaries
-            .iter()
-            .find(|s| s.crew == meta.id)
-            .cloned()
-            .unwrap_or_else(|| empty_crew_summary(&meta.id));
-        seen.insert(meta.id.clone());
-        rows.push(CrewRow { meta, summary });
-    }
-    // Then any crew that lives only in the graph (a raw crew_id, never
-    // registered) so nothing the loop is actually running stays hidden.
-    for summary in summaries {
-        if seen.contains(&summary.crew) {
-            continue;
-        }
-        let meta = CrewMeta {
-            id: summary.crew.clone(),
-            title: summary.crew.clone(),
-            description: None,
-            created_at: 0,
-        };
-        rows.push(CrewRow { meta, summary });
-    }
-    Ok(rows)
+    Ok(aura_loop::crew::crew_rows(&graph.list(), &registry))
 }
 
 /// A zero-count summary for a crew that exists in the registry but has no nodes
@@ -1115,6 +1139,8 @@ fn empty_crew_summary(id: &str) -> CrewSummary {
         crew: id.to_string(),
         total: 0,
         ready: 0,
+        planned: 0,
+        unrunnable: 0,
         working: 0,
         done: 0,
         paused: 0,
@@ -1475,6 +1501,7 @@ pub async fn loop_plan_goal(repo_root: String, goal: String) -> Result<PlanGoalR
             content: Value::String(decompose_user_prompt(&goal)),
         }],
         cwd: String::new(),
+        machine_id: None,
         system: Some(DECOMPOSE_SYSTEM.to_string()),
         tools: vec![],
         max_tokens: Some(2048),
@@ -1484,6 +1511,7 @@ pub async fn loop_plan_goal(repo_root: String, goal: String) -> Result<PlanGoalR
         model: None,
         long_context: false,
         approval: None,
+        output_style: None, // AURA-1296
     };
     let raw = plan_collect(request).await?;
 
@@ -1797,6 +1825,7 @@ pub async fn loop_plan_order(repo_root: String) -> Result<PlanOrderResult, Strin
                 )),
             }],
             cwd: String::new(),
+            machine_id: None,
             system: Some(ORDER_SYSTEM.to_string()),
             tools: vec![],
             max_tokens: Some(2048),
@@ -1806,6 +1835,7 @@ pub async fn loop_plan_order(repo_root: String) -> Result<PlanOrderResult, Strin
             model: None,
             long_context: false,
             approval: None,
+            output_style: None, // AURA-1296
         };
         requests.push((ci, request));
     }
@@ -1908,6 +1938,7 @@ pub async fn loop_plan_order(repo_root: String) -> Result<PlanOrderResult, Strin
                 content: Value::String(objective_user_prompt(&listing)),
             }],
             cwd: String::new(),
+            machine_id: None,
             system: Some(OBJECTIVE_SYSTEM.to_string()),
             tools: vec![],
             max_tokens: Some(1024),
@@ -1917,6 +1948,7 @@ pub async fn loop_plan_order(repo_root: String) -> Result<PlanOrderResult, Strin
             model: None,
             long_context: false,
             approval: None,
+            output_style: None, // AURA-1296
         };
         if let Ok(text) = plan_collect(request).await {
             let objs = parse_objectives(&text);

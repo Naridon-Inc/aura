@@ -719,7 +719,7 @@ async fn tool_prs_list(repo_root: &str, input: &Value) -> (String, bool) {
         // A project with no GitHub remote (or no `gh`) errors here. In a
         // fleet sweep that is ordinary, not a failure — skip it quietly
         // rather than filling the result with noise about local-only repos.
-        let Ok(prs) = crate::cmd_prs::pr_list(t.root.clone()).await else {
+        let Ok(prs) = crate::cmd_prs::pr_list(t.root.clone(), None).await else {
             continue;
         };
         if prs.is_empty() {
@@ -766,13 +766,13 @@ async fn tool_pr_detail(repo_root: &str, input: &Value) -> (String, bool) {
         Ok(t) => t,
         Err(e) => return (e, true),
     };
-    let detail = match crate::cmd_prs::pr_detail(target.root.clone(), number).await {
+    let detail = match crate::cmd_prs::pr_detail(target.root.clone(), number, None).await {
         Ok(d) => d,
         Err(e) => return (format!("PR #{number} in {}: {e}", target.label), true),
     };
     // Checks are a separate call; a failure there shouldn't lose the detail
     // we already have, so it degrades to an empty list.
-    let checks = crate::cmd_prs::pr_checks(target.root.clone(), number)
+    let checks = crate::cmd_prs::pr_checks(target.root.clone(), number, None)
         .await
         .unwrap_or_default();
     let check_rows: Vec<Value> = checks

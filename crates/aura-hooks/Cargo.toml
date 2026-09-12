@@ -1,0 +1,12 @@
+[package]
+name = "aura-hooks"
+version = "0.1.0"
+edition = "2021"
+description = "Wire an agent CLI in a repo to Aura — plugin packages plus the stamping that installs them."
+
+[dependencies]
+serde_json = "1.0.149"
+toml_edit = "0.22"
+
+[dev-dependencies]
+tempfile = "3"

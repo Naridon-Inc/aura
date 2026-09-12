@@ -174,6 +174,10 @@ pub async fn place_sleep(machine_id: String) -> Result<Sleeping, String> {
     // asked anyway: the alternative is a request naming an empty machine, which
     // some cloud somewhere will one day answer with a shrug.
     let handle = handle_of(&place).map_err(|why| refusal(&place, why))?;
+    // AURA-1294 — a port forwarded from a machine about to stop is a child
+    // that would sit there redialling a box that is gone. Let go first.
+    super::place_ports::forward::release_all(&machine_id);
+    // end AURA-1294
     provisioner_for(ProvisionKind::Managed)
         .sleep(&TargetId(handle))
         .await

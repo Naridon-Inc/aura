@@ -131,6 +131,12 @@ pub struct JsonlChild {
     events: broadcast::Sender<Value>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     next_id: std::sync::atomic::AtomicU64,
+    /// Takes the child's whole process group when this handle is dropped.
+    ///
+    /// Declared before `_child` so it runs first: `kill_on_drop` reaches only
+    /// the agent itself, and by the time that has fired the group leader is
+    /// gone and its children can no longer be found from here.
+    _tree: crate::child_reaper::TreeGuard,
     /// Kept so dropping the handle kills the process (`kill_on_drop`).
     _child: Mutex<tokio::process::Child>,
 }
@@ -149,6 +155,9 @@ impl JsonlChild {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        // Its own process group: a persistent agent session runs tool calls,
+        // and those are children of the agent, not of us.
+        crate::child_reaper::own_process_group(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|source| TransportError::Spawn {
             bin: bin.clone(),
@@ -167,6 +176,7 @@ impl JsonlChild {
             events,
             stderr_tail: Arc::new(Mutex::new(VecDeque::new())),
             next_id: std::sync::atomic::AtomicU64::new(1),
+            _tree: crate::child_reaper::TreeGuard::named(child.id(), &bin),
             _child: Mutex::new(child),
         });
 

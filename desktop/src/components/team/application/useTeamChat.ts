@@ -37,7 +37,9 @@ import {
   takePendingChatRoute,
 } from "../../../lib/chatRoute";
 import { useDocumentVisibility } from "../../../lib/useDocumentVisibility";
+import { trackFeature } from "../../../lib/track";
 import { roomTokenParam, roomAuthHeaders } from "../../../lib/roomAuth";
+import { cloudOrigins } from "../../../lib/cloudOrigin";
 import {
   reactionsStore,
   type ReactionRow,
@@ -1325,7 +1327,10 @@ export function useTeamChat(repoRoot: string, projectName: string) {
         return;
       }
       if (cancelled) return;
-      const origin = "wss://auravcs.com";
+      // Whatever cloud this app is actually talking to — NOT a literal, so a
+      // staging or self-hosted run subscribes to the same server its messages
+      // are being POSTed to.
+      const { http: httpOrigin, ws: origin } = await cloudOrigins();
       // Attach the cloud bearer as ?token= so the server can enforce room
       // membership once AURA_ROOMS_REQUIRE_AUTH is on. Empty when signed out.
       const tok = await roomTokenParam();
@@ -1338,7 +1343,7 @@ export function useTeamChat(repoRoot: string, projectName: string) {
       void (async () => {
         try {
           const res = await fetch(
-            `https://auravcs.com/api/v1/room/${encodeURIComponent(roomId)}/reactions`,
+            `${httpOrigin}/api/v1/room/${encodeURIComponent(roomId)}/reactions`,
             { headers: await roomAuthHeaders() },
           );
           if (!res.ok) return;
@@ -1522,7 +1527,9 @@ export function useTeamChat(repoRoot: string, projectName: string) {
       // once the server flag is on — so it needs the bearer too.
       const tok = await roomTokenParam();
       if (cancelled) return;
-      const url = `wss://auravcs.com/api/v1/room/${encodeURIComponent(
+      const { ws: wsOrigin } = await cloudOrigins();
+      if (cancelled) return;
+      const url = `${wsOrigin}/api/v1/room/${encodeURIComponent(
         AURA_GLOBAL_ROOM_ID,
       )}/ws${tok ? `?${tok}` : ""}`;
       try {
@@ -2047,6 +2054,17 @@ export function useTeamChat(repoRoot: string, projectName: string) {
         ...(auraHandle
           ? { fromName: auraHandle, fromHandle: auraHandle }
           : {}),
+      });
+      // Usage signal only: which kind of conversation and whether it was a
+      // thread reply. Never the channel name, the peer, or the body.
+      trackFeature("team_chat_send", {
+        kind:
+          conv.kind === "dm"
+            ? "dm"
+            : conv.channel === AURA_GLOBAL_CHANNEL
+              ? "aura"
+              : "channel",
+        thread: Boolean(threadParent),
       });
       const convId = conv.id;
       setMsgs((prev) => {

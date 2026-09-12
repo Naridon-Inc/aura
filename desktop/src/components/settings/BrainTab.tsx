@@ -28,6 +28,7 @@ import { AgentIcon } from "../agent/AgentIcon";
 import { PaneIntro, Section } from "../settings/kit";
 import { compactNumber } from "../../lib/compactNumber";
 import { askConfirm } from "../ui/ask";
+import { quotaFailure, lastTriedLabel } from "./auraProUsage";
 
 function brainBrandSlug(providerId: string): string {
   const id = providerId.toLowerCase();
@@ -935,11 +936,19 @@ function AuraProRow() {
   // panel claims the account is fine and offers a Refresh that repeats the
   // same 401 every time it's pressed.
   const [expired, setExpired] = useState(false);
+  /** Which of `offline` / `server` / `unsupported` it was. `unauthorized` is
+   *  carried by `expired` above, because it is the only one that changes what
+   *  is offered rather than only what is said. */
+  const [errKind, setErrKind] = useState<string | null>(null);
+  /** When the last attempt finished. Refresh looked inert because a failed
+   *  retry redrew a byte-identical screen; this is what moves. */
+  const [triedAt, setTriedAt] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setErr(null);
     setExpired(false);
+    setErrKind(null);
     try {
       const state = await api.auraProIsSignedIn();
       setSignIn(state);
@@ -950,9 +959,11 @@ function AuraProRow() {
           const q = await api.auraProQuota();
           setQuota(q);
         } catch (e) {
+          const typed = isAuraProQuotaError(e) ? e : null;
           setQuota(null);
-          setErr(`quota: ${isAuraProQuotaError(e) ? e.message : String(e)}`);
-          setExpired(isAuraProQuotaError(e) && e.kind === "unauthorized");
+          setErr(`quota: ${typed ? typed.message : String(e)}`);
+          setErrKind(typed?.kind ?? null);
+          setExpired(typed?.kind === "unauthorized");
         }
       } else {
         setQuota(null);
@@ -961,6 +972,7 @@ function AuraProRow() {
       setErr(String(e));
     } finally {
       setLoading(false);
+      setTriedAt(Date.now());
     }
   }, []);
 
@@ -1003,6 +1015,9 @@ function AuraProRow() {
       </div>
     );
   }
+
+  const failure = quotaFailure(errKind);
+  const tried = err ? lastTriedLabel(triedAt, Date.now()) : null;
 
   return (
     <div className="mt-2 flex flex-col gap-1">
@@ -1053,9 +1068,7 @@ function AuraProRow() {
             )}
           </span>
         ) : err ? (
-          <span className="text-text-3">
-            Couldn&rsquo;t load your usage.
-          </span>
+          <span className="text-text-3">{failure.title}</span>
         ) : (
           <span className="flex items-center gap-1.5 text-text-4" role="status">
             <AsciiSpinner className="text-xs leading-none" />
@@ -1065,7 +1078,7 @@ function AuraProRow() {
         {/* Withheld while the session is dead. Re-reading a quota the cloud
             has already refused can only produce the same 401, and offering
             it beside "Sign in again" implies the two are alternatives. */}
-        {!expired && (
+        {!expired && (!err || failure.retryable) && (
           <Button
             size="sm"
             variant="ghost"
@@ -1077,13 +1090,18 @@ function AuraProRow() {
           </Button>
         )}
       </div>
-      {/* The detail, for the times the sentence above isn't enough. Shown
-          alongside a good quota (a stale-but-readable number) and alongside
-          an expired session (which status, from which origin) — but never as
-          the *only* thing said, which is what "Couldn't load your usage."
-          with no explanation amounted to. */}
-      {err && (quota || expired) && (
-        <div className="text-xs text-text-4">{err}</div>
+      {/* The detail. It used to be printed only when there was *also* a
+          quota or an expired session to hang it on — so the one case with
+          nothing else on screen, a plain failed read, said only "Couldn't
+          load your usage." and stopped (AURA-266). Now the reason is always
+          available, with the attempt time beside it so a Refresh that fails
+          the same way is visibly a new attempt rather than a dead button. */}
+      {err && (
+        <div className="text-xs text-text-4 flex flex-wrap items-baseline gap-x-2">
+          {failure.hint && !quota && !expired && <span>{failure.hint}</span>}
+          <span className="font-mono text-text-5 break-all">{err}</span>
+          {tried && <span className="text-text-5">{tried}</span>}
+        </div>
       )}
     </div>
   );

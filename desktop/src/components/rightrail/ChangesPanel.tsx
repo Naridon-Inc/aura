@@ -5,9 +5,11 @@
 // right rail so git review is not duplicated.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "../../lib/api";
+// Through the place seam: a workspace standing in a machine stages and
+// discards on the box's checkout, not the laptop's copy (AURA-1306).
+import { gitDiscard, gitStage, gitUnstage } from "../../lib/place/workApi";
 import { useGitChanges, type ChangedFile } from "../../lib/useGitChanges";
-import { isNoisePath } from "../../lib/categorizeChange";
+import { isNoisePath } from "@shared/categorizeChange";
 import { AURA_SYNC_ENABLED, AURA_RADAR_ENABLED } from "../../lib/featureFlags";
 import { useVerticalSplit } from "../../lib/useVerticalSplit";
 import { CategorySection } from "./CategorySection";
@@ -276,7 +278,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
       if (paths.length === 0) return;
       setBusyPath(paths.join(","));
       try {
-        await api.gitStage(repoRoot, paths);
+        await gitStage(repoRoot, paths);
         await refreshAll();
         setError(null);
       } catch (e) {
@@ -293,7 +295,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
       if (paths.length === 0) return;
       setBusyPath(paths.join(","));
       try {
-        await api.gitUnstage(repoRoot, paths);
+        await gitUnstage(repoRoot, paths);
         await refreshAll();
         setError(null);
       } catch (e) {
@@ -309,7 +311,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
     async (path: string) => {
       setBusyPath(path);
       try {
-        await api.gitDiscard(repoRoot, [path]);
+        await gitDiscard(repoRoot, [path]);
         await refreshAll();
         setError(null);
       } catch (e) {

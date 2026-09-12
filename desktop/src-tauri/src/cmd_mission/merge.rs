@@ -66,6 +66,11 @@ pub struct MissionTrigger {
 pub struct MissionHost {
     pub configured: bool,
     pub online: bool,
+    /// AUDIT-UI-04 — the honest lifecycle word: `"online"`, `"draining"`
+    /// (a lease lapsed moments ago — winding down, not gone), `"offline"`
+    /// (configured, nothing live), or `"unconfigured"`. `configured` /
+    /// `online` stay derivable for existing consumers.
+    pub state: String,
     pub label: String,
 }
 
@@ -546,23 +551,46 @@ pub fn merge_state(inputs: &[RootInput], host: MissionHost) -> MissionState {
 
 // ─── Host label helpers (pure; liveness facts carried in) ─────────────────
 
-/// Build the honest host envelope from two carried-in facts:
-/// `configured` (an aura-runner config / a `runner:`-prefixed lease was ever
-/// seen) and `online` (a `runner:`-prefixed lease is currently un-expired).
-/// We NEVER mark online without a live lease.
-pub fn host_envelope(configured: bool, online: bool) -> MissionHost {
-    let label = if online {
-        "Aura Runner online — keeps working with your laptop closed"
+/// AUDIT-UI-04 — a lease that lapsed within this window reads as
+/// "draining" (the runner was just here; work is settling), not a hard
+/// offline. Two heartbeat generations of grace.
+pub const DRAIN_GRACE_SECS: i64 = 15 * 60;
+
+/// Build the honest host envelope from three carried-in facts:
+/// `configured` (a runner config / token, or a recent `runner:` lease),
+/// `online` (a `runner:`-prefixed lease is currently un-expired), and
+/// `last_active_age_secs` (seconds since the newest runner lease lapsed;
+/// `None` = never seen). We NEVER mark online without a live lease.
+pub fn host_envelope(
+    configured: bool,
+    online: bool,
+    last_active_age_secs: Option<i64>,
+) -> MissionHost {
+    let draining =
+        !online && matches!(last_active_age_secs, Some(a) if a <= DRAIN_GRACE_SECS);
+    // Online implies configured even if the config file wasn't found (the
+    // lease is proof enough it's set up somewhere) — and so does a lease
+    // fresh enough to still be draining.
+    let configured = configured || online || draining;
+    let state = if online {
+        "online"
+    } else if draining {
+        "draining"
     } else if configured {
-        "Aura Runner configured"
+        "offline"
     } else {
-        "Not set up"
+        "unconfigured"
+    };
+    let label = match state {
+        "online" => "Aura Runner online — keeps working with your laptop closed",
+        "draining" => "Aura Runner winding down — its last lease just lapsed",
+        "offline" => "Aura Runner configured — not running right now",
+        _ => "Not set up",
     };
     MissionHost {
-        // Online implies configured even if the config file wasn't found
-        // (the lease is proof enough it's set up somewhere).
-        configured: configured || online,
+        configured,
         online,
+        state: state.to_string(),
         label: label.to_string(),
     }
 }
@@ -597,7 +625,7 @@ mod tests {
             name: "empty".into(),
             ..Default::default()
         };
-        let state = merge_state(&[input], host_envelope(false, false));
+        let state = merge_state(&[input], host_envelope(false, false, None));
         assert!(state.live.is_empty());
         assert!(state.queued.is_empty());
         assert!(state.recent.is_empty());
@@ -625,7 +653,7 @@ mod tests {
             lane_id: Some("t-1".into()),
             commit: None,
         });
-        let state = merge_state(&[input], host_envelope(false, false));
+        let state = merge_state(&[input], host_envelope(false, false, None));
         // Exactly ONE live row, and it's the crew node (richer), not the auto.
         assert_eq!(state.live.len(), 1);
         assert_eq!(state.live[0].source, SOURCE_CREW);
@@ -643,7 +671,7 @@ mod tests {
             lane_id: Some("t-OTHER".into()),
             ..Default::default()
         });
-        let state = merge_state(&[input], host_envelope(false, false));
+        let state = merge_state(&[input], host_envelope(false, false, None));
         assert_eq!(state.live.len(), 2);
     }
 
@@ -664,7 +692,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        let state = merge_state(&[input], host_envelope(false, false));
+        let state = merge_state(&[input], host_envelope(false, false, None));
         assert_eq!(state.recent.len(), RECENT_CAP);
         assert!(state.capped);
         // Newest-first: the highest ended_at must be first.
@@ -690,7 +718,7 @@ mod tests {
                 ..Default::default()
             });
         }
-        let state = merge_state(&[input], host_envelope(false, false));
+        let state = merge_state(&[input], host_envelope(false, false, None));
         assert_eq!(state.recent.len(), 3);
         assert!(!state.capped);
     }
@@ -706,7 +734,7 @@ mod tests {
         );
         // Note: a completed node is NOT itself queued/live here, but its title
         // is still available for resolution via the id→title map.
-        let state = merge_state(&[input], host_envelope(false, false));
+        let state = merge_state(&[input], host_envelope(false, false, None));
         assert_eq!(state.queued.len(), 1);
         let q = &state.queued[0];
         assert_eq!(q.waiting_on, vec!["Build login".to_string(), "t-missing".to_string()]);
@@ -736,7 +764,7 @@ mod tests {
             ended_at_secs: Some(10),
             ..Default::default()
         });
-        let state = merge_state(&[input], host_envelope(false, false));
+        let state = merge_state(&[input], host_envelope(false, false, None));
         assert_eq!(state.recent.len(), 1);
         let proof = state.recent[0].proof.as_ref().expect("proof joined");
         assert_eq!(proof.verdict, "verified");
@@ -759,7 +787,7 @@ mod tests {
             ended_at_secs: Some(10),
             ..Default::default()
         });
-        let state = merge_state(&[input], host_envelope(false, false));
+        let state = merge_state(&[input], host_envelope(false, false, None));
         assert_eq!(state.recent[0].state, STATE_FAILED);
         assert_eq!(state.recent[0].error.as_deref(), Some("compile error"));
         assert!(state.recent[0].proof.is_none());
@@ -767,20 +795,62 @@ mod tests {
 
     #[test]
     fn host_online_label_is_honest() {
-        let off = host_envelope(false, false);
+        let off = host_envelope(false, false, None);
         assert!(!off.online && !off.configured);
+        assert_eq!(off.state, "unconfigured");
         assert_eq!(off.label, "Not set up");
 
-        let configured = host_envelope(true, false);
+        let configured = host_envelope(true, false, None);
         assert!(configured.configured && !configured.online);
-        assert_eq!(configured.label, "Aura Runner configured");
+        assert_eq!(configured.state, "offline");
+        assert_eq!(
+            configured.label,
+            "Aura Runner configured — not running right now"
+        );
 
-        let online = host_envelope(false, true);
+        let online = host_envelope(false, true, Some(0));
         assert!(online.online && online.configured, "online implies configured");
+        assert_eq!(online.state, "online");
         assert_eq!(
             online.label,
             "Aura Runner online — keeps working with your laptop closed"
         );
+    }
+
+    // AUDIT-UI-04 — the heartbeat lifecycle, walked in order. Each row is
+    // (configured-on-disk, live-lease, age-since-last-lease) → state; the
+    // walk covers every transition the lease clock can produce: setup,
+    // first live lease, lapse into the drain grace, hard offline, and the
+    // stale-history case where only the config file still vouches.
+    #[test]
+    fn heartbeat_transitions_walk_the_lifecycle() {
+        let table: [(bool, bool, Option<i64>, &str); 7] = [
+            // Nothing anywhere → not set up.
+            (false, false, None, "unconfigured"),
+            // Config written (wizard/env), no lease yet → offline.
+            (true, false, None, "offline"),
+            // First live lease → online, even with no config file found.
+            (false, true, Some(0), "online"),
+            // Lease lapsed seconds ago → draining, not offline.
+            (false, false, Some(30), "draining"),
+            // Still inside the grace window → draining.
+            (false, false, Some(DRAIN_GRACE_SECS), "draining"),
+            // Grace exceeded, config still on disk → offline.
+            (true, false, Some(DRAIN_GRACE_SECS + 1), "offline"),
+            // Grace exceeded, nothing on disk, lease is ancient history →
+            // unconfigured (stale runners expire instead of haunting).
+            (false, false, Some(30 * 24 * 3600), "unconfigured"),
+        ];
+        for (configured, online, age, want) in table {
+            let host = host_envelope(configured, online, age);
+            assert_eq!(
+                host.state, want,
+                "({configured}, {online}, {age:?}) should be {want}"
+            );
+            // Derived bits stay coherent with the state word.
+            assert_eq!(host.online, want == "online");
+            assert_eq!(host.configured, want != "unconfigured");
+        }
     }
 
     #[test]
@@ -790,7 +860,7 @@ mod tests {
         n.wave_label = Some("wave 2".into());
         n.agent = Some("claude".into());
         let input = root_with("proj", vec![n]);
-        let state = merge_state(&[input], host_envelope(false, false));
+        let state = merge_state(&[input], host_envelope(false, false, None));
         assert_eq!(state.live.len(), 1);
         assert_eq!(state.live[0].started_at_ms, Some(42_000));
         assert_eq!(state.live[0].source_detail.as_deref(), Some("wave 2"));
@@ -801,7 +871,7 @@ mod tests {
     fn failed_loop_node_is_not_double_listed_as_live_or_queued() {
         // A failed crew NODE is surfaced via the run ledger, not as live/queued.
         let input = root_with("proj", vec![node("t-1", "Nope", LOOP_FAILED)]);
-        let state = merge_state(&[input], host_envelope(false, false));
+        let state = merge_state(&[input], host_envelope(false, false, None));
         assert!(state.live.is_empty());
         assert!(state.queued.is_empty());
     }

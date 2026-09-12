@@ -28,7 +28,12 @@ import { describe, expect, test } from "bun:test";
 
 import { readSrc, stripComments } from "./support/code";
 
-const SWITCHER = "components/account/OrgSwitcher.tsx";
+// The switcher had its own file until every desktop menu moved onto the shared
+// finder panel; it is now `useOrgGroup` inside the account menu, which is why
+// both names below point at one file. What it renders changed shape — a
+// labelled group in a searchable panel rather than a Radix submenu — but every
+// guarantee underneath is the same one, so the tests moved rather than went.
+const SWITCHER = "components/account/AccountMenu.tsx";
 const MENU = "components/account/AccountMenu.tsx";
 const LIB = "lib/cloudOrgs.ts";
 
@@ -138,24 +143,42 @@ describe("the lists that are supposed to follow, follow", () => {
 });
 
 describe("the switcher costs one row, and asks for nothing until opened", () => {
-  test("it is a submenu, not an inlined list", async () => {
-    // The account menu is four rows; the org list is unbounded. Inlining it
-    // would make a menu about signing out as long as your client list.
+  test("the org list is its own labelled group, not spliced into the actions", async () => {
+    // The account menu is four rows; the org list is unbounded. The old answer
+    // was a submenu, so the rows only existed once you asked for them. The
+    // panel answers it differently now — it filters and scrolls — so an
+    // unbounded list is safe inside it, but only while it stays a group of its
+    // own. Concatenated into `actions` it would put "Sign out" an unknown
+    // number of rows below where it was last time.
     const src = stripComments(await readSrc(SWITCHER));
-    expect(src).toContain("DropdownMenuSub");
-    expect(src).toContain("DropdownMenuSubTrigger");
+    expect(src).toContain("FinderMenuGroup");
+    expect(src).toContain('label: "Organization"');
+    expect(src).toContain("if (orgGroup) groups.push(orgGroup)");
+    expect(src).not.toContain("...orgs.map");
   });
 
-  test("nothing is fetched before the submenu opens", async () => {
+  test("nothing is fetched before the menu opens", async () => {
+    // Two gates, and both matter: the hook is only made live when the panel is
+    // open and there is an account to ask about, and it returns nothing at all
+    // when it isn't — so a closed menu holds no rows and issues no request.
     const src = stripComments(await readSrc(SWITCHER));
-    expect(src).toContain("useCloudOrgs(open)");
+    expect(src).toContain("useOrgGroup(open && connected)");
+    expect(src).toContain("useCloudOrgs(active)");
+    expect(src).toContain("if (!active) return null");
   });
 
   test("it sits in the account menu, under the line that names the org", async () => {
     const src = stripComments(await readSrc(MENU));
-    expect(src).toContain("<OrgSwitcher />");
+    // The org line is the panel's own header; the group of orgs is pushed
+    // before the actions, so switching reads as the thing directly under the
+    // name of the org you are currently in.
+    expect(src).toContain("{orgLine}");
+    const groupPush = src.indexOf("if (orgGroup) groups.push(orgGroup)");
+    const actionsPush = src.indexOf("groups.push({ items: actions })");
+    expect(groupPush).toBeGreaterThan(-1);
+    expect(actionsPush).toBeGreaterThan(groupPush);
     // Signed out there is no org to be in, so there is nothing to offer.
-    expect(src).toContain("connected && (");
+    expect(src).toContain("useOrgGroup(open && connected)");
   });
 
   test("the org line prefers the name the server knows over the slug", async () => {
@@ -176,8 +199,11 @@ describe("loading, empty and error are three different things", () => {
   test("an error offers the retry, in place", async () => {
     // A menu you have to close and reopen to try again looks broken twice.
     const src = stripComments(await readSrc(SWITCHER));
-    expect(src).toContain("Try again");
-    expect(src).toContain("onRetry");
+    expect(src).toContain('hint: "Try again", onSelect: retry');
+    // And the row that offers it re-reads rather than navigating, and returns
+    // false so the panel it is drawn in stays open to show the second answer.
+    expect(src).toContain("reload();");
+    expect(src).toContain("return false as const");
   });
 
   test("an empty list is treated as a fault, because it cannot happen", async () => {
@@ -200,8 +226,10 @@ describe("loading, empty and error are three different things", () => {
     const src = stripComments(await readSrc(SWITCHER));
     expect(src).toContain("pending === org.slug");
     // And the menu is held open across the write, so the tick lands where you
-    // can see it rather than under a panel that already closed.
-    expect(src).toContain("e.preventDefault()");
+    // can see it rather than under a panel that already closed. The panel reads
+    // a falsy return from onSelect as "stay open".
+    expect(src).toContain("void pick(org.slug);");
+    expect(src).toContain("return false;");
   });
 });
 

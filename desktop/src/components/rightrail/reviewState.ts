@@ -20,7 +20,7 @@
 // offered to publish it, before a single git command had returned. When the
 // read then FAILED, that fabricated initial was what the `catch` kept.
 
-import { countOf, plural } from "../../lib/plural";
+import { countOf, plural } from "@shared/plural";
 
 export type ReviewStateId =
   | "unknown"

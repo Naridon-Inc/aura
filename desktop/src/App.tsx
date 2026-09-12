@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Layout } from "./components/Layout";
 import { letterMark } from "./lib/monogram";
+import { describeSnapshot, savePointName } from "./lib/snapshotDetail";
 import { ScreenshareFloating } from "./components/chat/ScreenshareFloating";
 import { WorkspaceCreateComposer } from "./components/workspace/WorkspaceCreateComposer";
 import { accentForRoot, type WorktreeRef } from "./lib/workspaceRef";
@@ -36,7 +37,16 @@ import {
   type TraceActions,
 } from "./components/AdeSidebar";
 import { TracePage } from "./components/trace/TracePage";
-import { TRACE_GO_EVENT, type TraceDest } from "./components/trace/traceRoute";
+import { TRACE_GO_EVENT, goToTrace, type TraceDest } from "./components/trace/traceRoute";
+import { parseSessionAppLink } from "@shared/sessionLink";
+import {
+  DEEP_LINK_EVENT,
+  handoffProblem,
+  resolveHandoff,
+  rewindPath,
+} from "./lib/sessionHandoff";
+import { requestOpenSessionDetail } from "./lib/traceNav";
+import { fetchIntentRows } from "./lib/intentCache";
 import { PLACE_GO_EVENT, type CollabPlace } from "./lib/placeRoute";
 import {
   NO_REMOTE_PLACES,
@@ -47,7 +57,11 @@ import {
   remotePlaceKey,
   type RemotePlaces,
 } from "./lib/remotePlaces";
-import { syncMachines } from "./lib/activeMachine";
+import {
+  machineIdForPath,
+  machineIdForRoot,
+  syncMachines,
+} from "./lib/activeMachine";
 import { placeForNewWork, writeAmbientSid } from "./lib/ambientSession";
 import {
   placeProjectName,
@@ -65,6 +79,22 @@ import {
 import { TasksPlace } from "./components/tasks/TasksPlace";
 import { PagesSurface } from "./components/pages2/PagesSurface";
 import { useWorkspaceCustomization } from "./lib/workspaceCustomization";
+// Managed agent/sibling worktrees live under
+// `<repo>/.{claude,gemini,aura}/worktrees/<name>` — machine-created checkouts
+// (an orchestrator spawning an agent in its own branch), not workspaces the
+// user opened. They belong in the parent workspace's worktree list, where the
+// roster nests them, never as their own top-level tile: surfacing one is what
+// made a spawned `agent-a40050d3` checkout masquerade as a workspace nobody
+// created. One definition, shared with the HUD, rather than the two identical
+// regexes that used to sit either side of `lib/`.
+import { isManagedWorktreeRoot as isManagedWorktree } from "./lib/hudProjects";
+import {
+  forgetRecent,
+  lastRecent,
+  persistRecents,
+  readRecents,
+  rememberRecent,
+} from "./lib/recentProjects";
 import {
   pluginRightRailPanels,
   pluginStatusPills,
@@ -124,6 +154,7 @@ import { CompareWorktreesDialog } from "./components/dialogs/CompareWorktreesDia
 import { LogIntentDialog } from "./components/dialogs/LogIntentDialog";
 import { IntentSplitMergeDialog } from "./components/dialogs/IntentSplitMergeDialog";
 import { SnapshotDialog } from "./components/dialogs/SnapshotDialog";
+import { FindWorktreesDialog } from "./components/dialogs/FindWorktreesDialog";
 import { PrAuthoringDialogHost } from "./components/dialogs/PrAuthoringDialog";
 import { KnowledgeDialog } from "./components/dialogs/KnowledgeDialog";
 import { RemoteDialog } from "./components/dialogs/RemoteDialog";
@@ -166,6 +197,10 @@ import { CommonsRailPanel } from "./components/rightrail/CommonsRailPanel";
 import { PagesSidebarMount } from "./components/pages/PagesSidebar";
 import { useEditorStore, armWorkspaceSnapshots, readPersistedAgents, readPersistedManagers, pendingFilePaths, openFileImperative, treeLeafNodes, openBrowserTab } from "./lib/editorStore";
 import { useIdeTabBridge } from "./lib/ideBridge/useIdeTabBridge";
+// AURA-1296 — keyboard + chat ergonomics chords (see dispatchAction).
+import { cycleOpenTab, jumpToAttentionTab } from "./lib/tabNav";
+import { forkActiveChat } from "./lib/forkFromTab";
+import { CYCLE_EFFORT_EVENT } from "./lib/effortCycle";
 import { sectionForRef } from "./lib/paneSection";
 import {
   clubHolds,
@@ -217,6 +252,8 @@ import { resumeCwdOf } from "./lib/agentSessionScope";
 import { fetchManagerList } from "./lib/managerCache";
 import { fetchPrList } from "./lib/prsCache";
 import { useApplyThemeClass } from "./lib/themeStore";
+// AURA-1298
+import { useZoomLevel } from "./lib/zoomStore";
 import { useIsFullscreen } from "./lib/useIsFullscreen";
 import { useApplyVsCodeChrome } from "./lib/vscodeThemesStore";
 import { loadSettings } from "./lib/settingsStore";
@@ -243,7 +280,7 @@ import { Toaster } from "./components/Toaster";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { useDocumentVisibility } from "./lib/useDocumentVisibility";
 import { relativeAgeFromDelta } from "./lib/relativeTime";
-import { titleCaseName } from "./lib/textCase";
+import { titleCaseName } from "@shared/textCase";
 import { truncate } from "./lib/truncate";
 import {
   fetchAstConflicts,
@@ -654,6 +691,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         machineId: p.machineId ?? null,
         threadKey: p.threadKey ?? null,
         repoRoot: p.repoRoot ?? null,
+        remoteRoot: p.remoteRoot ?? null,
       })),
       remotePlaces.focusedKey,
     );
@@ -860,6 +898,11 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         identifier: detail?.identifier ?? null,
         file: detail?.file ?? null,
       });
+      // The Timeline is the other immersive overlay, and it mounts LATER in
+      // the tree — left open it would sit on top of the Time machine it just
+      // summoned (its scrubber's per-file "Bring back" dispatches this event).
+      // Jumping surfaces means leaving the old one, so close it.
+      setTimelineOpen(false);
     }
     window.addEventListener("aura:open-time-machine", onEvent);
     return () => window.removeEventListener("aura:open-time-machine", onEvent);
@@ -1242,6 +1285,9 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     return () => window.removeEventListener("aura:open-conflicts", open);
   }, []);
   const [snapshotOpen, setSnapshotOpen] = useState(false);
+  // Lost-worktree recovery (FindWorktreesDialog) — which project root it is
+  // scanning, or null when closed. Opened from a project's roster menu.
+  const [findWorktreesRoot, setFindWorktreesRoot] = useState<string | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
   // Compare-worktrees dialog summon — fired by the Manager surface
   // (right-click a task → "Compare with sibling worktrees") and by the
@@ -1422,7 +1468,9 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   });
   const [, setIntentsToday] = useState(0);
   const [auditUnacked, setAuditUnacked] = useState(0);
-  const [zoom, setZoom] = useState<number>(storedZoom);
+  // AURA-1298 — the level lives in `lib/zoomStore` so the Appearance pane's
+  // zoom control and ⌘+/⌘− move the same number. Same tuple as before.
+  const [zoom, setZoom] = useZoomLevel();
   const [output, setOutput] = useState<OutputState>({
     open: false,
     title: "",
@@ -1483,21 +1531,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // recently opened workspace (`aura.recents` is append-ordered, so the tail is
   // newest); read straight from storage because the `recents` state is declared
   // further down this component.
-  const lastKnownRoot = useCallback((): string | null => {
-    try {
-      const raw = localStorage.getItem("aura.recents");
-      if (!raw) return null;
-      const arr = JSON.parse(raw);
-      if (!Array.isArray(arr)) return null;
-      for (let i = arr.length - 1; i >= 0; i--) {
-        const r = arr[i];
-        if (typeof r === "string" && r && !isManagedWorktree(r)) return r;
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  }, []);
+  const lastKnownRoot = useCallback((): string | null => lastRecent(), []);
   const startInlineChat = useCallback(() => {
     // Native Aura Manager gated off → never spin up a chat session; land on
     // the calm empty surface (the dashboard slot renders WorkSurfaceEmpty)
@@ -1568,6 +1602,21 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         else pickAndOpenFolderRef.current();
       })
       .catch((e) => console.error("[manager] open Aura failed:", e));
+  }, [lastKnownRoot]);
+  // Show the Aura conversation. Not `focusOrStartChat`, which is a TOGGLE:
+  // pressed while the chat is already up it takes you back to your work. That
+  // is right for a door you press yourself, and wrong for the end of an action
+  // that has just put an answer in there — half the time it would close the
+  // very thing it was meant to reveal.
+  const revealAuraChat = useCallback(() => {
+    if (!AURA_MANAGER_ENABLED || auraSidRef.current) return;
+    setWsOpen(false);
+    setPlace(null);
+    void resolveOrchestratorSession(currentRootRef.current ?? lastKnownRoot())
+      .then((sid) => {
+        if (sid) setAuraSid(sid);
+      })
+      .catch((e) => console.error("[manager] reveal Aura failed:", e));
   }, [lastKnownRoot]);
   // "New thread" from inside the Aura surface — a fresh conversation that
   // becomes the one the Aura row opens from now on. The old one isn't deleted;
@@ -1944,34 +1993,11 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   }, []);
 
   // Recent project roots, oldest→newest. Persisted to localStorage so the
-  // workspace rail rehydrates with the same tiles every launch. Capped to
-  // keep the rail readable.
-  const [recents, setRecents] = useState<string[]>(() => {
-    try {
-      const raw = localStorage.getItem("aura.recents");
-      if (!raw) return [];
-      const arr = JSON.parse(raw);
-      if (!Array.isArray(arr)) return [];
-      const clean = arr
-        .filter((s) => typeof s === "string" && !isManagedWorktree(s))
-        // Newest-8 (append order puts newest at the end), matching the
-        // eviction rule the write paths use.
-        .slice(-8);
-      // Self-heal: if a managed worktree had leaked into the persisted
-      // list (the agent-worktree-as-workspace bug), drop it for good so
-      // it doesn't reappear on the next boot.
-      if (clean.length !== arr.length) {
-        try {
-          localStorage.setItem("aura.recents", JSON.stringify(clean));
-        } catch {
-          /* quota — ignore */
-        }
-      }
-      return clean;
-    } catch {
-      return [];
-    }
-  });
+  // workspace rail rehydrates with the same tiles every launch. The cap, the
+  // cleaning and the rule about what may be forgotten all live in
+  // `lib/recentProjects` — see the note there about why a project used to
+  // leave this list without anyone deciding it should.
+  const [recents, setRecents] = useState<string[]>(() => readRecents());
 
   // Per-root worktree list, keyed by repo root. Populated lazily — only
   // the active project gets refreshed automatically; the rail also picks
@@ -2064,6 +2090,27 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       if (retryTimer) clearTimeout(retryTimer);
     };
   }, [recents, project?.root, worktreesByRoot, worktreeRetry]);
+
+  // Force-refetch ONE root's worktree rows, past the lazy cache's "never
+  // refetch a root we've listed" rule. The cache is right that a success
+  // needn't be re-asked on every render — but the truth moves under it:
+  // a crash corrupts git's registry, a CLI adds a worktree, the recovery
+  // dialog attaches one back. Called on project switch and after recovery,
+  // the moments the answer is most likely to have changed. A failure keeps
+  // the rows we have (stale beats suddenly-empty) and clears the strike
+  // count so the effect above is allowed to try again too.
+  const refreshWorktrees = useCallback((root: string) => {
+    worktreeFailures.current.delete(root);
+    if (worktreeInFlight.current.has(root)) return;
+    worktreeInFlight.current.add(root);
+    api
+      .gitWorktreeList(root)
+      .then((list) =>
+        setWorktreesByRoot((prev) => ({ ...prev, [root]: list })),
+      )
+      .catch(() => {})
+      .finally(() => worktreeInFlight.current.delete(root));
+  }, []);
 
   // Roster badges — per-worktree diff + PR pills. Each group falls back to a
   // synthetic root row (matching WorkspaceRoster) so a plain repo still gets
@@ -2214,13 +2261,21 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         setOutput({ open: true, title, body, loading: false, error: null });
         return;
       }
-      // snapshot
-      const title = `snapshot ${ev.entry.id} · ${ev.entry.file}`;
+      // A save point. This used to shell out to `aura snapshot show <id>`,
+      // a command that has never existed, so opening one filled the panel
+      // with a command-line usage error. Save points are files on disk;
+      // read one and show what it holds.
+      const title = `Save point · ${savePointName(ev.entry.file).path}`;
       setOutput({ open: true, title, body: "", loading: true, error: null });
       try {
-        const r = await api.auraCli(project.root, ["snapshot", "show", ev.entry.id]);
-        const body = r.stdout?.trim() || r.stderr?.trim() || "(no output)";
-        setOutput({ open: true, title, body, loading: false, error: null });
+        const snap = await api.auraReadSnapshot(project.root, ev.entry.file);
+        setOutput({
+          open: true,
+          title: snap.file_path ? `Save point · ${snap.file_path}` : title,
+          body: describeSnapshot(snap),
+          loading: false,
+          error: null,
+        });
       } catch (e) {
         setOutput({ open: true, title, body: "", loading: false, error: String(e) });
       }
@@ -2782,19 +2837,11 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       if (!root) return;
       // Promote the parent repo into recents so its project tile is present
       // (no-op if already open; skipped if `root` is itself a worktree path).
-      if (!isManagedWorktree(root)) {
-        setRecents((prev) => {
-          if (prev.includes(root)) return prev;
-          // Keep the newest 8 (evict oldest), never drop the new root.
-          const next = [...prev, root].slice(-8);
-          try {
-            localStorage.setItem("aura.recents", JSON.stringify(next));
-          } catch {
-            /* quota — ignore */
-          }
-          return next;
-        });
-      }
+      setRecents((prev) => {
+        const next = rememberRecent(prev, root);
+        if (next !== prev) persistRecents(next);
+        return next;
+      });
       // The worktree list is fetched once per root and then cached forever, so
       // the brand-new checkout has NO roster row until we re-fetch — that's the
       // "I started an agent but where did it go?" gap. Refresh now so the new
@@ -3314,10 +3361,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // every panel that keys off `project`.
   const loadProjectAt = useCallback(async (root: string) => {
     const name = root.split("/").filter(Boolean).pop() ?? "project";
-    const [branch, ageSecs] = await Promise.all([
-      api.gitBranch(root).catch(() => ""),
-      api.gitLastCommitAge(root).catch(() => -1),
-    ]);
     // Capture the outgoing root BEFORE setProject so the workspace
     // switch can serialize that workspace's tabs into its own slot.
     const previousRoot = projectRootRef.current;
@@ -3330,13 +3373,37 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     // Second step of the activation funnel: they got a project open. Once per
     // install — the root itself never leaves the machine.
     trackActivation("project_opened");
-    setProject({
-      root,
-      name,
-      branch: branch || "—",
-      lastModified: ageSecs >= 0 ? formatAge(ageSecs) : "no git history",
-    });
+    // Stand in the new project NOW. This used to await two git subprocesses
+    // (current branch + last-commit age) before touching any state, so
+    // clicking a project did nothing visible until both IPC round-trips came
+    // back — on a slow disk that reads as the click not landing. Both values
+    // are header cosmetics; they hydrate right below and patch in when git
+    // answers, guarded so a slow answer for a project you've already left
+    // can't stamp itself onto the one you're in.
+    setProject({ root, name, branch: "—", lastModified: "" });
     projectRootRef.current = root;
+    void Promise.all([
+      api.gitBranch(root).catch(() => ""),
+      api.gitLastCommitAge(root).catch(() => -1),
+    ]).then(([branch, ageSecs]) => {
+      if (projectRootRef.current !== root) return;
+      setProject((prev) =>
+        prev && prev.root === root
+          ? {
+              ...prev,
+              branch: branch || "—",
+              lastModified:
+                ageSecs >= 0 ? formatAge(ageSecs) : "no git history",
+            }
+          : prev,
+      );
+    });
+    // The roster's worktree rows come from a lazy cache that never refetches
+    // a root it has listed once. Standing in a project is the moment stale
+    // rows are actually visible — refresh so the sidebar heals itself after
+    // anything outside this window (a crash, a CLI worktree add) moved the
+    // truth. Fire-and-forget; the switch never waits on it.
+    refreshWorktrees(root);
     // Park prev's live state, then stand in `root`. A place already open this
     // session comes back as a FOCUS — its buffers, unsaved edits and running
     // agents are handed straight back, nothing is read from disk. Only a place
@@ -3446,18 +3513,8 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       // existing recent should NOT shuffle the rail — that made tiles
       // jump around when the user just wanted a stable place to click.
       setRecents((prev) => {
-        if (prev.includes(root)) return prev;
-        // Keep the NEWEST 8, evicting the oldest from the front. Using
-        // slice(0, 8) here silently dropped the just-opened folder once
-        // the rail was already full — the new root landed at index 8 and
-        // was truncated away, so it never got a sidebar tile and never
-        // persisted into the roster.
-        const next = [...prev, root].slice(-8);
-        try {
-          localStorage.setItem("aura.recents", JSON.stringify(next));
-        } catch {
-          /* quota — ignore */
-        }
+        const next = rememberRecent(prev, root);
+        if (next !== prev) persistRecents(next);
         return next;
       });
       // Mirror to backend `~/.aura/projects.json` so the Manager loop can
@@ -3471,7 +3528,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       // we're inside the `!isManagedWorktree` branch.
       void autoEnableCapture(root, name, false);
     }
-  }, [editor]);
+  }, [editor, refreshWorktrees]);
 
   // Clicking a project means "take me to this project" — its code, its agents,
   // its tabs. Not "re-scope the page I happen to be standing on".
@@ -3673,6 +3730,84 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     return () => window.removeEventListener("keydown", onKey);
   }, [recents, project?.root, loadProjectAt]);
 
+  // A session handed over from the console.
+  //
+  // The console can show any session in the org and none of them can be
+  // carried on there: the checkout, the transcript and the agent are all on
+  // one machine. So its Session detail offers "Resume in app", which asks the
+  // OS to open `aura://session/<id>` — a link that, until the app claimed the
+  // scheme (`src-tauri/deep_link.rs`), went nowhere at all.
+  //
+  // Two arrival paths, the same shape the Trace navigation uses: a URL that
+  // launched the app is already parked when this mounts, and one that arrives
+  // while the app is up fires an event. Whichever runs, the take empties the
+  // list, so one click opens one session exactly once.
+  const openHandedOverSession = useCallback(
+    async (url: string) => {
+      const link = parseSessionAppLink(url);
+      if (!link) return;
+      const roots = recents.length ? recents : project?.root ? [project.root] : [];
+      const handoff = await resolveHandoff(
+        link,
+        { roots, standingIn: project?.root ?? null },
+        (root) => fetchIntentRows(root, 250),
+      );
+      if (handoff.kind !== "open") {
+        // Naming what is missing. "Nothing happened" was the old answer and
+        // it is the one a person cannot act on.
+        setOutput({
+          open: true,
+          title: "That session is not on this machine",
+          body: handoffProblem(handoff),
+          loading: false,
+          error: null,
+        });
+        return;
+      }
+      if (handoff.root !== project?.root) {
+        await loadProjectAt(handoff.root).catch((e) =>
+          console.error("deep link: could not open the project:", e),
+        );
+      }
+      if (handoff.rewind) {
+        // The link asked for one file back rather than for the session. The
+        // tool previews and confirms before it restores anything.
+        goToTrace({
+          kind: "tool",
+          tool: "rewind",
+          arg: { file: rewindPath(handoff.root, handoff.rewind) },
+        });
+        return;
+      }
+      goToTrace({ kind: "sessions", view: "sessions" });
+      requestOpenSessionDetail(handoff.row);
+    },
+    [recents, project?.root, loadProjectAt],
+  );
+
+  useEffect(() => {
+    let live = true;
+    const drain = async () => {
+      let urls: string[] = [];
+      try {
+        urls = await api.deepLinkTake();
+      } catch {
+        // An older shell binary with no such command. Nothing to open.
+        return;
+      }
+      for (const url of urls) {
+        if (!live) return;
+        await openHandedOverSession(url);
+      }
+    };
+    void drain();
+    const un = listen(DEEP_LINK_EVENT, () => void drain());
+    return () => {
+      live = false;
+      void un.then((off) => off()).catch(() => {});
+    };
+  }, [openHandedOverSession]);
+
   // Onboarding's "Open folder…" button dispatches this event so the
   // dialog component doesn't need to import loadProjectAt directly.
   // `aura:open-repo-picker-path` (with detail.path) is used by the
@@ -3828,21 +3963,56 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           // Same folder picker the workspace rail's `+` tile uses.
           pickAndOpenFolder();
           return;
+        // AURA-1296 — keyboard + chat ergonomics. The moves live in
+        // lib/tabNav.ts and lib/forkFromTab.ts; this only routes.
+        case "next_tab":
+          cycleOpenTab(editor, 1);
+          return;
+        case "prev_tab":
+          cycleOpenTab(editor, -1);
+          return;
+        case "next_attention":
+          jumpToAttentionTab(editor);
+          return;
+        case "fork_chat":
+          void forkActiveChat(editor);
+          return;
+        case "toggle_changes":
+          // The Changes tab of the right rail. Already showing → hide the
+          // rail; otherwise switch to it and make sure the rail is open.
+          if (reviewOpen && rightRailTab === "changes") setReviewOpen(false);
+          else {
+            setRightRailTab("changes");
+            setReviewOpen(true);
+          }
+          return;
+        case "cycle_effort":
+          // The composer that owns the effort chip answers this.
+          window.dispatchEvent(new Event(CYCLE_EFFORT_EVENT));
+          return;
+        // end AURA-1296
       }
     },
-    [editor, runCli, runHandover, pickAndOpenFolder],
+    [editor, runCli, runHandover, pickAndOpenFolder, reviewOpen, rightRailTab],
   );
 
   useAppActions(dispatchAction);
 
   // Poll diff stats + ambient badge counts so the status bar and nav-rail
-  // badges reflect reality. 4s interval is light enough that the user
-  // never feels it; if perf gets tight we can fold this into a single
-  // bus that all panes share.
+  // badges reflect reality. Each tick is SEVEN backend reads (a git diff
+  // against the fork base among them), so on a large repo the old 4s cadence
+  // was a constant background churn of subprocess spawns — and with no
+  // overlap guard, a tick slower than the interval stacked more of them.
+  // 12s + the `aura:git-changed` event keeps the chips honest: app-driven
+  // changes (commit, checkout, finished jobs) refresh instantly, outside
+  // edits are at most one cadence away.
   useEffect(() => {
     if (!project) return;
     let cancelled = false;
+    let inFlight = false;
     async function tick() {
+      if (inFlight) return;
+      inFlight = true;
       try {
         // For an agent worktree the footer chip should reflect ALL the work
         // done in that copy since it forked from its base (committed AND
@@ -3874,14 +4044,19 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         if (auditCount !== null) setAuditUnacked(auditCount);
       } catch {
         /* swallow — these chips are best-effort */
+      } finally {
+        inFlight = false;
       }
     }
     tick();
     if (!windowVisible) return () => { cancelled = true; };
-    const id = window.setInterval(tick, 4000);
+    const onGitChanged = () => void tick();
+    window.addEventListener("aura:git-changed", onGitChanged);
+    const id = window.setInterval(tick, 12000);
     return () => {
       cancelled = true;
       window.clearInterval(id);
+      window.removeEventListener("aura:git-changed", onGitChanged);
     };
   }, [project, windowVisible]);
 
@@ -3997,14 +4172,9 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
               if (!pinned) {
                 const sr = sampleRoot;
                 setRecents((prev) => {
-                  if (prev.includes(sr)) return prev;
-                  // Sample leads the list; keep it plus the 7 newest others.
-                  const next = [sr, ...prev.filter((r) => r !== sr).slice(-7)];
-                  try {
-                    localStorage.setItem("aura.recents", JSON.stringify(next));
-                  } catch {
-                    /* quota — ignore */
-                  }
+                  // Sample leads the list rather than joining the end of it.
+                  const next = rememberRecent(prev, sr, { front: true });
+                  if (next !== prev) persistRecents(next);
                   return next;
                 });
                 try {
@@ -4163,8 +4333,19 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     (async () => {
       if (prev) {
         await api.unwatchRepo(prev).catch(() => {});
+        await api.unwatchCommits(prev).catch(() => {});
       }
+      // A project standing in a machine has no files on this disk to watch;
+      // the watcher would sit on the laptop's copy and report changes that
+      // are not the ones on screen. Those surfaces poll the box instead
+      // (`needsPolling` in lib/place/workApi).
+      if (machineIdForRoot(root)) return;
       await api.watchRepo(root).catch((e) => console.warn("watch_repo:", e));
+      // And start writing the plain-language account of each commit as it
+      // lands, rather than when a reader first opens it. Separate watch: this
+      // one follows HEAD's reflog, which the working-tree watcher above
+      // deliberately never looks at.
+      await api.watchCommits(root).catch(() => {});
     })();
   }, [project]);
 
@@ -4177,6 +4358,11 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         (ev) => {
           const path = ev.payload?.path;
           if (!path) return;
+          // A change on this disk under a project that is standing in a
+          // machine is a change to the laptop's copy, not to what is on
+          // screen — reloading the open buffer from it would overwrite the
+          // box's bytes with the laptop's.
+          if (machineIdForPath(path)) return;
           // Only refresh files we have open — the FileTree picks up
           // creates/removes via its own poll, so we don't need to fire
           // a tree-wide refresh here (which would be jittery).
@@ -4434,11 +4620,35 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // catches — a dispatch that throws used to leave the row spinning on an
   // unhandled rejection with nothing on screen ever saying so.
   const askAura = (key: "goals" | "review", prompt: string) => {
-    if (traceAsk || ambientBusy) return;
+    // A refused click used to `return` in silence. From the surface that is
+    // indistinguishable from a broken button: the page underneath is still
+    // Overview, nothing spins, and the reasonable conclusion is that the app
+    // ignored you. Aura can only hold one of these questions at a time, so
+    // when it is already holding one, say which.
+    if (traceAsk || ambientBusy) {
+      const held =
+        traceAsk === "goals"
+          ? "Goals"
+          : traceAsk === "review"
+            ? "Safety check"
+            : null;
+      void askNotice({
+        title: "Aura is still working",
+        body: held
+          ? `${held} is still running. Its answer will appear in the Aura chat — this one can go next.`
+          : "Aura is in the middle of something. Try again once it has finished.",
+      });
+      return;
+    }
     const root = placeRoot || project.root;
     setTraceAsk(key);
     setTraceAskSending(true);
     void sendToAmbientManager(root, prompt)
+      // The answer to these two is prose, and prose arrives in the chat. From
+      // Trace nothing under the strip changes, so without this the click read
+      // as dead: the question really had gone somewhere, just not anywhere the
+      // person was looking. Open the conversation it went to.
+      .then(() => revealAuraChat())
       .catch(async (err) => {
         setTraceAsk(null);
         await askNotice({
@@ -4786,21 +4996,15 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
                     goToProject(id);
                   }}
                   onOpenWorktree={(p) => goToProject(p)}
+                  onFindWorktrees={(root) => setFindWorktreesRoot(root)}
                   onCloseProject={(id) => {
                     // Same as the legacy rail's onCloseWorkspace: drop
                     // the project from recents (non-destructive — the
                     // checkout stays on disk) and fall back to another
                     // open workspace if we just closed the active one.
                     setRecents((prev) => {
-                      const next = prev.filter((r) => r !== id);
-                      try {
-                        localStorage.setItem(
-                          "aura.recents",
-                          JSON.stringify(next),
-                        );
-                      } catch {
-                        /* ignore quota errors */
-                      }
+                      const next = forgetRecent(prev, id);
+                      if (next !== prev) persistRecents(next);
                       return next;
                     });
                     // Closing is the one action that still wipes: drop the
@@ -5149,6 +5353,8 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
                     terminalOpen={terminalOpen}
                     onToggleReview={() => setReviewOpen((v) => !v)}
                     onToggleTerminal={() => editor.toggleTerminalPanel()}
+                    // AURA-1294 — so the Ports button knows which place this workspace runs on
+                    repoRoot={project.root}
                   />
                 }
                 onOpenRewind={(filePath?: string) =>
@@ -5353,6 +5559,15 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         repoRoot={project.root}
         onClose={() => setSnapshotOpen(false)}
       />
+      {findWorktreesRoot && (
+        <FindWorktreesDialog
+          open
+          repoRoot={findWorktreesRoot}
+          projectName={findWorktreesRoot.split("/").pop() || findWorktreesRoot}
+          onClose={() => setFindWorktreesRoot(null)}
+          onChanged={() => refreshWorktrees(findWorktreesRoot)}
+        />
+      )}
       <PrAuthoringDialogHost />
       <SettingsDialog
         open={settingsOpen}
@@ -5504,18 +5719,6 @@ function formatAge(secs: number): string {
 
 function isReviewableGitPath(path: string): boolean {
   return !/[{}*]/.test(path) && !path.endsWith("/");
-}
-
-// Managed agent/sibling worktrees live under
-// `<repo>/.{claude,gemini,aura}/worktrees/<name>` — they're machine-created
-// checkouts (e.g. an orchestrator spawning an agent in its own branch), not
-// workspaces the user opened. They belong in the parent workspace's worktree
-// list (the roster nests them there), never as their own top-level tile.
-// Surfacing one as a standalone workspace is what made a spawned
-// `agent-a40050d3` checkout masquerade as a workspace the user never created.
-// Filter these everywhere recents/roster/projects are built.
-function isManagedWorktree(root: string): boolean {
-  return /\/\.(claude|gemini|aura)\/worktrees\//.test(root);
 }
 
 export default App;

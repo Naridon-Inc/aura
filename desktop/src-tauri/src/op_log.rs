@@ -90,17 +90,25 @@ pub fn read_ops(repo_root: &str, limit: usize) -> Result<Vec<OpEntry>, String> {
         return Ok(vec![]);
     }
     let f = fs::File::open(&p).map_err(|e| format!("open op_log: {}", e))?;
-    let mut rows: Vec<OpEntry> = Vec::new();
-    for line in BufReader::new(f).lines().flatten() {
+    let mut rows: Vec<(usize, OpEntry)> = Vec::new();
+    for (idx, line) in BufReader::new(f).lines().flatten().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
         if let Ok(row) = serde_json::from_str::<OpEntry>(trimmed) {
-            rows.push(row);
+            rows.push((idx, row));
         }
     }
-    rows.sort_by(|a, b| b.ts.cmp(&a.ts));
+    // Newest first. `ts` is only whole-second resolution and `op_id` is a
+    // random UUID, so ts alone does not order ops recorded in the same second
+    // — a stable sort would leave them in append (oldest-first) order inside a
+    // list that is meant to be newest-first, and `aura_undo_last` (which takes
+    // the first not-yet-undone op) would then undo the OLDEST op of the latest
+    // second, not the most recent one. The file's append order is the
+    // authoritative tiebreak, so within a second the later-appended op leads.
+    rows.sort_by(|(ia, a), (ib, b)| b.ts.cmp(&a.ts).then(ib.cmp(ia)));
+    let mut rows: Vec<OpEntry> = rows.into_iter().map(|(_, e)| e).collect();
     rows.truncate(limit);
     Ok(rows)
 }
@@ -225,10 +233,30 @@ fn undo_snapshot(repo_root: &str, payload: &serde_json::Value) -> Result<String,
     if !abs.exists() {
         return Ok(format!("snapshot {} already gone", snap_path));
     }
-    if abs.is_dir() {
-        fs::remove_dir_all(&abs).map_err(|e| e.to_string())?;
+    // Containment: the only thing this undo may delete is a snapshot blob under
+    // the repo's own snapshot store. `snapshot_path` comes straight out of an
+    // op_log.jsonl row — plain on-disk data that is edited and synced — so a
+    // corrupted or hostile row carrying an absolute path or a `..` traversal
+    // must NOT let remove_dir_all escape the store and delete arbitrary files.
+    // Canonicalize both sides so symlinks and `..` can't slip past the prefix
+    // check. Both paths exist here (the store must exist for any snapshot to
+    // have been taken, and `abs` passed the exists() gate above).
+    let store = PathBuf::from(repo_root)
+        .join(".aura")
+        .join("snapshots")
+        .canonicalize()
+        .map_err(|e| format!("snapshot store unavailable: {}", e))?;
+    let canon = abs.canonicalize().map_err(|e| e.to_string())?;
+    if !canon.starts_with(&store) {
+        return Err(format!(
+            "snapshot undo refused: {} resolves outside the snapshot store",
+            snap_path
+        ));
+    }
+    if canon.is_dir() {
+        fs::remove_dir_all(&canon).map_err(|e| e.to_string())?;
     } else {
-        fs::remove_file(&abs).map_err(|e| e.to_string())?;
+        fs::remove_file(&canon).map_err(|e| e.to_string())?;
     }
     Ok(format!("Deleted snapshot {}", snap_path))
 }
@@ -405,4 +433,118 @@ fn undo_zone_claim(repo_root: &str, payload: &serde_json::Value) -> Result<Strin
         return Err(String::from_utf8_lossy(&out.stderr).into_owned());
     }
     Ok(format!("Released {} zone(s)", zones.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_repo() -> PathBuf {
+        // A process-wide counter guarantees uniqueness even when tests run in
+        // parallel — a wall-clock stamp alone can repeat and let two roots
+        // share one op_log.jsonl, which would cross-contaminate reads.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "aura-oplog-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            n
+        ));
+        fs::create_dir_all(dir.join(".aura")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn read_ops_puts_the_newest_first_within_one_second() {
+        let dir = tmp_repo();
+        let root = dir.to_string_lossy().to_string();
+        // Two ops sharing a whole-second ts, appended oldest → newest.
+        fs::write(
+            dir.join(".aura/op_log.jsonl"),
+            concat!(
+                r#"{"op_id":"older","ts":100,"kind":"log_intent","summary":"a","agent_id":"t","undo_payload":{}}"#,
+                "\n",
+                r#"{"op_id":"newer","ts":100,"kind":"log_intent","summary":"b","agent_id":"t","undo_payload":{}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let ops = read_ops(&root, 10).unwrap();
+        // aura_undo_last takes the first not-yet-undone op, so ops[0] must be
+        // the most recently appended op of that second — not the oldest.
+        assert_eq!(ops[0].op_id, "newer", "newest-appended op of a second must lead");
+        assert_eq!(ops[1].op_id, "older");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_ops_orders_newest_first_through_record_op() {
+        let dir = tmp_repo();
+        let root = dir.to_string_lossy().to_string();
+        // Two quick record_op calls very likely share a whole second; the
+        // second one is the more recent and must lead regardless.
+        let _a = record_op(&root, "log_intent", "first", "t", serde_json::json!({})).unwrap();
+        let b = record_op(&root, "log_intent", "second", "t", serde_json::json!({})).unwrap();
+
+        let ops = read_ops(&root, 10).unwrap();
+        assert_eq!(ops[0].op_id, b, "the second record_op is newest and must lead");
+        assert_eq!(ops.len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_snapshot_deletes_a_blob_inside_the_store() {
+        let dir = tmp_repo();
+        let root = dir.to_string_lossy().to_string();
+        let store = dir.join(".aura").join("snapshots");
+        fs::create_dir_all(&store).unwrap();
+        let blob = store.join("file__123.json");
+        fs::write(&blob, "{}").unwrap();
+
+        let payload = serde_json::json!({ "snapshot_path": blob.to_string_lossy() });
+        let msg = undo_snapshot(&root, &payload).unwrap();
+        assert!(msg.starts_with("Deleted snapshot"), "got: {msg}");
+        assert!(!blob.exists(), "the in-store snapshot blob is gone");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_snapshot_refuses_an_absolute_path_outside_the_store() {
+        let dir = tmp_repo();
+        let root = dir.to_string_lossy().to_string();
+        fs::create_dir_all(dir.join(".aura").join("snapshots")).unwrap();
+        // A precious file that happens to sit next to the repo, named in a
+        // hostile op row via its absolute path.
+        let victim = dir.join("precious.txt");
+        fs::write(&victim, "keep me").unwrap();
+
+        let payload = serde_json::json!({ "snapshot_path": victim.to_string_lossy() });
+        let err = undo_snapshot(&root, &payload).unwrap_err();
+        assert!(err.contains("outside the snapshot store"), "got: {err}");
+        assert!(victim.exists(), "a path outside the store must never be deleted");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_snapshot_refuses_a_dotdot_traversal() {
+        let dir = tmp_repo();
+        let root = dir.to_string_lossy().to_string();
+        fs::create_dir_all(dir.join(".aura").join("snapshots")).unwrap();
+        // Escape the store with `..` back into the repo root, which is inside
+        // repo_root but outside .aura/snapshots — still must be refused.
+        let victim = dir.join(".aura").join("outside.txt");
+        fs::write(&victim, "keep me").unwrap();
+
+        let payload =
+            serde_json::json!({ "snapshot_path": ".aura/snapshots/../outside.txt" });
+        let err = undo_snapshot(&root, &payload).unwrap_err();
+        assert!(err.contains("outside the snapshot store"), "got: {err}");
+        assert!(victim.exists(), "a `..` escape must never be deleted");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

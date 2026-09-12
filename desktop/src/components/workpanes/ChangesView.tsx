@@ -19,6 +19,7 @@
 // tree's +/− come straight from the changeset row's recorded counts.
 
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -26,6 +27,9 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { ChevronsUpDown } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { FinderMenu } from "@shared/ui/FinderList";
 import { Churn } from "../diff/Churn";
 import {
   api,
@@ -35,13 +39,20 @@ import {
 import { loadFileDiff } from "../../lib/sessionDataCache";
 import { fetchChangeNoteReport } from "../../lib/changeNoteCache";
 import { UnifiedDiff } from "../diff/UnifiedDiff";
-import { SplitDiff, materializeSides } from "../diff/SplitDiff";
+import { SplitDiff } from "../diff/SplitDiff";
+import { useEditableDiff } from "../diff/useEditableDiff";
+import { DiskChangedNotice, EditToggle, UnsavedMark } from "../diff/DiffSaveState";
+import { materializeSides, symbolSpan, type DiffFocus } from "../../lib/diffSides";
+import { reverseApplyDiff } from "../../lib/reverseApplyDiff";
 import { ChangeNoteCard } from "./ChangeNoteCard";
-import { SplitDiffHeader, SPLIT_INLINE_PX } from "./SplitDiffHeader";
+import { SplitDiffHeader, SPLIT_INLINE_PX, type FocusPick } from "./SplitDiffHeader";
 import {
   getDiffView,
+  getEditableDiffs,
   setDiffView,
+  setEditableDiffs,
   subscribeDiffView,
+  subscribeEditableDiffs,
   type DiffView,
 } from "../../lib/diffViewPref";
 import {
@@ -90,6 +101,8 @@ type FileLeaf = {
   status: string | undefined;
   adds: number;
   dels: number;
+  /** When this file last changed, in millis, or null when unknown. */
+  at: number | null;
 };
 
 type FolderNode = {
@@ -101,6 +114,9 @@ type FolderNode = {
   adds: number;
   dels: number;
   fileCount: number;
+  /** The newest stamp anywhere beneath it, so a folder sorts where its most
+   *  recent file would. */
+  at: number | null;
 };
 
 type TreeNode = FileLeaf | FolderNode;
@@ -113,10 +129,40 @@ type RawFolder = {
   files: FileLeaf[];
 };
 
+// ── ordering ─────────────────────────────────────────────────────────
+// A changeset of a dozen files reads fine alphabetically. One of forty does
+// not: the file that carries the change is somewhere in the middle of it, and
+// the only way to find it is to read every name. So the list can also be
+// ordered by how much a file changed, and by which change is newest — the two
+// questions people actually arrive with.
+//
+// Folders are ordered by the same rule as the files inside them (summed churn,
+// newest descendant), so a re-order moves the whole branch rather than
+// shuffling leaves inside a tree that still reads alphabetically.
+
+export type ChangeSort = "path" | "churn" | "recent";
+
+export const CHANGE_SORTS: { id: ChangeSort; label: string; hint: string }[] = [
+  { id: "path", label: "Name", hint: "Folders and files A–Z" },
+  { id: "churn", label: "Most changed", hint: "Largest +/− first" },
+  { id: "recent", label: "Newest", hint: "Most recently changed first" },
+];
+
+/** Millis for ordering, or `null` when the file carries no stamp — a working
+ *  copy edit that was never committed has nothing to be newer than. */
+function changedAt(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
+}
+
 /** Build a folder hierarchy from the flat changeset, then collapse any
  *  single-child directory chain into one row (so `a/b/c/file.ts` reads as a
  *  single `a/b/c` folder) and sum +/− bottom-up. */
-function buildChangeTree(files: IntentChangesetFile[]): {
+function buildChangeTree(
+  files: IntentChangesetFile[],
+  sort: ChangeSort = "path",
+): {
   nodes: TreeNode[];
   fileOrder: string[];
 } {
@@ -149,20 +195,38 @@ function buildChangeTree(files: IntentChangesetFile[]): {
       status: f.status,
       adds: typeof f.additions === "number" ? f.additions : 0,
       dels: typeof f.deletions === "number" ? f.deletions : 0,
+      at: changedAt(f.changed_at),
     });
   }
 
   const fileOrder: string[] = [];
+
+  // One comparator for both folders and files, so a branch and its leaves are
+  // never ordered by different rules. Files with nothing to compare on — no
+  // churn recorded, no stamp — fall to the end rather than to the top, where a
+  // zero would otherwise outrank a real number, and settle alphabetically
+  // among themselves so the order is stable between renders.
+  function compare(a: TreeNode, b: TreeNode): number {
+    if (sort === "churn") {
+      const d = b.adds + b.dels - (a.adds + a.dels);
+      if (d !== 0) return d;
+    } else if (sort === "recent") {
+      if (a.at !== b.at) {
+        if (a.at === null) return 1;
+        if (b.at === null) return -1;
+        return b.at - a.at;
+      }
+    }
+    return a.name.localeCompare(b.name);
+  }
 
   function freeze(raw: RawFolder): TreeNode[] {
     const folderNodes: FolderNode[] = [];
     for (const sub of raw.folders.values()) {
       folderNodes.push(collapseFolder(sub));
     }
-    folderNodes.sort((a, b) => a.name.localeCompare(b.name));
-    const fileNodes = [...raw.files].sort((a, b) =>
-      a.name.localeCompare(b.name),
-    );
+    folderNodes.sort(compare);
+    const fileNodes = [...raw.files].sort(compare);
     // Record file render order (folders first, depth-first) for auto-select.
     const out: TreeNode[] = [...folderNodes, ...fileNodes];
     for (const n of out) {
@@ -187,12 +251,14 @@ function buildChangeTree(files: IntentChangesetFile[]): {
     let adds = 0;
     let dels = 0;
     let fileCount = 0;
+    let at: number | null = null;
     for (const c of children) {
       adds += c.adds;
       dels += c.dels;
       fileCount += c.kind === "file" ? 1 : c.fileCount;
+      if (c.at !== null && (at === null || c.at > at)) at = c.at;
     }
-    return { kind: "folder", name, path, children, adds, dels, fileCount };
+    return { kind: "folder", name, path, children, adds, dels, fileCount, at };
   }
 
   // freeze() pushes file order as it goes; call on root last so order is the
@@ -287,18 +353,78 @@ function BackIcon() {
 
 // ── change tree (left pane) ──────────────────────────────────────────
 
+/** How the file list is ordered.
+ *
+ *  A `<select>` sat here until 2026-08-31, and it was the one native control
+ *  left in this pane. That was survivable while the pane only ever rendered
+ *  inside the desktop app, where a native menu is the platform's own; it stops
+ *  being survivable now the same pane is what the web console shows, because
+ *  a browser draws its own select chrome and the control reads as borrowed
+ *  from another product. `menuSurface.ts` exists precisely so every dropdown
+ *  in both surfaces is one look by construction, so this is that look. */
+function SortMenu({
+  sort,
+  onSort,
+}: {
+  sort: ChangeSort;
+  onSort: (s: ChangeSort) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const chosen = CHANGE_SORTS.find((o) => o.id === sort);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="Order the file list"
+          title={chosen?.hint}
+          className="flex cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-xs text-text-4 hover:bg-state-hover hover:text-text-2 focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+        >
+          {chosen?.label ?? "Name"}
+          <ChevronsUpDown size={11} className="shrink-0" aria-hidden />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-[200px] p-0">
+        <FinderMenu
+          groups={[
+            {
+              items: CHANGE_SORTS.map((o) => ({
+                id: o.id,
+                label: o.label,
+                hint: o.hint,
+                selected: o.id === sort,
+                onSelect: () => onSort(o.id),
+              })),
+            },
+          ]}
+          onClose={() => setOpen(false)}
+        />
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function ChangeTree({
   files,
   fileOrder,
   nodes,
   selected,
   onSelect,
+  sort,
+  onSort,
+  sortable,
 }: {
   files: IntentChangesetFile[];
   fileOrder: string[];
   nodes: TreeNode[];
   selected: string | null;
   onSelect: (path: string) => void;
+  sort: ChangeSort;
+  onSort: (s: ChangeSort) => void;
+  /** False when nothing in the changeset carries churn or a stamp — offering
+   *  an ordering the data cannot honour is a control that does nothing. */
+  sortable: boolean;
 }) {
   // Default: everything expanded (empty collapsed set). Folder paths toggle.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -361,14 +487,17 @@ function ChangeTree({
             className="ml-1.5 normal-case tracking-normal"
           />
         </span>
-        <button
-          type="button"
-          onClick={collapseAll}
-          className="rounded px-1.5 py-0.5 text-xs text-text-4 hover:bg-state-hover hover:text-text-2"
-          title={allCollapsed ? "Expand all folders" : "Collapse all folders"}
-        >
-          {allCollapsed ? "Expand" : "Collapse"}
-        </button>
+        <div className="flex shrink-0 items-center gap-0.5">
+          {sortable && <SortMenu sort={sort} onSort={onSort} />}
+          <button
+            type="button"
+            onClick={collapseAll}
+            className="rounded px-1.5 py-0.5 text-xs text-text-4 hover:bg-state-hover hover:text-text-2"
+            title={allCollapsed ? "Expand all folders" : "Collapse all folders"}
+          >
+            {allCollapsed ? "Expand" : "Collapse"}
+          </button>
+        </div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
         {rows.map((r) => {
@@ -458,12 +587,16 @@ function CodeReveal({
   onToggle,
   adds,
   dels,
+  keepMounted = false,
   children,
 }: {
   show: boolean;
   onToggle: () => void;
   adds: number;
   dels: number;
+  /** Hide rather than unmount when closed — an editable diff with unsaved
+   *  edits must not lose them to a "Hide the code" click. */
+  keepMounted?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -491,6 +624,10 @@ function CodeReveal({
       </button>
       {show ? (
         <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+      ) : keepMounted ? (
+        <div hidden className="min-h-0 flex-1 overflow-hidden">
+          {children}
+        </div>
       ) : null}
     </>
   );
@@ -548,8 +685,9 @@ function RemoteChangeSummary({ file }: { file: IntentChangesetFile }) {
 }
 
 // ── diff pane (right pane) ───────────────────────────────────────────
-// The split-diff renderer + `materializeSides` now live in the shared
-// ../diff/SplitDiff module so the working-file pane uses the identical view.
+// The split-diff renderer lives in ../diff/SplitDiff and the rebuild it needs
+// in ../../lib/diffSides, so the working-file pane uses the identical view and
+// the same piece→lines mapping.
 
 function DiffPane({
   repoRoot,
@@ -559,9 +697,20 @@ function DiffPane({
   onBack,
   onBringBack,
   busySymbol,
+  renderReasons,
+  onDirtyChange,
 }: {
   repoRoot: string;
   file: IntentChangesetFile;
+  /** Tells the host when this pane holds unsaved edits, so switching files
+   *  can ask before dropping them. */
+  onDirtyChange?: (dirty: boolean) => void;
+  /** Leads the pane with whatever the host can say about *why* this file
+   *  changed, when the recorded change-note below cannot be computed here.
+   *  The desktop leaves it unset — it has a checkout and derives the richer
+   *  before/after itself; the console passes the sentences their authors
+   *  actually wrote, which is the half that was never derived from a diff. */
+  renderReasons?: (file: IntentChangesetFile) => ReactNode;
   /** When narrow we render single-column with a back affordance. */
   narrow: boolean;
   /** "All changes" mode (worktrees): a working-tree file's diff spans the
@@ -582,9 +731,26 @@ function DiffPane({
   // Whitespace-hiding is the same shared, persisted toggle across every pane.
   const [ignoreWs, setIgnoreWs] = useState(getIgnoreWhitespace);
   useEffect(() => subscribeIgnoreWhitespace(setIgnoreWs), []);
+  // "Edit in diff" / "Read only" — shared and persisted like the two above.
+  const [editPref, setEditPref] = useState(getEditableDiffs);
+  useEffect(() => subscribeEditableDiffs(setEditPref), []);
   const [diff, setDiff] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The whole working-tree file as last read from disk — the current side of
+  // an editable diff. Null for a committed or teammate's file, which has no
+  // file here to write back to.
+  const [diskText, setDiskText] = useState<string | null>(null);
+  // Bumped to re-read the diff and file in place (after a save, or when the
+  // file changes on disk) without the blank-then-load flash a file switch has.
+  const [refreshTick, setRefreshTick] = useState(0);
+  const refresh = useCallback(() => setRefreshTick((t) => t + 1), []);
+  const isWorkingTree = !file.commit && !file.remote_only;
+  const absPath = isWorkingTree
+    ? file.path.startsWith("/")
+      ? file.path
+      : `${repoRoot.replace(/\/$/, "")}/${file.path}`
+    : null;
   // The per-file change-note for THIS file in THIS commit, used to populate the
   // split diff's three-block header (merged summary + previous/new side
   // columns). Same shared (repo, commit) cache the unified path's
@@ -606,6 +772,21 @@ function DiffPane({
   const [showCode, setShowCode] = useState(true);
   useEffect(() => {
     setShowCode(true);
+  }, [file.path, file.commit]);
+
+  // The piece the reader clicked in the header above. Held here rather than in
+  // the header because BOTH the header and the diff body have to agree on it:
+  // one shows it selected, the other highlights its lines and captions them.
+  const [pick, setPick] = useState<FocusPick | null>(null);
+  const onFocusPiece = useCallback((p: FocusPick | null) => {
+    setPick(p);
+    // Picking a piece is asking to see code, so reveal it — the click is
+    // otherwise silent when the diff is collapsed.
+    if (p) setShowCode(true);
+  }, []);
+  // A different file is a different set of pieces.
+  useEffect(() => {
+    setPick(null);
   }, [file.path, file.commit]);
 
   useLayoutEffect(() => {
@@ -643,6 +824,16 @@ function DiffPane({
     };
   }, [repoRoot, file.commit, file.path]);
 
+  // A different file (or scope) starts from blank. Declared before the fetch
+  // below so it runs first in the same commit; a plain refresh (the tick)
+  // skips this and re-reads quietly behind whatever is already on screen.
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    setDiff(null);
+    setDiskText(null);
+  }, [repoRoot, file.path, file.commit, file.remote_only, sinceBase]);
+
   useEffect(() => {
     if (!repoRoot) return;
     // A teammate's file, carried over the team plane. There is no patch here
@@ -654,18 +845,28 @@ function DiffPane({
       return;
     }
     let alive = true;
-    setLoading(true);
     setError(null);
-    setDiff(null);
     // A back-filled changeset stamps each file with the commit that landed it;
     // once a run is committed `git diff HEAD` is empty, so we show that commit's
     // real patch (`git show <sha> -- <path>`). A live/manual claim has no commit
     // sha — its change is still in the working tree, so fall back to git diff.
     // Routed through the per-session diff cache so re-selecting a file (or
     // reopening the whole session) is instant instead of re-shelling git.
-    loadFileDiff(repoRoot, file, sinceBase)
-      .then((d) => {
-        if (alive) setDiff(d ?? "");
+    //
+    // A working-tree file is also read whole, in the same round, so the
+    // editable view has the real file to type into and the patch and the file
+    // describe the same moment.
+    const fileRead: Promise<string | null> = absPath
+      ? api
+          .readFile(absPath)
+          .then((c) => (c.status === "ok" ? c.text : null))
+          .catch(() => null)
+      : Promise.resolve(null);
+    Promise.all([loadFileDiff(repoRoot, file, sinceBase), fileRead])
+      .then(([d, text]) => {
+        if (!alive) return;
+        setDiff(d ?? "");
+        setDiskText(text);
       })
       .catch((e) => {
         if (alive) setError(e instanceof Error ? e.message : String(e));
@@ -676,7 +877,27 @@ function DiffPane({
     return () => {
       alive = false;
     };
-  }, [repoRoot, file.path, file.commit, file.remote_only, sinceBase]);
+  }, [repoRoot, file.path, file.commit, file.remote_only, sinceBase, absPath, refreshTick]);
+
+  // The original side of an editable diff, rebuilt by walking the patch
+  // backwards over the file on disk. Null when there is nothing to edit, or
+  // when the two no longer describe each other (the file moved between the
+  // reads) — the pane then shows the plain read-only diff, and the next
+  // refresh brings the editable one back.
+  const editOriginal = useMemo(
+    () => (diskText != null && diff != null ? reverseApplyDiff(diff, diskText) : null),
+    [diskText, diff],
+  );
+  const edit = useEditableDiff({
+    absPath,
+    diskText,
+    onSaved: refresh,
+    onDiskChanged: refresh,
+  });
+  useEffect(() => {
+    onDirtyChange?.(edit.dirty);
+  }, [edit.dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   const g = statusGlyph(file.status);
   const adds = typeof file.additions === "number" ? file.additions : 0;
@@ -690,6 +911,25 @@ function DiffPane({
   );
   const splitDisabled = narrow || (sidesPreview?.oneSided ?? false);
   const effectiveMode: DiffView = splitDisabled ? "unified" : mode;
+  // Editable needs the whole file on both sides. Once there are unsaved edits
+  // the Monaco view stays up even if the reader flips to "Read only" — the
+  // switch locks the text, it never discards it.
+  const canEdit = hasDiff && editOriginal != null;
+  const useEditor = canEdit && (editPref || edit.dirty);
+
+  // Resolve the picked piece to the lines it occupies on its side of THIS diff.
+  // A null span is a real answer — the piece's lines were trimmed out of the
+  // patch — and the diff bodies say so instead of highlighting a neighbour.
+  const focus: DiffFocus | null = useMemo(() => {
+    if (!pick || !sidesPreview) return null;
+    const side = pick.side === "previous" ? "original" : "modified";
+    return {
+      span: symbolSpan(sidesPreview, pick.symbol, side),
+      title: pick.title,
+      identifier: pick.symbol.identifier,
+      meaning: pick.meaning,
+    };
+  }, [pick, sidesPreview]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg-content">
@@ -718,14 +958,22 @@ function DiffPane({
         >
           {file.path}
         </span>
+        {/* Unsaved dot / saving spinner, right beside the name it belongs to. */}
+        <UnsavedMark edit={edit} />
         {/* Sits directly above the lines it counts — the number IS what's on
             screen, so it carries the same green/red as the diff below it. */}
         <Churn additions={adds} deletions={dels} tone="diff" />
+        <DiskChangedNotice edit={edit} />
         {/* Code-display controls (side-by-side vs inline, hide-whitespace) only
             matter when the raw code is actually revealed — keep them out of the
             way while the plain-language view is the star. */}
         {showCode ? (
           <>
+            {canEdit ? (
+              <span className="ml-1 inline-flex shrink-0">
+                <EditToggle on={editPref} onChange={setEditableDiffs} />
+              </span>
+            ) : null}
             {!splitDisabled ? (
               <span className="ml-1 inline-flex shrink-0 items-center overflow-hidden rounded border border-line-soft">
                 <button
@@ -785,6 +1033,7 @@ function DiffPane({
             plain-words before/after (from the recorded change-note); the
             commit's ChangeNoteCard is the fallback lead. A live working-tree
             edit has no recorded note, so it leads straight to the code below. */}
+        {renderReasons?.(file)}
         {note ? (
           <SplitDiffHeader
             note={note}
@@ -795,6 +1044,7 @@ function DiffPane({
             stacked={bodyNarrow}
             onBringBack={onBringBack}
             busySymbol={busySymbol}
+            onFocusPiece={onFocusPiece}
           />
         ) : file.commit ? (
           <ChangeNoteCard repoRoot={repoRoot} commit={file.commit} path={file.path} />
@@ -827,12 +1077,31 @@ function DiffPane({
             onToggle={() => setShowCode((v) => !v)}
             adds={adds}
             dels={dels}
+            keepMounted={edit.dirty}
           >
-            {effectiveMode === "split" ? (
-              <SplitDiff diff={diff as string} path={file.path} />
+            {useEditor ? (
+              // The working-tree file, whole, with the current side open to
+              // typing; ⌘S saves. Inline when the reader prefers unified —
+              // it has to stay a Monaco editor to be editable.
+              <SplitDiff
+                diff={diff as string}
+                path={file.path}
+                focus={focus}
+                onClearFocus={() => setPick(null)}
+                sides={{ original: editOriginal as string, modified: edit.modified }}
+                inline={effectiveMode === "unified"}
+                edit={{ readOnly: !editPref, attach: edit.attach }}
+              />
+            ) : effectiveMode === "split" ? (
+              <SplitDiff
+                diff={diff as string}
+                path={file.path}
+                focus={focus}
+                onClearFocus={() => setPick(null)}
+              />
             ) : (
               <div className="h-full overflow-y-auto">
-                <UnifiedDiff diff={diff as string} />
+                <UnifiedDiff diff={diff as string} focus={focus} />
               </div>
             )}
           </CodeReveal>
@@ -850,6 +1119,7 @@ export function ChangesView({
   initialSelected,
   onBringBack,
   busySymbol,
+  renderReasons,
 }: {
   repoRoot: string;
   files: IntentChangesetFile[];
@@ -862,13 +1132,54 @@ export function ChangesView({
    *  lives where you see the change — the Time machine's job, folded in. */
   onBringBack?: (symbol: string, relFile: string) => void;
   busySymbol?: string | null;
+  /** Host-supplied "why did this file change" band, shown above the diff. See
+   *  {@link DiffPane}'s own prop for who sets it and why. */
+  renderReasons?: (file: IntentChangesetFile) => ReactNode;
 }) {
-  const { nodes, fileOrder } = useMemo(() => buildChangeTree(files), [files]);
+  const [sort, setSort] = useState<ChangeSort>("path");
+  const { nodes, fileOrder } = useMemo(
+    () => buildChangeTree(files, sort),
+    [files, sort],
+  );
+  // Both alternative orderings need something to order by. A working-tree
+  // changeset has neither churn nor stamps, and a picker whose two other
+  // options are alphabetical-by-another-name is worse than no picker.
+  const sortable = useMemo(
+    () =>
+      files.some(
+        (f) =>
+          typeof f.additions === "number" ||
+          typeof f.deletions === "number" ||
+          Boolean(f.changed_at),
+      ),
+    [files],
+  );
   const [selected, setSelected] = useState<string | null>(
     initialSelected ?? null,
   );
   const [narrow, setNarrow] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // An editable diff with unsaved edits: leaving it for another file would
+  // drop them silently, so ask first. The pane reports its own dirty state; a
+  // confirmed leave clears it so the next pane starts clean.
+  const dirtyRef = useRef(false);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const onDirtyChange = useCallback((dirty: boolean) => {
+    dirtyRef.current = dirty;
+  }, []);
+  const select = useCallback((path: string | null) => {
+    if (path === selectedRef.current) return;
+    if (
+      dirtyRef.current &&
+      !window.confirm("This diff has edits you haven't saved. Leave without saving them?")
+    ) {
+      return;
+    }
+    dirtyRef.current = false;
+    setSelected(path);
+  }, []);
 
   // An agent worktree forked from a base, so "all the work done here" =
   // committed + uncommitted since that fork. The toggle lets the user narrow
@@ -931,7 +1242,10 @@ export function ChangesView({
       fileOrder={fileOrder}
       nodes={nodes}
       selected={selected}
-      onSelect={setSelected}
+      onSelect={select}
+      sort={sort}
+      onSort={setSort}
+      sortable={sortable}
     />
   );
 
@@ -984,9 +1298,11 @@ export function ChangesView({
                 file={selectedFile}
                 narrow
                 sinceBase={isWorktree && sinceBase}
-                onBack={() => setSelected(null)}
+                onBack={() => select(null)}
                 onBringBack={onBringBack}
                 busySymbol={busySymbol}
+                renderReasons={renderReasons}
+                onDirtyChange={onDirtyChange}
               />
             </div>
           ) : (
@@ -1006,9 +1322,11 @@ export function ChangesView({
                   file={selectedFile}
                   narrow={false}
                   sinceBase={isWorktree && sinceBase}
-                  onBack={() => setSelected(null)}
+                  onBack={() => select(null)}
                   onBringBack={onBringBack}
                   busySymbol={busySymbol}
+                  renderReasons={renderReasons}
+                  onDirtyChange={onDirtyChange}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center text-sm text-text-4">

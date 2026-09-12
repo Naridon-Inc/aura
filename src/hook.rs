@@ -85,14 +85,21 @@ impl HookInstaller {
         let hooks_dir = Self::hooks_dir();
         fs::create_dir_all(&hooks_dir)?;
 
-        let current_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("aura"));
+        // REL-04: the path baked into the hooks must be absolute AND proven —
+        // canonicalized and executable — because a hook that names a moved or
+        // never-existing binary silently fails on every commit thereafter.
+        // If verification fails we fall back to PATH-resolved `aura`, loudly.
+        let aura_bin = crate::agent_integrations::verified_aura_binary();
+        if !aura_bin.verified {
+            println!("  ⚠ Could not verify the aura binary path — hooks will rely on PATH.");
+        }
         // The invocation in every generated hook MUST quote this path: a user's
         // install dir or repo path can contain spaces (e.g. ".../New Git/...").
         // Unquoted, /bin/sh word-splits it and the commit dies with
         // "<first-word>: is a directory" — and because the pre-commit hook then
         // `exit 1`s, it blocks the commit entirely. So we wrap `{aura_path}` in
         // double quotes at every call site below.
-        let aura_path = current_exe.to_string_lossy();
+        let aura_path = aura_bin.command;
 
         // 1. The Pre-Commit Hook (Scrapes intent and ASTs)
         let pre_commit_path = hooks_dir.join("pre-commit");

@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
   Eye,
+  LayoutGrid,
   Plus,
   Terminal as TerminalIcon,
   X,
@@ -29,7 +30,11 @@ import { isAsleep, placeOfMachine, projectToFilePlaceUnder } from "../../lib/pla
 import { remotePlaceKey, type RemotePlace } from "../../lib/remotePlaces";
 import { remotePlace } from "../../lib/placeRef";
 import { openPopout } from "../../lib/popout";
-import type { RemoteTab } from "../../lib/remoteWorkspaceSnapshot";
+import {
+  REMOTE_WORK_KINDS,
+  type RemoteTab,
+  type RemoteWorkKind,
+} from "../../lib/remoteWorkspaceSnapshot";
 import { releaseTerminalSession } from "../Terminal";
 import { AgentIcon } from "../agent/AgentIcon";
 import { AsciiSpinner } from "../ui/ascii-spinner";
@@ -47,6 +52,8 @@ import { BoxPanel } from "./BoxPanel";
 import { CloudThreadPane } from "./CloudThreadPane";
 import { MachineChat } from "./MachineChat";
 import { RemoteSessionTerminal } from "./RemoteSessionTerminal";
+import { RemoteWorkPane } from "./RemoteWorkPane";
+import { REMOTE_WORK } from "./remoteWork";
 import {
   instanceIdFor,
   machineToOpen,
@@ -169,8 +176,9 @@ export function RemoteWorkspace({
       machine?.id ?? null,
       entry.threadKey ?? null,
       placeRepoRoot,
+      entry.remoteRoot ?? null,
     );
-  }, [placeKey, machine?.id, entry.threadKey, placeRepoRoot]);
+  }, [placeKey, machine?.id, entry.threadKey, placeRepoRoot, entry.remoteRoot]);
 
   // Is it up? Asked of the board, repeatedly, because the answer changes under
   // you — a box you stopped last night is not a box you can open a shell on,
@@ -316,11 +324,16 @@ function RemoteWorkspaceBody({
   // a different machine picks a different project with it. That is why it is
   // half of the slot the tabs are filed under rather than something read once.
   const repoRoot = entry.repoRoot ?? machine?.project_root ?? undefined;
+  // Where the checkout is ON the machine, when a launched workspace put it in
+  // a worktree beside the machine's own copy. Absent for a box entered on its
+  // main checkout — which then keeps the slot and the key it always had.
+  const remoteRoot = entry.remoteRoot ?? undefined;
 
-  // The tabs, and which one is in front — held per (machine, project) rather
-  // than per mount. One mount therefore serves as many projects on as many
-  // boxes as you walk through, and each of them keeps its own strip.
-  const strip = useRemoteTabs(machine?.id ?? null, repoRoot);
+  // The tabs, and which one is in front — held per (machine, project,
+  // worktree) rather than per mount. One mount therefore serves as many
+  // projects on as many boxes as you walk through, and each of them keeps
+  // its own strip.
+  const strip = useRemoteTabs(machine?.id ?? null, repoRoot, remoteRoot);
   const { tabs, activeId, active } = strip;
 
   // The place a tab on this strip runs in. Same box, but the project is the
@@ -359,8 +372,22 @@ function RemoteWorkspaceBody({
   // slot is named after, and a second spelling of it is how one arrival becomes
   // two.
   const standingIn = machine
-    ? remotePlaceKey({ machineId: machine.id, repoRoot })
+    ? remotePlaceKey({ machineId: machine.id, repoRoot, remoteRoot })
     : null;
+
+  // The file the Files tab is showing. Held here rather than in the pane so
+  // it survives a look at Changes or a session and back, and so the Changes
+  // tab's "open in the editor" can put a file on it. Reset per place: a file
+  // of one box's project is not a file of the next.
+  const [openFile, setOpenFile] = useState<string | null>(null);
+  useEffect(() => setOpenFile(null), [standingIn]);
+  const openInFiles = useCallback(
+    (path: string) => {
+      setOpenFile(path);
+      strip.openWork("files");
+    },
+    [strip.openWork],
+  );
   useEffect(() => {
     if (!machine || !standingIn || entry.threadKey || !box.sessions) return;
     if (greeted === standingIn) return;
@@ -407,10 +434,11 @@ function RemoteWorkspaceBody({
         machineId,
         threadKey: threadKey ?? undefined,
         repoRoot,
+        remoteRoot,
       }),
       title: machine?.name ? `Aura. ${machine.name}` : "Aura",
     });
-  }, [machineId, threadKey, repoRoot, machine?.name]);
+  }, [machineId, threadKey, repoRoot, remoteRoot, machine?.name]);
 
   const attach = (session: BoxSession, opts?: { readOnly?: boolean }) => {
     strip.openSession(session, !!opts?.readOnly);
@@ -542,6 +570,7 @@ function RemoteWorkspaceBody({
           t.kind === "session" ? [t.session.name] : [],
         )}
         onAttach={attach}
+        onOpenWork={strip.openWork}
       />
 
       <div className="min-h-0 flex-1">
@@ -567,6 +596,18 @@ function RemoteWorkspaceBody({
               repoRoot={repoRoot ?? ""}
             />
           )
+        ) : active.kind === "work" ? (
+          // The local pane of that name, mounted on the project where it
+          // stands. Each of them takes `repoRoot` — the LOCAL root the place
+          // is keyed by — and asks through `lib/place/workApi`, which sends
+          // the question to the box, in the worktree this place works in.
+          <RemoteWorkPane
+            kind={active.work}
+            repoRoot={repoRoot}
+            machineName={machine.name}
+            openFile={openFile}
+            onOpenFile={openInFiles}
+          />
         ) : (
           // Every terminal tab stays mounted-by-id in the Terminal module's own
           // session cache, so switching tabs — and leaving the workspace and
@@ -630,6 +671,7 @@ function TabStrip({
   box,
   openSessions = [],
   onAttach,
+  onOpenWork,
 }: {
   machine: Machine | null;
   machines: Machine[] | null;
@@ -652,7 +694,12 @@ function TabStrip({
   box?: BoxState;
   openSessions?: string[];
   onAttach?: (s: BoxSession, opts?: { readOnly?: boolean }) => void;
+  /** Open one of the work surfaces — files, changes, git, PRs, run. */
+  onOpenWork?: (kind: RemoteWorkKind) => void;
 }) {
+  // The work picker, open or not. Its own state because it is a menu of
+  // this strip and nothing else needs to know it is up.
+  const [picking, setPicking] = useState(false);
   return (
     <div
       className="relative flex flex-shrink-0 items-stretch border-b border-line-soft bg-bg-chrome"
@@ -661,7 +708,13 @@ function TabStrip({
       <div className="no-scrollbar flex min-w-0 flex-1 items-stretch overflow-x-auto">
         {tabs.map((t) => {
           const on = t.id === activeId;
-          const label = t.kind === "cloud" ? t.label : sessionLabel(t.session);
+          const label =
+            t.kind === "cloud"
+              ? t.label
+              : t.kind === "work"
+                ? REMOTE_WORK[t.work].label
+                : sessionLabel(t.session);
+          const WorkIcon = t.kind === "work" ? REMOTE_WORK[t.work].Icon : null;
           return (
             <div
               key={t.id}
@@ -677,7 +730,9 @@ function TabStrip({
                 title={
                   t.kind === "cloud"
                     ? undefined
-                    : `${label} — running in ${t.session.project || "the home directory"} on the machine${
+                    : t.kind === "work"
+                      ? REMOTE_WORK[t.work].hint
+                      : `${label} — running in ${t.session.project || "the home directory"} on the machine${
                         t.readOnly
                           ? ". You are watching: this tab can't type into it."
                           : ""
@@ -688,6 +743,8 @@ function TabStrip({
                 <span className="flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center">
                   {t.kind === "cloud" ? (
                     <CloudGlyph size={12} />
+                  ) : t.kind === "work" ? (
+                    WorkIcon && <WorkIcon size={12} />
                   ) : t.readOnly ? (
                     // Which way you joined changes what the keyboard does, so
                     // it is on the tab and not only in the panel you came from.
@@ -748,7 +805,52 @@ function TabStrip({
             <Plus size={13} />
           </button>
         )}
+
+        {/* The work surfaces. Beside ＋ rather than inside it: ＋ is about
+            what is RUNNING on the machine, and the file tree of a project
+            is not something that runs. Only when the place has a project —
+            without one there is nothing over there to list. */}
+        {machine && onOpenWork && (
+          <button
+            type="button"
+            onClick={() => setPicking((v) => !v)}
+            title="Open the files, changes, git, pull requests or run scripts of this project on the machine"
+            className="flex h-full flex-shrink-0 items-center px-2.5 text-text-4 transition-colors hover:bg-state-hover hover:text-text-1"
+          >
+            <LayoutGrid size={13} />
+          </button>
+        )}
       </div>
+
+      {picking && onOpenWork && (
+        <>
+          <MenuBackdrop onClose={() => setPicking(false)} />
+          <div
+            className={`${MENU_PANEL} absolute left-2 z-50`}
+            style={{ top: "calc(var(--topbar-h) + 2px)" }}
+          >
+            <div className={MENU_LABEL}>On the machine</div>
+            {REMOTE_WORK_KINDS.map((k) => {
+              const { label, Icon, hint } = REMOTE_WORK[k];
+              return (
+                <button
+                  key={k}
+                  type="button"
+                  className={`${MENU_ROW} flex w-full items-center gap-2`}
+                  title={hint}
+                  onClick={() => {
+                    setPicking(false);
+                    onOpenWork(k);
+                  }}
+                >
+                  <Icon size={13} className="text-text-4" />
+                  <span>{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       {/* Keyed on the box, because this control holds a draft OF that box: the
           folder its conversation reads, half-typed. The workspace around it no

@@ -30,6 +30,7 @@ function offStatus(over: Partial<AuraTrackStatus> = {}): AuraTrackStatus {
     wired: false,
     detail: "Aura couldn't switch on for this project. It said: error: unrecognized subcommand 'enable'",
     stale_cli: null,
+    privacy_path: null,
     raw_detail: "error: unrecognized subcommand 'enable'",
     ...over,
   };
@@ -44,6 +45,7 @@ function onStatus(): AuraTrackStatus {
     wired: true,
     detail: null,
     stale_cli: null,
+    privacy_path: null,
     raw_detail: null,
   };
 }
@@ -261,4 +263,30 @@ describe("the strip stays honest about the other states", () => {
     });
     expect(copy.showInstallCommand).toBe(true);
   });
+});
+
+test("a folder macOS refuses offers the switch, not another retry", () => {
+  // Retry is the wrong button here and pressing it forever is the bug: Aura
+  // cannot raise the permission dialog from a helper it spawned, so the answer
+  // is identical every time until the switch in System Settings is flipped.
+  const copy = noticeCopy({
+    ...idleAttempt,
+    attempts: 3,
+    status: offStatus({
+      detail:
+        "macOS is blocking Aura from this project's Git folder, which lives outside the project — switch Aura on under System Settings › Privacy & Security › Full Disk Access, then try again. Aura cannot ask for this itself. Blocked: /Users/sam/Documents/Shopify/.git",
+      privacy_path: "/Users/sam/Documents/Shopify/.git",
+      raw_detail: null,
+    }),
+  });
+
+  expect(copy.cta).toBe("Open Settings");
+  expect(copy.privacyPath).toBe("/Users/sam/Documents/Shopify/.git");
+  expect(copy.line).toContain("Full Disk Access");
+});
+
+test("an ordinary failure still offers a retry", () => {
+  const copy = noticeCopy({ ...idleAttempt, attempts: 1, status: offStatus() });
+  expect(copy.cta).toBe("Try again");
+  expect(copy.privacyPath).toBeNull();
 });

@@ -21,8 +21,221 @@ export type ThemeVariant =
   | "amber"
   | "emerald";
 
+/** How hard the dark ground and its type are pushed apart. `low` is for
+ *  people who find the full-contrast dark theme harsh over a long day — the
+ *  same palette, softened, with the accent left exactly where it was. */
+export type ThemeContrast = "normal" | "low";
+
 const KEY = "aura.theme";
 const VARIANT_KEY = "aura.theme.variant";
+const CONTRAST_KEY = "aura.theme.contrast";
+
+// ── Low contrast ─────────────────────────────────────────────────────────
+//
+// Not a fourth style pack: a softening applied over whichever dark pack is
+// on. The type steps a little toward the ground and the ground lifts a
+// little toward the type, so the ratio between them drops by about 15% —
+// enough to take the edge off, not enough to fall under the AA floor body
+// copy sits on. The accent, the semantic colours (green / amber / red) and
+// the primary button are left alone: those carry meaning, and a warning
+// that read as calmer would be a warning that lied.
+
+/** The dark tokens the softening touches. Every one is a flat hex in each
+ *  pack; the aliases that point at them (`--color-bg-card` and friends)
+ *  follow on their own. */
+export const SOFTENED_TOKENS: readonly string[] = [
+  "--color-bg-0",
+  "--color-bg-1",
+  "--color-bg-2",
+  "--color-bg-3",
+  "--color-bg-layer-3",
+  "--color-composer-bg",
+  "--color-composer-border",
+  "--color-popover-bg",
+  "--color-popover-border",
+  "--color-popover-row-hover",
+  "--color-pill-bg",
+  "--color-pill-bg-hover",
+  "--color-kbd-bg",
+  "--color-avatar-bg",
+  "--color-line",
+  "--color-line-soft",
+  "--color-text-1",
+  "--color-text-2",
+  "--color-text-3",
+  "--color-text-4",
+  "--color-text-5",
+  "--color-pill-fg",
+  "--color-kbd-fg",
+  "--color-avatar-fg",
+];
+
+/** The Amber pack's dark tokens — the ground almost everyone is on, and the
+ *  fixture the softening is judged against in tests. Kept in step with
+ *  `.theme-amber` in styles.css by hand; the runtime reads the live values
+ *  off the document instead, so a pack edit does not have to come here. */
+export const AMBER_DARK_TOKENS: Readonly<Record<string, string>> = {
+  "--color-bg-0": "#1c1815",
+  "--color-bg-1": "#15120f",
+  "--color-bg-2": "#272220",
+  "--color-bg-3": "#2d2724",
+  "--color-bg-layer-3": "#342d28",
+  "--color-composer-bg": "#1f1b18",
+  "--color-composer-border": "#2d2825",
+  "--color-popover-bg": "#1f1b18",
+  "--color-popover-border": "#2d2825",
+  "--color-popover-row-hover": "#272220",
+  "--color-pill-bg": "#2d2724",
+  "--color-pill-bg-hover": "#353029",
+  "--color-kbd-bg": "#2d2724",
+  "--color-avatar-bg": "#2a2520",
+  "--color-line": "#302b26",
+  "--color-line-soft": "#282320",
+  "--color-text-1": "#f0ece7",
+  "--color-text-2": "#bab5ad",
+  "--color-text-3": "#898279",
+  "--color-text-4": "#5a554d",
+  "--color-text-5": "#3b3732",
+  "--color-pill-fg": "#c8c3bb",
+  "--color-kbd-fg": "#c8c3bb",
+  "--color-avatar-fg": "#bdb5aa",
+  "--color-accent": "#6aa885",
+};
+
+/** How much the low setting softens: the drop in the text-on-ground contrast
+ *  ratio it aims for. */
+export const LOW_CONTRAST_AMOUNT = 0.15;
+
+type Rgb = [number, number, number];
+
+function parseHex(value: string): Rgb | null {
+  const v = value.trim();
+  const m = /^#([0-9a-f]{6})$/i.exec(v);
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+}
+
+function toHex([r, g, b]: Rgb): string {
+  const h = (n: number) => Math.round(Math.max(0, Math.min(255, n))).toString(16).padStart(2, "0");
+  return `#${h(r)}${h(g)}${h(b)}`;
+}
+
+/** `a` moved `t` of the way toward `b`, in sRGB. */
+function mix(a: Rgb, b: Rgb, t: number): Rgb {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+}
+
+/** WCAG relative luminance of a hex colour, 0 (black) to 1 (white). */
+export function luminance(hex: string): number {
+  const rgb = parseHex(hex);
+  if (!rgb) return 0;
+  const lin = rgb.map((c) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+}
+
+/** WCAG contrast ratio between two hex colours, always >= 1. */
+export function contrastRatio(a: string, b: string): number {
+  const la = luminance(a);
+  const lb = luminance(b);
+  const [hi, lo] = la >= lb ? [la, lb] : [lb, la];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** The same dark palette with its contrast taken down by `amount`.
+ *
+ *  Type tokens step toward the content ground (`--color-bg-0`) and ground
+ *  tokens lift toward the type (`--color-text-1`). The ground moves less than
+ *  the type does: a dark surface's luminance sits so near zero that a small
+ *  lift is a large share of it, so the two mixes are weighted to land the
+ *  ratio drop on `amount` rather than overshoot it. Any token that is not a
+ *  flat hex is passed through untouched — a value like `var(--color-bg-1)`
+ *  follows whatever it points at. The accent is never in the result. */
+export function softenDarkPalette(
+  tokens: Readonly<Record<string, string>>,
+  amount = LOW_CONTRAST_AMOUNT,
+): Record<string, string> {
+  const ground = parseHex(tokens["--color-bg-0"] ?? "");
+  const ink = parseHex(tokens["--color-text-1"] ?? "");
+  if (!ground || !ink) return {};
+  const textMix = amount * 0.42;
+  const groundMix = amount * 0.13;
+  const out: Record<string, string> = {};
+  for (const name of SOFTENED_TOKENS) {
+    const raw = tokens[name];
+    if (raw === undefined) continue;
+    const rgb = parseHex(raw);
+    if (!rgb) continue;
+    const isInk =
+      name.startsWith("--color-text-") ||
+      name === "--color-pill-fg" ||
+      name === "--color-kbd-fg" ||
+      name === "--color-avatar-fg";
+    out[name] = isInk ? toHex(mix(rgb, ground, textMix)) : toHex(mix(rgb, ink, groundMix));
+  }
+  return out;
+}
+
+/** The Amber dark pack, softened — what the low setting paints on a fresh
+ *  install. */
+export const LOW_CONTRAST_AMBER_DARK: Readonly<Record<string, string>> =
+  softenDarkPalette(AMBER_DARK_TOKENS);
+
+function readContrast(): ThemeContrast {
+  try {
+    return localStorage.getItem(CONTRAST_KEY) === "low" ? "low" : "normal";
+  } catch {
+    return "normal";
+  }
+}
+
+export function setThemeContrast(contrast: ThemeContrast) {
+  try {
+    localStorage.setItem(CONTRAST_KEY, contrast);
+  } catch {
+    /* private mode — best-effort */
+  }
+  notify();
+  persist();
+}
+
+export function useThemeContrast(): ThemeContrast {
+  const [contrast, setContrast] = useState<ThemeContrast>(() => readContrast());
+  useEffect(() => {
+    const fn = () => setContrast(readContrast());
+    subs.add(fn);
+    // Cross-heap mirror — see useThemePreference.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === CONTRAST_KEY) fn();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      subs.delete(fn);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+  return contrast;
+}
+
+/** Paint or clear the softened palette on `<html>`.
+ *
+ *  Reads the pack's live values off the document — after clearing any earlier
+ *  softening, so a second application does not soften the softened — and
+ *  writes the result inline, which outranks the pack's class rules without
+ *  a stylesheet having to know each pack. */
+function applyContrast(root: HTMLElement, low: boolean): void {
+  for (const name of SOFTENED_TOKENS) root.style.removeProperty(name);
+  root.classList.toggle("contrast-low", low);
+  if (!low) return;
+  const live = getComputedStyle(root);
+  const tokens: Record<string, string> = {};
+  for (const name of SOFTENED_TOKENS) tokens[name] = live.getPropertyValue(name);
+  const soft = softenDarkPalette(tokens);
+  for (const [name, value] of Object.entries(soft)) root.style.setProperty(name, value);
+}
 
 // Variants that ship dark-only — selecting one forces the resolved
 // scheme back to dark so light/system don't fight the variant palette.
@@ -196,6 +409,7 @@ export function useResolvedTheme(): ResolvedTheme {
 export function useApplyThemeClass(): void {
   const resolved = useResolvedTheme();
   const variant = useThemeVariant();
+  const contrast = useThemeContrast();
   useEffect(() => {
     if (typeof document === "undefined") return;
     const root = document.documentElement;
@@ -209,5 +423,9 @@ export function useApplyThemeClass(): void {
       "theme-emerald",
     );
     root.classList.add(`theme-${variant}`);
-  }, [resolved, variant]);
+    // Low contrast is a dark-only softening: the light packs are already
+    // paper-and-ink and have nothing to take the edge off. Applied after the
+    // classes so it reads the pack that is now on.
+    applyContrast(root, resolved === "dark" && contrast === "low");
+  }, [resolved, variant, contrast]);
 }

@@ -58,6 +58,20 @@ pub mod run_log;
 /// The crew registry — durable identity for parallel crews (`.aura/crew/crews.json`).
 pub mod crew;
 
+/// Naming a worktree after the work it is for, not out of a pool of place
+/// names. Pure — the one implementation `aura-cli` (`aura work`, the loop
+/// runner) and `aura-shell` (agent lanes, Manager fan-out) both name from,
+/// so two surfaces can never slug the same title two different ways.
+pub mod worktree_name;
+
+/// The projection between a task **card** (`T-xxxxxxxx.json`, one file per
+/// task, written by `aura task` and by the crew) and a task **board row**
+/// (`tasks.json`, written by the desktop app). Both live in `.aura/tasks/`,
+/// and until this existed each reader treated the other's shape as an empty
+/// board. One table, so the surfaces cannot disagree about what a status
+/// means.
+pub mod board_card;
+
 // ── A2A v1.2 lifecycle states. Kept spelling-identical to
 // `aura-cloud/src/a2a_tasks.rs` so a local node and its cloud mirror
 // share one status vocabulary.
@@ -74,6 +88,34 @@ pub const STATE_AUTH_REQUIRED: &str = "auth-required";
 /// and it re-enters the ready set. Aura-native; has no cloud A2A mirror, so it
 /// is treated as `submitted` when syncing up.
 pub const STATE_PAUSED: &str = "paused";
+
+// ── Planning states (WRK-02). These exist so a node can be VISIBLE without
+// being WORK. `submitted` is not a description, it is the execution queue:
+// every runner drains it. A board card projected into the graph so the
+// console/canvas can show it, or a plan mirrored for teammate visibility,
+// must therefore land somewhere that no runner reads.
+//
+// The full lifecycle vocabulary, mapped onto the store:
+//   draft          → `draft` — a spec still being written; never executable.
+//   planned        → `planned` — plan-of-record, projected for visibility
+//                    (board sync, console mirror); never executable.
+//   offered        → the `offer()` transition: the explicit hand-off that
+//                    moves draft/planned into `submitted` (the queue).
+//   ready          → derived: `submitted` + every dependency completed +
+//                    passes `execution_gate` (see `ready_view`).
+//   blocked        → derived: `submitted` with unmet dependencies.
+//   claimed        → the `claim()` transition: lease stamped, node moves to
+//                    `working` in the same write.
+//   running        → `working` under a live lease.
+//   input-required → `input-required`.
+//   completed      → `completed` (plus failed/canceled/rejected terminals).
+pub const STATE_DRAFT: &str = "draft";
+pub const STATE_PLANNED: &str = "planned";
+
+/// States that mean "visible, not executable". Nothing in these states is
+/// ever ready, claimable, or dispatched — `offer()` is the only door into
+/// the queue.
+pub const PLANNING_STATES: &[&str] = &[STATE_DRAFT, STATE_PLANNED];
 
 pub const TERMINAL_STATES: &[&str] =
     &[STATE_COMPLETED, STATE_FAILED, STATE_CANCELED, STATE_REJECTED];
@@ -145,6 +187,45 @@ pub fn runs_here(task: &LoopTask, here: &str) -> bool {
     match task.place.as_deref().and_then(normalize_place) {
         Some(p) => p == here,
         None => true,
+    }
+}
+pub fn is_planning(status: &str) -> bool {
+    PLANNING_STATES.contains(&status)
+}
+
+/// Can this node execute at all, regardless of where it sits in the
+/// lifecycle? The one gate `offer`, `claim` and `ready_view` all share, so
+/// the answer can never differ between the surface, the queue door and the
+/// runner:
+///   * `plan` containers are planning envelopes — never executable.
+///   * `wave` / `task` (and any unknown kind) need a non-empty
+///     `acceptance_criteria`: without an oracle there is nothing to verify
+///     the work against, so an acceptance-less planning node stays visible
+///     but can never run.
+///   * `subtask` is the explicit "just run this" leaf — it inherits context
+///     from its parent, so it carries no AC requirement.
+pub fn execution_gate(task: &LoopTask) -> Result<(), String> {
+    if task.task_kind == KIND_PLAN {
+        return Err(format!(
+            "{} is a `plan` container — a planning envelope, never executable",
+            task.id
+        ));
+    }
+    if task.task_kind == KIND_SUBTASK {
+        return Ok(());
+    }
+    let has_ac = task
+        .acceptance_criteria
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if has_ac {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} ({}) has no acceptance_criteria — an acceptance-less planning node is not executable; add acceptance first",
+            task.id, task.task_kind
+        ))
     }
 }
 
@@ -306,6 +387,11 @@ pub struct BoardProjection {
     /// crew the node already had (a sync must not silently un-crew a node an
     /// operator explicitly assigned).
     pub crew_id: Option<String>,
+    /// Structured acceptance criteria from the board card (WRK-02). This is
+    /// what lets a projected card graduate: the execution gate refuses an
+    /// acceptance-less plan/wave/task, so without it a board card could be
+    /// seen but never offered.
+    pub acceptance_criteria: Option<String>,
 }
 
 /// Whether an `upsert_from_board` minted a new node or updated an existing
@@ -426,21 +512,42 @@ impl LoopGraph {
         Some(task)
     }
 
-    pub fn save(&self, task: &LoopTask) -> std::io::Result<()> {
+    /// Write `bytes` to `path` via tmp + rename in the same directory, so a
+    /// crash mid-write can never leave a torn file. A torn graph file is not
+    /// a cosmetic problem: `list()` skips anything that fails to parse, so a
+    /// half-written node silently vanishes from the board.
+    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        fs::write(&tmp, bytes)?;
+        match fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
+    }
+
+    /// Persist just the durable graph body (never the lease sidecar).
+    fn write_body(&self, task: &LoopTask) -> std::io::Result<()> {
         self.ensure_dir()?;
-        // Split the ephemeral lease out of the durable graph file so the graph
-        // stays clean for git. The lease, if any, goes to a gitignored sidecar.
         let mut for_disk = task.clone();
-        let lease = for_disk.lease.take();
+        for_disk.lease = None;
         let body = serde_json::to_string_pretty(&for_disk)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        fs::write(self.path_for(&task.id), body)?;
+        self.write_atomic(&self.path_for(&task.id), body.as_bytes())
+    }
+
+    pub fn save(&self, task: &LoopTask) -> std::io::Result<()> {
+        // Split the ephemeral lease out of the durable graph file so the graph
+        // stays clean for git. The lease, if any, goes to a gitignored sidecar.
+        self.write_body(task)?;
         let lease_path = self.lease_path_for(&task.id);
-        match lease {
+        match &task.lease {
             Some(l) => {
-                let lb = serde_json::to_string_pretty(&l)
+                let lb = serde_json::to_string_pretty(l)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                fs::write(lease_path, lb)?;
+                self.write_atomic(&lease_path, lb.as_bytes())?;
             }
             None => {
                 if lease_path.exists() {
@@ -575,27 +682,190 @@ impl LoopGraph {
         Ok(task)
     }
 
-    /// Claim a node for execution: move to `working` and stamp a lease.
-    pub fn claim(&self, id: &str, holder: &str, lease_secs: i64) -> Result<LoopTask, String> {
+    /// Offer a planning node to the execution queue: `draft`/`planned` →
+    /// `submitted`. This is the ONE deliberate hand-off between "visible on
+    /// the board/canvas" and "a runner may pick this up" — projections for
+    /// visibility land in `planned` and stay there until someone explicitly
+    /// offers them. Refuses nodes the `execution_gate` rejects (containers,
+    /// acceptance-less planning nodes), so offering can never arm work that
+    /// couldn't be verified. Idempotent on already-`submitted` nodes.
+    pub fn offer(&self, id: &str) -> Result<LoopTask, String> {
         let mut task = self.get(id).ok_or_else(|| format!("task {id} not found"))?;
-        if task.status == STATE_WORKING {
-            if let Some(l) = &task.lease {
-                let now = chrono::Utc::now().timestamp();
-                if !l.is_expired(now) && l.holder != holder {
-                    return Err(format!("{id} is leased by {} until {}", l.holder, l.expires_at));
-                }
-            }
+        if task.status == STATE_SUBMITTED {
+            // Idempotent — but only when the node truly IS in the queue.
+            // A legacy `submitted` row the gate refuses (container,
+            // acceptance-less task) must not get a false "offered" — tell
+            // the caller why it will never run instead.
+            execution_gate(&task)?;
+            return Ok(task);
         }
-        let now = chrono::Utc::now().timestamp();
-        task.status = STATE_WORKING.to_string();
-        task.lease = Some(Lease {
-            holder: holder.to_string(),
-            acquired_at: now,
-            expires_at: now + lease_secs.max(1),
-        });
+        if is_terminal(&task.status) {
+            return Err(format!("{id} is already {} — nothing to offer", task.status));
+        }
+        if task.status == STATE_WORKING {
+            return Err(format!("{id} is in flight (working) — it is already past the queue"));
+        }
+        if task.status == STATE_PAUSED {
+            return Err(format!("{id} is paused — use resume, not offer"));
+        }
+        if !is_planning(&task.status) {
+            return Err(format!(
+                "{id} is {} — only draft/planned nodes can be offered",
+                task.status
+            ));
+        }
+        execution_gate(&task)?;
+        task.status = STATE_SUBMITTED.to_string();
         Self::touch(&mut task);
         self.save(&task).map_err(|e| e.to_string())?;
         Ok(task)
+    }
+
+    /// Claim a node for execution: move to `working` and stamp a lease.
+    ///
+    /// Only work that was explicitly offered to the queue is claimable:
+    /// the node must be `submitted` (or `working` under an expired/own lease,
+    /// the crash-recovery path), pass the `execution_gate`, and have every
+    /// dependency completed. A `planned` board projection, a `plan`/`wave`
+    /// container, or an acceptance-less task is refused by name — this is
+    /// what makes "push a board for visibility" start zero agents even when
+    /// a caller passes ids directly instead of going through `ready_view`.
+    ///
+    /// The lease sidecar is taken with an exclusive create (`create_new`), so
+    /// two runners racing for the same `submitted` node can never both walk
+    /// away believing they own it — the second create fails and that runner
+    /// re-reads to find the winner's lease. The sidecar is written before the
+    /// graph body: a crash between the two leaves `submitted` + a lease that
+    /// blocks other claimants only until it expires, which self-heals.
+    pub fn claim(&self, id: &str, holder: &str, lease_secs: i64) -> Result<LoopTask, String> {
+        let mut task = self.get(id).ok_or_else(|| format!("task {id} not found"))?;
+        if task.status != STATE_SUBMITTED && task.status != STATE_WORKING {
+            return Err(format!(
+                "{id} is {} — only offered (`submitted`) work can be claimed; use offer (draft/planned) or resume (paused) first",
+                task.status
+            ));
+        }
+        execution_gate(&task)?;
+        // Ready means every dependency is completed — claiming by id is not a
+        // way around the ordering the graph declares. A missing dep blocks
+        // too, so a typo can't make a node claimable.
+        let idx = self.index();
+        let unmet: Vec<&String> = task
+            .depends_on
+            .iter()
+            .filter(|d| {
+                idx.get(d.as_str())
+                    .map(|dep| dep.status != STATE_COMPLETED)
+                    .unwrap_or(true)
+            })
+            .collect();
+        if !unmet.is_empty() {
+            return Err(format!(
+                "{id} is not ready — waiting on {}",
+                unmet.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        let now = chrono::Utc::now().timestamp();
+        if let Some(l) = &task.lease {
+            if !l.is_expired(now) && l.holder != holder {
+                return Err(format!("{id} is leased by {} until {}", l.holder, l.expires_at));
+            }
+        }
+        let lease = Lease {
+            holder: holder.to_string(),
+            acquired_at: now,
+            expires_at: now + lease_secs.max(1),
+        };
+        let lease_bytes = serde_json::to_string_pretty(&lease).map_err(|e| e.to_string())?;
+        let lease_path = self.lease_path_for(id);
+        self.ensure_dir().map_err(|e| e.to_string())?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lease_path)
+        {
+            Ok(mut f) => {
+                use std::io::Write as _;
+                f.write_all(lease_bytes.as_bytes()).map_err(|e| e.to_string())?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Someone holds (or held) the sidecar. Re-read it: a live
+                // foreign lease refuses the claim; an expired or own lease is
+                // replaced atomically.
+                let existing = fs::read_to_string(&lease_path)
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<Lease>(&t).ok());
+                if let Some(l) = existing {
+                    if !l.is_expired(now) && l.holder != holder {
+                        return Err(format!("{id} is leased by {} until {}", l.holder, l.expires_at));
+                    }
+                }
+                self.write_atomic(&lease_path, lease_bytes.as_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+        task.status = STATE_WORKING.to_string();
+        task.lease = Some(lease);
+        Self::touch(&mut task);
+        self.write_body(&task).map_err(|e| e.to_string())?;
+        Ok(task)
+    }
+
+    /// Extend the caller's own lease while its agent is still working, so a
+    /// long lane is never reclaimed out from under a live runner. Refuses when
+    /// the lease was lost — the node was reclaimed, re-claimed by someone
+    /// else, or finished — which is the runner's signal that its work may no
+    /// longer be wanted.
+    pub fn renew(&self, id: &str, holder: &str, lease_secs: i64) -> Result<LoopTask, String> {
+        let mut task = self.get(id).ok_or_else(|| format!("task {id} not found"))?;
+        self.verify_holder_of(&task, holder)?;
+        let now = chrono::Utc::now().timestamp();
+        let acquired_at = task.lease.as_ref().map(|l| l.acquired_at).unwrap_or(now);
+        let lease = Lease {
+            holder: holder.to_string(),
+            acquired_at,
+            expires_at: now + lease_secs.max(1),
+        };
+        let lease_bytes = serde_json::to_string_pretty(&lease).map_err(|e| e.to_string())?;
+        self.write_atomic(&self.lease_path_for(id), lease_bytes.as_bytes())
+            .map_err(|e| e.to_string())?;
+        task.lease = Some(lease);
+        Ok(task)
+    }
+
+    /// Does `holder` still own the live lease on this node? `Err` explains
+    /// exactly what changed (reclaimed, taken over, already finished), so
+    /// runners can report honestly instead of stomping newer state.
+    pub fn verify_holder(&self, id: &str, holder: &str) -> Result<(), String> {
+        let task = self.get(id).ok_or_else(|| format!("task {id} not found"))?;
+        self.verify_holder_of(&task, holder)
+    }
+
+    fn verify_holder_of(&self, task: &LoopTask, holder: &str) -> Result<(), String> {
+        if is_terminal(&task.status) {
+            return Err(format!(
+                "{} is already {} — another writer finished it",
+                task.id, task.status
+            ));
+        }
+        if task.status != STATE_WORKING {
+            return Err(format!(
+                "{} is {} — the lease was lost (likely reclaimed after expiry)",
+                task.id, task.status
+            ));
+        }
+        match &task.lease {
+            Some(l) if l.holder == holder => Ok(()),
+            Some(l) => Err(format!(
+                "{} is now leased by {} — this runner's lease was lost",
+                task.id, l.holder
+            )),
+            None => Err(format!(
+                "{} has no live lease — it is about to be reclaimed",
+                task.id
+            )),
+        }
     }
 
     /// Reclaim any `working` node whose lease has expired back to
@@ -643,7 +913,9 @@ impl LoopGraph {
         reclaimed
     }
 
-    /// Mark a node completed and record the commit it landed in.
+    /// Mark a node completed and record the commit it landed in. Unchecked:
+    /// for supervisors and human rescue paths. A runner that held a lease
+    /// must use [`Self::complete_as`] so a lost lease can't stomp newer state.
     pub fn complete(&self, id: &str, commit_sha: Option<String>, result: Option<serde_json::Value>) -> Result<LoopTask, String> {
         let mut task = self.get(id).ok_or_else(|| format!("task {id} not found"))?;
         task.status = STATE_COMPLETED.to_string();
@@ -659,6 +931,23 @@ impl LoopGraph {
         Ok(task)
     }
 
+    /// [`Self::complete`], but only if `holder` still owns the node's live
+    /// lease. A worker whose lease lapsed and whose node was handed to
+    /// someone else gets an error naming the new holder instead of silently
+    /// overwriting their state.
+    pub fn complete_as(
+        &self,
+        id: &str,
+        holder: &str,
+        commit_sha: Option<String>,
+        result: Option<serde_json::Value>,
+    ) -> Result<LoopTask, String> {
+        self.verify_holder(id, holder)?;
+        self.complete(id, commit_sha, result)
+    }
+
+    /// Unchecked failure write — supervisors and rescue paths only; runners
+    /// use [`Self::fail_as`].
     pub fn fail(&self, id: &str, error_message: String) -> Result<LoopTask, String> {
         let mut task = self.get(id).ok_or_else(|| format!("task {id} not found"))?;
         task.status = STATE_FAILED.to_string();
@@ -667,6 +956,12 @@ impl LoopGraph {
         Self::touch(&mut task);
         self.save(&task).map_err(|e| e.to_string())?;
         Ok(task)
+    }
+
+    /// [`Self::fail`], but only if `holder` still owns the node's live lease.
+    pub fn fail_as(&self, id: &str, holder: &str, error_message: String) -> Result<LoopTask, String> {
+        self.verify_holder(id, holder)?;
+        self.fail(id, error_message)
     }
 
     /// Park a node so the runner skips it. A `submitted` node moves to
@@ -783,11 +1078,29 @@ impl LoopGraph {
             if p.crew_id.is_some() {
                 t.crew_id = p.crew_id;
             }
+            // Board acceptance wins when it says something; an empty board
+            // field never wipes acceptance a graph-side edit already added.
+            if p
+                .acceptance_criteria
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+            {
+                t.acceptance_criteria = p.acceptance_criteria;
+            }
             if t.status != STATE_WORKING {
                 if is_terminal(&p.status) {
+                    // The board closed/cancelled the card — that verdict wins.
                     t.lease = None;
+                    t.status = p.status;
+                } else if is_planning(&t.status) || is_terminal(&t.status) {
+                    // Planning nodes follow the board; a re-opened board card
+                    // revives a terminal node back into the planning lane.
+                    t.status = p.status;
                 }
-                t.status = p.status;
+                // else: `submitted`/`paused` are graph-owned scheduling state
+                // (offer/pause). A visibility re-sync never un-offers queued
+                // work or un-pauses a parked node (WRK-02).
             }
             t.updated_at = now;
             self.save(&t)?;
@@ -798,7 +1111,9 @@ impl LoopGraph {
                 id,
                 title: p.title,
                 input: p.input,
-                acceptance_criteria: None,
+                acceptance_criteria: p
+                    .acceptance_criteria
+                    .filter(|s| !s.trim().is_empty()),
                 task_kind: p.kind,
                 parent_task_id: p.parent_task_id,
                 depends_on: vec![],
@@ -878,6 +1193,14 @@ pub struct ReadyView {
     /// terminal — held back until `resume`. Kept in its own bucket so the
     /// surface can show "paused by you" distinctly from a failure.
     pub paused: Vec<LoopTask>,
+    /// Planning-state nodes (`draft`/`planned`) — visible plan-of-record,
+    /// deliberately outside the queue. `offer()` is their only way in.
+    pub planned: Vec<LoopTask>,
+    /// `submitted` nodes the `execution_gate` refuses (containers,
+    /// acceptance-less planning nodes), each with the refusal reason. In the
+    /// queue by state, but no runner will ever pick them up — surfaced so a
+    /// human can see exactly why and fix the node instead of wondering.
+    pub unrunnable: Vec<(LoopTask, String)>,
     pub other: Vec<LoopTask>, // failed / canceled / rejected / input-required
 }
 
@@ -891,6 +1214,8 @@ pub fn ready_view(tasks: &[LoopTask]) -> ReadyView {
         working: Vec::new(),
         done: Vec::new(),
         paused: Vec::new(),
+        planned: Vec::new(),
+        unrunnable: Vec::new(),
         other: Vec::new(),
     };
     for t in tasks {
@@ -898,7 +1223,16 @@ pub fn ready_view(tasks: &[LoopTask]) -> ReadyView {
             STATE_WORKING => view.working.push(t.clone()),
             STATE_COMPLETED => view.done.push(t.clone()),
             STATE_PAUSED => view.paused.push(t.clone()),
+            STATE_DRAFT | STATE_PLANNED => view.planned.push(t.clone()),
             STATE_SUBMITTED => {
+                // In the queue by state — but only gate-passing work can be
+                // ready. A container or acceptance-less node parked in
+                // `submitted` (legacy rows, manual `set`) is surfaced with
+                // its reason instead of handed to a runner.
+                if let Err(reason) = execution_gate(t) {
+                    view.unrunnable.push((t.clone(), reason));
+                    continue;
+                }
                 let unmet: Vec<String> = t
                     .depends_on
                     .iter()
@@ -1014,6 +1348,13 @@ pub struct GoalSummary {
     pub paused: usize,
     pub blocked: usize,
     pub failed: usize,
+    /// Planning-state nodes (`draft`/`planned`) — visible, not in the queue.
+    #[serde(default)]
+    pub planned: usize,
+    /// `submitted` nodes the execution gate refuses (containers,
+    /// acceptance-less nodes) — in the queue by state, never dispatched.
+    #[serde(default)]
+    pub unrunnable: usize,
     /// Task ids in this goal, creation order — the goal's member set.
     pub task_ids: Vec<String>,
 }
@@ -1037,6 +1378,8 @@ pub fn goals_summary(tasks: &[LoopTask]) -> Vec<GoalSummary> {
                 paused: 0,
                 blocked: 0,
                 failed: 0,
+                planned: 0,
+                unrunnable: 0,
                 task_ids: Vec::new(),
             }
         });
@@ -1047,7 +1390,12 @@ pub fn goals_summary(tasks: &[LoopTask]) -> Vec<GoalSummary> {
             STATE_COMPLETED => entry.done += 1,
             STATE_PAUSED => entry.paused += 1,
             STATE_FAILED => entry.failed += 1,
+            STATE_DRAFT | STATE_PLANNED => entry.planned += 1,
             STATE_SUBMITTED => {
+                if execution_gate(t).is_err() {
+                    entry.unrunnable += 1;
+                    continue;
+                }
                 // ready vs blocked needs the whole-graph dependency check.
                 let unmet = t.depends_on.iter().any(|d| {
                     tasks
@@ -1083,6 +1431,12 @@ pub struct CrewSummary {
     pub paused: usize,
     pub blocked: usize,
     pub failed: usize,
+    /// Planning-state nodes (`draft`/`planned`) — visible, not in the queue.
+    #[serde(default)]
+    pub planned: usize,
+    /// `submitted` nodes the execution gate refuses — never dispatched.
+    #[serde(default)]
+    pub unrunnable: usize,
     pub goals: Vec<String>,
 }
 
@@ -1104,6 +1458,8 @@ pub fn crews_summary(tasks: &[LoopTask]) -> Vec<CrewSummary> {
                 paused: 0,
                 blocked: 0,
                 failed: 0,
+                planned: 0,
+                unrunnable: 0,
                 goals: Vec::new(),
             }
         });
@@ -1118,7 +1474,12 @@ pub fn crews_summary(tasks: &[LoopTask]) -> Vec<CrewSummary> {
             STATE_COMPLETED => entry.done += 1,
             STATE_PAUSED => entry.paused += 1,
             STATE_FAILED => entry.failed += 1,
+            STATE_DRAFT | STATE_PLANNED => entry.planned += 1,
             STATE_SUBMITTED => {
+                if execution_gate(t).is_err() {
+                    entry.unrunnable += 1;
+                    continue;
+                }
                 let unmet = t.depends_on.iter().any(|d| {
                     tasks
                         .iter()
@@ -1154,6 +1515,9 @@ mod tests {
     }
 
     fn mk(graph: &LoopGraph, title: &str, prio: &str) -> LoopTask {
+        // Executable by construction: a `task` needs acceptance to pass the
+        // execution gate, and these helpers exist to exercise deps/lease
+        // mechanics on runnable work. Gate behavior has its own tests below.
         graph
             .create(
                 title.to_string(),
@@ -1161,7 +1525,7 @@ mod tests {
                 prio.to_string(),
                 KIND_TASK.to_string(),
                 vec![],
-                None,
+                Some(format!("{title} is done and verified")),
                 None,
                 vec![],
             )
@@ -1447,6 +1811,211 @@ mod tests {
         let _ = fs::remove_dir_all(&repo);
     }
 
+    /// WRK-02 regression — the prior mass-dispatch failure: every board card
+    /// projected into the graph used to land `submitted` (the work queue), so
+    /// pushing a board for visibility armed the entire backlog and one Build
+    /// click dispatched all of it. Projections now land `planned`: visible,
+    /// counted, and worth zero agents.
+    #[test]
+    fn board_projection_is_visibility_not_work() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        for i in 0..10 {
+            g.upsert_from_board(BoardProjection {
+                board_task_id: format!("T-{i:04}"),
+                title: format!("backlog card {i}"),
+                input: "imported for display".into(),
+                priority: "high".into(),
+                kind: KIND_TASK.into(),
+                status: STATE_PLANNED.into(),
+                agent_kind: None,
+                parent_task_id: None,
+                external_source: None,
+                external_id: None,
+                tags: vec![],
+                assignee: None,
+                crew_id: None,
+                acceptance_criteria: None,
+            })
+            .unwrap();
+        }
+        let view = ready_view(&g.list());
+        assert!(view.ready.is_empty(), "a synced board must start zero agents");
+        assert!(view.blocked.is_empty(), "planned nodes aren't queued-blocked either");
+        assert_eq!(view.planned.len(), 10, "all ten cards visible as plan-of-record");
+
+        // Claiming one by id is refused too — the gate is on the node, not
+        // just on the ready-set query.
+        let node = g.by_board_task("T-0003").unwrap();
+        let err = g.claim(&node.id, "runner-x", 1800).unwrap_err();
+        assert!(err.contains("offer"), "refusal must point at the offer door: {err}");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// WRK-02 — `offer()` is the only door from planning into the queue, and
+    /// it enforces the execution gate on the way through.
+    #[test]
+    fn offer_is_the_only_gate_into_the_queue() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        // A planned task WITH acceptance — offerable.
+        let (t, _) = g
+            .upsert_from_board(BoardProjection {
+                board_task_id: "T-ok".into(),
+                title: "real work".into(),
+                input: "do the thing".into(),
+                priority: "high".into(),
+                kind: KIND_TASK.into(),
+                status: STATE_PLANNED.into(),
+                agent_kind: None,
+                parent_task_id: None,
+                external_source: None,
+                external_id: None,
+                tags: vec![],
+                assignee: None,
+                crew_id: None,
+                acceptance_criteria: None,
+            })
+            .unwrap();
+        assert!(g.claim(&t.id, "r", 60).is_err(), "planned is not claimable");
+        // Acceptance-less task → offer refused until AC exists.
+        let err = g.offer(&t.id).unwrap_err();
+        assert!(err.contains("acceptance"), "AC-less task can't be offered: {err}");
+        let mut with_ac = g.get(&t.id).unwrap();
+        with_ac.acceptance_criteria = Some("the thing verifiably works".into());
+        g.save(&with_ac).unwrap();
+        let offered = g.offer(&t.id).unwrap();
+        assert_eq!(offered.status, STATE_SUBMITTED);
+        assert_eq!(ready_set(&g.list()).len(), 1, "offered + AC + no deps = ready");
+        assert!(g.claim(&t.id, "r", 60).is_ok(), "offered ready work claims fine");
+
+        // A plan container is never offerable, with or without AC.
+        let plan = g
+            .create(
+                "the plan".into(),
+                "envelope".into(),
+                "high".into(),
+                KIND_PLAN.into(),
+                vec![],
+                Some("everything ships".into()),
+                None,
+                vec![],
+            )
+            .unwrap();
+        let mut plan_node = g.get(&plan.id).unwrap();
+        plan_node.status = STATE_PLANNED.into();
+        g.save(&plan_node).unwrap();
+        assert!(g.offer(&plan.id).is_err(), "plan containers are planning envelopes");
+
+        // An acceptance-less subtask is the explicit "just run this" leaf —
+        // it offers fine (context lives on its parent).
+        let sub = g
+            .create(
+                "leaf".into(),
+                "quick".into(),
+                "low".into(),
+                KIND_SUBTASK.into(),
+                vec![],
+                None,
+                None,
+                vec![],
+            )
+            .unwrap();
+        let mut sub_node = g.get(&sub.id).unwrap();
+        sub_node.status = STATE_DRAFT.into();
+        g.save(&sub_node).unwrap();
+        assert!(g.offer(&sub.id).is_ok(), "subtask leaves need no AC to offer");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// WRK-02 — a visibility re-sync must never un-offer queued work: once a
+    /// node is explicitly offered, the board's `planned` mirror can't yank it
+    /// back out of the queue.
+    #[test]
+    fn board_resync_does_not_unoffer_queued_work() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let proj = || BoardProjection {
+            board_task_id: "T-q".into(),
+            title: "queued".into(),
+            input: "spec".into(),
+            priority: "high".into(),
+            kind: KIND_TASK.into(),
+            status: STATE_PLANNED.into(),
+            agent_kind: None,
+            parent_task_id: None,
+            external_source: None,
+            external_id: None,
+            tags: vec![],
+            assignee: None,
+            crew_id: None,
+            acceptance_criteria: None,
+        };
+        let (node, _) = g.upsert_from_board(proj()).unwrap();
+        let mut with_ac = g.get(&node.id).unwrap();
+        with_ac.acceptance_criteria = Some("done means done".into());
+        g.save(&with_ac).unwrap();
+        g.offer(&node.id).unwrap();
+        let (after, _) = g.upsert_from_board(proj()).unwrap();
+        assert_eq!(after.status, STATE_SUBMITTED, "re-sync must not un-offer");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// WRK-02 — legacy rows already sitting `submitted` that the gate refuses
+    /// (containers, acceptance-less tasks) are surfaced as unrunnable, never
+    /// ready, and refuse claims by id.
+    #[test]
+    fn containers_and_acceptance_less_tasks_are_unrunnable() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let container = g
+            .create(
+                "epic".into(),
+                "container".into(),
+                "high".into(),
+                KIND_PLAN.into(),
+                vec![],
+                Some("has AC but is still an envelope".into()),
+                None,
+                vec![],
+            )
+            .unwrap();
+        let bare = g
+            .create(
+                "no oracle".into(),
+                "task without acceptance".into(),
+                "high".into(),
+                KIND_TASK.into(),
+                vec![],
+                None,
+                None,
+                vec![],
+            )
+            .unwrap();
+        // Both were minted straight into `submitted` (the legacy default).
+        let view = ready_view(&g.list());
+        assert!(view.ready.is_empty(), "neither node may reach a runner");
+        assert_eq!(view.unrunnable.len(), 2, "both surfaced with reasons");
+        assert!(g.claim(&container.id, "r", 60).is_err());
+        assert!(g.claim(&bare.id, "r", 60).is_err());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// WRK-02 — claiming by id can't skip the ordering the graph declares.
+    #[test]
+    fn claim_requires_met_dependencies() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let a = mk(&g, "A", "high");
+        let b = mk(&g, "B", "high");
+        g.add_dep(&b.id, &a.id).unwrap();
+        let err = g.claim(&b.id, "r", 60).unwrap_err();
+        assert!(err.contains(&a.id), "refusal names the unmet dep: {err}");
+        g.complete(&a.id, None, None).unwrap();
+        assert!(g.claim(&b.id, "r", 60).is_ok(), "claimable once deps complete");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
     #[test]
     fn pause_scope_parks_a_whole_goal() {
         let repo = tmp_repo();
@@ -1552,6 +2121,7 @@ mod tests {
             tags: vec![],
             assignee: None,
             crew_id: None,
+            acceptance_criteria: None,
         };
         let (a, k1) = g.upsert_from_board(proj("first", STATE_SUBMITTED)).unwrap();
         assert_eq!(k1, UpsertKind::Created);
@@ -1583,6 +2153,7 @@ mod tests {
             external_id: None,
             tags: vec![],
             assignee: None,
+            acceptance_criteria: None,
             crew_id: crew.map(str::to_string),
         };
         // A board card that names a crew mints the node into it.
@@ -1601,12 +2172,14 @@ mod tests {
     fn upsert_does_not_yank_a_working_lease() {
         let repo = tmp_repo();
         let g = LoopGraph::at(&repo);
+        // A subtask leaf: claimable without acceptance, so this test keeps
+        // exercising exactly what it always did — lease preservation.
         let proj = BoardProjection {
             board_task_id: "T-x".into(),
             title: "t".into(),
             input: String::new(),
             priority: "medium".into(),
-            kind: KIND_TASK.into(),
+            kind: KIND_SUBTASK.into(),
             status: STATE_SUBMITTED.into(),
             agent_kind: None,
             parent_task_id: None,
@@ -1615,6 +2188,7 @@ mod tests {
             tags: vec![],
             assignee: None,
             crew_id: None,
+            acceptance_criteria: None,
         };
         let (node, _) = g.upsert_from_board(proj.clone()).unwrap();
         g.claim(&node.id, "runner", 3600).unwrap();
@@ -1634,6 +2208,142 @@ mod tests {
         let reclaimed = g.reclaim_stale();
         assert!(reclaimed.is_empty(), "live lease must not be reclaimed");
         assert_eq!(g.get(&a.id).unwrap().status, STATE_WORKING);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_scoped_runner_reclaims_only_its_own_crews_nodes() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let ours = mk(&g, "ours", "high");
+        let theirs = mk(&g, "theirs", "high");
+        g.set_crew(&ours.id, Some("alpha".to_string())).unwrap();
+        g.set_crew(&theirs.id, Some("beta".to_string())).unwrap();
+        // Both crews have a node stuck `working` with an expired lease.
+        g.claim(&ours.id, "runner-a", 1).unwrap();
+        g.claim(&theirs.id, "runner-b", 1).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let scope = RunScope { goal: None, crew: Some("alpha".into()) };
+        let reclaimed = g.reclaim_stale_in(&scope);
+        assert_eq!(reclaimed, vec![ours.id.clone()], "only alpha's node comes back");
+        assert_eq!(g.get(&ours.id).unwrap().status, STATE_SUBMITTED);
+        assert_eq!(
+            g.get(&theirs.id).unwrap().status,
+            STATE_WORKING,
+            "beta's in-flight node must not be yanked by alpha's runner"
+        );
+        // The unscoped supervisor form still sweeps everything.
+        assert!(g.reclaim_stale().contains(&theirs.id));
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn renew_extends_the_holders_lease_and_refuses_a_stranger() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let t = mk(&g, "long lane", "high");
+        let claimed = g.claim(&t.id, "runner-a", 30).unwrap();
+        let first_expiry = claimed.lease.as_ref().unwrap().expires_at;
+        let acquired = claimed.lease.as_ref().unwrap().acquired_at;
+
+        let renewed = g.renew(&t.id, "runner-a", 3600).unwrap();
+        let l = renewed.lease.unwrap();
+        assert!(l.expires_at > first_expiry, "renewal must push the expiry out");
+        assert_eq!(l.acquired_at, acquired, "renewal keeps the original acquisition time");
+        assert_eq!(g.get(&t.id).unwrap().lease.unwrap().expires_at, l.expires_at);
+
+        let err = g.renew(&t.id, "runner-b", 3600).expect_err("stranger must not renew");
+        assert!(err.contains("runner-a"), "error names the live holder: {err}");
+        // A completed node can't be renewed back to life.
+        g.complete(&t.id, None, None).unwrap();
+        let err = g.renew(&t.id, "runner-a", 3600).expect_err("terminal node refuses renewal");
+        assert!(err.contains("completed"), "got: {err}");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_reclaimed_node_refuses_its_old_workers_terminal_write() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let t = mk(&g, "flaky lane", "high");
+        g.claim(&t.id, "runner-old", 1).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(g.reclaim_stale().contains(&t.id));
+        // A new runner picks it up and finishes it.
+        g.claim(&t.id, "runner-new", 3600).unwrap();
+
+        let err = g
+            .complete_as(&t.id, "runner-old", Some("stale-sha".into()), None)
+            .expect_err("the zombie's write must be refused");
+        assert!(err.contains("runner-new"), "error names the new holder: {err}");
+        let err = g
+            .fail_as(&t.id, "runner-old", "gave up".into())
+            .expect_err("zombie fail refused too");
+        assert!(err.contains("runner-new"), "got: {err}");
+
+        let live = g.get(&t.id).unwrap();
+        assert_eq!(live.status, STATE_WORKING, "the new runner's claim survives");
+        assert!(live.commit_sha.is_none(), "the stale sha never landed");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn complete_as_succeeds_for_the_live_holder() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let t = mk(&g, "clean lane", "high");
+        g.claim(&t.id, "runner-a", 3600).unwrap();
+        let done = g.complete_as(&t.id, "runner-a", Some("abc123".into()), None).unwrap();
+        assert_eq!(done.status, STATE_COMPLETED);
+        assert_eq!(done.commit_sha.as_deref(), Some("abc123"));
+        // Failing after completion is refused even for the old holder — the
+        // node is terminal and its lease is gone.
+        let err = g.fail_as(&t.id, "runner-a", "oops".into()).expect_err("terminal");
+        assert!(err.contains("completed"), "got: {err}");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_planted_unexpired_lease_blocks_claim_even_when_the_graph_says_submitted() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let t = mk(&g, "raced lane", "high");
+        // Simulate the claim race: a peer wrote its lease sidecar but crashed
+        // (or hasn't yet flipped the body) — the graph file still says
+        // `submitted`, the sidecar says someone owns it.
+        let sidecar = repo.join(".aura").join("a2a").join(format!("{}.lease.json", t.id));
+        let now = chrono::Utc::now().timestamp();
+        let foreign = Lease { holder: "runner-peer".into(), acquired_at: now, expires_at: now + 600 };
+        fs::write(&sidecar, serde_json::to_string_pretty(&foreign).unwrap()).unwrap();
+
+        let err = g.claim(&t.id, "runner-me", 3600).expect_err("live foreign lease wins");
+        assert!(err.contains("runner-peer"), "got: {err}");
+
+        // Once that lease expires, the claim goes through and replaces it.
+        let expired = Lease { holder: "runner-peer".into(), acquired_at: now - 700, expires_at: now - 100 };
+        fs::write(&sidecar, serde_json::to_string_pretty(&expired).unwrap()).unwrap();
+        let claimed = g.claim(&t.id, "runner-me", 3600).unwrap();
+        assert_eq!(claimed.lease.unwrap().holder, "runner-me");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn saves_and_claims_leave_no_tmp_files() {
+        let repo = tmp_repo();
+        let g = LoopGraph::at(&repo);
+        let t = mk(&g, "tidy lane", "high");
+        g.claim(&t.id, "runner-a", 3600).unwrap();
+        g.renew(&t.id, "runner-a", 3600).unwrap();
+        g.complete_as(&t.id, "runner-a", Some("sha".into()), None).unwrap();
+        let a2a = repo.join(".aura").join("a2a");
+        let stray: Vec<String> = fs::read_dir(&a2a)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(stray.is_empty(), "tmp files must not survive: {stray:?}");
         let _ = fs::remove_dir_all(&repo);
     }
 }

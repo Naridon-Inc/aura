@@ -30,7 +30,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { api, type ClaudeSession, type IntentChangesetFile } from "../../lib/api";
-import { intentTypeChip } from "../../lib/intentTypeLabels";
+import { intentTypeChip } from "@shared/intentTypeLabels";
 import { StoryMarkdown } from "../story/StoryMarkdown";
 import { AgentBadge } from "../agent/AgentBadge";
 import { Button } from "../ui/button";

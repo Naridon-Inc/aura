@@ -379,12 +379,23 @@ mod tests {
         }
     }
 
-    fn tmp_root() -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!("aura-atlas-test-{}", std::process::id()));
-        p.push(format!("{:?}", std::time::SystemTime::now()));
-        fs::create_dir_all(p.join(".aura")).unwrap();
-        p
+    /// A private repo root per test, with `.aura/` already in place.
+    ///
+    /// Uniqueness has to come from the filesystem, not the clock: these tests
+    /// run in parallel and all seed the same node id at the same generations,
+    /// so two of them sharing a root means one reads the other's baseline and
+    /// fails on a meaning it never wrote. `SystemTime::now()` is not fine
+    /// enough to keep them apart when they start in the same instant.
+    ///
+    /// The returned dir must stay bound for the length of the test — it is
+    /// removed when it drops.
+    fn tmp_root() -> tempfile::TempDir {
+        let dir = tempfile::Builder::new()
+            .prefix("aura-atlas-test-")
+            .tempdir()
+            .unwrap();
+        fs::create_dir_all(dir.path().join(".aura")).unwrap();
+        dir
     }
 
     #[test]
@@ -415,9 +426,10 @@ mod tests {
 
     #[test]
     fn first_run_seeds_baseline_and_reports_no_change() {
-        let root = tmp_root();
+        let dir = tmp_root();
+        let root = dir.path();
         let entries = vec![entry("n1", "verify_token", "Checks a token.")];
-        let changes = reconcile_meanings(&root, 100, &entries);
+        let changes = reconcile_meanings(root, 100, &entries);
         assert!(changes.is_empty(), "first run must report nothing changed");
         // Baseline file now exists.
         assert!(root.join(".aura/atlas.meaning.json").exists());
@@ -425,12 +437,13 @@ mod tests {
 
     #[test]
     fn regen_with_new_summary_is_a_meaning_change() {
-        let root = tmp_root();
+        let dir = tmp_root();
+        let root = dir.path();
         // Seed.
-        reconcile_meanings(&root, 100, &[entry("n1", "verify_token", "Checks a token.")]);
+        reconcile_meanings(root, 100, &[entry("n1", "verify_token", "Checks a token.")]);
         // Regen with a rewritten meaning + a newer generatedAt.
         let changes = reconcile_meanings(
-            &root,
+            root,
             200,
             &[entry("n1", "verify_token", "Validates the signed session token.")],
         );
@@ -442,22 +455,24 @@ mod tests {
 
     #[test]
     fn unchanged_summary_is_not_a_change() {
-        let root = tmp_root();
-        reconcile_meanings(&root, 100, &[entry("n1", "verify_token", "Checks a token.")]);
+        let dir = tmp_root();
+        let root = dir.path();
+        reconcile_meanings(root, 100, &[entry("n1", "verify_token", "Checks a token.")]);
         let changes =
-            reconcile_meanings(&root, 200, &[entry("n1", "verify_token", "Checks a token.")]);
+            reconcile_meanings(root, 200, &[entry("n1", "verify_token", "Checks a token.")]);
         assert!(changes.is_empty());
     }
 
     #[test]
     fn same_generation_reserves_prior_changes() {
-        let root = tmp_root();
-        reconcile_meanings(&root, 100, &[entry("n1", "verify_token", "Checks a token.")]);
+        let dir = tmp_root();
+        let root = dir.path();
+        reconcile_meanings(root, 100, &[entry("n1", "verify_token", "Checks a token.")]);
         // Roll forward — produces a change.
-        reconcile_meanings(&root, 200, &[entry("n1", "verify_token", "New meaning.")]);
+        reconcile_meanings(root, 200, &[entry("n1", "verify_token", "New meaning.")]);
         // Read AGAIN at the same generation (no regen) — change must persist.
         let again =
-            reconcile_meanings(&root, 200, &[entry("n1", "verify_token", "New meaning.")]);
+            reconcile_meanings(root, 200, &[entry("n1", "verify_token", "New meaning.")]);
         assert_eq!(again.get("n1").map(|c| c.now.as_str()), Some("New meaning."));
     }
 }

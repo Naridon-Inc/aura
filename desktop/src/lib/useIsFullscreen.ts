@@ -13,9 +13,19 @@
 // on the resize event latches the stale value and the inset never
 // collapses (the bug this file exists to fix, regressed once the ADE moved
 // its traffic-light reservation onto the header). We therefore re-query on
-// resize AND move, and also schedule two settled re-queries after the
-// animation window so we always latch the final state. No polling loop —
-// the timers are one-shot per transition and no-op once unmounted.
+// resize AND move, and also schedule a settled re-query after the animation
+// window so we always latch the final state.
+//
+// Why the probes are coalesced: `onResized` does not fire once per
+// transition, it fires continuously while the user drags a window edge —
+// tens of events a second. Scheduling a fresh set of probes per event turned
+// one drag into hundreds of `isFullscreen()` round-trips, and on macOS every
+// one of those hops the *main thread*, which is the same thread AppKit is
+// using to service the resize. That is a self-inflicted storm on the thread
+// least able to absorb it (see `reference_tauri_ipc_cost_and_terminal_latency`,
+// and `src-tauri/src/watchdog.rs` for what a wedged main thread costs). So
+// each event now replaces the pending probes instead of adding to them: a
+// drag of any length costs one settled probe after the user lets go.
 
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -38,15 +48,24 @@ export function useIsFullscreen(): boolean {
         });
     };
 
-    // Re-query now, then again after the fullscreen animation settles so a
-    // stale mid-transition `isFullscreen()` can't leave us latched wrong.
+    // Re-query once the geometry stops changing, so a stale mid-transition
+    // `isFullscreen()` can't leave us latched wrong. 900ms clears the ~0.6s
+    // macOS fullscreen animation with room to spare, and each new event
+    // restarts the timer rather than queueing another one — so a long drag
+    // costs exactly one probe, fired after it ends.
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
     const syncSettled = () => {
-      sync();
-      window.setTimeout(sync, 250);
-      window.setTimeout(sync, 700);
+      if (settleTimer !== undefined) clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => {
+        settleTimer = undefined;
+        sync();
+      }, 900);
     };
 
-    syncSettled();
+    // The mount probe answers immediately: there is no transition in flight to
+    // wait out, and the header would otherwise render one frame with the wrong
+    // inset.
+    sync();
 
     // Fullscreen changes both the window size and its origin; subscribe to
     // both so we catch the transition regardless of which fires first.
@@ -55,6 +74,7 @@ export function useIsFullscreen(): boolean {
 
     return () => {
       alive = false;
+      if (settleTimer !== undefined) clearTimeout(settleTimer);
       unResized.then((f) => f()).catch(() => {});
       unMoved.then((f) => f()).catch(() => {});
     };

@@ -256,27 +256,77 @@ pub(crate) async fn hang_up(m: &Machine) -> Result<(), String> {
 /// on this disk, not to the box.
 const HANG_UP_TIMEOUT: Duration = Duration::from_secs(5);
 
+// AURA-1294 — the argv that holds one port on a place open at localhost here.
+/// The program and argv for a child that carries `127.0.0.1:<remote_port>` on
+/// the place to `localhost:<local_port>` on this Mac, and runs nothing else.
+///
+/// Derived from [`ssh_argv`] rather than written beside it, so identity, host
+/// key policy, agent forwarding and every timeout are the ones every other
+/// call to the box uses — a forward that reached the box some other way would
+/// be a second transport to keep honest. `ControlMaster=no` is stated first
+/// (first option wins) so this long-lived child never becomes the multiplex
+/// master for the place's other calls: a member pressing Stop on a forward
+/// must not hang up every chat on the box. `ExitOnForwardFailure` makes a
+/// port this Mac cannot bind a failure with a reason instead of a child that
+/// sits there carrying nothing.
+pub(crate) fn forward_argv(m: &Machine, local_port: u16, remote_port: u16) -> (String, Vec<String>) {
+    let mut args = ssh_argv(m, "", false);
+    args.pop();
+    let target = args.pop().unwrap_or_default();
+    let mut head: Vec<String> = vec![
+        "-N".into(),
+        "-o".into(),
+        "ExitOnForwardFailure=yes".into(),
+        "-o".into(),
+        "ControlMaster=no".into(),
+        "-L".into(),
+        format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"),
+    ];
+    head.append(&mut args);
+    head.push(target);
+    ("ssh".to_string(), head)
+}
+// end AURA-1294
+
 /// The one line in the repo that runs `ssh`.
 ///
 /// Split out from [`dial`] when closing a connection became a second thing to
-/// ask ssh for. Two spawns would have been two places to add whatever the next
-/// transport needs — see [`sole_ssh`], which fails the build on the second.
+/// ask ssh for, and out of [`run_ssh`] when a third arrived that cannot wait
+/// for the answer at all: an agent turn streamed off a box
+/// ([`stream`]) reads stdout line by line for as long as the agent talks. Two
+/// spawns would have been two places to add whatever the next transport needs —
+/// see [`sole_ssh`], which fails the build on the second.
 ///
-/// `feed` is written to the child's standard input and nowhere else; see
-/// [`dial`] for why that distinction is the point rather than a detail. `None`
-/// closes stdin outright, so a remote command that reads it sees end of file
+/// `feed_stdin` opens a pipe to the child's standard input; otherwise stdin is
+/// closed outright, so a remote command that reads it sees end of file
 /// immediately instead of waiting on a terminal that will never type.
-async fn run_ssh(args: Vec<String>, feed: Option<&str>) -> std::io::Result<std::process::Output> {
-    let mut child = Command::new("ssh")
+/// `kill_on_drop` is for the streaming caller only: a turn abandoned halfway
+/// must take its `ssh` with it, where a question ([`dial`]) is awaited whole
+/// and has nothing left to kill.
+fn spawn_ssh(
+    args: Vec<String>,
+    feed_stdin: bool,
+    kill_on_drop: bool,
+) -> std::io::Result<tokio::process::Child> {
+    Command::new("ssh")
         .args(args)
-        .stdin(if feed.is_some() {
+        .stdin(if feed_stdin {
             Stdio::piped()
         } else {
             Stdio::null()
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .kill_on_drop(kill_on_drop)
+        .spawn()
+}
+
+/// Ask ssh something and wait for everything it says.
+///
+/// `feed` is written to the child's standard input and nowhere else; see
+/// [`dial`] for why that distinction is the point rather than a detail.
+async fn run_ssh(args: Vec<String>, feed: Option<&str>) -> std::io::Result<std::process::Output> {
+    let mut child = spawn_ssh(args, feed.is_some(), false)?;
     if let Some(bytes) = feed {
         let mut sink = child.stdin.take().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "ssh has no input")
@@ -420,6 +470,27 @@ pub(crate) async fn dial(
 
 fn unreachable(m: &Machine, e: std::io::Error) -> String {
     format!("Couldn't reach {}: {e}", m.name)
+}
+
+/// Run one command on a box and hand back the running child, not its answer.
+///
+/// [`dial`] is for questions: it waits for everything the box says and hands
+/// the lot back at once. This is for *work that talks while it runs* — a
+/// coding agent's turn, which is minutes of stream-json the chat has to draw
+/// line by line — and the whole difference is that the caller reads the child's
+/// stdout itself. Same argv, same multiplexed connection, same `BatchMode`
+/// (an agent turn has no terminal to answer a password prompt on either), and
+/// the same single spawn behind it, so a streamed turn cannot reach a box a
+/// question could not.
+///
+/// stdin is piped so the caller can close it, or feed it: dropping the handle
+/// is end-of-file on the far side, which is what a CLI given its prompt as an
+/// argument wants. Nothing is waited on here, which is why there is no
+/// timeout — the caller owns the pace, and the child is killed when its handle
+/// is dropped, so a turn cancelled halfway through does not leave an `ssh` on
+/// this laptop holding a channel open to nobody.
+pub(crate) fn stream(m: &Machine, remote: &str) -> Result<tokio::process::Child, String> {
+    spawn_ssh(ssh_args(m, remote), true, true).map_err(|e| unreachable(m, e))
 }
 
 /// Ask a box something and read the answer.

@@ -1,8 +1,12 @@
-// Memorable place-name slugs for auto-naming a new workspace branch when the
-// user doesn't type one — mirrors the CLI's place-name list so a worktree
-// reads like "houston" or "machu-picchu" instead of an opaque hash. Every name
-// is already lowercase + hyphen-safe, so it drops straight into a git branch
-// name with no further slugging.
+// Memorable place-name slugs — the LAST-RESORT name for a new workspace
+// branch, for the case where nothing on hand says what the work is about.
+// Mirrors the CLI's place-name list so a worktree reads like "houston" or
+// "machu-picchu" instead of an opaque hash. Every name is already lowercase +
+// hyphen-safe, so it drops straight into a git branch name with no further
+// slugging.
+//
+// Work that HAS a description is named after it — see `workNames.ts`. Reach
+// for this only once `workBranchName` has nothing to work with.
 
 export const PLACE_NAMES: string[] = [
   "houston",
@@ -70,8 +74,8 @@ export const PLACE_NAMES: string[] = [
 /** Pick a memorable place name not already in `taken`. Falls back to a
  *  suffixed name (`houston-2`) when every base name is taken, so it always
  *  returns something usable for a branch. */
-export function randomPlaceName(taken?: Set<string>): string {
-  const used = taken ?? new Set<string>();
+export function randomPlaceName(taken?: ReadonlySet<string>): string {
+  const used: ReadonlySet<string> = taken ?? new Set<string>();
   const free = PLACE_NAMES.filter((n) => !used.has(n));
   if (free.length > 0) {
     return free[Math.floor(Math.random() * free.length)];

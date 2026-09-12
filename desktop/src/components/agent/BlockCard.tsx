@@ -14,7 +14,7 @@
 //   • re-run (prompt cards) — dispatches `aura:rerun-prompt { sessionId, text }`
 // The parent AgentSurface routes the re-run event to its Composer.
 
-import { useState } from "react";
+import { memo, useState } from "react";
 import type { BlockEnvelope } from "../../lib/api";
 
 type BlockState = "running" | "done" | "failed";
@@ -27,14 +27,32 @@ type Props = {
   /** Optional companion exit envelope so an output card can render its
    *  exit pill inline (matches the term layout) without an extra row. */
   exit?: BlockEnvelope | null;
+  /** Collapsed state, when the list owns it. The windowed stack unmounts a
+   *  card you scroll past, so a flag held inside the card would reset every
+   *  time one came back — the list keeps it and passes it down. Left out,
+   *  the card falls back to its own state. */
+  collapsed?: boolean;
+  onToggleCollapsed?: (blockId: string) => void;
 };
 
-export function BlockCard({ block, focused = false, exit = null }: Props) {
+// Memoised on a plain shallow prop compare, which is exact here: the session
+// store hands out a new envelope object only for the block that actually
+// changed, and the list passes stable handlers. Without this a single chunk of
+// PTY output re-rendered every card in the session's history — including their
+// multi-KB <pre> bodies.
+export const BlockCard = memo(function BlockCard({
+  block,
+  focused = false,
+  exit = null,
+  collapsed: collapsedProp,
+  onToggleCollapsed,
+}: Props) {
   const state = synthState(block, exit);
   const tone = stateTone(state);
   const label = stateLabel(state);
   const failed = state === "failed";
-  const [collapsed, setCollapsed] = useState(false);
+  const [selfCollapsed, setSelfCollapsed] = useState(false);
+  const collapsed = collapsedProp ?? selfCollapsed;
   const [copied, setCopied] = useState(false);
 
   const startedMs = block.started_at * 1000;
@@ -56,6 +74,11 @@ export function BlockCard({ block, focused = false, exit = null }: Props) {
         /* clipboard denied — silent fallback */
       },
     );
+  }
+
+  function toggleCollapsed() {
+    if (onToggleCollapsed) onToggleCollapsed(block.id);
+    else setSelfCollapsed((v) => !v);
   }
 
   function rerun() {
@@ -98,7 +121,7 @@ export function BlockCard({ block, focused = false, exit = null }: Props) {
         <BlockActions
           canCollapse={block.kind === "output" && !!block.text}
           collapsed={collapsed}
-          onToggleCollapsed={() => setCollapsed((v) => !v)}
+          onToggleCollapsed={toggleCollapsed}
           canRerun={block.kind === "prompt" && !!block.text}
           onRerun={rerun}
           onCopy={copyAsMarkdown}
@@ -127,7 +150,7 @@ export function BlockCard({ block, focused = false, exit = null }: Props) {
       )}
     </div>
   );
-}
+});
 
 function BlockActions({
   canCollapse,

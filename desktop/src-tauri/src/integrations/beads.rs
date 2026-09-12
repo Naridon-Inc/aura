@@ -528,6 +528,7 @@ fn blank_update(id: &str) -> UpdateTaskInput {
         id: id.to_string(),
         title: None,
         description: None,
+        acceptance: None,
         status: None,
         state_id: None,
         priority: None,

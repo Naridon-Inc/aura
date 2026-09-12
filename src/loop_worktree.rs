@@ -2,9 +2,12 @@
 //!
 //! A [`LoopWorktree`] is a throwaway git worktree dedicated to a single loop
 //! task, checked out on its own branch. Paths are sibling directories of the
-//! repo (`<parent>/<repo-name>-aura-loop-<safeid>`) and branches are named
-//! `loop/<safeid>`, where `<safeid>` is a deterministic, ref-safe slug of the
-//! task id. Merge-back is a plain `git merge --no-ff` — when the aura AST
+//! repo (`<parent>/<repo-name>-aura-loop-<name>`) and branches are named
+//! `loop/<name>`, where `<name>` is a ref-safe slug of what the task IS — its
+//! title — so a row of crew worktrees reads `fix-the-login-bug`,
+//! `rate-limit-retries` rather than a column of uuid fragments. A task with no
+//! usable title falls back to a slug of its id. Merge-back is a plain
+//! `git merge --no-ff` — when the aura AST
 //! merge-driver is configured it resolves clean cases automatically. Discard
 //! is best-effort: it removes the worktree and deletes the branch, ignoring a
 //! `branch -D` failure on an already-merged branch.
@@ -12,21 +15,35 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use aura_loop::worktree_name;
+
 /// A git worktree dedicated to one loop task, on its own branch.
 pub struct LoopWorktree {
-    /// Sibling dir: `<parent>/<repo-name>-aura-loop-<safeid>`.
+    /// Sibling dir: `<parent>/<repo-name>-aura-loop-<name>`.
     pub path: PathBuf,
-    /// Branch name: `loop/<safeid>`.
+    /// Branch name: `loop/<name>`.
     pub branch: String,
 }
 
-/// Create a fresh worktree off `base` (default: current HEAD of `repo_root`) for
-/// `task_id`, on a new branch `loop/<safeid>`. Idempotent-ish: if the target
-/// path already exists, returns an `Err` with a clear message so the caller can
-/// fall back to sequential execution. Uses
+/// Create a fresh worktree off `base` (default: current HEAD of `repo_root`)
+/// for a task, on a new branch `loop/<name>`.
+///
+/// The name comes from `title` — what the task is about — because that is the
+/// only thing about a crew worktree anyone can read at a glance; `task_id` is
+/// the fallback for a task whose title says nothing (empty, or nothing that
+/// survives slugging). Two tasks that happen to share a title get `-2`, `-3`
+/// rather than colliding, so naming after the work never costs isolation.
+///
+/// Returns an `Err` if the target path exists anyway (something claimed it
+/// mid-flight) so the caller can fall back to sequential execution. Uses
 /// `git -C <repo_root> worktree add -b <branch> <path> [<base>]`.
-pub fn create(repo_root: &Path, task_id: &str, base: Option<&str>) -> Result<LoopWorktree, String> {
-    let safe = safe_id(task_id);
+pub fn create(
+    repo_root: &Path,
+    task_id: &str,
+    title: Option<&str>,
+    base: Option<&str>,
+) -> Result<LoopWorktree, String> {
+    let safe = name_for(repo_root, task_id, title);
     let (path, branch) = paths_for(repo_root, &safe);
 
     if path.exists() {
@@ -86,8 +103,8 @@ pub fn merge_back(repo_root: &Path, wt: &LoopWorktree) -> Result<(), String> {
             // itself has already landed.
             let parked = stash_park(repo_root)?;
             let merged = run_merge(repo_root, &wt.branch);
-            if parked {
-                let _ = stash_pop(repo_root);
+            if let Some(parked) = parked {
+                let _ = stash_unpark(repo_root, &parked);
             }
             merged
         }
@@ -124,11 +141,63 @@ fn blocked_by_dirty_tree(e: &str) -> bool {
         || e.contains("your local changes to the following files")
 }
 
-/// Stash the main tree's uncommitted changes (tracked + untracked) so the merge
-/// has a clean tree to land on. Returns `Ok(true)` when something was actually
-/// stashed, `Ok(false)` when there was nothing to save.
-fn stash_park(repo_root: &Path) -> Result<bool, String> {
+/// The user's uncommitted work, parked on the stash, identified by what it
+/// is rather than by where it currently sits in the stack.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Parked {
+    /// The commit the stash entry points at — stable for the life of the
+    /// entry, unlike its position.
+    pub sha: String,
+    /// The unique message this park was pushed with.
+    pub tag: String,
+}
+
+/// How `git stash list` is asked to print, so entries can be matched by
+/// identity: `stash@{0}<TAB><sha><TAB><subject>`.
+const STASH_FORMAT: &str = "--format=%gd%x09%H%x09%gs";
+
+/// Find our own parked entry in a stash listing.
+///
+/// The stash is **one stack per repository, shared by every worktree and
+/// every agent session working in it**. Between parking and restoring,
+/// another session can push its own entry on top, and `stash@{0}` then
+/// names their work, not ours. So the entry is found by the message this
+/// park wrote and confirmed against the commit it pointed at.
+fn find_parked(list: &str, tag: &str) -> Option<(String, String)> {
+    for line in list.lines() {
+        let mut parts = line.split('\t');
+        let (Some(name), Some(sha), subject) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        if subject.unwrap_or("").contains(tag) {
+            return Some((name.to_string(), sha.to_string()));
+        }
+    }
+    None
+}
+
+fn stash_list(repo_root: &Path) -> String {
     let repo_str = repo_root.to_string_lossy().into_owned();
+    Command::new("git")
+        .args(["-C", &repo_str, "stash", "list", STASH_FORMAT])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// Stash the main tree's uncommitted changes (tracked + untracked) so the merge
+/// has a clean tree to land on. `Ok(None)` when there was nothing to save.
+fn stash_park(repo_root: &Path) -> Result<Option<Parked>, String> {
+    let repo_str = repo_root.to_string_lossy().into_owned();
+    // Unique per park, so the entry can be recognised later even with
+    // other sessions' parks stacked above and below it.
+    let tag = format!(
+        "aura-loop merge-back park {}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
     let out = Command::new("git")
         .args([
             "-C",
@@ -137,27 +206,60 @@ fn stash_park(repo_root: &Path) -> Result<bool, String> {
             "push",
             "--include-untracked",
             "-m",
-            "aura-loop merge-back park",
+            &tag,
         ])
         .output()
         .map_err(|e| format!("spawn git: {e}"))?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).to_string());
     }
-    let said = String::from_utf8_lossy(&out.stdout);
-    Ok(!said.contains("No local changes to save"))
+    if String::from_utf8_lossy(&out.stdout).contains("No local changes to save") {
+        return Ok(None);
+    }
+    match find_parked(&stash_list(repo_root), &tag) {
+        Some((_, sha)) => Ok(Some(Parked { sha, tag })),
+        // Pushed, but not findable afterwards. Returning an error here
+        // aborts the merge with the work still safely on the stash; the
+        // alternative — carrying on and guessing at an entry later — is
+        // how someone else's changes end up in this tree.
+        None => Err(format!(
+            "parked your uncommitted work on the stash as \"{tag}\" but could not find it again; \
+             the merge was not attempted and nothing was lost — restore it with `git stash list`"
+        )),
+    }
 }
 
-/// Restore the parked changes after the merge. Best-effort: on a pop conflict
-/// git keeps the stash entry, so the user's work is never lost.
-fn stash_pop(repo_root: &Path) -> Result<(), String> {
+/// Restore the parked changes after the merge.
+///
+/// This applied and dropped `stash@{0}`, which is whatever entry happens to
+/// be on top of a stack the whole repository shares — another worktree's
+/// session parking work of its own between the merge starting and finishing
+/// was enough to hand their changes to this tree and delete their entry.
+/// The entry is now found by the message it was pushed with, applied by its
+/// own commit, and dropped only after that commit is confirmed still to be
+/// the one under that name.
+fn stash_unpark(repo_root: &Path, parked: &Parked) -> Result<(), String> {
     let repo_str = repo_root.to_string_lossy().into_owned();
     let out = Command::new("git")
-        .args(["-C", &repo_str, "stash", "pop"])
+        .args(["-C", &repo_str, "stash", "apply", &parked.sha])
         .output()
         .map_err(|e| format!("spawn git: {e}"))?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+        // A conflict leaves both the tree and the entry alone; the work is
+        // still on the stash under its own name.
+        return Err(format!(
+            "your parked changes are still on the stash as \"{}\" — {}",
+            parked.tag,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    // Applied. Drop only if the name still holds the very commit applied.
+    if let Some((name, sha)) = find_parked(&stash_list(repo_root), &parked.tag) {
+        if sha == parked.sha {
+            let _ = Command::new("git")
+                .args(["-C", &repo_str, "stash", "drop", &name])
+                .output();
+        }
     }
     Ok(())
 }
@@ -235,6 +337,15 @@ fn safe_id(raw: &str) -> String {
     }
 }
 
+/// The worktree name for a task: its title when that says something, else a
+/// slug of its id — then stepped past anything already on disk (`-2`, `-3`).
+fn name_for(repo_root: &Path, task_id: &str, title: Option<&str>) -> String {
+    let base = title
+        .and_then(worktree_name::from_label)
+        .unwrap_or_else(|| safe_id(task_id));
+    worktree_name::unique(&base, |candidate| paths_for(repo_root, candidate).0.exists())
+}
+
 /// PURE, unit-testable: compute `(worktree_path, branch)` for a `repo_root` and
 /// an already-sanitized `safe` id, matching the sibling-dir scheme
 /// `<parent>/<repo-name>-aura-loop-<safe>` with branch `loop/<safe>`. Factored
@@ -268,6 +379,62 @@ fn short_hash(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stash listing in the format `stash_list` asks for.
+    fn listing(entries: &[(&str, &str, &str)]) -> String {
+        entries
+            .iter()
+            .map(|(name, sha, subject)| format!("{name}\t{sha}\t{subject}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn our_park_is_found_under_someone_elses_entries() {
+        // The stash is one stack for the whole repository. Another
+        // worktree's session parking its own work puts its entry on top,
+        // and `stash@{0}` is then their changes — which is what the old
+        // `stash pop` took.
+        let list = listing(&[
+            ("stash@{0}", "aaa111", "On main: someone else's wip"),
+            ("stash@{1}", "bbb222", "aura-loop merge-back park 1789109999"),
+            ("stash@{2}", "ccc333", "On main: older unrelated park"),
+        ]);
+        assert_eq!(
+            find_parked(&list, "aura-loop merge-back park 1789109999"),
+            Some(("stash@{1}".to_string(), "bbb222".to_string()))
+        );
+    }
+
+    #[test]
+    fn two_parks_from_different_runs_do_not_claim_each_other() {
+        let list = listing(&[
+            ("stash@{0}", "aaa111", "aura-loop merge-back park 222"),
+            ("stash@{1}", "bbb222", "aura-loop merge-back park 111"),
+        ]);
+        assert_eq!(
+            find_parked(&list, "aura-loop merge-back park 111").map(|(n, _)| n),
+            Some("stash@{1}".to_string())
+        );
+    }
+
+    #[test]
+    fn a_park_that_is_gone_is_not_mistaken_for_the_nearest_entry() {
+        // Better to restore nothing and say so than to apply a stranger's
+        // work into this tree.
+        let list = listing(&[("stash@{0}", "aaa111", "On main: someone else's wip")]);
+        assert_eq!(find_parked(&list, "aura-loop merge-back park 111"), None);
+        assert_eq!(find_parked("", "anything"), None);
+    }
+
+    #[test]
+    fn a_malformed_listing_line_is_skipped_rather_than_misread() {
+        let list = "garbage-with-no-tabs\nstash@{0}\tddd444\taura-loop merge-back park 7";
+        assert_eq!(
+            find_parked(list, "park 7"),
+            Some(("stash@{0}".to_string(), "ddd444".to_string()))
+        );
+    }
 
     #[test]
     fn safe_id_uuid() {
@@ -319,6 +486,33 @@ mod tests {
     fn safe_id_collapses_repeats_and_trims() {
         assert_eq!(safe_id("___a   b___"), "a-b");
         assert_eq!(safe_id("--lead-and-trail--"), "lead-and-trail");
+    }
+
+    /// A repo root that cannot exist, so `name_for`'s on-disk collision check
+    /// always answers "free" and the naming itself is what's under test.
+    const NOWHERE: &str = "/this/path/should/not/exist/myrepo";
+
+    #[test]
+    fn name_for_uses_the_task_title() {
+        assert_eq!(
+            name_for(Path::new(NOWHERE), "3f2504e0-4f89-41d3-9a0c-0305e82c3301", Some("Fix the login bug")),
+            "fix-the-login-bug"
+        );
+        // A branch-flow prefix on the title is noise in a worktree name.
+        assert_eq!(
+            name_for(Path::new(NOWHERE), "t1", Some("feat/worktree-control-plane")),
+            "worktree-control-plane"
+        );
+    }
+
+    #[test]
+    fn name_for_falls_back_to_the_id_when_the_title_says_nothing() {
+        let id = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+        // No title at all, an empty one, and one with nothing sluggable in it
+        // all land on the id — never on an empty or invented name.
+        for title in [None, Some(""), Some("   "), Some("★★★")] {
+            assert_eq!(name_for(Path::new(NOWHERE), id, title), safe_id(id));
+        }
     }
 
     #[test]

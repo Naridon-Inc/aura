@@ -439,6 +439,7 @@ pub async fn reconcile_suggest(repo_root: &str) -> Result<Vec<ReconcileSuggestio
             )),
         }],
         cwd: String::new(),
+        machine_id: None,
         system: Some(RECONCILE_SYSTEM.into()),
         tools: vec![],
         max_tokens: Some(1024),
@@ -448,6 +449,7 @@ pub async fn reconcile_suggest(repo_root: &str) -> Result<Vec<ReconcileSuggestio
         model: None,
         long_context: false,
         approval: None,
+        output_style: None, // AURA-1296
     };
 
     let raw = crate::cmd_loop::plan_collect(request).await?;

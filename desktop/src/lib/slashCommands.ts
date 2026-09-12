@@ -6,6 +6,8 @@
 // Kept in lib/ rather than baked into the Composer so the keyboard
 // palette (⌘K) and a future help surface can share the same catalog.
 
+import { buildPrototypePrompt } from "./prototypePrompt";
+
 export type SlashCommand = {
   name: string;
   description: string;
@@ -78,6 +80,16 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/remote", description: "Pair a phone over LAN to drive this session", kind: "ui", target: "remote" },
   { name: "/inspect", description: "Review whether a commit matched the task", kind: "ui", target: "intent_inspector" },
   { name: "/replay", description: "Open the commit audit trail", kind: "ui", target: "provenance_replay" },
+  // AURA-1296 — a prompt, not an action: "show me, don't ship it". The Aura
+  // chat expands it in lib/chatSlashHandler.ts; the legacy Composer inserts
+  // `expansion` verbatim.
+  {
+    name: "/prototype",
+    description: "Try a quick throwaway version in a scratch folder and report back",
+    kind: "prompt",
+    target: "prototype",
+    expansion: buildPrototypePrompt(""),
+  },
   { name: "/zones", description: "List active zone claims", kind: "aura-cli", target: "zones list" },
   { name: "/sentinel", description: "Inspect Sentinel agent presence", kind: "aura-cli", target: "sentinel agents" },
   { name: "/config", description: "Open Aura config", kind: "aura-cli", target: "config show" },

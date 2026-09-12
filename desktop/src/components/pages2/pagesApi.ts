@@ -96,7 +96,45 @@ export type NotesWriteInput = {
   /** Folder membership. Omit (or pass null) to leave the page's folder
    *  untouched on a body save — folder moves go through {@link noteSetFolder}. */
   folder?: string | null;
+  /** The `updated_at` this edit was made against. If the copy on disk is newer
+   *  — MCP wrote it, a teammate's edit arrived over the live rail, another
+   *  window saved — the backend refuses the write instead of dropping their
+   *  work, and the promise rejects with a {@link NoteConflict}. */
+  baseUpdatedAt?: string | null;
 };
+
+/** Someone else changed the page since we loaded it. */
+export type NoteConflict = {
+  id: string;
+  /** What the copy on disk is stamped with now. */
+  diskUpdatedAt: string | null;
+  /** What we thought we were editing. */
+  baseUpdatedAt: string | null;
+};
+
+/** Backend marker for a refused save. Must match `cmd_notes::NOTE_CONFLICT`. */
+const CONFLICT_PREFIX = "note-conflict:";
+
+/** Read a rejected {@link notesWrite} as a conflict, or null if it was an
+ *  ordinary failure (disk full, permissions) that the caller should surface as
+ *  a plain save error. */
+export function asNoteConflict(err: unknown): NoteConflict | null {
+  const text = typeof err === "string" ? err : String((err as Error)?.message ?? err ?? "");
+  const at = text.indexOf(CONFLICT_PREFIX);
+  if (at < 0) return null;
+  try {
+    const raw = JSON.parse(text.slice(at + CONFLICT_PREFIX.length));
+    return {
+      id: String(raw.id ?? ""),
+      diskUpdatedAt: raw.disk_updated_at ?? null,
+      baseUpdatedAt: raw.base_updated_at ?? null,
+    };
+  } catch {
+    // The marker is there but the payload isn't readable — still a conflict,
+    // and saying so beats reporting a generic failure.
+    return { id: "", diskUpdatedAt: null, baseUpdatedAt: null };
+  }
+}
 
 // ─── In-memory cache ───────────────────────────────────────────────────────
 //
@@ -314,6 +352,7 @@ export function notesWrite(input: NotesWriteInput): Promise<Note> {
       // null ⇒ leave the existing folder untouched (a body save never re-files
       // a page); folder moves use note_set_folder instead.
       folder: input.folder ?? null,
+      base_updated_at: input.baseUpdatedAt ?? null,
     },
   }).then((note) => {
     // Keep the cache in step with the write so a re-open after a save is a hit

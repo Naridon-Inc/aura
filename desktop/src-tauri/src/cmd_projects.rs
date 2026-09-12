@@ -206,8 +206,10 @@ mod tests {
 
     #[test]
     fn register_and_list() {
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        // Borrowed HOME: serialized against the rest of the suite and put back
+        // afterwards, so the registry lands in a tempdir without stranding
+        // other tests on a HOME that no longer exists.
+        let _home = crate::test_home::borrow();
         let h = ProjectRegistryHandle::new();
         let _ = write_all(&[]); // start clean
         let entry = ProjectEntry {

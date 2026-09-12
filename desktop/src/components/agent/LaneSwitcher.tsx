@@ -10,8 +10,9 @@
 //   - close a lane, with a guard that warns when it has unsaved work
 //
 // Plain-language copy throughout — the audience is non-engineers. The
-// `lane/claude-ab12ef34` branch name only ever shows as quiet secondary
-// detail, never as the headline.
+// branch name — `lane/claude/auth-refactor` for a labelled lane, or
+// `lane/claude-ab12ef34` for one the user never named — only ever shows as
+// quiet secondary detail, never as the headline.
 //
 // NOTE (intended mount point): this is a complete, self-contained,
 // importable component. The integration step (mounting it in the agent
@@ -31,7 +32,7 @@ import {
 import { AgentIcon } from "./AgentIcon";
 import { Input } from "../ui/input";
 import { AsciiSpinner } from "../ui/ascii-spinner";
-import { titleCaseName } from "../../lib/textCase";
+import { titleCaseName } from "@shared/textCase";
 
 type Props = {
   /** Active workspace root. Lanes are scoped to it. */

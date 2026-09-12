@@ -8,7 +8,7 @@
  *  verbatim from the CommsPanel monolith — only the diagnostic dialog uses
  *  these, so they travel together as the header's private surface. */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type ChatDoctorReport,
@@ -16,6 +16,7 @@ import {
   type TeamManifest,
 } from "../../../lib/api";
 import { Button } from "../../ui/button";
+import { useDismiss } from "../../../lib/useDismiss";
 
 // ── rail actions ─────────────────────────────────────────────────────
 //
@@ -108,6 +109,10 @@ function ChatDoctorDialog({
   const [report, setReport] = useState<ChatDoctorReport | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
+  // This dialog listened for nothing: it closed on the backdrop and the ✕,
+  // and Escape — which closes every other dialog in the app — left it up.
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  useDismiss(true, onClose, panelRef);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,13 +148,13 @@ function ChatDoctorDialog({
   return (
     <div
       className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-6"
-      onClick={onClose}
       role="dialog"
+      aria-modal="true"
       aria-label="Chat diagnostics"
     >
       <div
+        ref={panelRef}
         className="flex max-h-[80vh] w-[560px] flex-col overflow-hidden rounded-md border border-line-1 bg-bg-1 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-line-soft px-3 py-2">
           <div className="text-sm font-medium text-text-1">Chat doctor</div>

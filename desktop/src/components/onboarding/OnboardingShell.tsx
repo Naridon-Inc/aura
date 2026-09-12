@@ -44,8 +44,9 @@ export function OnboardingShell({
 }) {
   return (
     // A modal surface: it owns the whole window until first-run finishes, so
-    // screen readers should treat everything behind it as inert. No Escape —
-    // there is nothing to fall back to until setup is done.
+    // screen readers should treat everything behind it as inert.
+    // no-escape-dismissal: there is nothing to fall back to until setup is
+    // done, so there is nowhere for Escape to go.
     <div
       className="fixed inset-0 z-[60] bg-bg-1 flex flex-col"
       role="dialog"

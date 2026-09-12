@@ -11,10 +11,18 @@
 // editor store's openTerminal(cwd, { bootCommand }). When nothing is
 // configured yet, the control deep-links to the settings pane that edits it.
 
+//
+// Where it runs (AURA-1307): the terminal is always a tab here, but when the
+// project stands in a machine the command is typed after the box's own boot
+// line, so it starts in the checkout over there. The settings that name the
+// commands are read here, as before — they are this laptop's notes about the
+// project, not the checkout's.
+
 import { useEffect, useState } from "react";
 import { Play, Wrench, Plus } from "lucide-react";
 import { repoWorktreeSettingsGet } from "../lib/api";
 import { useEditorStore } from "../lib/editorStore";
+import { bootCommandFor } from "../lib/place/runAt";
 
 type Props = {
   /** Project root the scripts run in (also the terminal cwd). */
@@ -33,10 +41,12 @@ export function RunScriptButton({ repoRoot }: Props) {
   const [setup, setSetup] = useState<string | null>(null);
   const [namedScripts, setNamedScripts] = useState<Array<{ name: string; command: string }>>([]);
   const [loaded, setLoaded] = useState(false);
+  const [launchError, setLaunchError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setLoaded(false);
+    setLaunchError(null);
     repoWorktreeSettingsGet(repoRoot)
       .then((s) => {
         if (cancelled) return;
@@ -74,8 +84,17 @@ export function RunScriptButton({ repoRoot }: Props) {
       window.removeEventListener("aura:worktree-settings-saved", reload);
   }, [repoRoot]);
 
-  const launch = (command: string, label: string) => {
-    openTerminal(repoRoot, { bootCommand: command, label });
+  // A machine that cannot be opened is shown, not worked around: running the
+  // command in this laptop's copy would start the wrong thing on the wrong
+  // computer while looking like it worked.
+  const launch = async (command: string, label: string) => {
+    try {
+      const bootCommand = await bootCommandFor(repoRoot, command);
+      setLaunchError(null);
+      openTerminal(repoRoot, { bootCommand, label });
+    } catch (e) {
+      setLaunchError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   if (!loaded) return null;
@@ -101,7 +120,7 @@ export function RunScriptButton({ repoRoot }: Props) {
         <button
           key={`${script.name}:${script.command}`}
           type="button"
-          onClick={() => launch(script.command, script.name)}
+          onClick={() => void launch(script.command, script.name)}
           title={`${script.name}: ${script.command}`}
           className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 hover:bg-bg-3 text-text-2 hover:text-text-1 text-xs font-medium transition-colors"
         >
@@ -112,7 +131,7 @@ export function RunScriptButton({ repoRoot }: Props) {
       {run && (
         <button
           type="button"
-          onClick={() => launch(run, "Run")}
+          onClick={() => void launch(run, "Run")}
           title={`Run: ${run}`}
           className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 hover:bg-bg-3 text-[color:var(--color-accent)] text-xs font-medium transition-colors"
         >
@@ -123,13 +142,22 @@ export function RunScriptButton({ repoRoot }: Props) {
       {setup && (
         <button
           type="button"
-          onClick={() => launch(setup, "Setup")}
+          onClick={() => void launch(setup, "Setup")}
           title={`Setup: ${setup}`}
           className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 text-text-2 hover:bg-bg-3 hover:text-text-1 text-xs font-medium transition-colors"
         >
           <Wrench size={10} strokeWidth={2} aria-hidden />
           Setup
         </button>
+      )}
+      {launchError && (
+        <span
+          role="alert"
+          title={launchError}
+          className="max-w-[16rem] truncate text-xs text-[color:var(--color-danger)]"
+        >
+          {launchError}
+        </span>
       )}
     </div>
   );

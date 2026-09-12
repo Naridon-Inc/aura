@@ -41,7 +41,7 @@ import {
   PR_STATE_CHIP,
 } from "../ui/statusChip";
 import { relativeAgeAuto } from "../../lib/relativeTime";
-import { sentenceCase } from "../../lib/textCase";
+import { sentenceCase } from "@shared/textCase";
 
 export type ThreadCounts = {
   total: number;

@@ -17,7 +17,7 @@ import { type ClaudeSession, type IntentRow } from "../../lib/api";
 import { fetchSessions } from "../../lib/sessionsCache";
 import { fetchIntentRows } from "../../lib/intentCache";
 import { agentDisplayLabel } from "../../lib/agentIdentity";
-import { intentTypeChip } from "../../lib/intentTypeLabels";
+import { intentTypeChip } from "@shared/intentTypeLabels";
 import { collapseAutoStubSessions } from "../../lib/sessionMeta";
 import { AgentIcon } from "../agent/AgentIcon";
 import { FullscreenOverlay } from "../FullscreenOverlay";

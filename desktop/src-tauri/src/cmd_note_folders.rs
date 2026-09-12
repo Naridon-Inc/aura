@@ -366,6 +366,7 @@ mod tests {
             archived_at: None,
             icon: None,
             folder: None,
+            base_updated_at: None,
         })
         .await
         .unwrap();

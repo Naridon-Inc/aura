@@ -489,19 +489,35 @@ async fn api_snapshots() -> impl IntoResponse {
 
 async fn webhook_rollback(ExtractJson(payload): ExtractJson<WebhookPayload>) -> impl IntoResponse {
     println!("\n🚨 [WEBHOOK TRIGGERED] Production Incident Detected!");
-    let branch_name = format!("aura/snapshot/{}", payload.snapshot_id);
-    println!("⏪ Aura Autonomous Arbitrator: Rolling back to safety snapshot: {}", branch_name);
-    
-    let status = std::process::Command::new("git").args(["reset", "--hard", &branch_name]).output();
-    
-    match status {
-        Ok(s) if s.status.success() => {
-            println!("✓ Autonomous rollback successful. Production restored.");
-            Json(serde_json::json!({ "status": "success", "message": "Rollback complete" }))
-        },
-        _ => {
-            println!("✗ Autonomous rollback failed.");
-            Json(serde_json::json!({ "status": "error", "message": "Rollback failed" }))
+    println!("⏪ Rolling back to snapshot {}", payload.snapshot_id);
+
+    // This arrives over HTTP, so nobody is necessarily at the keyboard when
+    // it fires — and it used to run `git reset --hard` on whatever the
+    // person at that checkout had open. `restore` anchors their work in a
+    // ref first and refuses to run if it cannot, so an incident rollback
+    // can no longer cost someone their afternoon.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let mut git = crate::safety_snapshot::RealGit::here();
+
+    match crate::safety_snapshot::restore(&mut git, &payload.snapshot_id, &now.to_string()) {
+        Ok(done) => {
+            let lines = crate::safety_snapshot::restored_lines(&done);
+            for line in &lines {
+                println!("  ↳ {}", line);
+            }
+            Json(serde_json::json!({
+                "status": "success",
+                "message": "Rollback complete",
+                "notes": lines,
+                "saved_work_ref": done.previous_work,
+            }))
+        }
+        Err(e) => {
+            println!("✗ Rollback did not run: {}", e);
+            Json(serde_json::json!({ "status": "error", "message": e }))
         }
     }
 }

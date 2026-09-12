@@ -22,8 +22,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import { api, type ClaudeSession } from "../../lib/api";
+import { type ClaudeSession } from "../../lib/api";
 import { isOwnWorktreeSession, resumeCwdOf } from "../../lib/agentSessionScope";
+import { startResume } from "../../lib/resumeLaunch";
 import { getPermissionMode, streamChannel } from "../../lib/agentStreamStore";
 import { useEditorStore, type WorkPaneRef } from "../../lib/editorStore";
 import { fetchSessions, peekSessions } from "../../lib/sessionsCache";
@@ -104,34 +105,36 @@ export function useEarlierSessions(
   async function resume(s: ClaudeSession) {
     const title = sessionPromptTitle(s.last_prompt) || sessionPromptTitle(s.first_prompt);
     const label = truncate(title, 24) || "Claude";
-    try {
-      const cwd = resumeCwdOf(s, repoRoot);
-      const pm = getPermissionMode(streamChannel("claude", cwd));
-      const handle = await api.agentPtyOpen(
-        "claude",
-        cwd,
-        96,
-        32,
-        s.session_id,
-        true,
-        undefined,
-        pm === "default" ? undefined : pm,
-      );
-      store.openAgent({
-        sessionId: handle.id,
-        agentId: "claude",
-        agentLabel: label,
-        agentMonogram: "C",
-        repoRoot: cwd,
-        mode: "pty",
-        resumeSessionId: s.session_id,
-      });
-      place({ kind: "agent", id: handle.id });
-    } catch (e) {
+    const cwd = resumeCwdOf(s, repoRoot);
+    const pm = getPermissionMode(streamChannel("claude", cwd));
+    // Through the shared claim: the session detail's Resume button and a second
+    // press on this row reach the same conversation, and two `--resume` spawns
+    // on one thread is two agents editing the same files.
+    const started = await startResume({
+      repoRoot,
+      cwd,
+      sessionId: s.session_id,
+      cols: 96,
+      rows: 32,
+      permissionMode: pm,
+    });
+    if (!started.ok) {
       // Silence here reads as a dead row: the CLI can be missing, the
-      // transcript can have been deleted out from under the list.
-      toast.danger(`Couldn't resume ${label}`, String(e));
+      // transcript can have been deleted out from under the list, or the same
+      // conversation can already be opening.
+      toast.danger(`Couldn't resume ${label}`, started.detail || started.message);
+      return;
     }
+    store.openAgent({
+      sessionId: started.handleId,
+      agentId: "claude",
+      agentLabel: label,
+      agentMonogram: "C",
+      repoRoot: cwd,
+      mode: "pty",
+      resumeSessionId: s.session_id,
+    });
+    place({ kind: "agent", id: started.handleId });
   }
 
   const rows = useMemo<Row[]>(() => {

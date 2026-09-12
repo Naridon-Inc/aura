@@ -29,7 +29,7 @@ import {
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
-import { Field, PaneIntro, Section, SelectField } from "./kit";
+import { Field, PaneIntro, Section, SelectField, Toggle } from "./kit";
 
 const EMPTY: RepoWorktreeSettings = {
   setup: null,
@@ -38,6 +38,11 @@ const EMPTY: RepoWorktreeSettings = {
   base: null,
   copyFiles: [],
   namedScripts: [],
+  copyFilesIncludeBinaries: false,
+  reviewInstructions: null,
+  prInstructions: null,
+  conflictInstructions: null,
+  ghHost: null,
 };
 
 // Trim a textarea draft down to a stored value: blank → null, so an empty
@@ -73,6 +78,11 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
         base: s.base ?? null,
         copyFiles: Array.isArray(s.copyFiles) ? s.copyFiles : [],
         namedScripts: Array.isArray(s.namedScripts) ? s.namedScripts : [],
+        copyFilesIncludeBinaries: s.copyFilesIncludeBinaries === true,
+        reviewInstructions: s.reviewInstructions ?? null,
+        prInstructions: s.prInstructions ?? null,
+        conflictInstructions: s.conflictInstructions ?? null,
+        ghHost: s.ghHost ?? null,
       });
     } catch (e) {
       setLoadError(String(e));
@@ -172,6 +182,11 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
             command: script.command.trim(),
           }))
           .filter((script) => script.name && script.command),
+        copyFilesIncludeBinaries: form.copyFilesIncludeBinaries === true,
+        reviewInstructions: nullable(form.reviewInstructions ?? ""),
+        prInstructions: nullable(form.prInstructions ?? ""),
+        conflictInstructions: nullable(form.conflictInstructions ?? ""),
+        ghHost: nullable(form.ghHost ?? ""),
       };
       await repoWorktreeSettingsSet(repoRoot, payload);
       setForm(payload);
@@ -311,6 +326,66 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
               onAdd={addCopyFile}
               onRemove={removeCopyFile}
             />
+            <Toggle
+              label="Copy binary files too"
+              hint="Off, files that look binary (images, archives, anything over 20 MB) are left out of the copy and noted in the log. Turn this on if a copy genuinely needs them."
+              value={form.copyFilesIncludeBinaries === true}
+              onChange={(v) => patch({ copyFilesIncludeBinaries: v })}
+            />
+          </Section>
+
+          <Section title="Instructions for the agent">
+            <Field
+              label="How the agent should review this repo"
+              hint="Added to every review the agent runs here. Say what to look for, what to ignore, and what always blocks."
+            >
+              <Textarea
+                value={form.reviewInstructions ?? ""}
+                onChange={(e) => patch({ reviewInstructions: e.target.value })}
+                rows={3}
+                placeholder="Flag any database change without a migration. Ignore formatting-only diffs."
+                className="text-sm"
+              />
+            </Field>
+            <Field
+              label="How to write pull requests here"
+              hint="Added when the agent opens a pull request: title style, what the description must include, who to tag."
+            >
+              <Textarea
+                value={form.prInstructions ?? ""}
+                onChange={(e) => patch({ prInstructions: e.target.value })}
+                rows={3}
+                placeholder="Start the title with the ticket id. Link the design doc in the description."
+                className="text-sm"
+              />
+            </Field>
+            <Field
+              label="How to resolve conflicts here"
+              hint="Added when the agent resolves merge conflicts: which side wins for which files, what to never merge by hand."
+            >
+              <Textarea
+                value={form.conflictInstructions ?? ""}
+                onChange={(e) => patch({ conflictInstructions: e.target.value })}
+                rows={3}
+                placeholder="Generated files under gen/ always take the main branch's version."
+                className="text-sm"
+              />
+            </Field>
+          </Section>
+
+          <Section title="GitHub">
+            <Field
+              label="GitHub host"
+              hint="Leave empty for github.com. Set your company's GitHub Enterprise address (for example github.mycompany.com) so pull requests and checks for this project come from there."
+            >
+              <Input
+                value={form.ghHost ?? ""}
+                onChange={(e) => patch({ ghHost: e.target.value })}
+                spellCheck={false}
+                placeholder="github.com"
+                className="font-mono text-sm"
+              />
+            </Field>
           </Section>
 
           <div className="mt-1 flex items-center gap-3">

@@ -181,6 +181,16 @@ pub enum TargetStatus {
     Asleep,
     /// Registered but not seen recently.
     Offline,
+    /// AUDIT-UI-04 — alive and finishing what it holds, not taking more
+    /// (a busy box mid-task, or one asked to stop). Distinct from Online
+    /// so the wizard doesn't offer it new work it will never pick up.
+    Draining,
+    /// AUDIT-UI-04 — the box answered, but no runner token/registration
+    /// is present where we asked. Setup incomplete, not an outage.
+    Unconfigured,
+    /// AUDIT-UI-04 — we couldn't reach the box at all (transport-level
+    /// failure). Says nothing about whether the runner itself is healthy.
+    Unreachable,
     /// Teardown in progress.
     Terminating,
     /// Torn down / no longer registered.

@@ -260,12 +260,17 @@ pub fn run_privacy(level: Option<&str>, json: bool) {
 
 /// `aura radar sync` — force one push + pull round through the active
 /// transport. Also what `maybe_spawn_sync` runs detached after each emit.
-pub fn run_sync(json: bool, quiet: bool) {
+///
+/// WRK-03: returns a process exit code — 1 when either leg failed — so
+/// automation forcing a round can see it fail. `--json` output carries the
+/// same truth in `push_error` / `pull_error`.
+pub fn run_sync(json: bool, quiet: bool) -> i32 {
     let pushed = broadcast::push_pending(true);
     let pulled = broadcast::pull_remote(true);
+    let code = if pushed.is_err() || pulled.is_err() { 1 } else { 0 };
 
     if quiet {
-        return;
+        return code;
     }
     if json {
         println!(
@@ -277,7 +282,7 @@ pub fn run_sync(json: bool, quiet: bool) {
                 "pull_error": pulled.as_ref().err(),
             })
         );
-        return;
+        return code;
     }
     match &pushed {
         Ok(n) => println!("{} pushed {} event{}", "✓".green(), n, if *n == 1 { "" } else { "s" }),
@@ -293,6 +298,7 @@ pub fn run_sync(json: bool, quiet: bool) {
             "↳".dimmed()
         );
     }
+    code
 }
 
 /// `aura radar wire` — wire `aura validate-tool` into Claude Code's PreToolUse

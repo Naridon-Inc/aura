@@ -17,7 +17,7 @@ import {
   type NoteSummary,
 } from "./pagesApi";
 import type { MentionSources } from "./mentionSources";
-import { sentenceCase } from "../../lib/textCase";
+import { sentenceCase } from "@shared/textCase";
 
 type Heading = { id: string; level: number; text: string };
 

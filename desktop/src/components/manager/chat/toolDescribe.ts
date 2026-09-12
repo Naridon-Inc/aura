@@ -36,7 +36,7 @@ import type {
   ToolField,
 } from "./types";
 import { basename } from "../../../lib/paths";
-import { camelSplitTail, sentenceCase } from "../../../lib/textCase";
+import { camelSplitTail, sentenceCase } from "@shared/textCase";
 
 /** Cap a built unified diff so a giant Write doesn't blow out the card. */
 const MAX_DIFF_LINES = 80;

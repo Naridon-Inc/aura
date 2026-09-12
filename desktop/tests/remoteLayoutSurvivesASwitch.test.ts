@@ -471,7 +471,11 @@ const hook = await readSrc("components/cloud/useRemoteTabs.ts");
 
 describe("the workspace is wired to the slot, not to its own lifetime", () => {
   test("the tabs come from the slot", () => {
-    expect(body).toContain("useRemoteTabs(machine?.id ?? null, repoRoot)");
+    // The third argument is the worktree on the box a launched workspace
+    // works in; a box entered on its main checkout passes none.
+    expect(body).toContain(
+      "useRemoteTabs(machine?.id ?? null, repoRoot, remoteRoot)",
+    );
     // The `useState` that died with the mount is gone, in both halves.
     expect(body).not.toContain("useState<RemoteTab[]>");
     expect(body).not.toContain('useState<string>("cloud")');
@@ -487,7 +491,7 @@ describe("the workspace is wired to the slot, not to its own lifetime", () => {
   });
 
   test("the slot is both halves, so one mount serves several projects", () => {
-    expect(hook).toContain("remoteSlotFor(machineId, repoRoot)");
+    expect(hook).toContain("remoteSlotFor(machineId, repoRoot, remoteRoot)");
     expect(body).toContain(
       "const repoRoot = entry.repoRoot ?? machine?.project_root ?? undefined;",
     );

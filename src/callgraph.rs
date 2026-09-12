@@ -454,7 +454,13 @@ fn parse_import(name: &str) -> Option<ImportRef> {
     // ---- JS/TS: `import { login } from "./auth";` / `import x from "y"`. ---
     if lower.starts_with("import ") || t.contains("} from") {
         let module = extract_quoted(t).map(normalize_js_path).unwrap_or_default();
-        let sym = if let (Some(open), Some(close)) = (t.find('{'), t.find('}')) {
+        // `open < close` matters: a line like `} from "./x"; import {` puts the
+        // first `}` before the first `{`, and slicing open+1..close panics.
+        let braces = match (t.find('{'), t.find('}')) {
+            (Some(open), Some(close)) if open < close => Some((open, close)),
+            _ => None,
+        };
+        let sym = if let Some((open, close)) = braces {
             // Named import: first symbol inside the braces.
             t[open + 1..close]
                 .split(',')
@@ -494,10 +500,14 @@ fn parse_import(name: &str) -> Option<ImportRef> {
 /// `None` if `t` does not start with `kw` followed by whitespace.
 fn strip_kw<'a>(t: &'a str, kw: &str) -> Option<&'a str> {
     let t = t.trim_start();
-    if t.len() > kw.len()
-        && t[..kw.len()].eq_ignore_ascii_case(kw)
-        && t.as_bytes()[kw.len()].is_ascii_whitespace()
-    {
+    // `t.get(..kw.len())` is None when kw.len() is past the end OR lands
+    // mid-codepoint — either way, `t` does not start with `kw`. Never
+    // byte-slice `t[..kw.len()]` directly: dependency text can be arbitrary
+    // source (Unicode identifiers, string literals) and slicing off a char
+    // boundary panics.
+    let head = t.get(..kw.len())?;
+    let next = t.as_bytes().get(kw.len())?;
+    if head.eq_ignore_ascii_case(kw) && next.is_ascii_whitespace() {
         Some(t[kw.len()..].trim_start())
     } else {
         None
@@ -885,6 +895,52 @@ mod tests {
         assert_eq!(bare_name("auth::verify_token"), "verify_token");
         assert_eq!(bare_name("obj.method(arg)"), "method");
         assert_eq!(bare_name("compute::<u32>"), "compute");
+    }
+
+    /// A dependency string with a multibyte char sitting where a keyword
+    /// would be must not crash graph building. `strip_kw` used to byte-slice
+    /// `t[..kw.len()]`, which panics when that range lands mid-codepoint —
+    /// and `parse_import` reaches `strip_kw` for any text that merely
+    /// *contains* "} from" / "import {", not only ASCII-keyword-leading text.
+    #[test]
+    fn parse_import_survives_non_ascii_before_keyword() {
+        // "café} from …" — the é (2 bytes) straddles byte index 4, exactly
+        // where strip_kw(_, "from") slices. Must return a value, not panic.
+        let _ = parse_import("café} from \"./m\"");
+        let _ = parse_import("naïve, x } from './auth'");
+        // And a genuine Unicode Python import still parses cleanly.
+        let imp = parse_import("from café import verify").expect("python import");
+        assert_eq!(imp.symbol, "verify");
+    }
+
+    /// A line whose first `}` precedes its first `{` (a wrapped multi-line
+    /// import, or minified `} from "x"; import {`) used to slice
+    /// `t[open+1..close]` with start > end and panic. It must fall through to
+    /// the default-import path instead.
+    #[test]
+    fn parse_import_survives_reversed_braces() {
+        let _ = parse_import("} from \"./a\"; import {");
+        let _ = parse_import("x } from './auth'");
+        // Well-formed named import still resolves the first symbol.
+        let imp = parse_import("import { login, logout } from \"./auth\"").expect("named import");
+        assert_eq!(imp.symbol, "login");
+    }
+
+    /// A node carrying such a dependency must build without panicking and
+    /// still index the def.
+    #[test]
+    fn build_survives_non_ascii_dependency_text() {
+        let nodes = vec![
+            mk("def_v", "verify", "aura-cli/src/auth.rs", &[]),
+            mk(
+                "caller",
+                "flow",
+                "aura-cli/src/server.rs",
+                &["café} from \"./m\"", "verify"],
+            ),
+        ];
+        let g = ReverseGraph::build(&nodes);
+        assert_eq!(g.callers_of_node("def_v").len(), 1);
     }
 
     /// Builtins/macros are skipped so they never create phantom defs/edges.

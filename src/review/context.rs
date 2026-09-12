@@ -59,12 +59,23 @@ pub fn gather(diff: &str) -> ReviewContext {
         sections.push(history);
     }
 
-    let mut block = sections.join("\n");
+    let block = cap_block(sections.join("\n"));
+    ReviewContext { block }
+}
+
+/// Cap the assembled block at `MAX_BLOCK_BYTES`. The budget is bytes but the
+/// cut must land on a char boundary — git log and taste lines carry arbitrary
+/// UTF-8, and a raw `truncate(MAX_BLOCK_BYTES)` panics mid-codepoint.
+fn cap_block(mut block: String) -> String {
     if block.len() > MAX_BLOCK_BYTES {
-        block.truncate(MAX_BLOCK_BYTES);
+        let mut end = MAX_BLOCK_BYTES;
+        while end > 0 && !block.is_char_boundary(end) {
+            end -= 1;
+        }
+        block.truncate(end);
         block.push_str("\n… [context truncated] …");
     }
-    ReviewContext { block }
+    block
 }
 
 /// Parse the new-side path of every file in a unified diff. Handles the
@@ -385,5 +396,22 @@ diff --git a/old.txt b/old.txt\n--- a/old.txt\n+++ /dev/null\n\
         let c = clip(&long, 50);
         assert!(c.chars().count() <= 50);
         assert!(c.ends_with('…'));
+    }
+
+    #[test]
+    fn cap_block_survives_multibyte_at_the_cut() {
+        // Fill so that byte MAX_BLOCK_BYTES lands inside a multi-byte char:
+        // 4-byte emoji repeated leaves the boundary mid-codepoint for any
+        // MAX_BLOCK_BYTES not divisible by 4 — pad with one ascii to force it.
+        let block = format!("a{}", "🚀".repeat(MAX_BLOCK_BYTES / 4 + 10));
+        let capped = cap_block(block);
+        assert!(capped.len() <= MAX_BLOCK_BYTES + "\n… [context truncated] …".len());
+        assert!(capped.ends_with("… [context truncated] …"));
+    }
+
+    #[test]
+    fn cap_block_leaves_short_blocks_alone() {
+        let block = "héllo wörld".to_string();
+        assert_eq!(cap_block(block.clone()), block);
     }
 }

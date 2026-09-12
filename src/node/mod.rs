@@ -20,11 +20,26 @@
 //! node still refuses to bind a non-loopback address without `--allow-remote`,
 //! and off loopback it demands `--require-auth` unless `--allow-anonymous` is
 //! passed, so it can never be *accidentally* exposed unauthenticated.
+//!
+//! On top of hosting, the node can say what it holds. [`read_api`] serves that
+//! to an operator or a console over the node's own HTTP — repos, ref-log, token
+//! metadata — behind a token in every configuration, and [`report`] sends the
+//! same picture to the Aura cloud, signed, so the web console can show a node
+//! you run yourself. Both read the same gatherers, so the two views cannot
+//! drift apart. What travels is always a *verifiable copy*: the ref-log keeps
+//! its per-entry signatures and chain links, and [`tokens`] is a ledger of
+//! hashes and labels rather than of grants, so nothing replayable ever leaves
+//! the box.
 
 mod auth;
+mod bridge;
+mod mirror;
 mod pins;
+mod read_api;
 mod reflog;
+mod report;
 mod smart_http;
+mod tokens;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -64,6 +79,12 @@ pub enum NodeSubcommands {
         /// anyone who can reach the port can push. Only for trusted networks.
         #[arg(long)]
         allow_anonymous: bool,
+        /// Re-fetch every mirrored repo this often, in seconds. Off by default:
+        /// a node that mirrors nothing should make no outbound requests, and an
+        /// operator who wants a schedule usually already has one (cron, a timer
+        /// unit) and would rather own it than inherit ours.
+        #[arg(long)]
+        mirror_interval: Option<u64>,
     },
     /// List the repos hosted on this node.
     List {
@@ -122,8 +143,82 @@ pub enum NodeSubcommands {
         /// Time-to-live in seconds (default 30 days; `0` = never expires).
         #[arg(long)]
         ttl: Option<i64>,
+        /// What this token is for ("ci deploy", "laptop"). Recorded in the
+        /// node's token ledger so the list is readable later; the token itself
+        /// is never stored.
+        #[arg(long)]
+        label: Option<String>,
         #[arg(long)]
         data_dir: Option<String>,
+        /// Mint against a live cloud grant instead of local flags: read the
+        /// named agent's grant in this org and mint only what it still allows.
+        /// A capability token is verified offline and cannot be revoked once
+        /// out, so this is where revocation bites — a revoked or lapsed grant
+        /// mints nothing, and the token's expiry is capped by the grant's.
+        /// Requires --agent.
+        #[arg(long)]
+        org: Option<String>,
+        /// The agent whose cloud grant backs this token (with --org).
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// List the capability tokens this node has issued — metadata only (id,
+    /// label, scope, lifetime, whether it has been revoked). The tokens
+    /// themselves are not stored and cannot be shown again.
+    Tokens {
+        /// Include tokens that are revoked or past their expiry.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        data_dir: Option<String>,
+    },
+    /// Revoke an issued token by its id (from `aura node tokens`). The node
+    /// refuses it from that moment on, on git requests and on its read API.
+    Revoke {
+        /// Token id as shown by `aura node tokens`.
+        id: String,
+        #[arg(long)]
+        data_dir: Option<String>,
+    },
+    /// Report what this node holds — its repos, its signed ref-log and its
+    /// token metadata — to the Aura cloud, so the web console can show it.
+    ///
+    /// Signed with the node's own key and safe to run on a timer: the ref-log
+    /// is sent incrementally from a high-water mark, and a re-run with nothing
+    /// new sends nothing new.
+    Report {
+        /// Operator label for this node in the console. Remembered, so a
+        /// scheduled run needs no flags.
+        #[arg(long)]
+        name: Option<String>,
+        /// Public base URL clients use to reach this node. Also remembered.
+        #[arg(long)]
+        url: Option<String>,
+        /// Cloud to report to. Defaults to the cloud this machine signed in to.
+        #[arg(long)]
+        cloud: Option<String>,
+        /// Re-send the entire ref-log, ignoring the high-water mark.
+        #[arg(long)]
+        full: bool,
+        /// Print the signed report instead of sending it.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        data_dir: Option<String>,
+    },
+    /// Mirror upstream repositories onto this node — a GitHub or GitLab repo
+    /// so agents clone from hardware you own instead of rate-limited forge
+    /// infrastructure, or another Aura node to replicate it.
+    Mirror {
+        #[command(subcommand)]
+        cmd: mirror::MirrorSubcommands,
+    },
+    /// Bridge hosted repos to a downstream forge — every push accepted by
+    /// this node is forwarded to GitHub/GitLab automatically, so the team
+    /// can make `aura://` the primary remote without leaving GitHub behind.
+    Bridge {
+        #[command(subcommand)]
+        cmd: bridge::BridgeSubcommands,
     },
     /// Install the `git-remote-aura` helper onto PATH so stock git can clone,
     /// fetch and push `aura://` URLs. Creates a `git-remote-aura` symlink to the
@@ -149,6 +244,7 @@ pub fn run(sub: &NodeSubcommands) -> Result<(), Box<dyn std::error::Error>> {
             require_auth,
             public_read,
             allow_anonymous,
+            mirror_interval,
         } => run_serve(
             addr,
             data_dir.as_deref(),
@@ -158,6 +254,7 @@ pub fn run(sub: &NodeSubcommands) -> Result<(), Box<dyn std::error::Error>> {
                 public_read: *public_read,
                 allow_anonymous: *allow_anonymous,
             },
+            *mirror_interval,
         ),
         NodeSubcommands::List { data_dir } => run_list(data_dir.as_deref()),
         NodeSubcommands::Reflog { id, data_dir, json } => {
@@ -184,8 +281,40 @@ pub fn run(sub: &NodeSubcommands) -> Result<(), Box<dyn std::error::Error>> {
             push,
             read,
             ttl,
+            label,
             data_dir,
-        } => run_token(id.as_deref(), *all_repos, *push, *read, *ttl, data_dir.as_deref()),
+            org,
+            agent,
+        } => run_token(
+            id.as_deref(),
+            *all_repos,
+            *push,
+            *read,
+            *ttl,
+            label.as_deref(),
+            data_dir.as_deref(),
+            org.as_deref(),
+            agent.as_deref(),
+        ),
+        NodeSubcommands::Tokens { all, data_dir } => run_tokens(*all, data_dir.as_deref()),
+        NodeSubcommands::Revoke { id, data_dir } => run_revoke(id, data_dir.as_deref()),
+        NodeSubcommands::Report {
+            name,
+            url,
+            cloud,
+            full,
+            dry_run,
+            data_dir,
+        } => report::run(
+            data_dir.as_deref(),
+            name.as_deref(),
+            url.as_deref(),
+            cloud.as_deref(),
+            *full,
+            *dry_run,
+        ),
+        NodeSubcommands::Mirror { cmd } => mirror::run(cmd, |d| resolve_data_dir(d)),
+        NodeSubcommands::Bridge { cmd } => bridge::run(cmd, |d| resolve_data_dir(d)),
         NodeSubcommands::InstallHelper { dir, force } => {
             run_install_helper(dir.as_deref(), *force)
         }
@@ -226,6 +355,7 @@ fn run_serve(
     addr: &str,
     data_dir: Option<&str>,
     auth: ServeAuth,
+    mirror_interval: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Fail fast if the system git can't provide the smart-HTTP backend.
     smart_http::ensure_http_backend()?;
@@ -303,14 +433,35 @@ fn run_serve(
             format!("git push http://{sock}/<repo-id> <branch>").dimmed()
         );
     } else {
+        let mirrors = mirror::all_mirrors(&store);
         println!("  {} {} repo(s) hosted:", "•".dimmed(), hosted.len());
         for id in &hosted {
-            println!("    {} {}", "→".dimmed(), id);
+            match mirrors.get(id) {
+                Some(cfg) => println!(
+                    "    {} {} {}",
+                    "→".dimmed(),
+                    id,
+                    format!("· mirror of {}", cfg.upstream).dimmed()
+                ),
+                None => println!("    {} {}", "→".dimmed(), id),
+            }
         }
+    }
+
+    let refresh = mirror_refresh_plan(&store, mirror_interval);
+    if let Some(secs) = refresh {
+        println!(
+            "  {} mirrors refresh every {}",
+            "•".dimmed(),
+            format!("{secs}s").cyan()
+        );
     }
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio runtime: {e}"))?;
     rt.block_on(async move {
+        if let Some(secs) = refresh {
+            spawn_mirror_refresh(store.clone(), secs);
+        }
         let app = smart_http::router(store);
         let listener = tokio::net::TcpListener::bind(sock)
             .await
@@ -321,6 +472,57 @@ fn run_serve(
         Ok::<(), String>(())
     })?;
     Ok(())
+}
+
+/// Whether this serving node should refresh its mirrors on a timer, and how
+/// often. `None` means it will not — either the operator asked for no schedule,
+/// or there is nothing mirrored to refresh, in which case a timer would only
+/// wake up to find no work.
+fn mirror_refresh_plan(store: &NodeStore, requested: Option<u64>) -> Option<u64> {
+    let secs = requested?;
+    if secs == 0 {
+        return None;
+    }
+    if mirror::all_mirrors(store).is_empty() {
+        return None;
+    }
+    Some(secs)
+}
+
+/// Refresh every mirror on a timer, in the background, for as long as the node
+/// serves. Sync runs on a blocking worker because it shells out to `git fetch`,
+/// which must not occupy an async executor thread while it talks to a forge.
+///
+/// A failing upstream is reported and retried on the next tick rather than
+/// stopping the timer: a node whose refresh loop dies on one bad credential
+/// would silently stop updating every other mirror it holds.
+fn spawn_mirror_refresh(store: Arc<NodeStore>, secs: u64) {
+    tokio::spawn(async move {
+        let period = std::time::Duration::from_secs(secs);
+        loop {
+            tokio::time::sleep(period).await;
+            let store = store.clone();
+            let results = match tokio::task::spawn_blocking(move || mirror::sync_all(&store)).await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("aura node: mirror refresh task failed: {e}");
+                    continue;
+                }
+            };
+            for (id, res) in results {
+                match res {
+                    Ok(outcome) if outcome.changes.is_empty() => {}
+                    Ok(outcome) => println!(
+                        "{} mirror {id} refreshed — {} ref change(s)",
+                        "◆".cyan(),
+                        outcome.changes.len()
+                    ),
+                    Err(e) => eprintln!("aura node: mirror {id} refresh failed: {e}"),
+                }
+            }
+        }
+    });
 }
 
 fn run_list(data_dir: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -341,13 +543,17 @@ fn run_list(data_dir: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
 /// `aura node token` — mint a signed capability token that authorizes clone
 /// and/or push to a repo hosted on this node. Signed with the node's own
 /// identity key, so the same node verifies it later with no external state.
+#[allow(clippy::too_many_arguments)]
 fn run_token(
     id: Option<&str>,
     all_repos: bool,
     push: bool,
     read: bool,
     ttl: Option<i64>,
+    label: Option<&str>,
     data_dir: Option<&str>,
+    org: Option<&str>,
+    agent: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let scope = if all_repos {
         auth::SCOPE_ALL.to_string()
@@ -359,19 +565,82 @@ fn run_token(
         id.to_string()
     };
 
-    let caps = auth::normalize_caps(push, read);
-    if caps.is_empty() {
-        return Err("grant at least one capability: --push and/or --read".into());
-    }
-
     // Default 30-day TTL; `--ttl 0` mints a non-expiring token.
-    let ttl = ttl.unwrap_or(30 * 24 * 3600);
+    let requested_ttl = ttl.unwrap_or(30 * 24 * 3600);
     let now = chrono::Utc::now().timestamp();
 
-    let store = NodeStore::new(resolve_data_dir(data_dir))?;
+    // Two ways to decide what the token may do. The local path trusts the
+    // operator's `--push/--read`; the grant-backed path (`--org --agent`) reads
+    // the agent's live cloud grant and mints only what it still allows, capping
+    // expiry at the grant's own — the point where a revoked or lapsed grant
+    // stops producing capabilities that the offline node could never take back.
+    let (caps, ttl, backing) = match (org, agent) {
+        (None, None) => {
+            let caps = auth::normalize_caps(push, read);
+            if caps.is_empty() {
+                return Err("grant at least one capability: --push and/or --read \
+                            (or --org/--agent to mint from a cloud grant)"
+                    .into());
+            }
+            (caps, requested_ttl, None)
+        }
+        (Some(org), Some(agent)) => {
+            let grant = fetch_active_grant(org, agent)?;
+            let (gr, gp) = node_caps_from_scopes(&grant.scopes);
+            if !gr && !gp {
+                return Err(format!(
+                    "the live grant for agent '{agent}' in org '{org}' carries no repo access \
+                     (needs repo:read or repo:push) — a node token would grant nothing"
+                )
+                .into());
+            }
+            // If the operator also named caps, mint the intersection and refuse
+            // to over-grant; otherwise mint everything the grant maps to.
+            let (want_read, want_push) = if push || read {
+                (read || push, push)
+            } else {
+                (gr, gp)
+            };
+            if want_push && !gp {
+                return Err(format!(
+                    "the grant for agent '{agent}' does not allow push (no repo:push)"
+                )
+                .into());
+            }
+            if want_read && !gr && !gp {
+                return Err(format!(
+                    "the grant for agent '{agent}' does not allow read (no repo:read)"
+                )
+                .into());
+            }
+            let caps = auth::normalize_caps(want_push, want_read);
+            if caps.is_empty() {
+                return Err("nothing to mint: the requested caps are not in the grant".into());
+            }
+            // Cap expiry at the grant's. A grant with no expiry leaves the
+            // requested TTL alone; a grant that has already lapsed mints nothing
+            // (which is also how a revoked grant reads once its wall passes).
+            let capped_ttl = cap_ttl_to_grant(now, requested_ttl, grant.expires_at)?;
+            (caps, capped_ttl, Some(grant))
+        }
+        _ => {
+            return Err("--org and --agent go together — name both to mint from a cloud grant".into());
+        }
+    };
+
+    let root = resolve_data_dir(data_dir);
+    let store = NodeStore::new(root.clone())?;
     let key = store.node_signing_key()?;
     let issuer = key.key_id();
-    let token = auth::CapabilityToken::new(scope.clone(), caps.clone(), now, ttl).issue(&key)?;
+    let claims = auth::CapabilityToken::new(scope.clone(), caps.clone(), now, ttl);
+    let token = claims.issue(&key)?;
+
+    // Record what was minted so the operator can list and revoke it later. The
+    // claims are re-read from the wire token rather than taken from the struct
+    // above, because `issue` stamps the issuer as it signs — the ledger should
+    // describe the token that exists, not the one we asked for.
+    let recorded = auth::CapabilityToken::parse_and_verify(&token, &key.verifying_key())?;
+    let token_id = tokens::record_issue(&root, &token, label.unwrap_or_default(), &recorded)?;
 
     let scope_display = if scope == auth::SCOPE_ALL {
         "* (every repo on this node)".to_string()
@@ -379,9 +648,20 @@ fn run_token(
         scope.clone()
     };
     println!("{} capability token minted", "◆".cyan().bold());
+    println!("  {} id     {}", "•".dimmed(), token_id);
+    if let Some(l) = label.map(str::trim).filter(|s| !s.is_empty()) {
+        println!("  {} label  {}", "•".dimmed(), l);
+    }
     println!("  {} repo   {}", "•".dimmed(), scope_display);
     println!("  {} caps   {}", "•".dimmed(), caps.join(", "));
     println!("  {} issuer {}", "•".dimmed(), issuer.dimmed());
+    if let Some(g) = &backing {
+        println!(
+            "  {} from   {}",
+            "•".dimmed(),
+            format!("cloud grant {} (agent {})", g.id, g.agent).dimmed()
+        );
+    }
     if ttl <= 0 {
         println!("  {} expiry {}", "•".dimmed(), "never".dimmed());
     } else {
@@ -399,6 +679,109 @@ fn run_token(
     println!(
         "      {}",
         format!("git clone aura://x-access-token:{token}@<host>/{id_hint}").dimmed()
+    );
+    println!();
+    println!(
+        "  {} this is the only time the token is shown — the node keeps its {}, not the token",
+        "!".yellow().bold(),
+        "id and label".bold()
+    );
+    println!(
+        "      {}",
+        format!("revoke it later with `aura node revoke {token_id}`").dimmed()
+    );
+    Ok(())
+}
+
+/// `aura node tokens` — what this node has handed out. Metadata only; the
+/// tokens themselves were never stored and cannot be reprinted.
+fn run_tokens(all: bool, data_dir: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let root = resolve_data_dir(data_dir);
+    let ledger = tokens::load(&root)?;
+    let now = chrono::Utc::now().timestamp();
+
+    let shown: Vec<&tokens::TokenRecord> = ledger
+        .tokens
+        .iter()
+        .filter(|t| {
+            all || (!t.revoked && t.expires_at.map(|exp| exp > now).unwrap_or(true))
+        })
+        .collect();
+
+    if ledger.tokens.is_empty() {
+        println!(
+            "{} this node has issued no capability tokens yet — mint one with {}",
+            "•".yellow(),
+            "aura node token".bold()
+        );
+        return Ok(());
+    }
+    if shown.is_empty() {
+        println!(
+            "{} no live tokens ({} revoked or expired) — {} to see them",
+            "•".yellow(),
+            ledger.tokens.len(),
+            "--all".bold()
+        );
+        return Ok(());
+    }
+
+    println!("{} {} token(s):", "◆".cyan(), shown.len());
+    for t in shown {
+        let state = if t.revoked {
+            "revoked".red().to_string()
+        } else if t.expires_at.map(|exp| exp <= now).unwrap_or(false) {
+            "expired".yellow().to_string()
+        } else {
+            "live".green().to_string()
+        };
+        let repo = t.repo.clone().unwrap_or_else(|| "* (node-wide)".to_string());
+        let label = if t.label.is_empty() {
+            "(no label)".dimmed().to_string()
+        } else {
+            t.label.clone()
+        };
+        println!(
+            "  {} {}  {:<7} {:<6} {}  {}",
+            "→".dimmed(),
+            t.id,
+            t.scope,
+            state,
+            repo,
+            label
+        );
+        println!(
+            "        {}",
+            format!(
+                "created {} · expires {} · last used {}",
+                report::rfc3339(t.created_at),
+                t.expires_at.map(report::rfc3339).unwrap_or_else(|| "never".to_string()),
+                t.last_used_at.map(report::rfc3339).unwrap_or_else(|| "never".to_string()),
+            )
+            .dimmed()
+        );
+    }
+    Ok(())
+}
+
+/// `aura node revoke <id>` — stop honouring one issued token.
+fn run_revoke(id: &str, data_dir: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let root = resolve_data_dir(data_dir);
+    let record = tokens::revoke(&root, id.trim())?;
+    println!(
+        "{} token {} revoked {}",
+        "✓".green().bold(),
+        record.id,
+        format!(
+            "· {} on {}",
+            record.scope,
+            record.repo.clone().unwrap_or_else(|| "* (node-wide)".to_string())
+        )
+        .dimmed()
+    );
+    println!(
+        "  {} a serving node picks this up on its next request — no restart needed",
+        "•".dimmed()
     );
     Ok(())
 }
@@ -622,6 +1005,148 @@ fn print_verify_summary(repo_id: Option<&str>, summary: &reflog::ChainSummary) {
 /// that name and runs it. `cargo install` already drops a real standalone
 /// binary; this command is for installs that ship only `aura` (the app bundle),
 /// or to add the helper to a chosen PATH directory.
+/// The slice of a cloud agent grant a node token cares about.
+#[derive(Debug)]
+struct GrantInfo {
+    id: String,
+    agent: String,
+    scopes: Vec<String>,
+    /// Grant expiry as a unix second, or `None` for "never".
+    expires_at: Option<i64>,
+}
+
+/// Map the cloud scope vocabulary onto the node's two capabilities. Only the two
+/// repo scopes cross the plane boundary — `intent:write`, `crew:claim` and the
+/// rest are cloud-API powers a git token cannot express. `repo:push` implies
+/// read, mirroring `normalize_caps`.
+fn node_caps_from_scopes(scopes: &[String]) -> (bool, bool) {
+    let mut read = false;
+    let mut push = false;
+    for s in scopes {
+        match s.as_str() {
+            "repo:read" => read = true,
+            "repo:push" => {
+                push = true;
+                read = true;
+            }
+            _ => {}
+        }
+    }
+    (read, push)
+}
+
+/// Cap a requested TTL by a grant's expiry. Returns the TTL (in seconds from
+/// `now`) to mint with: `0` stays "never" only when the grant itself never
+/// expires. A grant already past its expiry is refused — there is nothing left
+/// to delegate, which is exactly how a revoked grant reads once its wall passes.
+fn cap_ttl_to_grant(
+    now: i64,
+    requested_ttl: i64,
+    grant_expires_at: Option<i64>,
+) -> Result<i64, String> {
+    // The instant the requested TTL would land on (None = never).
+    let requested_exp = if requested_ttl <= 0 { None } else { Some(now + requested_ttl) };
+    let effective_exp = match (requested_exp, grant_expires_at) {
+        (None, None) => None,
+        (Some(r), None) => Some(r),
+        (None, Some(g)) => Some(g),
+        (Some(r), Some(g)) => Some(r.min(g)),
+    };
+    match effective_exp {
+        None => Ok(0),
+        Some(exp) if exp <= now => Err(
+            "the grant has already expired — nothing left to mint a token from".to_string(),
+        ),
+        Some(exp) => Ok(exp - now),
+    }
+}
+
+/// Ask the cloud what this agent may actually do here, and refuse anything
+/// that is not a live grant.
+///
+/// The question goes to `/scopes/effective` rather than to the grant *list*
+/// for a reason worth stating: a list is keyed by agent name alone, so picking
+/// the first row whose name matches would hand this member the scopes of a
+/// grant minted for somebody else. The server resolves by agent *and* the
+/// member the caller is acting as — the pair the uniqueness index is built on
+/// — so there is exactly one answer and the client cannot pick the wrong one.
+///
+/// An expired grant comes back as `expired` rather than as an absent row, so
+/// the message below can say which of the two happened instead of guessing.
+fn fetch_active_grant(org: &str, agent: &str) -> Result<GrantInfo, String> {
+    let (url, token) = crate::recall_cloud_creds()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let resp = client
+        .get(format!("{url}/api/v2/orgs/{org}/scopes/effective"))
+        .query(&[("agent", agent)])
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .map_err(|e| format!("network: {e}"))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .map_err(|e| format!("parse grant (HTTP {status}): {e}"))?;
+    if !status.is_success() {
+        let detail = body["detail"].as_str().unwrap_or_else(|| {
+            body["error"].as_str().unwrap_or("")
+        });
+        return Err(format!("HTTP {status} reading the grant: {detail}"));
+    }
+
+    grant_from_effective(org, agent, &body)
+}
+
+/// Read the server's effective-scopes answer, refusing anything that is not a
+/// live grant. Split from the request above so the three outcomes a human
+/// actually meets — granted, lapsed, never granted — are testable without a
+/// server, and so an unknown future status word refuses rather than mints.
+fn grant_from_effective(
+    org: &str,
+    agent: &str,
+    body: &serde_json::Value,
+) -> Result<GrantInfo, String> {
+    match body["status"].as_str().unwrap_or("none") {
+        "active" => {}
+        "expired" => {
+            let when = body["expires_at"].as_str().unwrap_or("its expiry");
+            return Err(format!(
+                "the grant for agent '{agent}' lapsed at {when} — renew it with `aura access grant` before minting"
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "no grant for agent '{agent}' in org '{org}' acting as you — grant one with `aura access grant`"
+            ));
+        }
+    }
+
+    let scopes: Vec<String> = body["scopes"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    // A grant carrying no scope delegates no power, so minting from it would
+    // hand out a token that can do nothing while reading as authorisation.
+    if scopes.is_empty() {
+        return Err(format!(
+            "the grant for agent '{agent}' carries no scopes — there is nothing to mint from"
+        ));
+    }
+    let expires_at = body["expires_at"].as_str().and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.timestamp())
+    });
+    Ok(GrantInfo {
+        id: body["grant_id"].as_str().unwrap_or_default().to_string(),
+        agent: body["agent"].as_str().unwrap_or(agent).to_string(),
+        scopes,
+        expires_at,
+    })
+}
+
 fn run_install_helper(dir: Option<&str>, force: bool) -> Result<(), Box<dyn std::error::Error>> {
     // The binary git should exec for `aura://` remotes: the real `aura` on disk.
     // Canonicalize so the link points at the actual file, not another symlink.
@@ -1067,5 +1592,105 @@ impl NodeStore {
         }
         out.sort();
         out
+    }
+}
+
+#[cfg(test)]
+mod grant_mint_tests {
+    use super::{cap_ttl_to_grant, grant_from_effective, node_caps_from_scopes};
+    use serde_json::json;
+
+    #[test]
+    fn a_live_grant_mints_with_the_scopes_the_server_resolved() {
+        let g = grant_from_effective(
+            "naridon",
+            "claude",
+            &json!({
+                "agent": "claude",
+                "status": "active",
+                "grant_id": "11111111-1111-4111-8111-111111111111",
+                "scopes": ["repo:read", "repo:push"],
+                "expires_at": "2030-01-01T00:00:00Z",
+            }),
+        )
+        .expect("a live grant must mint");
+        assert_eq!(g.agent, "claude");
+        assert_eq!(g.scopes, vec!["repo:read".to_string(), "repo:push".to_string()]);
+        assert!(g.expires_at.is_some(), "the grant's wall must reach the mint");
+    }
+
+    #[test]
+    fn a_lapsed_grant_says_so_instead_of_saying_it_never_existed() {
+        let err = grant_from_effective(
+            "naridon",
+            "claude",
+            &json!({ "status": "expired", "expires_at": "2020-01-01T00:00:00Z" }),
+        )
+        .expect_err("a lapsed grant must not mint");
+        assert!(err.contains("lapsed"), "{err}");
+        assert!(err.contains("2020-01-01"), "the human needs the date: {err}");
+    }
+
+    #[test]
+    fn an_ungranted_agent_mints_nothing_and_is_told_how_to_get_one() {
+        let err = grant_from_effective("naridon", "gemini", &json!({ "status": "none" }))
+            .expect_err("an absent grant must not mint");
+        assert!(err.contains("no grant for agent 'gemini'"), "{err}");
+        assert!(err.contains("aura access grant"), "{err}");
+    }
+
+    #[test]
+    fn an_unrecognised_status_refuses_rather_than_minting() {
+        // A server that grows a fourth word must not be read as permission.
+        assert!(grant_from_effective("naridon", "claude", &json!({ "status": "pending" })).is_err());
+        assert!(grant_from_effective("naridon", "claude", &json!({})).is_err());
+    }
+
+    #[test]
+    fn a_grant_with_no_scopes_is_not_authorisation() {
+        let err = grant_from_effective(
+            "naridon",
+            "claude",
+            &json!({ "status": "active", "scopes": [] }),
+        )
+        .expect_err("an empty grant must not mint");
+        assert!(err.contains("no scopes"), "{err}");
+    }
+
+    #[test]
+    fn only_repo_scopes_cross_the_plane() {
+        // repo:push implies read.
+        assert_eq!(node_caps_from_scopes(&["repo:push".into()]), (true, true));
+        assert_eq!(node_caps_from_scopes(&["repo:read".into()]), (true, false));
+        // Cloud-only powers map to nothing a git token can express.
+        assert_eq!(
+            node_caps_from_scopes(&["intent:write".into(), "crew:claim".into()]),
+            (false, false)
+        );
+        assert_eq!(
+            node_caps_from_scopes(&["repo:read".into(), "billing:read".into()]),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn ttl_is_capped_by_the_grant() {
+        let now = 1_000_000;
+        // No grant expiry: the requested TTL stands; 0 stays "never".
+        assert_eq!(cap_ttl_to_grant(now, 3600, None).unwrap(), 3600);
+        assert_eq!(cap_ttl_to_grant(now, 0, None).unwrap(), 0);
+        // Grant expires sooner than the request → capped to the grant.
+        assert_eq!(cap_ttl_to_grant(now, 3600, Some(now + 600)).unwrap(), 600);
+        // Grant expires later than the request → request stands.
+        assert_eq!(cap_ttl_to_grant(now, 600, Some(now + 3600)).unwrap(), 600);
+        // A "never" request against an expiring grant is bounded by the grant.
+        assert_eq!(cap_ttl_to_grant(now, 0, Some(now + 900)).unwrap(), 900);
+    }
+
+    #[test]
+    fn an_expired_grant_mints_nothing() {
+        let now = 1_000_000;
+        assert!(cap_ttl_to_grant(now, 3600, Some(now - 1)).is_err());
+        assert!(cap_ttl_to_grant(now, 3600, Some(now)).is_err());
     }
 }

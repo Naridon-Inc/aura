@@ -8,7 +8,7 @@
 // Everything visual here comes from `components/board`; this module's only job
 // is to say which task field goes in which slot.
 
-import { useMemo, type JSX, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type JSX, type ReactNode } from "react";
 import { Bot, Clock, GitBranch, Link2, ListChecks, Users } from "lucide-react";
 
 import {
@@ -45,6 +45,13 @@ import {
   shouldShowStateChip,
 } from "./taskGlyphs";
 import { DEFAULT_DISPLAY_PROPS } from "./TasksFilterBar";
+import {
+  budgetGroups,
+  rowCap,
+  FIRST_PAINT_CARDS,
+  REVEAL_STEP_CARDS,
+} from "./rowBudget";
+import { RevealFoot } from "./RevealFoot";
 
 export function TasksBoardView({
   tasks,
@@ -102,6 +109,23 @@ export function TasksBoardView({
     if (parent) childCounts.set(parent, (childCounts.get(parent) ?? 0) + 1);
   }
 
+  // How many cards a lane draws before the reader scrolls — see ./rowBudget.
+  // A card is heavier than a list row, and the board drew every one of them:
+  // on a real board that is the same seconds-long blocked render the list had
+  // (AURA-263), which is also why the Display menu looked like it needed a
+  // second click (AURA-269).
+  //
+  // The budget is per lane, because lanes scroll independently — one shared
+  // pool would let a long Backlog starve Done of every card. The reveal
+  // *count* is shared: reaching the foot of one lane costs nothing in a lane
+  // that had nothing held back.
+  const [reveals, setReveals] = useState(0);
+  useEffect(() => {
+    setReveals(0);
+  }, [tasks, groupBy]);
+  const reveal = useCallback(() => setReveals((r) => r + 1), []);
+  const cap = rowCap(reveals, FIRST_PAINT_CARDS, REVEAL_STEP_CARDS);
+
   return (
     <BoardFrame>
       {groups.map((g) => {
@@ -111,12 +135,15 @@ export function TasksBoardView({
         // whether it's replacing an owner or adding one — so those lanes stay
         // inert rather than doing something surprising.
         const droppable = g.status != null;
+        const { groups: lanes, hidden } = budgetGroups([g], cap);
+        const drawn = lanes[0] ?? { ...g, total: g.tasks.length, tasks: [] };
         return (
           <BoardColumn
             key={g.key}
             title={g.label}
             titleHint={g.hint}
-            count={g.tasks.length}
+            // The lane's real size, not the number of cards drawn.
+            count={drawn.total}
             loading={loading}
             collapsible
             glyph={g.glyph}
@@ -134,7 +161,7 @@ export function TasksBoardView({
               ) : undefined
             }
           >
-            {g.tasks.map((t) => (
+            {drawn.tasks.map((t) => (
               <TaskCard
                 key={t.id}
                 task={t}
@@ -151,6 +178,7 @@ export function TasksBoardView({
                 onDragStart={() => onDragStart(t.id)}
               />
             ))}
+            <RevealFoot hidden={hidden} onReveal={reveal} />
           </BoardColumn>
         );
       })}

@@ -13,13 +13,14 @@
 // strict → settings, hub → settings, agents → focus the chat (right
 // rail).
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import {
   isManagerTurnInFlight,
   useManagerSummaries,
   useManagerTurnsTick,
 } from "../../lib/managerStore";
+import { useDocumentVisibility } from "../../lib/useDocumentVisibility";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 
 type Props = {
@@ -57,6 +58,11 @@ export function StatusPills({
     strict: false,
     captureOff: false,
   });
+  const visible = useDocumentVisibility();
+  // The poll reads its own last answer without re-arming the interval on
+  // every state change — see the "keep the last good answer" note below.
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   // "Aura is working" — the persistent chat activity signal. The manager
   // chat surface unmounts the moment you focus a Claude terminal, so its
@@ -83,29 +89,51 @@ export function StatusPills({
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      const next: State = {
-        strict: false,
-        captureOff: false,
-      };
+      // Seed from what we already know, not from `false`. Each read fills in
+      // its own field; a read that throws leaves the previous answer alone,
+      // so a transient settings-file lock can't blink the Strict pill off and
+      // tell the user their policy isn't enforced when it is.
+      const prev = stateRef.current;
+      let strict = prev.strict;
+      let captureOff = prev.captureOff;
       try {
-        const s = await api.settingsLoad();
-        next.strict = s.strict_gatekeeper_mode;
+        strict = (await api.settingsLoad()).strict_gatekeeper_mode;
       } catch {}
       if (repoRoot) {
         try {
           const cap = await api.captureStatus(repoRoot);
-          next.captureOff = cap.is_git && !cap.enabled;
+          captureOff = cap.is_git && !cap.enabled;
         } catch {}
+      } else {
+        captureOff = false;
       }
-      if (!cancelled) setState(next);
+      if (cancelled) return;
+      // Neither pill changes more than a handful of times a session, so
+      // publishing a fresh object every 4s only ever re-rendered the footer
+      // for nothing. Keep the old object when both flags held.
+      setState((cur) =>
+        cur.strict === strict && cur.captureOff === captureOff
+          ? cur
+          : { strict, captureOff },
+      );
     };
     poll();
-    const id = window.setInterval(poll, 4000);
+    // `settingsLoad` is a full settings.toml parse off disk — there is no
+    // reason to keep doing that behind a hidden window. The effect re-runs on
+    // `visible`, so coming back also refreshes immediately.
+    if (!visible) {
+      return () => {
+        cancelled = true;
+      };
+    }
+    // A full settings.toml parse off disk per tick — settings change at
+    // human frequency, so 15s is plenty and a third of the old disk churn.
+    const id = window.setInterval(poll, 15000);
     return () => {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [repoRoot]);
+  }, [repoRoot, visible]);
 
   return (
     <div className="flex items-center gap-1 text-text-3">

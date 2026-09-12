@@ -16,6 +16,11 @@ export type WorktreeRef = {
    *  `git_worktree_list`). Powers the Workspaces view's recency grouping.
    *  Absent/null when the branch tip can't be resolved. */
   head_committed_at?: number | null;
+  /** Unix seconds of when this copy was made (from `git_worktree_list`). A
+   *  copy cut off an untouched branch has an old HEAD but a new birthday, so
+   *  this is the only field that answers "did I just create this?". Absent
+   *  for the main checkout and wherever git's admin dir can't be read. */
+  created_at?: number | null;
 };
 
 export type Workspace = {

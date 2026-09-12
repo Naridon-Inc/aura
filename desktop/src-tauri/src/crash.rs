@@ -42,8 +42,6 @@ pub fn install_panic_hook() {
 }
 
 fn write_crash_report(info: &panic::PanicHookInfo<'_>) -> std::io::Result<()> {
-    let dir = crashes_dir();
-    fs::create_dir_all(&dir)?;
     let timestamp_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -63,6 +61,42 @@ fn write_crash_report(info: &panic::PanicHookInfo<'_>) -> std::io::Result<()> {
     let thread = std::thread::current().name().map(String::from);
     let backtrace = format!("{}", std::backtrace::Backtrace::force_capture());
 
+    write_report_inner(timestamp_ms, panic_message, location, thread, backtrace)
+}
+
+/// File a report for something that killed the session but was not a panic —
+/// today that is `watchdog.rs` catching a frozen main thread, which leaves no
+/// panic payload and no crash log of any kind behind. It lands in the same
+/// directory and carries the same field names, so the launch-time recovery
+/// toast picks it up with no changes of its own.
+///
+/// Best-effort by design: this runs on a path where the app is already lost,
+/// so a failure to write is logged and swallowed rather than propagated.
+pub fn write_report(
+    message: String,
+    location: Option<String>,
+    thread: Option<String>,
+    backtrace: String,
+) {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if let Err(e) = write_report_inner(timestamp_ms, message, location, thread, backtrace) {
+        eprintln!("[crash.rs] failed to write report: {e}");
+    }
+}
+
+fn write_report_inner(
+    timestamp_ms: u64,
+    panic_message: String,
+    location: Option<String>,
+    thread: Option<String>,
+    backtrace: String,
+) -> std::io::Result<()> {
+    let dir = crashes_dir();
+    fs::create_dir_all(&dir)?;
+
     let report = CrashReport {
         timestamp_ms,
         panic_message,
@@ -79,7 +113,9 @@ fn write_crash_report(info: &panic::PanicHookInfo<'_>) -> std::io::Result<()> {
     fs::write(path, json)
 }
 
-fn crashes_dir() -> PathBuf {
+/// Shared with `watchdog.rs` — a wedge's stall bundle lands next to the
+/// crash reports so one directory explains every bad end this app has.
+pub(crate) fn crashes_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     home.join(".aura").join("aura-shell-crashes")
 }

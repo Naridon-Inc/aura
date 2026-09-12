@@ -1,34 +1,27 @@
-//! What repo is this folder, and which org does it belong to?
+//! Which project is this folder, and which org does it push to?
 //!
-//! One rule, one place. Before this module the answer was spread across
-//! `cloud_session_sync::resolve_repo_full_name` (GitHub URLs only, everything
-//! else fell through) and a pair of regexes in `src/lib/repoSlug.ts` that
-//! answered the same question a second, slightly different way. Two
-//! implementations of an identity rule is one too many: they drift, and a repo
-//! that resolves one way in Rust and another way in TypeScript ends up filed
-//! under two names in the cloud.
+//! The *naming* rule itself lives in [`aura_repo_identity`] and is re-exported
+//! below, because the desktop is not the only client that has to answer it:
+//! `aura-cli` answers it too, and when each crate carried its own copy they
+//! drifted — the desktop filing a remote-less project as
+//! `local/<dirname>-<id>` while the CLI filed the same folder as
+//! `local/<dirname>`, so one project became two cloud rows.
 //!
-//! Three things live here:
+//! What stays here is what only the desktop has:
 //!
-//! * **[`remote_slug`] — the canonical name of a hosted repo.** GitHub keeps
-//!   its historic bare `owner/repo` shape so no existing `repos` row is
-//!   renamed. Every other host — gitlab.com, bitbucket, a self-hosted Gitea or
-//!   GitLab behind a VPN — is `host/path…`, which is what stops GitLab's
-//!   `acme/api` from being filed as GitHub's `acme/api`.
-//! * **[`local_project_slug`] — a stable id for a repo with no remote.** The
-//!   old answer was `local/<dirname>`, and with `repos UNIQUE(org_id,
-//!   github_full_name)` that silently merged `~/work/api` and `~/other/api`
-//!   into one row: two projects, one history, no warning. The id is now
-//!   distinct per project.
 //! * **[`ProjectBinding`] — the org this project pushes to, chosen not
 //!   inferred.** A bound project sends its org on every cloud request; the
 //!   server validates that claim against the caller's membership rather than
 //!   assuming whichever org happened to sort first.
+//! * **[`repo_slug`] — the name including that binding.** An explicit
+//!   `repo_full_name` override wins over anything derived from disk, which is
+//!   the one place the desktop's answer may differ from the rule's.
+//! * **[`branch`] — which branch this checkout has out**, read from *this*
+//!   worktree's own gitdir rather than the shared one.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// Filename under `.aura/` holding the explicit project → org binding.
 const BINDING_FILE: &str = "cloud_binding.json";
@@ -38,11 +31,6 @@ const BINDING_FILE: &str = "cloud_binding.json";
 /// against the caller's own membership, so a claim it cannot back up is a 403
 /// rather than a silent write into someone else's org.
 pub const ORG_HEADER: &str = "X-Aura-Org";
-
-/// How many hex characters of a digest/uuid go into a local slug. 48 bits is
-/// far more than enough to keep one developer's project folders apart, and
-/// short enough that `local/api-3f2a1b90cd12` is still readable in a dashboard.
-const ID_LEN: usize = 12;
 
 // ─── Explicit binding ───────────────────────────────────────────────────────
 
@@ -135,393 +123,219 @@ pub fn repo_slug(repo_root: &Path) -> String {
     remote_slug_for_repo(repo_root).unwrap_or_else(|| local_project_slug(repo_root))
 }
 
-/// The canonical name derived from the repo's `origin` remote, or `None` when
-/// the project has no remote to derive one from.
+// ─── The naming rule ────────────────────────────────────────────────────────
+//
+// Re-exported rather than restated. Every one of these was defined here and in
+// `aura-cli` separately, and the two answers disagreed for exactly the projects
+// that have no remote — which is most of the rows in a production picker.
+
+pub use aura_repo_identity::{
+    local_project_slug, origin_url, remote_slug_for_repo, worktree_name,
+};
+
+/// The names an older build filed this checkout under, so the cloud can move
+/// their history onto the project it actually belongs to.
 ///
-/// Callers that need "does this have a cloud counterpart?" want this; callers
-/// that need a name no matter what want [`repo_slug`].
-pub fn remote_slug_for_repo(repo_root: &Path) -> Option<String> {
-    remote_slug(&origin_url(repo_root)?)
+/// Thin wrapper over [`aura_repo_identity::superseded_slugs`] that passes the
+/// desktop's own answer for "what is this project called now" — which honours
+/// an explicit [`ProjectBinding`] and so can differ from the derived name.
+pub fn superseded_slugs(repo_root: &Path) -> Vec<String> {
+    aura_repo_identity::superseded_slugs(repo_root, &repo_slug(repo_root))
 }
 
-/// Read the `origin` remote URL out of `<repo_root>/.git/config`.
+/// The branch checked out at `repo_root`, or `None` on a detached HEAD.
 ///
-/// Parsed rather than shelled out to, because this runs on the session-sync
-/// hot path and a `git` fork per push is not worth it. A worktree's `.git` is
-/// a file pointing at the real gitdir, which is followed here so a worktree
-/// resolves to the same repo as its checkout.
-pub fn origin_url(repo_root: &Path) -> Option<String> {
-    let cfg = std::fs::read_to_string(git_dir(repo_root)?.join("config")).ok()?;
-    let mut in_origin = false;
-    for line in cfg.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_origin = line == "[remote \"origin\"]";
-            continue;
-        }
-        if !in_origin {
-            continue;
-        }
-        if let Some(url) = line.strip_prefix("url = ").or_else(|| line.strip_prefix("url=")) {
-            let url = url.trim();
-            if !url.is_empty() {
-                return Some(url.to_string());
-            }
-        }
-    }
-    None
+/// Reads `HEAD` out of *this* checkout's gitdir — the linked worktree's own,
+/// not the main repo's, which is the whole point: two worktrees of one project
+/// are on two branches, and reporting the main checkout's branch for both
+/// would make the label a lie.
+pub fn branch(repo_root: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(head_dir(repo_root)?.join("HEAD")).ok()?;
+    let name = head.trim().strip_prefix("ref:")?.trim();
+    let name = name.strip_prefix("refs/heads/").unwrap_or(name);
+    (!name.is_empty()).then(|| name.to_string())
 }
 
-/// Resolve `<repo_root>/.git` to the directory holding `config`.
-fn git_dir(repo_root: &Path) -> Option<PathBuf> {
+/// The directory holding *this* checkout's `HEAD` and `index`.
+///
+/// Unlike [`git_dir`], this does not walk up out of `worktrees/<name>`:
+/// per-worktree state lives there and only the shared config lives above it.
+fn head_dir(repo_root: &Path) -> Option<PathBuf> {
     let dot_git = repo_root.join(".git");
     if dot_git.is_dir() {
         return Some(dot_git);
     }
-    // Linked worktree / submodule: `.git` is a file `gitdir: <path>`. The
-    // config we want is the main repo's, so walk up out of `worktrees/<name>`.
     let pointer = std::fs::read_to_string(&dot_git).ok()?;
     let target = pointer.trim().strip_prefix("gitdir:")?.trim();
-    let target = if Path::new(target).is_absolute() {
+    Some(if Path::new(target).is_absolute() {
         PathBuf::from(target)
     } else {
         repo_root.join(target)
-    };
-    if target.join("config").is_file() {
-        return Some(target);
-    }
-    // `<main>/.git/worktrees/<name>` → `<main>/.git`
-    target
-        .parent()
-        .and_then(Path::parent)
-        .filter(|p| p.join("config").is_file())
-        .map(Path::to_path_buf)
-}
-
-/// Reduce any git remote URL to the canonical repo name.
-///
-/// Understands every shape git accepts: `https://`, `http://`, `ssh://`,
-/// `git://`, and the scp-like `git@host:path`. Credentials in the URL and a
-/// `:port` are dropped so the same repo cloned two ways lands on one name.
-///
-/// GitHub answers `owner/repo` — the shape already stored in every existing
-/// `repos` row, so widening the parser renames nothing. Every other host
-/// answers `host/path…`, which keeps two hosts' identically-named projects
-/// apart and preserves GitLab's nested subgroups (`gitlab.com/acme/team/api`)
-/// instead of flattening them into a collision.
-///
-/// Returns `None` for a remote that names no host — a `file://` or plain
-/// filesystem path is a local clone, not a hosted identity, and those resolve
-/// through [`local_project_slug`] instead.
-pub fn remote_slug(url: &str) -> Option<String> {
-    let (host, path) = split_remote(url.trim())?;
-    let mut segments: Vec<&str> = path
-        .trim_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-    if segments.is_empty() {
-        return None;
-    }
-    // Trailing `.git` belongs to the URL, not the repo name.
-    let last = segments.len() - 1;
-    let tail = segments[last].trim_end_matches(".git");
-    if tail.is_empty() {
-        return None;
-    }
-    segments[last] = tail;
-
-    if host == "github.com" {
-        // Two segments exactly: a GitHub URL may carry extra path (`/tree/main`)
-        // and the repo is always the first pair.
-        if segments.len() < 2 {
-            return None;
-        }
-        return Some(format!("{}/{}", segments[0], segments[1]));
-    }
-    Some(format!("{host}/{}", segments.join("/")))
-}
-
-/// Split a remote URL into `(lowercased host, path)`.
-fn split_remote(url: &str) -> Option<(String, &str)> {
-    // scheme://[user[:pass]@]host[:port]/path
-    if let Some((_scheme, rest)) = url.split_once("://") {
-        let (authority, path) = match rest.split_once('/') {
-            Some((a, p)) => (a, p),
-            None => (rest, ""),
-        };
-        let host = normalise_host(strip_userinfo(authority))?;
-        return Some((host, path));
-    }
-    // Plain filesystem path — a local clone, no hosted identity.
-    if url.starts_with('/') || url.starts_with('.') || url.starts_with('~') {
-        return None;
-    }
-    // scp-like: [user@]host:path
-    let (authority, path) = url.split_once(':')?;
-    // A Windows drive letter (`C:\repos\api`) is a path, not a host.
-    if authority.len() == 1 {
-        return None;
-    }
-    let host = normalise_host(strip_userinfo(authority))?;
-    Some((host, path))
-}
-
-fn strip_userinfo(authority: &str) -> &str {
-    match authority.rsplit_once('@') {
-        Some((_, host)) => host,
-        None => authority,
-    }
-}
-
-/// Lowercase the host and drop any `:port`.
-///
-/// An SSH host alias whose name contains "github" (the `git@github-work:me/x`
-/// pattern for juggling deploy keys) is treated as github.com — the same rule
-/// `cmd_device::normalise_origin_url` uses to derive room ids, so a repo's
-/// name and its room agree on which host it is.
-fn normalise_host(authority: &str) -> Option<String> {
-    let host = authority.split(':').next()?.trim().to_lowercase();
-    if host.is_empty() {
-        return None;
-    }
-    let is_bare_github_alias = host.contains("github") && !host.contains('.');
-    if host == "github.com" || is_bare_github_alias {
-        return Some("github.com".to_string());
-    }
-    Some(host)
-}
-
-// ─── Local (remote-less) identity ───────────────────────────────────────────
-
-/// A stable `local/<name>-<id>` for a project with no remote.
-///
-/// The `<id>` is what makes this safe to store under `UNIQUE(org_id,
-/// github_full_name)`: `~/work/api` and `~/other/api` are two projects and
-/// must be two rows. It is drawn from, in order:
-///
-/// 1. **The repo's committed Aura identity** (`.aura/repo.json`, minted by
-///    `aura repo-id init`) — durable across moves *and* clones, and already
-///    the identity primitive this codebase uses for rooms.
-/// 2. **A digest of the absolute path** — deterministic, so a project that has
-///    never run `repo-id init` still resolves to the same id on every launch
-///    without needing anything written to disk first.
-///
-/// The name half stays human-readable so the dashboard shows `local/api-3f2a…`
-/// rather than an opaque hash.
-pub fn local_project_slug(repo_root: &Path) -> String {
-    let name = project_name(repo_root);
-    format!("local/{name}-{}", project_id(repo_root))
-}
-
-/// The legacy `local/<dirname>` this project would have been filed under
-/// before ids existed. The cloud uses it to adopt the old row rather than
-/// stranding its history under a name nothing reports any more.
-pub fn legacy_local_slug(repo_root: &Path) -> String {
-    format!("local/{}", project_name(repo_root))
-}
-
-fn project_name(repo_root: &Path) -> String {
-    let raw = repo_root
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .trim();
-    let cleaned: String = raw
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' })
-        .collect();
-    let cleaned = cleaned.trim_matches('-').to_string();
-    if cleaned.is_empty() {
-        "unknown".to_string()
-    } else {
-        cleaned
-    }
-}
-
-fn project_id(repo_root: &Path) -> String {
-    if let Some(uuid) = committed_repo_uuid(repo_root) {
-        return uuid;
-    }
-    // `canonicalize` resolves symlinks and `..`, so two spellings of one
-    // folder are one project. It fails only if the path is gone, in which case
-    // the literal path is still a stable key for that spelling.
-    let canonical = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
-    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
-    hex::encode(digest)[..ID_LEN].to_string()
-}
-
-/// The `repo_uuid` from a committed `.aura/repo.json`, if it has one.
-///
-/// A signed manifest must verify: an unverified signature means someone edited
-/// the file after it was minted, and silently trusting the claimed uuid would
-/// let a tampered manifest point one project's history at another's row. Same
-/// stance as `cmd_device::read_repo_override` takes for room ids.
-fn committed_repo_uuid(repo_root: &Path) -> Option<String> {
-    let manifest = aura_attestation::RepoIdentityManifest::read(repo_root).ok()??;
-    if manifest.is_signed() && manifest.verify().is_err() {
-        return None;
-    }
-    let uuid = manifest.repo_uuid.trim().replace('-', "");
-    (uuid.len() >= ID_LEN).then(|| uuid[..ID_LEN].to_string())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // ─── Worktrees are one project ─────────────────────────────────────────
+    //
+    // Found live: 26 of the 28 desktop sessions on MHASK/aura-sovereign were
+    // run in linked worktrees, and the shipped shell read
+    // `<root>/.git/config` as a directory — which a worktree's `.git` is not,
+    // it is a file — so every one of them was filed under a made-up project
+    // named after the worktree folder (`local/granada`). The console's repo
+    // picker then showed them as a different project, and the roster for the
+    // real one looked empty.
+
+    /// Lay down the exact on-disk shape `git worktree add` produces: a main
+    /// checkout with `.git/`, and a linked worktree whose `.git` is a file
+    /// pointing at `<main>/.git/worktrees/<name>` — a directory that holds
+    /// per-worktree `HEAD` but deliberately *no* `config`.
+    fn worktree_fixture(origin: &str, branch: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("project");
+        let git = main.join(".git");
+        std::fs::create_dir_all(&git).unwrap();
+        std::fs::write(
+            git.join("config"),
+            format!("[remote \"origin\"]\n\turl = {origin}\n"),
+        )
+        .unwrap();
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let linked_git = git.join("worktrees").join("granada");
+        std::fs::create_dir_all(&linked_git).unwrap();
+        std::fs::write(linked_git.join("HEAD"), format!("ref: refs/heads/{branch}\n")).unwrap();
+
+        let wt = tmp.path().join("elsewhere").join("granada");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", linked_git.display()),
+        )
+        .unwrap();
+        (tmp, main, wt)
+    }
+
     #[test]
-    fn github_keeps_its_historic_bare_shape() {
-        // Every existing `repos` row is named this way — widening the parser
-        // must not rename a single one of them.
-        for url in [
-            "https://github.com/MHASK/aura-sovereign.git",
-            "https://github.com/MHASK/aura-sovereign",
-            "http://github.com/MHASK/aura-sovereign",
-            "git@github.com:MHASK/aura-sovereign.git",
-            "ssh://git@github.com/MHASK/aura-sovereign.git",
-            "git://github.com/MHASK/aura-sovereign.git",
-            "https://GitHub.com/MHASK/aura-sovereign/",
-        ] {
-            assert_eq!(
-                remote_slug(url).as_deref(),
-                Some("MHASK/aura-sovereign"),
-                "{url}"
-            );
+    fn a_worktree_is_filed_under_the_project_it_is_a_worktree_of() {
+        let (_tmp, main, wt) = worktree_fixture("https://github.com/MHASK/aura-sovereign.git", "feat/x");
+        assert_eq!(repo_slug(&main), "MHASK/aura-sovereign");
+        // The bug, pinned: this used to fall through to `local/granada`
+        // because `<wt>/.git/config` cannot be read — `.git` is a file.
+        assert_eq!(repo_slug(&wt), "MHASK/aura-sovereign");
+    }
+
+    #[test]
+    fn a_worktree_still_says_which_worktree_and_branch_it_is() {
+        let (_tmp, main, wt) = worktree_fixture("https://github.com/MHASK/aura-sovereign.git", "feat/x");
+        // Rolling worktrees up under one project must not lose the split —
+        // it becomes a label rather than a separate project.
+        assert_eq!(worktree_name(&wt).as_deref(), Some("granada"));
+        assert_eq!(branch(&wt).as_deref(), Some("feat/x"));
+        // The main checkout is not a worktree of anything, and reads its own
+        // HEAD rather than the linked one's.
+        assert_eq!(worktree_name(&main), None);
+        assert_eq!(branch(&main).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_detached_head_has_no_branch_rather_than_a_wrong_one() {
+        let (_tmp, main, _wt) = worktree_fixture("https://github.com/MHASK/aura-sovereign.git", "feat/x");
+        std::fs::write(
+            main.join(".git").join("HEAD"),
+            "9fceb02d0ae598e95dc970b74767f19372d61af8\n",
+        )
+        .unwrap();
+        assert_eq!(branch(&main), None);
+    }
+
+    #[test]
+    fn a_folder_that_is_not_a_repo_claims_no_worktree_or_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(worktree_name(tmp.path()), None);
+        assert_eq!(branch(tmp.path()), None);
+    }
+
+    #[test]
+    fn a_submodule_is_a_repo_of_its_own_not_a_worktree_view() {
+        // A submodule's `.git` is also a file, and pointing it at
+        // `<parent>/.git/modules/<name>` must not read as a worktree — it is a
+        // different repo, so its sessions belong to it and not to the parent.
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("vendor").join("lib");
+        std::fs::create_dir_all(&sub).unwrap();
+        let modules = tmp.path().join(".git").join("modules").join("lib");
+        std::fs::create_dir_all(&modules).unwrap();
+        std::fs::write(sub.join(".git"), format!("gitdir: {}\n", modules.display())).unwrap();
+        assert_eq!(worktree_name(&sub), None);
+    }
+
+    #[test]
+    fn a_worktree_names_the_phantom_repos_its_history_is_stranded_under() {
+        // The exact production shape: sessions filed under `local/granada`,
+        // which is not a project — it is a worktree of MHASK/aura-sovereign.
+        // Saying so is what lets the server merge them back, and only this
+        // machine is in a position to say it. Production carries two
+        // generations of that phantom, so both spellings are claimed.
+        let (_tmp, _main, wt) = worktree_fixture("git@github.com:MHASK/aura-sovereign.git", "feat/x");
+        let claimed = superseded_slugs(&wt);
+        assert_eq!(claimed[0], "local/granada");
+        assert!(claimed[1].starts_with("local/granada-"), "{claimed:?}");
+        assert_eq!(claimed.len(), 2, "{claimed:?}");
+    }
+
+    #[test]
+    fn a_binding_decides_what_counts_as_a_former_name() {
+        // `repo_slug` is the desktop's answer, and an explicit binding
+        // overrides the derived one. A project bound to a name of its own must
+        // still be able to reclaim the local rows it left behind — and must
+        // never claim the name it is bound to.
+        let (_tmp, main, _wt) = worktree_fixture("git@github.com:MHASK/aura-sovereign.git", "main");
+        ProjectBinding {
+            repo_full_name: Some("MHASK/renamed".to_string()),
+            ..Default::default()
+        }
+        .write(&main)
+        .unwrap();
+        assert_eq!(repo_slug(&main), "MHASK/renamed");
+        let claimed = superseded_slugs(&main);
+        assert!(claimed.iter().all(|n| n.starts_with("local/")), "{claimed:?}");
+        assert!(!claimed.contains(&"MHASK/renamed".to_string()), "{claimed:?}");
+    }
+
+    #[test]
+    fn a_worktree_that_really_is_local_does_not_ask_to_merge_with_itself() {
+        // No remote, so `repo_slug` answers a `local/` name of its own. If that
+        // happened to equal the phantom spelling, declaring it would be asking
+        // the server to merge a row into itself.
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        std::fs::create_dir_all(main.join(".git").join("worktrees").join("granada")).unwrap();
+        std::fs::write(main.join(".git").join("config"), "[core]\n").unwrap();
+        std::fs::write(
+            main.join(".git").join("worktrees").join("granada").join("HEAD"),
+            "ref: refs/heads/feat/x\n",
+        )
+        .unwrap();
+        let linked = tmp.path().join("granada");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", main.join(".git").join("worktrees").join("granada").display()),
+        )
+        .unwrap();
+        // Whatever local name it derives, it must never be the phantom one.
+        for claimed in superseded_slugs(&linked) {
+            assert_ne!(claimed, repo_slug(&linked));
         }
     }
 
     #[test]
-    fn gitlab_is_not_filed_as_github() {
-        // The collision this fixes: both hosts have an `acme/api`.
-        assert_eq!(
-            remote_slug("https://gitlab.com/acme/api.git").as_deref(),
-            Some("gitlab.com/acme/api")
-        );
-        assert_eq!(
-            remote_slug("https://github.com/acme/api.git").as_deref(),
-            Some("acme/api")
-        );
-        assert_ne!(
-            remote_slug("https://gitlab.com/acme/api.git"),
-            remote_slug("https://github.com/acme/api.git")
-        );
-    }
-
-    #[test]
-    fn gitlab_subgroups_survive_instead_of_colliding() {
-        // Flattening to the last two segments would file both of these as
-        // `gitlab.com/team/api`.
-        assert_eq!(
-            remote_slug("git@gitlab.com:acme/team/api.git").as_deref(),
-            Some("gitlab.com/acme/team/api")
-        );
-        assert_eq!(
-            remote_slug("git@gitlab.com:other/team/api.git").as_deref(),
-            Some("gitlab.com/other/team/api")
-        );
-    }
-
-    #[test]
-    fn self_hosted_resolves_by_host() {
-        assert_eq!(
-            remote_slug("git@git.acme.internal:platform/api.git").as_deref(),
-            Some("git.acme.internal/platform/api")
-        );
-        assert_eq!(
-            remote_slug("ssh://git@git.acme.internal:2222/platform/api.git").as_deref(),
-            Some("git.acme.internal/platform/api")
-        );
-        assert_eq!(
-            remote_slug("https://git.acme.internal/platform/api").as_deref(),
-            Some("git.acme.internal/platform/api")
-        );
-    }
-
-    #[test]
-    fn one_repo_cloned_two_ways_is_one_name() {
-        let ssh = remote_slug("git@gitlab.com:acme/api.git");
-        let https = remote_slug("https://gitlab.com/acme/api.git");
-        let tokenised = remote_slug("https://oauth2:s3cr3t@gitlab.com/acme/api.git");
-        let ported = remote_slug("ssh://git@gitlab.com:22/acme/api.git");
-        assert_eq!(ssh, https);
-        assert_eq!(ssh, tokenised);
-        assert_eq!(ssh, ported);
-    }
-
-    #[test]
-    fn ssh_alias_for_github_still_reads_as_github() {
-        assert_eq!(
-            remote_slug("git@github-work:MHASK/aura-sovereign.git").as_deref(),
-            Some("MHASK/aura-sovereign")
-        );
-        // A real host that merely contains "github" is left alone — only a
-        // bare alias (no dots) is treated as github.com.
-        assert_eq!(
-            remote_slug("git@github.acme.com:MHASK/api.git").as_deref(),
-            Some("github.acme.com/MHASK/api")
-        );
-    }
-
-    #[test]
-    fn a_pathless_or_hostless_remote_has_no_hosted_name() {
-        for url in [
-            "",
-            "https://github.com/",
-            "https://github.com/owner",
-            "/Users/me/repos/api",
-            "../sibling-repo",
-            "~/repos/api",
-            "file:///Users/me/repos/api",
-            "C:\\repos\\api",
-        ] {
-            assert_eq!(remote_slug(url), None, "{url}");
-        }
-    }
-
-    #[test]
-    fn two_folders_sharing_a_basename_are_two_projects() {
-        // The bug: `repos UNIQUE(org_id, github_full_name)` merged these into
-        // one row because both answered `local/api`.
-        let tmp = std::env::temp_dir().join(format!(
-            "aura-identity-{}",
-            std::process::id()
-        ));
-        let work = tmp.join("work").join("api");
-        let other = tmp.join("other").join("api");
-        std::fs::create_dir_all(&work).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-
-        let a = local_project_slug(&work);
-        let b = local_project_slug(&other);
-
-        assert_ne!(a, b, "two different folders must not share a repo name");
-        assert!(a.starts_with("local/api-"), "{a}");
-        assert!(b.starts_with("local/api-"), "{b}");
-        // Both used to collapse onto the one legacy name — that is exactly
-        // what the cloud needs in order to adopt the old row.
-        assert_eq!(legacy_local_slug(&work), "local/api");
-        assert_eq!(legacy_local_slug(&other), "local/api");
-
-        // Stable: asking twice is the same answer, not a fresh id.
-        assert_eq!(local_project_slug(&work), a);
-
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    #[test]
-    fn a_local_slug_is_readable_and_bounded() {
-        let slug = local_project_slug(Path::new("/tmp/My Project!"));
-        assert!(slug.starts_with("local/My-Project-"), "{slug}");
-        let id = slug.rsplit('-').next().unwrap();
-        assert_eq!(id.len(), ID_LEN);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn a_nameless_root_still_gets_an_id() {
-        let slug = local_project_slug(Path::new("/"));
-        assert!(slug.starts_with("local/unknown-"), "{slug}");
+    fn a_folder_that_is_not_a_repo_claims_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(superseded_slugs(tmp.path()).is_empty());
     }
 
     #[test]

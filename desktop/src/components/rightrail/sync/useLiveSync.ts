@@ -7,7 +7,7 @@
 // returns and never talks to the live/collab API directly. Polling pauses
 // when the window is hidden (same cadence discipline as CommitInput).
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   type ConflictedNode,
@@ -15,6 +15,7 @@ import {
 } from "../../../lib/api";
 import { useDocumentVisibility } from "../../../lib/useDocumentVisibility";
 import { fetchAstConflicts, fetchImpacts } from "../../../lib/ambientCache";
+import { usePanelActive } from "../../../lib/panelActive";
 
 const POLL_MS = 4000;
 // An agent whose heartbeat is older than this reads as "away" — shown
@@ -66,6 +67,58 @@ export type LiveSync = {
   refresh: () => Promise<void>;
 };
 
+// ─── Cheap identity checks ───────────────────────────────────────────────
+// Compare the fields the rows actually render, never the whole payload. A
+// peer's heartbeat ticks every poll by design, so it is deliberately NOT part
+// of identity — only who's here, where they are, and whether they've gone
+// stale, which is all the list draws.
+
+function samePeers(a: LivePeer[], b: LivePeer[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (
+      a[i].sessionId !== b[i].sessionId ||
+      a[i].agentId !== b[i].agentId ||
+      a[i].stale !== b[i].stale ||
+      a[i].branch !== b[i].branch ||
+      a[i].source !== b[i].source
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameImpacts(a: ImpactAlert[], b: ImpactAlert[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id || a[i].resolved !== b[i].resolved) return false;
+  }
+  return true;
+}
+
+function sameConflicts(a: ConflictedNode[], b: ConflictedNode[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id || a[i].resolved_at !== b[i].resolved_at) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** setState that keeps the previous array when the contents match, so an
+ *  unchanged poll costs no re-render downstream. A `null` current is always
+ *  replaced: unread and empty are different answers here, and moving from one
+ *  to the other is a real change. */
+function keepIfSame<T>(
+  set: (fn: (cur: T[] | null) => T[] | null) => void,
+  next: T[],
+  eq: (a: T[], b: T[]) => boolean,
+): void {
+  set((cur) => (cur !== null && eq(cur, next) ? cur : next));
+}
+
 export function useLiveSync(repoRoot: string, enabled: boolean): LiveSync {
   const [live, setLive] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -86,15 +139,23 @@ export function useLiveSync(repoRoot: string, enabled: boolean): LiveSync {
   const [conflicts, setConflicts] = useState<ConflictedNode[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const visible = useDocumentVisibility();
+  const panelActive = usePanelActive();
 
-  const peers = useMemo<LivePeer[]>(
-    () =>
-      [...cloudRead, ...localRead].map((p) => ({
-        ...p,
-        stale: readAt - p.lastHeartbeat > PEER_STALE_SECS,
-      })),
-    [cloudRead, localRead, readAt],
-  );
+  // `readAt` moves on every poll by design, so this memo re-runs every tick
+  // even when nobody moved — and handing back a fresh array re-rendered the
+  // whole list for nothing. Keep the previous one when it still says the same
+  // thing; `stale` is part of that comparison, so a peer going away still
+  // lands.
+  const peersRef = useRef<LivePeer[]>([]);
+  const peers = useMemo<LivePeer[]>(() => {
+    const next = [...cloudRead, ...localRead].map((p) => ({
+      ...p,
+      stale: readAt - p.lastHeartbeat > PEER_STALE_SECS,
+    }));
+    if (samePeers(peersRef.current, next)) return peersRef.current;
+    peersRef.current = next;
+    return next;
+  }, [cloudRead, localRead, readAt]);
 
   const refresh = useCallback(async () => {
     if (!enabled || !repoRoot) return;
@@ -108,8 +169,8 @@ export function useLiveSync(repoRoot: string, enabled: boolean): LiveSync {
         setCloudRead([]);
         setLocalRead([]);
         setPresenceHint(null);
-        setIncoming([]);
-        setConflicts([]);
+        keepIfSame(setIncoming, [], sameImpacts);
+        keepIfSame(setConflicts, [], sameConflicts);
         // The daemon died on its own (vs. an explicit stop) — surface its
         // stderr tail so the toggle flipping off is never a silent mystery.
         if (status.last_error) {
@@ -169,8 +230,13 @@ export function useLiveSync(repoRoot: string, enabled: boolean): LiveSync {
           })),
         );
       setPresenceHint(presence.available ? null : presence.reason);
-      if (impacts) setIncoming(impacts.filter((i) => !i.resolved));
-      if (confs) setConflicts(confs.filter((c) => c.resolved_at == null));
+      if (impacts) keepIfSame(setIncoming, impacts.filter((i) => !i.resolved), sameImpacts);
+      if (confs)
+        keepIfSame(
+          setConflicts,
+          confs.filter((c) => c.resolved_at == null),
+          sameConflicts,
+        );
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -178,12 +244,12 @@ export function useLiveSync(repoRoot: string, enabled: boolean): LiveSync {
   }, [enabled, repoRoot]);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !panelActive) return;
     void refresh();
     if (!visible) return;
     const id = window.setInterval(() => void refresh(), POLL_MS);
     return () => window.clearInterval(id);
-  }, [enabled, visible, refresh]);
+  }, [enabled, visible, panelActive, refresh]);
 
   const goLive = useCallback(async () => {
     if (!repoRoot) return;

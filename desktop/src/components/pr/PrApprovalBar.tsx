@@ -1,16 +1,27 @@
 // PR approval bar — Stage 7D. Three actions on a PR: Approve, Request
-// Changes, Merge. Each opens a small inline body editor (Approve's body
-// is optional; Request Changes requires a body). Merge picks a strategy
+// Changes, Merge. Approve is ONE click — it submits straight away, since an
+// approval with no note is by far the common case and a form in the way of
+// it was the whole complaint. "Approve with a note" sits in a small menu
+// beside it and opens the note box. Request Changes still needs a note (a
+// bare "changes requested" tells the author nothing). Merge picks a strategy
 // (squash/merge/rebase) + delete-branch toggle.
 //
 // All call into Tauri `pr_*` commands which proxy to `gh pr review` /
 // `gh pr merge`. Uses the same auth `gh` already has.
 
 import { useEffect, useState } from "react";
-import { api } from "../../lib/api";
+import { ChevronDown } from "lucide-react";
+import { prApprove, prMerge, prRequestChanges } from "../../lib/prApi";
 import { invalidatePrList } from "../../lib/prsCache";
 import { invalidatePrDetail } from "../../lib/prDetailCache";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 
 type Mode = "idle" | "approve" | "changes" | "merge";
 
@@ -71,16 +82,36 @@ export function PrApprovalBar({
 
   const mergeBlocked = failingChecks > 0 && !overrideChecks;
 
+  // The one-click path. No panel, no note: approve now, then refresh the
+  // same caches the panel path does. A failure shows inline under the
+  // buttons, where the click happened, rather than in a panel that never
+  // opened.
+  const approveNow = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await prApprove(repoRoot, prNumber, undefined);
+      void invalidatePrList(repoRoot);
+      void invalidatePrDetail(repoRoot, prNumber);
+      onMutated();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submit = async () => {
     setBusy(true);
     setError(null);
     try {
       if (mode === "approve") {
-        await api.prApprove(repoRoot, prNumber, body || undefined);
+        await prApprove(repoRoot, prNumber, body.trim() || undefined);
       } else if (mode === "changes") {
-        await api.prRequestChanges(repoRoot, prNumber, body);
+        await prRequestChanges(repoRoot, prNumber, body);
       } else if (mode === "merge") {
-        await api.prMerge(repoRoot, prNumber, strategy, deleteBranch);
+        await prMerge(repoRoot, prNumber, strategy, deleteBranch);
       }
       // Mutations changed PR state — propagate to every cached list so
       // Inbox / sidebar / overview refresh from the same source. Also
@@ -119,15 +150,59 @@ export function PrApprovalBar({
   if (mode === "idle") {
     return (
       <div className="flex items-center gap-1.5">
-        <Button
-          variant="accentSoft"
-          size="xs"
-          disabled={!open}
-          onClick={() => setMode("approve")}
-          title={approved ? "Already approved" : "Approve this PR"}
-        >
-          {approved ? "✓ Approved" : "Approve"}
-        </Button>
+        <div className="inline-flex items-stretch">
+          <Button
+            variant="accentSoft"
+            size="xs"
+            disabled={!open || busy}
+            onClick={() => void approveNow()}
+            title={
+              approved
+                ? "Already approved. Approve again to refresh your review."
+                : "Approve this PR right away, with no note"
+            }
+            className="rounded-r-none"
+          >
+            {busy ? (
+              <>
+                <AsciiSpinner className="text-xs" />
+                Approving…
+              </>
+            ) : approved ? (
+              "✓ Approved"
+            ) : (
+              "Approve"
+            )}
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="accentSoft"
+                size="xs"
+                disabled={!open || busy}
+                aria-label="More ways to approve"
+                title="More ways to approve"
+                className="rounded-l-none border-l border-l-accent/25 px-1"
+              >
+                <ChevronDown size={12} aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => setMode("approve")}>
+                Approve with a note
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+        {error && (
+          <span
+            className="text-xs text-red truncate max-w-[240px]"
+            title={error}
+            role="alert"
+          >
+            Couldn't approve: {error}
+          </span>
+        )}
         <Button
           variant="destructive"
           size="xs"
@@ -153,7 +228,7 @@ export function PrApprovalBar({
       <div className="flex items-center mb-2">
         <span className="text-sm font-medium text-text-1">
           {mode === "approve"
-            ? "Approve PR"
+            ? "Approve with a note"
             : mode === "changes"
               ? "Request changes"
               : "Merge PR"}
@@ -223,7 +298,7 @@ export function PrApprovalBar({
           placeholder={
             mode === "changes"
               ? "What needs to change? (required)"
-              : "Optional approval message"
+              : "A note to go with your approval"
           }
           className="w-full text-sm bg-bg-1 border border-line-soft rounded px-2 py-1.5 resize-y min-h-[80px] focus:outline-none focus:border-accent-blue"
         />

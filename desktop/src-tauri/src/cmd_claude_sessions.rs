@@ -12,10 +12,12 @@
 //!   - first user prompt (so the row reads like a conversation title)
 //!   - approximate turn count (so the user can tell long threads apart)
 //!
-//! Cheap enough — we cap parsing per file at the first ~64 lines and
-//! the first 20 sessions, which is enough to find the leading prompt
-//! plus a count of `type:"user"` events. A future revision can tail
-//! the file in full if a session preview pane is added.
+//! Reading these in full is not cheap — a busy conversation runs to
+//! gigabytes — so the scan reads each byte at most once ever: results are
+//! remembered in an on-disk index, a file that has grown since the last look
+//! is resumed from where the last pass stopped, and lines that cannot carry a
+//! prompt are skipped with a byte-level test instead of a JSON parse. The
+//! numbers it reports stay exact; only the work to get them shrinks.
 
 use std::collections::HashMap;
 use std::fs;
@@ -128,90 +130,98 @@ pub struct ClaudeSession {
 
 #[tauri::command]
 pub async fn claude_list_sessions(repo_root: String) -> Result<Vec<ClaudeSession>, String> {
-    crate::blocking::run(move || {
-        // Claude keys session storage by the *current working directory* it was
-        // launched from, not the workspace root. So a single project ends up
-        // scattered across multiple `~/.claude/projects/<encoded-cwd>/` dirs: one
-        // per subdir the user happened to be in, AND one per sibling git worktree
-        // (an agent driving THIS worktree may have run from the main checkout or
-        // another worktree). We surface the union across every worktree root and
-        // its descendant cwds, so no transcript goes missing just because it was
-        // authored from a sibling checkout.
-        let projects_root = projects_root_dir()
-            .ok_or_else(|| "could not resolve ~/.claude projects dir".to_string())?;
-        if !projects_root.exists() {
-            return Ok(vec![]);
-        }
-        let roots = sibling_worktree_roots(&repo_root);
-        let recovery = recovery_prefix_for(&repo_root);
-        let mut out = Vec::new();
-        for (dir_path, owning_root) in
-            matching_project_dirs(&projects_root, &roots, recovery.as_deref(), &repo_root)
-        {
-            let session_entries = match fs::read_dir(&dir_path) {
-                Ok(it) => it,
+    // Directory walks, multi-gigabyte reads and a `git worktree list` — all
+    // blocking. On a runtime worker this starved every other command while the
+    // list built, so the app felt frozen rather than merely slow here.
+    tokio::task::spawn_blocking(move || list_sessions_blocking(&repo_root))
+        .await
+        .map_err(|e| format!("session scan failed: {e}"))?
+}
+
+fn list_sessions_blocking(repo_root: &str) -> Result<Vec<ClaudeSession>, String> {
+    // Claude keys session storage by the *current working directory* it was
+    // launched from, not the workspace root. So a single project ends up
+    // scattered across multiple `~/.claude/projects/<encoded-cwd>/` dirs: one
+    // per subdir the user happened to be in, AND one per sibling git worktree
+    // (an agent driving THIS worktree may have run from the main checkout or
+    // another worktree). We surface the union across every worktree root and
+    // its descendant cwds, so no transcript goes missing just because it was
+    // authored from a sibling checkout.
+    let projects_root = projects_root_dir()
+        .ok_or_else(|| "could not resolve ~/.claude projects dir".to_string())?;
+    if !projects_root.exists() {
+        return Ok(vec![]);
+    }
+    let roots = sibling_worktree_roots(repo_root);
+    let recovery = recovery_prefix_for(repo_root);
+    let mut out = Vec::new();
+    for (dir_path, owning_root) in
+        matching_project_dirs(&projects_root, &roots, recovery.as_deref(), repo_root)
+    {
+        let session_entries = match fs::read_dir(&dir_path) {
+            Ok(it) => it,
+            Err(_) => continue,
+        };
+        for entry in session_entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let session_id = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
                 Err(_) => continue,
             };
-            for entry in session_entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                let session_id = match path.file_stem().and_then(|s| s.to_str()) {
-                    Some(s) => s.to_string(),
-                    None => continue,
-                };
-                let metadata = match entry.metadata() {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                let mtime = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let scan = scan_session_cached(&path, mtime);
-                // A session whose recorded cwd no longer exists on disk ran in an
-                // archived/pruned worktree. Viewing it still works (the transcript
-                // replays straight off `file_path`), but resuming live must spawn
-                // from a real directory — so we hand the resume the main checkout
-                // instead of the dead worktree path. The label keeps the worktree
-                // branch (the friendliest id we still have) so the row reads
-                // `feat-foo`, not a `.../p-hash/feat-foo` jumble.
-                let orphaned = !scan.cwd.is_empty() && !Path::new(&scan.cwd).is_dir();
-                let (cwd, cwd_rel) = if orphaned {
-                    let branch = scan
-                        .cwd
-                        .rsplit('/')
-                        .find(|s| !s.is_empty())
-                        .unwrap_or("")
-                        .to_string();
-                    (repo_root.clone(), branch)
-                } else {
-                    // Relativize against the worktree the session actually ran in,
-                    // so a row reads `aura-shell/src-tauri` rather than a
-                    // cross-worktree `.../New Git` fallback.
-                    (scan.cwd.clone(), relativize_cwd(&scan.cwd, &owning_root))
-                };
-                out.push(ClaudeSession {
-                    session_id,
-                    mtime,
-                    first_prompt: scan.first_prompt,
-                    last_prompt: scan.last_prompt,
-                    turn_count: scan.turn_count,
-                    step_count: scan.step_count,
-                    file_path: path.to_string_lossy().into_owned(),
-                    cwd_rel,
-                    cwd,
-                });
-            }
+            let mtime = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let scan = scan_session_cached(&path, mtime);
+            // A session whose recorded cwd no longer exists on disk ran in an
+            // archived/pruned worktree. Viewing it still works (the transcript
+            // replays straight off `file_path`), but resuming live must spawn
+            // from a real directory — so we hand the resume the main checkout
+            // instead of the dead worktree path. The label keeps the worktree
+            // branch (the friendliest id we still have) so the row reads
+            // `feat-foo`, not a `.../p-hash/feat-foo` jumble.
+            let orphaned = !scan.cwd.is_empty() && !Path::new(&scan.cwd).is_dir();
+            let (cwd, cwd_rel) = if orphaned {
+                let branch = scan
+                    .cwd
+                    .rsplit('/')
+                    .find(|s| !s.is_empty())
+                    .unwrap_or("")
+                    .to_string();
+                (repo_root.to_string(), branch)
+            } else {
+                // Relativize against the worktree the session actually ran in,
+                // so a row reads `aura-shell/src-tauri` rather than a
+                // cross-worktree `.../New Git` fallback.
+                (scan.cwd.clone(), relativize_cwd(&scan.cwd, &owning_root))
+            };
+            out.push(ClaudeSession {
+                session_id,
+                mtime,
+                first_prompt: scan.first_prompt,
+                last_prompt: scan.last_prompt,
+                turn_count: scan.turn_count,
+                step_count: scan.step_count,
+                file_path: path.to_string_lossy().into_owned(),
+                cwd_rel,
+                cwd,
+            });
         }
-        // Newest first — `/resume` users almost always want the most recent.
-        out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
-        Ok(out)
-    })
-    .await
+    }
+    // Newest first — `/resume` users almost always want the most recent.
+    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    // Hand the work we just did to the next app launch.
+    persist_scan_index();
+    Ok(out)
 }
 
 pub(crate) fn projects_root_dir() -> Option<PathBuf> {
@@ -261,8 +271,8 @@ pub(crate) fn encode_path(repo_root: &str) -> String {
 /// out to `git worktree list` each time; worktrees are added/pruned rarely, so a
 /// few seconds of staleness is harmless and spares the subprocess on repeat
 /// opens. Same pattern as the commit-index TTL cache.
-fn worktree_roots_cache() -> &'static Mutex<HashMap<String, (u64, Vec<String>)>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, (u64, Vec<String>)>>> = OnceLock::new();
+fn worktree_roots_cache() -> &'static Mutex<HashMap<String, (u64, Vec<Checkout>)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (u64, Vec<Checkout>)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -275,7 +285,47 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn sibling_worktree_roots(repo_root: &str) -> Vec<String> {
+/// One live checkout of this repo: where it is on disk, and what branch it
+/// has out. `branch` is `None` for a detached HEAD.
+#[derive(Clone, Debug)]
+pub(crate) struct Checkout {
+    pub path: String,
+    pub branch: Option<String>,
+}
+
+impl Checkout {
+    /// The short name a person uses for this checkout — the directory's own
+    /// name. The main checkout is the repo directory itself.
+    pub fn name(&self) -> String {
+        self.path
+            .rsplit('/')
+            .find(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_string()
+    }
+}
+
+/// Do two paths name the same directory?
+///
+/// String equality is not enough: git reports the resolved path, and on macOS
+/// anything under `/var` or `/tmp` resolves through a symlink into
+/// `/private/...`. A caller passing the unresolved form would otherwise be
+/// treated as a *second* checkout — same files, no branch — and its unlabelled
+/// rows would win the dedupe against the real entry.
+pub(crate) fn same_dir(a: &str, b: &str) -> bool {
+    if a.trim_end_matches('/') == b.trim_end_matches('/') {
+        return true;
+    }
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Every checkout git currently lists for this repo, with its branch, served
+/// from the short TTL cache. Deleted worktrees are absent — git is the source
+/// of truth, so a pruned checkout stops contributing rows the moment it goes.
+pub(crate) fn worktree_checkouts(repo_root: &str) -> Vec<Checkout> {
     let now = now_unix_secs();
     if let Ok(cache) = worktree_roots_cache().lock() {
         if let Some((built_at, roots)) = cache.get(repo_root) {
@@ -284,7 +334,7 @@ fn sibling_worktree_roots(repo_root: &str) -> Vec<String> {
             }
         }
     }
-    let mut roots = vec![repo_root.to_string()];
+    let mut roots = vec![Checkout { path: repo_root.to_string(), branch: None }];
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root)
@@ -295,11 +345,27 @@ fn sibling_worktree_roots(repo_root: &str) -> Vec<String> {
     if let Ok(output) = output {
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout);
+            // Porcelain emits a `worktree <path>` line, then that checkout's
+            // `HEAD`/`branch`/`detached` lines, then a blank separator. So the
+            // branch always belongs to the most recent `worktree` line.
+            let mut current: Option<usize> = None;
             for line in text.lines() {
                 if let Some(path) = line.strip_prefix("worktree ") {
                     let path = path.trim();
-                    if !path.is_empty() && !roots.iter().any(|r| r == path) {
-                        roots.push(path.to_string());
+                    if path.is_empty() {
+                        continue;
+                    }
+                    current = match roots.iter().position(|r| same_dir(&r.path, path)) {
+                        Some(i) => Some(i),
+                        None => {
+                            roots.push(Checkout { path: path.to_string(), branch: None });
+                            Some(roots.len() - 1)
+                        }
+                    };
+                } else if let Some(rf) = line.strip_prefix("branch ") {
+                    if let Some(i) = current {
+                        roots[i].branch =
+                            Some(rf.trim().trim_start_matches("refs/heads/").to_string());
                     }
                 }
             }
@@ -309,6 +375,10 @@ fn sibling_worktree_roots(repo_root: &str) -> Vec<String> {
         cache.insert(repo_root.to_string(), (now, roots.clone()));
     }
     roots
+}
+
+fn sibling_worktree_roots(repo_root: &str) -> Vec<String> {
+    worktree_checkouts(repo_root).into_iter().map(|c| c.path).collect()
 }
 
 /// Project dirs under `~/.claude/projects` whose encoded name is one of the
@@ -512,6 +582,38 @@ pub fn newest_session_id_for_repo(repo_root: &str) -> Option<String> {
 /// This is the "why" behind an edit an external CLI made: the guard fires while
 /// the agent is actively editing, so this session's prompt is the request that
 /// produced the change — captured at edit time, no commit required.
+/// The prompt that *opened* the newest Claude transcript under `repo_root` —
+/// the one sentence that names what the session is about.
+///
+/// Deliberately the first prompt and not the last: this is used as a session's
+/// title, and a title that rewrote itself every time the person typed again
+/// would move the row out from under them. `None` when Claude has never run
+/// here, or when the session has been opened but not yet typed into.
+pub fn opening_prompt_for_repo(repo_root: &str) -> Option<String> {
+    let session_id = newest_session_id_for_repo(repo_root)?;
+    let projects_root = projects_root_dir()?;
+    let roots = sibling_worktree_roots(repo_root);
+    let recovery = recovery_prefix_for(repo_root);
+    for (dir_path, _owning_root) in
+        matching_project_dirs(&projects_root, &roots, recovery.as_deref(), repo_root)
+    {
+        let candidate = dir_path.join(format!("{session_id}.jsonl"));
+        if !candidate.is_file() {
+            continue;
+        }
+        let mtime = fs::metadata(&candidate)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let first = scan_session_cached(&candidate, mtime).first_prompt;
+        let first = first.trim();
+        return (!first.is_empty()).then(|| first.to_string());
+    }
+    None
+}
+
 pub fn latest_prompt_for_session(repo_root: &str, session_id: &str) -> Option<String> {
     let projects_root = projects_root_dir()?;
     if !projects_root.exists() {
@@ -548,7 +650,7 @@ pub fn latest_prompt_for_session(repo_root: &str, session_id: &str) -> Option<St
     None
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct SessionScan {
     first_prompt: String,
     last_prompt: String,
@@ -557,52 +659,182 @@ struct SessionScan {
     cwd: String,
 }
 
-/// Per-file scan cache keyed by absolute path → (mtime, scan). The list
-/// command re-runs on every Sessions-pane open/refresh, and a cold scan
-/// reads each JSONL transcript in full (they can be multi-MB). Almost no
-/// session changes between two list calls, so we cache each file's parse
-/// and only re-read when its mtime moves. This is what makes the second+
-/// load instant instead of re-parsing every transcript from disk.
-fn session_scan_cache() -> &'static Mutex<HashMap<String, (i64, SessionScan)>> {
-    static C: OnceLock<Mutex<HashMap<String, (i64, SessionScan)>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+/// What we know about one transcript, and how far into it we know it.
+///
+/// `scanned_to` always sits just past a newline, so a later pass can resume
+/// exactly on a record boundary. `head_sig` fingerprints the first few KB: a
+/// transcript that was rewritten rather than appended to changes there, and
+/// resuming into it would splice two different conversations together.
+#[derive(Clone, Serialize, Deserialize)]
+struct ScanEntry {
+    scanned_to: u64,
+    head_sig: u64,
+    scan: SessionScan,
 }
 
-/// `scan_session` with an mtime-guarded cache in front. A hit (same mtime)
-/// skips the full file read entirely; a miss (new/edited file) re-scans and
-/// refreshes the entry.
-fn scan_session_cached(path: &Path, mtime: i64) -> SessionScan {
+/// Per-file scan state, keyed by absolute path, loaded from disk on first use.
+///
+/// Transcripts are append-only and enormous — on this machine 2.7 GB across
+/// 148 files, the largest a single 1.6 GB conversation. Re-reading them on
+/// every Sessions open is the difference between an instant list and a
+/// ten-second one, so we remember three things and re-read as little as
+/// possible: the parse result, how far into the file it covers, and a
+/// fingerprint proving the file still starts the way it did.
+fn session_scan_cache() -> &'static Mutex<HashMap<String, ScanEntry>> {
+    static C: OnceLock<Mutex<HashMap<String, ScanEntry>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(load_scan_index()))
+}
+
+/// Marks the index as worth writing back. Set on any real scan, cleared by
+/// `persist_scan_index`.
+fn scan_index_dirty() -> &'static std::sync::atomic::AtomicBool {
+    static D: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    &D
+}
+
+fn scan_index_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let mut p = PathBuf::from(home);
+    p.push(".aura");
+    p.push("session-scan-index.json");
+    Some(p)
+}
+
+/// The index survives app restarts on purpose. Without it, the very first
+/// Sessions open after every launch pays the full multi-gigabyte parse again.
+fn load_scan_index() -> HashMap<String, ScanEntry> {
+    let Some(path) = scan_index_path() else { return HashMap::new() };
+    let Ok(bytes) = fs::read(&path) else { return HashMap::new() };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+/// Write the index back, dropping entries whose transcript is gone. Called
+/// once per list, and only when something actually changed.
+fn persist_scan_index() {
+    use std::sync::atomic::Ordering;
+    if !scan_index_dirty().swap(false, Ordering::Relaxed) {
+        return;
+    }
+    let Some(path) = scan_index_path() else { return };
+    let snapshot: HashMap<String, ScanEntry> = match session_scan_cache().lock() {
+        Ok(mut c) => {
+            c.retain(|k, _| Path::new(k).exists());
+            c.clone()
+        }
+        Err(_) => return,
+    };
+    let Ok(bytes) = serde_json::to_vec(&snapshot) else { return };
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    // Write-then-rename: a half-written index that failed to parse would
+    // silently cost every user a full rescan, and the failure would look like
+    // "the app is slow again" rather than a corrupt file.
+    let tmp = path.with_extension("json.tmp");
+    if fs::write(&tmp, &bytes).is_ok() {
+        let _ = fs::rename(&tmp, &path);
+    }
+}
+
+/// FNV-1a over the first 4 KB. Cheap, and enough to notice that a transcript
+/// was replaced rather than appended to.
+fn head_signature(path: &Path) -> u64 {
+    let mut buf = [0u8; 4096];
+    let n = fs::File::open(path)
+        .and_then(|mut f| f.read(&mut buf))
+        .unwrap_or(0);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in &buf[..n] {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+/// The parse, reading as little of the file as it can get away with.
+///
+/// Three cases: nothing changed (return the remembered result), the file grew
+/// (parse only the new bytes and fold them into the remembered result), or the
+/// file is new or was rewritten (parse it all). The middle case is the one
+/// that matters day to day — the transcript of the session you are *in* grows
+/// continuously, and it is usually the biggest file in the set.
+fn scan_session_cached(path: &Path, _mtime: i64) -> SessionScan {
     let key = path.to_string_lossy().into_owned();
-    if let Ok(cache) = session_scan_cache().lock() {
-        if let Some((ts, scan)) = cache.get(&key) {
-            if *ts == mtime {
-                return scan.clone();
+    let len = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let prior = session_scan_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(&key).cloned());
+
+    if let Some(e) = prior {
+        // Only trust a resume if the file still begins the same way. Length
+        // alone would let an in-place rewrite masquerade as an append.
+        if e.head_sig == head_signature(path) {
+            if e.scanned_to == len {
+                return e.scan;
+            }
+            if len > e.scanned_to {
+                let (scan, to) = scan_session_from(path, e.scanned_to, e.scan);
+                remember(key, ScanEntry { scanned_to: to, head_sig: e.head_sig, scan: scan.clone() });
+                return scan;
             }
         }
     }
-    let scan = scan_session(path);
-    if let Ok(mut cache) = session_scan_cache().lock() {
-        cache.insert(key, (mtime, scan.clone()));
-    }
+    let sig = head_signature(path);
+    let (scan, to) = scan_session_from(path, 0, SessionScan::default());
+    remember(key, ScanEntry { scanned_to: to, head_sig: sig, scan: scan.clone() });
     scan
 }
 
-/// Walk the JSONL once, capturing (1) first user-typed prompt, (2) last
-/// user-typed prompt — usually more identifying since openings are
-/// often "hi" — (3) turn count, (4) the directory `claude --resume` has to
-/// be launched from to find this transcript.
+fn remember(key: String, entry: ScanEntry) {
+    if let Ok(mut c) = session_scan_cache().lock() {
+        c.insert(key, entry);
+    }
+    scan_index_dirty().store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Cheap raw-bytes substring test.
 ///
-/// No artificial line cap — sessions are at most a few MB and this only
-/// runs when the picker dialog opens. A capped scan was cheaper but
-/// gave bad previews on long sessions.
-fn scan_session(path: &Path) -> SessionScan {
-    let mut out = SessionScan {
-        first_prompt: String::new(),
-        last_prompt: String::new(),
-        turn_count: 0,
-        step_count: 0,
-        cwd: String::new(),
-    };
+/// Deliberately not a JSON parse. Building a `serde_json::Value` for every
+/// line of a multi-gigabyte transcript is an order of magnitude more
+/// expensive than looking for the one marker that makes a line worth
+/// parsing at all, and the overwhelming majority of lines — assistant
+/// messages, tool results — are not.
+fn contains_sub(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    let first = needle[0];
+    let last_start = hay.len() - needle.len();
+    let mut i = 0usize;
+    while i <= last_start {
+        match hay[i..=last_start].iter().position(|&b| b == first) {
+            Some(off) => {
+                let at = i + off;
+                if &hay[at..at + needle.len()] == needle {
+                    return true;
+                }
+                i = at + 1;
+            }
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Read the transcript from `start`, folding what it finds into `out`:
+/// (1) first user-typed prompt, (2) last user-typed prompt — usually more
+/// identifying, since openings are often "hi" — (3) turn count, (4) cwd.
+///
+/// Returns how far it got, which is always just past a newline. A trailing
+/// partial line means the writer is mid-append; we stop before it so the next
+/// pass re-reads that record whole rather than parsing half a JSON object.
+///
+/// Every field is exact — `turn_count` in particular is shown as a number in
+/// the UI, so an estimate would be a lie. What makes this affordable is
+/// reading each byte at most once across the life of the file, not reading
+/// fewer of them.
+fn scan_session_from(path: &Path, start: u64, mut out: SessionScan) -> (SessionScan, u64) {
     // The directory this transcript physically lives in is the ONE thing
     // `claude --resume <id>` resolves against, so it is what decides the
     // launch cwd below — not the `cwd` field, which can disagree.
@@ -612,18 +844,43 @@ fn scan_session(path: &Path) -> SessionScan {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_string();
-    let mut cwd_matches_dir = false;
-    let file = match fs::File::open(path) {
+    // Seeded from what an earlier incremental pass already settled on, so
+    // resuming a scan mid-file does not re-open a question this transcript
+    // has already answered.
+    let mut cwd_matches_dir = !out.cwd.is_empty() && encode_path(&out.cwd) == project_dir;
+    let mut file = match fs::File::open(path) {
         Ok(f) => f,
-        Err(_) => return out,
+        Err(_) => return (out, start),
     };
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = match line {
+    if start > 0 && file.seek(SeekFrom::Start(start)).is_err() {
+        return (out, start);
+    }
+    let mut reader = BufReader::with_capacity(1 << 20, file);
+    let mut raw: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut pos = start;
+    loop {
+        raw.clear();
+        let n = match reader.read_until(b'\n', &mut raw) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if raw.last() != Some(&b'\n') {
+            break; // partial trailing line — leave it for the next pass
+        }
+        pos += n as u64;
+        // `cwd` and the opening prompt both live in the first records, so
+        // these two conditions stop being true almost immediately and the
+        // rest of the file only pays the substring test.
+        let need_head = out.cwd.is_empty() || out.first_prompt.is_empty();
+        if !need_head && !contains_sub(&raw, b"queue-operation") {
+            continue;
+        }
+        let line = match std::str::from_utf8(&raw[..n - 1]) {
             Ok(l) => l,
             Err(_) => continue,
         };
-        let v: Value = match serde_json::from_str(&line) {
+        let v: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -691,7 +948,7 @@ fn scan_session(path: &Path) -> SessionScan {
             }
         }
     }
-    out
+    (out, pos)
 }
 
 /// Compute a friendly relative cwd label like `aura-shell/src-tauri`.
@@ -1148,6 +1405,14 @@ fn is_synthetic_prompt(text: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A whole-file scan, which is what these tests are asking about. The
+    /// reader itself became incremental — it resumes from a byte offset with
+    /// whatever an earlier pass already settled — so starting at 0 with an
+    /// empty scan is the "read it all, know nothing yet" case.
+    fn scan_session(path: &Path) -> SessionScan {
+        scan_session_from(path, 0, SessionScan::default()).0
+    }
+
     // ── where the transcript is read up to ──────────────────────────────────
     //
     // The tab is unmounted while the agent keeps writing. Everything between
@@ -1399,5 +1664,134 @@ fn content_to_text(v: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod incremental_scan_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    fn scratch(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "aura-scan-{}-{}-{}",
+            name,
+            std::process::id(),
+            now_unix_secs()
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn prompt(text: &str) -> String {
+        format!(
+            r#"{{"type":"queue-operation","operation":"enqueue","content":{},"cwd":"/tmp/proj"}}"#,
+            serde_json::to_string(text).unwrap()
+        )
+    }
+
+    /// Filler that looks like the bulk of a real transcript: assistant turns
+    /// and tool results, none of which can carry a user prompt.
+    fn noise(i: usize) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"reply {i}"}}]}}}}"#
+        )
+    }
+
+    fn append(path: &Path, lines: &[String]) {
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        for l in lines {
+            writeln!(f, "{l}").unwrap();
+        }
+    }
+
+    #[test]
+    fn contains_sub_matches_only_real_occurrences() {
+        assert!(contains_sub(b"a queue-operation here", b"queue-operation"));
+        assert!(!contains_sub(b"a queue-operatio here", b"queue-operation"));
+        assert!(!contains_sub(b"short", b"queue-operation"));
+        // A near-miss that shares the first byte must not stop the search.
+        assert!(contains_sub(b"qqqqqueue-operation", b"queue-operation"));
+    }
+
+    /// The load-bearing property: reading a transcript in two passes must
+    /// produce exactly what reading it in one pass would. If this ever drifts,
+    /// the turn counts and previews in the Sessions list quietly go wrong.
+    #[test]
+    fn resuming_a_grown_transcript_matches_a_full_rescan() {
+        let dir = scratch("resume");
+        let p = dir.join("s.jsonl");
+
+        let mut first: Vec<String> = vec![prompt("open the door")];
+        first.extend((0..50).map(noise));
+        first.push(prompt("second thing"));
+        append(&p, &first);
+
+        let (partial, at) = scan_session_from(&p, 0, SessionScan::default());
+        assert_eq!(partial.turn_count, 2);
+        assert_eq!(partial.cwd, "/tmp/proj");
+        assert_eq!(at, fs::metadata(&p).unwrap().len());
+
+        let mut more: Vec<String> = (50..90).map(noise).collect();
+        more.push(prompt("third thing"));
+        append(&p, &more);
+
+        let (resumed, resumed_at) = scan_session_from(&p, at, partial);
+        let (full, full_at) = scan_session_from(&p, 0, SessionScan::default());
+
+        assert_eq!(resumed.turn_count, full.turn_count, "turn count must be exact");
+        assert_eq!(resumed.turn_count, 3);
+        assert_eq!(resumed.first_prompt, full.first_prompt);
+        assert_eq!(resumed.last_prompt, full.last_prompt);
+        assert_eq!(resumed.last_prompt, "third thing");
+        assert_eq!(resumed.cwd, full.cwd);
+        assert_eq!(resumed_at, full_at);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A transcript being written right now ends mid-record. Consuming that
+    /// half-line would drop the record when the rest arrives, so the scan has
+    /// to stop before it and report the offset of the last complete line.
+    #[test]
+    fn a_half_written_line_is_left_for_the_next_pass() {
+        let dir = scratch("partial");
+        let p = dir.join("s.jsonl");
+        append(&p, &[prompt("complete one")]);
+        let complete_len = fs::metadata(&p).unwrap().len();
+
+        let mut f = fs::OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(br#"{"type":"queue-operation","operation":"enq"#).unwrap();
+        drop(f);
+
+        let (scan, at) = scan_session_from(&p, 0, SessionScan::default());
+        assert_eq!(at, complete_len, "must stop at the last newline");
+        assert_eq!(scan.turn_count, 1);
+
+        // Now the writer finishes the record; resuming picks it up whole.
+        append(&p, &[String::from(r#"ueue","content":"finished later"}"#)]);
+        let (after, _) = scan_session_from(&p, at, scan);
+        assert_eq!(after.turn_count, 2);
+        assert_eq!(after.last_prompt, "finished later");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rewritten_head_is_detected() {
+        let dir = scratch("sig");
+        let a = dir.join("a.jsonl");
+        let b = dir.join("b.jsonl");
+        append(&a, &[prompt("one")]);
+        append(&b, &[prompt("two")]);
+        assert_ne!(head_signature(&a), head_signature(&b));
+        assert_eq!(head_signature(&a), head_signature(&a));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

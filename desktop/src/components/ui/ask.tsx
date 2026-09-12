@@ -233,18 +233,25 @@ function Sheet({ pending, onDone }: { pending: Pending; onDone: () => void }) {
       role="presentation"
     >
       <div
-        className={cn(MODAL_PANEL, "max-w-[420px]")}
+        // Capped and scrolling, because the body is whatever the caller had
+        // to say. The card starts 18vh down; with no cap, a long body — an
+        // error, a pasted path, a list of names — pushed Cancel and the
+        // primary button below the bottom of a 900×600 window, and the panel
+        // is overflow-hidden, so there was no way to scroll to them: a
+        // question that cannot be answered. Header and footer stay put; only
+        // the middle moves.
+        className={cn(MODAL_PANEL, "flex max-h-[70vh] w-full max-w-[420px] flex-col")}
         onMouseDown={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label={pending.req.title}
       >
-        <div className={MODAL_HEADER}>
+        <div className={cn(MODAL_HEADER, "shrink-0")}>
           <span className={MODAL_TITLE}>{pending.req.title}</span>
         </div>
 
         {(body || pending.kind === "form") && (
-          <div className={cn(MODAL_BODY, "flex flex-col gap-3")}>
+          <div className={cn(MODAL_BODY, "flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto")}>
             {body && (
               <p className="whitespace-pre-line text-sm leading-relaxed text-text-2">{body}</p>
             )}
@@ -271,7 +278,7 @@ function Sheet({ pending, onDone }: { pending: Pending; onDone: () => void }) {
           </div>
         )}
 
-        <div className={MODAL_FOOTER}>
+        <div className={cn(MODAL_FOOTER, "shrink-0")}>
           {pending.kind !== "notice" && (
             <Button variant="secondary" size="sm" onClick={leave}>
               {pending.kind === "confirm" ? (pending.req.cancelLabel ?? "Cancel") : "Cancel"}

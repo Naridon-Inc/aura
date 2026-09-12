@@ -767,6 +767,55 @@ impl Place {
         dial(machine, &remote, feed, wait).await
     }
 
+    /// Start a command in the root and hand back the running child, so the
+    /// caller can read it while it runs.
+    ///
+    /// Every other verb here waits for an answer. This one is for work that
+    /// *talks while it runs* — a coding agent's turn, minutes of stream-json
+    /// the chat draws line by line — and it is the reason a `cli_wrapper:` brain
+    /// bound to a machine no longer runs the CLI on this laptop against a path
+    /// that means nothing here while the tab says the machine's name. The
+    /// native brain's tools reached the box through `execute_tool` from the
+    /// start; this is the same seam for a brain whose hands are a whole CLI.
+    ///
+    /// The child's stdin, stdout and stderr are all piped, wherever it runs, so
+    /// one reader serves both arms. Nothing is validated: like [`Place::sh`],
+    /// this is a command the caller wrote, and quoting exists so it arrives
+    /// unmangled. No deadline either — the caller owns the pace and drops the
+    /// child to end it — which is why this does not go through [`remote_sh`]
+    /// and its `timeout`.
+    ///
+    /// On a box this walks the same wake step as [`Place::run_remote`], for the
+    /// same reason: a sleeping place refuses a stream exactly as it refuses a
+    /// question, and the caller asked for work, not a diagnosis.
+    pub(crate) async fn stream(
+        &self,
+        command: &str,
+    ) -> Result<tokio::process::Child, String> {
+        match self {
+            Place::Here { root } => tokio::process::Command::new("sh")
+                .args(["-c", command])
+                .current_dir(crate::spawn_dir::safe_spawn_dir(root))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|e| format!("spawn: {e}")),
+            Place::Box { machine, root, .. } => {
+                let woken;
+                let machine = match super::place_wake::before_reaching(machine).await? {
+                    Some(up) => {
+                        woken = up;
+                        &woken
+                    }
+                    None => machine,
+                };
+                crate::cloudbox::stream(machine, &remote_stream(root, command))
+            }
+        }
+    }
+
     /// Put a file on this place, with the bytes travelling where a command line
     /// cannot be read.
     ///
@@ -827,6 +876,190 @@ impl Place {
             }
         }
     }
+
+    /// Write a project file — the editor's save, the file tree's "new file".
+    ///
+    /// Root-relative like [`Place::read`], where [`Place::deliver`] is
+    /// home-relative: this is a file in the work, not a credential in a
+    /// profile, so it takes the file's own mode and no `umask`. The bytes
+    /// still travel on stdin, for the same reason `deliver`'s do — a source
+    /// file in argv is a source file in `ps` on both machines, and some source
+    /// files carry keys.
+    pub async fn write(&self, path: &str, contents: &str) -> Result<(), String> {
+        match self {
+            Place::Here { root } => {
+                let p = resolve_writable_local(root, path)?;
+                if let Some(dir) = p.parent() {
+                    tokio::fs::create_dir_all(dir)
+                        .await
+                        .map_err(|e| format!("{}: {e}", dir.display()))?;
+                }
+                tokio::fs::write(&p, contents.as_bytes())
+                    .await
+                    .map_err(|e| format!("write {}: {e}", p.display()))
+            }
+            Place::Box { machine, root, .. } => {
+                let p = resolve_writable_remote(root, path)?;
+                let ran = self
+                    .run_remote(machine, remote_write(&p), Some(contents), READ_WAIT)
+                    .await?;
+                if ran.code == 0 {
+                    Ok(())
+                } else {
+                    Err(format!("write {p}: {}", last_line(&ran.stderr)))
+                }
+            }
+        }
+    }
+
+    /// Make a directory, and every missing one above it.
+    pub async fn mkdir(&self, path: &str) -> Result<(), String> {
+        match self {
+            Place::Here { root } => {
+                let p = resolve_writable_local(root, path)?;
+                tokio::fs::create_dir_all(&p)
+                    .await
+                    .map_err(|e| format!("mkdir {}: {e}", p.display()))
+            }
+            Place::Box { machine, root, .. } => {
+                let p = resolve_writable_remote(root, path)?;
+                let ran = self
+                    .run_remote(machine, remote_mkdir(&p), None, READ_WAIT)
+                    .await?;
+                if ran.code == 0 {
+                    Ok(())
+                } else {
+                    Err(format!("mkdir {p}: {}", last_line(&ran.stderr)))
+                }
+            }
+        }
+    }
+
+    /// Move a file or directory. Refuses to land on something that already
+    /// exists, on both sides, so a rename never quietly overwrites.
+    pub async fn rename(&self, from: &str, to: &str) -> Result<(), String> {
+        match self {
+            Place::Here { root } => {
+                let a = resolve_writable_local(root, from)?;
+                let b = resolve_writable_local(root, to)?;
+                if tokio::fs::try_exists(&b).await.unwrap_or(false) {
+                    return Err(format!("{} already exists.", b.display()));
+                }
+                tokio::fs::rename(&a, &b)
+                    .await
+                    .map_err(|e| format!("rename {}: {e}", a.display()))
+            }
+            Place::Box { machine, root, .. } => {
+                let a = resolve_writable_remote(root, from)?;
+                let b = resolve_writable_remote(root, to)?;
+                let ran = self
+                    .run_remote(machine, remote_rename(&a, &b), None, READ_WAIT)
+                    .await?;
+                if ran.code == 0 {
+                    Ok(())
+                } else {
+                    Err(format!("rename {a}: {}", last_line(&ran.stderr)))
+                }
+            }
+        }
+    }
+
+    /// Delete a file or a whole directory. The root itself is refused: a
+    /// tree that asks to delete `.` is a bug, not a wish.
+    pub async fn remove(&self, path: &str) -> Result<(), String> {
+        match self {
+            Place::Here { root } => {
+                let p = resolve_writable_local(root, path)?;
+                if p == PathBuf::from(root) {
+                    return Err("Refusing to delete the project itself.".to_string());
+                }
+                let meta = tokio::fs::symlink_metadata(&p)
+                    .await
+                    .map_err(|e| format!("remove {}: {e}", p.display()))?;
+                if meta.is_dir() {
+                    tokio::fs::remove_dir_all(&p).await
+                } else {
+                    tokio::fs::remove_file(&p).await
+                }
+                .map_err(|e| format!("remove {}: {e}", p.display()))
+            }
+            Place::Box { machine, root, .. } => {
+                let p = resolve_writable_remote(root, path)?;
+                if p == root.trim_end_matches('/') {
+                    return Err("Refusing to delete the project itself.".to_string());
+                }
+                let ran = self
+                    .run_remote(machine, remote_remove(&p), None, READ_WAIT)
+                    .await?;
+                if ran.code == 0 {
+                    Ok(())
+                } else {
+                    Err(format!("remove {p}: {}", last_line(&ran.stderr)))
+                }
+            }
+        }
+    }
+}
+
+/// `mkdir -p` the parent, then take the file from stdin. No `chmod`: a
+/// project file keeps whatever mode it had, and a new one gets the box's
+/// default, exactly as an editor there would give it.
+fn remote_write(p: &str) -> String {
+    let dir = match p.rsplit_once('/') {
+        Some((d, _)) if !d.is_empty() => d,
+        _ => "/",
+    };
+    format!("mkdir -p {} && cat > {}", quote(dir), quote(p))
+}
+
+fn remote_mkdir(p: &str) -> String {
+    format!("mkdir -p {}", quote(p))
+}
+
+/// `mv -n` would be simpler but is not POSIX; the `test -e` in front does the
+/// same refusal on every box.
+fn remote_rename(from: &str, to: &str) -> String {
+    format!(
+        "if test -e {to}; then echo 'already exists' >&2; exit 1; fi; mv -- {from} {to}",
+        from = quote(from),
+        to = quote(to)
+    )
+}
+
+fn remote_remove(p: &str) -> String {
+    format!("rm -rf -- {}", quote(p))
+}
+
+/// A root-relative path a verb may *change*, on this disk.
+///
+/// The read verbs take any path this laptop's tools would; a write must stay
+/// inside the project and must not climb out of it, so `..` is refused here
+/// where [`resolve_local`] lets it through.
+fn resolve_writable_local(root: &str, p: &str) -> Result<PathBuf, String> {
+    let p = p.trim();
+    if p.contains("..") || p.contains('\0') || p.starts_with('~') {
+        return Err(format!("{p} isn't a path this can write to."));
+    }
+    let full = resolve_local(root, p);
+    if !full.starts_with(root) {
+        return Err(format!("{p} isn't inside the project."));
+    }
+    Ok(full)
+}
+
+/// The same rule over there. On top of what [`resolve_remote`] refuses, `~`
+/// is refused: quoted for the shell it is a directory literally called `~`,
+/// and a write that lands there is a write nobody will find.
+fn resolve_writable_remote(root: &str, p: &str) -> Result<String, String> {
+    let full = resolve_remote(root, p)?;
+    if full.starts_with('~') || root.starts_with('~') {
+        return Err(format!("{p} isn't a path this can write to."));
+    }
+    let root = root.trim_end_matches('/');
+    if full != root && !full.starts_with(&format!("{root}/")) {
+        return Err(format!("{p} isn't inside the project."));
+    }
+    Ok(full)
 }
 
 /// A `~/`-relative path, as a shell on the far side must spell it.
@@ -923,6 +1156,24 @@ fn remote_sh(root: &str, command: &str, wait: Duration) -> String {
         wait.as_secs().max(1),
         quote(command)
     )
+}
+
+/// The same `cd` and the same whole-quoted hand-off as [`remote_sh`], without
+/// the deadline.
+///
+/// `timeout` is what makes a *question* safe to drop: a command that hangs
+/// dies on the box. A streamed turn is not dropped by accident — the caller
+/// holds the child and ends it on purpose — and an agent's turn has no honest
+/// fixed length, so a deadline here would be a turn cut off mid-answer on a
+/// slow model and reported as the machine going quiet.
+fn remote_stream(root: &str, command: &str) -> String {
+    // A machine with no project recorded roots at `~`, and only the box can
+    // expand that: quoted whole it is a directory literally called `~`.
+    let cd = match root.trim() {
+        "" | "~" => "cd \"$HOME\"".to_string(),
+        r => format!("cd {}", quote(r)),
+    };
+    format!("{cd} && sh -c {}", quote(command))
 }
 
 /// A path the way this laptop's tools have always resolved one.
@@ -1155,6 +1406,48 @@ mod tests {
     }
 
     #[test]
+    fn a_streamed_turn_reaches_the_box_whole_and_has_no_deadline() {
+        // AURA-1308 — an agent's turn is minutes of output with no honest
+        // fixed length; a `timeout` here would be a slow model reported as the
+        // machine going quiet. The `cd` and the whole-quoting are unchanged.
+        let out = remote_stream("/home/u/p", "'claude' '-p' 'fix the tests' && echo done");
+        assert!(out.starts_with("cd '/home/u/p' && sh -c "), "{out}");
+        assert!(!out.contains("timeout"), "{out}");
+        assert!(out.contains(&quote("'claude' '-p' 'fix the tests' && echo done")));
+    }
+
+    #[test]
+    fn a_streamed_turn_on_a_machine_with_no_project_lands_in_its_home() {
+        // `Place::at_machine` roots an unbound machine at `~`, and only the
+        // box can expand that — quoted whole it is a directory called `~`.
+        for root in ["~", "", "  "] {
+            let out = remote_stream(root, "true");
+            assert!(out.starts_with("cd \"$HOME\" && sh -c "), "{root:?} → {out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn this_laptop_streams_a_command_the_same_way_a_box_would() {
+        // Not a string test: the local arm hands back a child whose stdout is
+        // read the way the remote one is, which is the claim — one reader,
+        // two places. Rooted in the command's own directory, like `sh`.
+        use tokio::io::AsyncReadExt as _;
+        let here = Place::Here { root: "/tmp".into() };
+        let mut child = here.stream("printf '%s' \"$PWD\"").await.expect("spawned");
+        drop(child.stdin.take());
+        let mut out = String::new();
+        child
+            .stdout
+            .take()
+            .expect("stdout is piped")
+            .read_to_string(&mut out)
+            .await
+            .expect("read");
+        assert!(child.wait().await.expect("wait").success());
+        assert!(out.ends_with("/tmp"), "{out}");
+    }
+
+    #[test]
     fn a_directory_listing_says_which_entries_are_directories() {
         let out = parse_listing("src/\nCargo.toml\n.git/\nREADME.md\n\n");
         assert_eq!(
@@ -1196,6 +1489,49 @@ mod tests {
         assert_eq!(p.here(), "/Users/me/naridon");
         assert_eq!(p.machine_name(), Some("aura-runner"));
         assert!(p.is_remote());
+    }
+
+    #[test]
+    fn a_write_stays_inside_the_project_on_both_sides() {
+        assert_eq!(
+            resolve_writable_remote("/home/u/p", "src/a.rs").unwrap(),
+            "/home/u/p/src/a.rs"
+        );
+        assert_eq!(
+            resolve_writable_remote("/home/u/p/", "/home/u/p/src/a.rs").unwrap(),
+            "/home/u/p/src/a.rs"
+        );
+        assert_eq!(
+            resolve_writable_local("/Users/me/p", "src/a.rs").unwrap(),
+            PathBuf::from("/Users/me/p/src/a.rs")
+        );
+        for bad in ["../x", "src/../../x", "/etc/hosts", "~/x", "a\0"] {
+            assert!(resolve_writable_remote("/home/u/p", bad).is_err(), "{bad:?}");
+            assert!(resolve_writable_local("/Users/me/p", bad).is_err(), "{bad:?}");
+        }
+        // A quote is a fine byte in a filename on this disk and a second
+        // command on a shell over there.
+        assert!(resolve_writable_local("/Users/me/p", "a'b").is_ok());
+        assert!(resolve_writable_remote("/home/u/p", "a'b").is_err());
+        // A root the box has to expand is one we cannot write under safely.
+        assert!(resolve_writable_remote("~", "x").is_err());
+    }
+
+    #[test]
+    fn the_mutating_scripts_quote_every_path_and_feed_content_on_stdin() {
+        assert_eq!(
+            remote_write("/home/u/p/src/a.rs"),
+            "mkdir -p '/home/u/p/src' && cat > '/home/u/p/src/a.rs'"
+        );
+        assert_eq!(remote_write("/x"), "mkdir -p '/' && cat > '/x'");
+        assert_eq!(remote_mkdir("/home/u/p/new dir"), "mkdir -p '/home/u/p/new dir'");
+        assert_eq!(
+            remote_rename("/home/u/p/a", "/home/u/p/b"),
+            "if test -e '/home/u/p/b'; then echo 'already exists' >&2; exit 1; fi; mv -- '/home/u/p/a' '/home/u/p/b'"
+        );
+        assert_eq!(remote_remove("/home/u/p/-x"), "rm -rf -- '/home/u/p/-x'");
+        // No `chmod`, no `umask`: a project file is not a credential.
+        assert!(!remote_write("/home/u/p/a").contains("chmod"));
     }
 
     fn fake_machine() -> Machine {

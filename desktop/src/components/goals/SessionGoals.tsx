@@ -132,6 +132,13 @@ export function SessionGoals({
             agentId={row.agent_id}
             currentRunKey={runKey}
             atCommit={atCommit}
+            // This surface is reviewing one particular run's code, so each card
+            // can say whether its verdict was actually measured against it.
+            // `row.timestamp` is in seconds; the staleness rule works in millis.
+            underReview={{
+              revision: atCommit ?? null,
+              changedAt: row.timestamp * 1000,
+            }}
             autoExplain
           />
         ))}

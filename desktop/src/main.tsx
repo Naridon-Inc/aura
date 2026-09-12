@@ -7,6 +7,7 @@ import { readPopoutParams } from "./lib/popout";
 import { sidebarGlassEnabled } from "./lib/sidebarGlass";
 import { installContextMenuGuard } from "./lib/suppressContextMenu";
 import { installErrorReporting } from "./lib/track";
+import { primeCloudOrigins } from "./lib/cloudOrigin";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { AskHost } from "./components/ui/ask";
 import "./styles.css";
@@ -23,6 +24,12 @@ installContextMenuGuard();
 // from and the error's class, never its message, which routinely carries
 // paths and prompts.
 installErrorReporting();
+
+// Ask once, up front, which cloud this app is talking to, so the chat, Pages
+// and voice sockets never open against a literal `auravcs.com` while the rest
+// of the app is pointed at a staging or self-hosted server. Fire and forget —
+// every caller awaits the same cached answer anyway.
+primeCloudOrigins();
 
 // Spun-off popout windows (lib/popout.ts) load this same entry with a
 // `?popout=…` query string. Single-surface popouts render one focused surface

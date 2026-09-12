@@ -24,6 +24,9 @@ module.exports = {
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
+    // Shared UI lives one directory up, outside this package root, so the
+    // scanner has to be pointed at it by hand or its classes vanish at build.
+    "../aura-shared/**/*.{js,ts,jsx,tsx}",
     "./node_modules/@medusajs/ui/dist/**/*.{js,mjs}",
   ],
 };

@@ -18,9 +18,12 @@ import { readSrc } from "./support/code";
 
 const src = await readSrc("components/rightrail/RightRail.tsx");
 
-/** Tab ids whose body is rendered with the `activeTab === "x" ? … : hidden`
- *  pattern — i.e. every section the rail can show. */
-const bodyTabs = [...src.matchAll(/activeTab === "([a-z]+)" \?/g)].map((m) => m[1]);
+/** Tab ids whose body the rail renders — every section it can show. The
+ *  visible/hidden switch moved inside `RailBody`, which also publishes
+ *  `PanelActiveContext`, so the body sites now read
+ *  `<RailBody active={activeTab === "x"}>` rather than a ternary. Match the
+ *  comparison itself so the scan survives either spelling. */
+const bodyTabs = [...src.matchAll(/activeTab === "([a-z]+)"/g)].map((m) => m[1]);
 
 describe("the rail's section bodies", () => {
   it("has bodies to check in the first place", () => {
@@ -36,6 +39,17 @@ describe("the rail's section bodies", () => {
   it("gates every one on having been opened", () => {
     const ungated = bodyTabs.filter((tab) => !src.includes(`opened("${tab}")`));
     expect(ungated).toEqual([]);
+  });
+
+  it("routes every body through RailBody, so none can poll while parked", () => {
+    // `RailBody` is both the hidden/visible switch and the
+    // `PanelActiveContext` provider. A body rendered with a bare
+    // `className={activeTab === … ? … : "hidden"}` would still look right and
+    // would still keep its 15-second polls running behind another tab, which
+    // is the whole cost this file exists to prevent.
+    const bare = [...src.matchAll(/activeTab === "([a-z]+)" \?/g)].map((m) => m[1]);
+    expect(bare).toEqual([]);
+    expect(src).toContain("PanelActiveContext.Provider");
   });
 
   it("gates plugin panels too. A plugin panel is someone else's code", () => {

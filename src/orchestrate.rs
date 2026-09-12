@@ -181,37 +181,61 @@ fn estimate_full_context_tokens() -> u64 {
     estimated_bytes / 4 // bytes to tokens
 }
 
-fn print_token_summary(stats: &SessionTokenStats) {
-    eprintln!("\n📊 Token Usage Summary:");
-    eprintln!("  Input:  {:>8} tokens    Output: {:>8} tokens    Total: {:>8} tokens",
-        format_num(stats.total_input), format_num(stats.total_output), format_num(stats.total_tokens));
-    eprintln!("  Claude: {:>8} tokens (${:.4})    Gemini: {:>8} tokens (${:.4})",
-        format_num(stats.claude_tokens), stats.claude_cost_usd,
-        format_num(stats.gemini_tokens), stats.gemini_cost_usd);
-    eprintln!("  Total cost: ${:.4}", stats.total_cost_usd);
-    eprintln!();
-    eprintln!("  Savings:");
+/// Format the savings section as plain lines, each explicitly marked as an
+/// ESTIMATE. These figures come from a byte-based heuristic (~3.5–4 chars per
+/// token) and a fixed assumption that an agent would otherwise re-read ~40% of
+/// the repo — they are NOT measured provider-token deltas. AUDIT-CTX-01: an
+/// estimate must never be printed as an actual, measured saving. The only
+/// measured numbers in this summary are the input/output/cost block, which is
+/// drawn from real provider telemetry; the counterfactual "without Aura" is a
+/// model, so it is hedged and its basis is disclosed for reproducibility.
+fn savings_summary_lines(stats: &SessionTokenStats) -> Vec<String> {
+    let mut lines = vec!["  Estimated savings (heuristic — not measured):".to_string()];
     if stats.tokens_saved_handover > 0 {
         let handover_pct = if stats.estimated_without_aura > 0 {
             (stats.tokens_saved_handover as f64 / stats.estimated_without_aura as f64 * 100.0) as u64
         } else { 0 };
-        eprintln!("    Handover compression:  -{} tokens saved ({}% reduction)",
-            format_num(stats.tokens_saved_handover), handover_pct);
+        lines.push(format!(
+            "    Handover compression:  ~{} fewer tokens (est. {}% reduction)",
+            format_num(stats.tokens_saved_handover), handover_pct));
     }
     if stats.tokens_saved_resume > 0 {
-        eprintln!("    Session resumption:    -{} tokens saved", format_num(stats.tokens_saved_resume));
+        lines.push(format!(
+            "    Session resumption:    ~{} fewer tokens (est.)",
+            format_num(stats.tokens_saved_resume)));
     }
     if stats.gemini_tokens > 0 {
         let gemini_as_claude_cost = calculate_cost(&AgentType::ClaudeCode,
             stats.gemini_tokens * 60 / 100, stats.gemini_tokens * 40 / 100);
         let saved = gemini_as_claude_cost - stats.gemini_cost_usd;
         if saved > 0.0 {
-            eprintln!("    Gemini routing:        -${:.4} saved (vs all-Claude)", saved);
+            lines.push(format!(
+                "    Gemini routing:        ~${:.4} lower cost (est. vs all-Claude)", saved));
         }
     }
+    lines.push(String::new());
+    lines.push(format!(
+        "  Without Aura (est.): ~${:.4}    With Aura (measured): ${:.4}    Est. saving: ~{:.0}%",
+        stats.estimated_cost_without_aura, stats.total_cost_usd, stats.savings_pct));
+    lines.push(
+        "  Estimates use a byte-based heuristic (~3.5–4 chars/token) and assume ~40% of the repo \
+would be re-read without Aura; they are not measured provider-token deltas."
+            .to_string());
+    lines
+}
+
+fn print_token_summary(stats: &SessionTokenStats) {
+    eprintln!("\n📊 Token Usage Summary:");
+    eprintln!("  Input:  {:>8} tokens    Output: {:>8} tokens    Total: {:>8} tokens  (measured)",
+        format_num(stats.total_input), format_num(stats.total_output), format_num(stats.total_tokens));
+    eprintln!("  Claude: {:>8} tokens (${:.4})    Gemini: {:>8} tokens (${:.4})",
+        format_num(stats.claude_tokens), stats.claude_cost_usd,
+        format_num(stats.gemini_tokens), stats.gemini_cost_usd);
+    eprintln!("  Total cost: ${:.4}  (measured)", stats.total_cost_usd);
     eprintln!();
-    eprintln!("  Without Aura: ~${:.4}    With Aura: ${:.4}    Saved: {:.0}%",
-        stats.estimated_cost_without_aura, stats.total_cost_usd, stats.savings_pct);
+    for line in savings_summary_lines(stats) {
+        eprintln!("{line}");
+    }
 }
 
 fn format_num(n: u64) -> String {
@@ -499,13 +523,23 @@ fn get_git_head() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Put the checkout back to where the wave started before retrying it.
+///
+/// This runs in the repository the person launched `aura orchestrate` in,
+/// so a blunt `git reset --hard` here takes their uncommitted work with
+/// it — and a failing wave does this up to three times. Anchoring the
+/// tree first costs one commit object and makes a retry free to undo;
+/// where it went is printed, because a ref nobody is told about is the
+/// same as no ref at all.
 fn git_reset_hard(ref_str: &str) -> Result<(), String> {
-    let status = Command::new("git")
-        .args(["reset", "--hard", ref_str])
-        .output()
-        .map_err(|e| format!("git reset error: {}", e))?;
-    if !status.status.success() {
-        return Err(format!("git reset --hard {} failed", ref_str));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let mut git = crate::safety_snapshot::RealGit::here();
+    let saved = crate::safety_snapshot::reset_keeping_work(&mut git, ref_str, &now.to_string())?;
+    if saved.is_some() {
+        eprintln!("  {}", crate::safety_snapshot::kept_work_line(&saved));
     }
     Ok(())
 }
@@ -731,7 +765,9 @@ fn handle_failure(
             // 1st fail: run aura fix, retry same agent
             eprintln!("  [retry 1/3] Running aura fix...");
             if let Some(ref r) = git_ref {
-                let _ = git_reset_hard(r);
+                if let Err(e) = git_reset_hard(r) {
+                    eprintln!("  the checkout was left as-is: {e}");
+                }
             }
             let fix_output = run_aura_fix(base)?;
             session.waves[wave_idx].logs.push_str(&format!("\n--- AURA FIX ---\n{}", fix_output));
@@ -745,7 +781,9 @@ fn handle_failure(
             if let Some(alt) = alternate_agent(&session.waves[wave_idx].assigned_agent, &session.agents_available) {
                 eprintln!("  [retry 2/3] Switching agent to {}...", alt);
                 if let Some(ref r) = git_ref {
-                    let _ = git_reset_hard(r);
+                    if let Err(e) = git_reset_hard(r) {
+                        eprintln!("  the checkout was left as-is: {e}");
+                    }
                 }
                 session.waves[wave_idx].assigned_agent = alt;
                 session.waves[wave_idx].status = WaveStatus::Retrying;
@@ -764,7 +802,9 @@ fn handle_failure(
             // 3rd fail: pause session
             eprintln!("  [fail] Wave {} failed after 3 attempts. Pausing session.", wave_idx + 1);
             if let Some(ref r) = git_ref {
-                let _ = git_reset_hard(r);
+                if let Err(e) = git_reset_hard(r) {
+                    eprintln!("  the checkout was left as-is: {e}");
+                }
             }
             session.waves[wave_idx].status = WaveStatus::Failed;
             session.status = OrchestrationStatus::Paused;
@@ -2076,4 +2116,80 @@ pub fn run_duo(objective: &str, base: &str) -> Result<OrchestrationSession, Stri
     session.updated_at = now_ts();
     save_session(&session)?;
     Ok(session)
+}
+
+#[cfg(test)]
+mod ctx01_savings_honesty {
+    //! AUDIT-CTX-01: byte-based / fixed-wave savings figures must never be
+    //! printed as measured, actual savings. These guard the estimate labeling
+    //! and the disclosed heuristic basis (so the numbers are reproducible).
+    use super::*;
+
+    fn sample_stats() -> SessionTokenStats {
+        SessionTokenStats {
+            total_input: 1_000,
+            total_output: 500,
+            total_tokens: 1_500,
+            total_cost_usd: 0.02,
+            claude_tokens: 1_500,
+            claude_cost_usd: 0.02,
+            gemini_tokens: 0,
+            gemini_cost_usd: 0.0,
+            tokens_saved_handover: 40_000,
+            tokens_saved_resume: 5_000,
+            estimated_without_aura: 100_000,
+            estimated_cost_without_aura: 0.50,
+            savings_pct: 60.0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn savings_section_is_framed_as_estimated_not_measured() {
+        let joined = savings_summary_lines(&sample_stats()).join("\n");
+        assert!(
+            joined.contains("Estimated savings"),
+            "savings header must announce it is estimated: {joined}"
+        );
+        assert!(
+            joined.to_lowercase().contains("not measured"),
+            "savings section must disclaim measurement: {joined}"
+        );
+    }
+
+    #[test]
+    fn every_savings_figure_is_hedged() {
+        let lines = savings_summary_lines(&sample_stats());
+        for l in lines
+            .iter()
+            .filter(|l| l.contains("fewer tokens") || l.contains("lower cost"))
+        {
+            assert!(
+                l.contains("est.") || l.contains('~'),
+                "each savings figure must be marked an estimate, not a flat saving: {l}"
+            );
+        }
+    }
+
+    #[test]
+    fn measured_cost_is_distinguished_from_estimated_counterfactual() {
+        let joined = savings_summary_lines(&sample_stats()).join("\n");
+        assert!(
+            joined.contains("With Aura (measured)"),
+            "the real provider cost must be labeled measured: {joined}"
+        );
+        assert!(
+            joined.contains("Without Aura (est.)"),
+            "the counterfactual must be labeled an estimate: {joined}"
+        );
+    }
+
+    #[test]
+    fn heuristic_basis_is_disclosed_for_reproducibility() {
+        let joined = savings_summary_lines(&sample_stats()).join("\n");
+        assert!(
+            joined.contains("chars/token"),
+            "the byte-based heuristic must be disclosed so the estimate is auditable: {joined}"
+        );
+    }
 }

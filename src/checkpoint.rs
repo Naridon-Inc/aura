@@ -17,6 +17,10 @@ fn git_dir() -> PathBuf {
 
 use crate::models::AstNode;
 
+#[cfg(test)]
+#[path = "checkpoint_anchor_tests.rs"]
+mod checkpoint_anchor_tests;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CheckpointData {
     pub id: String,
@@ -52,6 +56,10 @@ pub struct CheckpointData {
     /// and costs one full parse.
     #[serde(default)]
     pub file_oids: std::collections::HashMap<String, String>,
+    /// Canonical scope manifest (AUDIT-CAP-01) — repo/checkout/session this
+    /// checkpoint belongs to. Old checkpoints deserialize with `None`.
+    #[serde(default)]
+    pub scope: Option<serde_json::Value>,
 }
 
 impl CheckpointData {
@@ -213,25 +221,44 @@ impl SnapshotStore {
         Ok(filename)
     }
 
-    /// Get all snapshots for a specific file, sorted newest first
-    pub fn get_snapshots_for_file(file_path: &str) -> Vec<FileSnapshot> {
-        Self::ensure_dir();
-        let safe_name = file_path.replace('/', "__").replace('\\', "__");
-
-        let mut snapshots = Vec::new();
+    /// Collect every on-disk snapshot whose stored `file_path` is exactly
+    /// `file_path`, paired with its path so callers can prune by real time.
+    ///
+    /// The sanitized filename is only a cheap prefix pre-filter — it is NOT
+    /// authoritative, because one file's sanitized name can be a prefix of
+    /// another's: `src/index.ts` → `src__index.ts` is a prefix of
+    /// `src__index.tsx__<ts>.json`, and `a` → `a__` is a prefix of `a/b`'s
+    /// `a__b__<ts>.json`. Requiring the trailing `__` separator drops the
+    /// first case, and confirming the deserialized `file_path` drops the
+    /// second. Matching on the filename alone (as this used to) meant a
+    /// sibling's snapshots were pulled into a file's set — so a query
+    /// returned the wrong file's history and a prune deleted it.
+    fn snapshots_of(file_path: &str) -> Vec<(PathBuf, FileSnapshot)> {
+        let safe_prefix = format!("{}__", file_path.replace('/', "__").replace('\\', "__"));
+        let mut out = Vec::new();
         if let Ok(entries) = fs::read_dir(Self::SNAPSHOT_DIR) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with(&safe_name) && name.ends_with(".json") {
-                    if let Ok(content) = fs::read_to_string(entry.path()) {
-                        if let Ok(snap) = serde_json::from_str::<FileSnapshot>(&content) {
-                            snapshots.push(snap);
+                if !name.ends_with(".json") || !name.starts_with(&safe_prefix) {
+                    continue;
+                }
+                if let Ok(content) = fs::read_to_string(entry.path()) {
+                    if let Ok(snap) = serde_json::from_str::<FileSnapshot>(&content) {
+                        if snap.file_path == file_path {
+                            out.push((entry.path(), snap));
                         }
                     }
                 }
             }
         }
+        out
+    }
 
+    /// Get all snapshots for a specific file, sorted newest first
+    pub fn get_snapshots_for_file(file_path: &str) -> Vec<FileSnapshot> {
+        Self::ensure_dir();
+        let mut snapshots: Vec<FileSnapshot> =
+            Self::snapshots_of(file_path).into_iter().map(|(_, s)| s).collect();
         snapshots.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         snapshots
     }
@@ -271,23 +298,16 @@ impl SnapshotStore {
 
     /// Prune old snapshots for a file, keeping only MAX_SNAPSHOTS_PER_FILE
     fn prune_file_snapshots(file_path: &str) {
-        let safe_name = file_path.replace('/', "__").replace('\\', "__");
-        let mut entries: Vec<_> = Vec::new();
-
-        if let Ok(dir) = fs::read_dir(Self::SNAPSHOT_DIR) {
-            for entry in dir.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with(&safe_name) && name.ends_with(".json") {
-                    entries.push(entry.path());
-                }
-            }
-        }
+        let mut entries = Self::snapshots_of(file_path);
 
         if entries.len() > Self::MAX_SNAPSHOTS_PER_FILE {
-            // Sort by name (which includes timestamp) — oldest first
-            entries.sort();
+            // Oldest first by the snapshot's own timestamp. Sorting by
+            // filename (as this used to) is wrong: `a.rs__2.json` sorts after
+            // `a.rs__10.json` lexicographically, so the string order does not
+            // track time, and deleting from the front dropped the wrong rows.
+            entries.sort_by_key(|(_, snap)| snap.timestamp);
             let to_remove = entries.len() - Self::MAX_SNAPSHOTS_PER_FILE;
-            for path in entries.iter().take(to_remove) {
+            for (path, _) in entries.iter().take(to_remove) {
                 let _ = fs::remove_file(path);
             }
         }
@@ -295,20 +315,28 @@ impl SnapshotStore {
 
     /// Global prune to keep total snapshots under MAX_TOTAL_SNAPSHOTS
     pub fn prune_global() {
-        let mut entries: Vec<_> = Vec::new();
+        let mut entries: Vec<(PathBuf, u64)> = Vec::new();
 
         if let Ok(dir) = fs::read_dir(Self::SNAPSHOT_DIR) {
             for entry in dir.flatten() {
-                if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
-                    entries.push(entry.path());
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        if let Ok(snap) = serde_json::from_str::<FileSnapshot>(&content) {
+                            entries.push((path, snap.timestamp));
+                        }
+                    }
                 }
             }
         }
 
         if entries.len() > Self::MAX_TOTAL_SNAPSHOTS {
-            entries.sort();
+            // Globally oldest first, by timestamp — never by filename, whose
+            // lexicographic order would drop the alphabetically-earliest
+            // filenames instead of the actually-oldest snapshots.
+            entries.sort_by_key(|(_, ts)| *ts);
             let to_remove = entries.len() - Self::MAX_TOTAL_SNAPSHOTS;
-            for path in entries.iter().take(to_remove) {
+            for (path, _) in entries.iter().take(to_remove) {
                 let _ = fs::remove_file(path);
             }
         }
@@ -580,6 +608,15 @@ impl CheckpointStore {
         out
     }
 
+    /// The snapshot taken on **this exact commit**, or `None`. Deliberately does
+    /// not look at neighbours: a caller that needs to say "this commit was
+    /// checked" must not be handed the commit next door's evidence. The
+    /// resolving lookup below is the other, explicitly-borrowing question.
+    pub fn checkpoint_for_commit(repo: &Repository, rev: &str) -> Option<CheckpointData> {
+        let oid = repo.revparse_single(rev).ok()?.peel_to_commit().ok()?.id();
+        Self::note_checkpoint(repo, oid)
+    }
+
     /// Retrieve the checkpoint that best represents the code **at a given commit** —
     /// so a goal can be proven against the snapshot that session actually produced,
     /// not whatever branch happens to be checked out. Resolution order:
@@ -606,7 +643,7 @@ impl CheckpointStore {
             .id();
 
         // 1. Direct hit — a note on this exact commit.
-        if let Some(cp) = Self::note_checkpoint(repo, target) {
+        if let Some(cp) = Self::checkpoint_for_commit(repo, commit_ish) {
             return Some(cp);
         }
 
@@ -890,6 +927,60 @@ impl CheckpointStore {
         Ok(false)
     }
 
+    /// How many checkpoints the shadow branch archives, without reading one.
+    ///
+    /// [`Self::get_shadow_checkpoints`] deserializes every archived checkpoint
+    /// so it can sort them by time. A checkpoint is the whole semantic graph of
+    /// the repository at one moment, so on a repository with real history those
+    /// blobs run to tens of megabytes each — 465 of them here, eleven gigabytes
+    /// of JSON in total. Every caller that only ever wanted the number was
+    /// paying for all of it: `aura doctor` grew past eight gigabytes resident
+    /// and was killed by the kernel around twenty-six seconds in, having
+    /// written nothing at all. That is what the desktop's Project Health card
+    /// sat waiting on, and why it never stopped saying it was still checking.
+    ///
+    /// Counting is a tree walk. Git already knows the shape of the archive
+    /// without a single blob being inflated, so this stays constant-memory and
+    /// answers in milliseconds however large the history behind it grows.
+    pub fn count_shadow_checkpoints(repo: &Repository) -> Result<usize, Box<dyn std::error::Error>> {
+        let shadow_ref = match repo.find_reference(&format!("refs/heads/{}", Self::SHADOW_BRANCH)) {
+            Ok(r) => r,
+            Err(_) => return Ok(0),
+        };
+
+        let root_tree = shadow_ref.peel_to_commit()?.tree()?;
+        let mut count = 0usize;
+
+        // The same shard/rest/<session_num>/checkpoint.json layout the loader
+        // walks, minus the part that reads what it finds.
+        for shard_entry in root_tree.iter() {
+            if shard_entry.kind() != Some(git2::ObjectType::Tree) { continue; }
+            let shard_tree = repo.find_tree(shard_entry.id())?;
+            for cp_entry in shard_tree.iter() {
+                if cp_entry.kind() != Some(git2::ObjectType::Tree) { continue; }
+                let cp_tree = repo.find_tree(cp_entry.id())?;
+                // Rows written before the layout gained numbered session
+                // folders put checkpoint.json directly here. There is one such
+                // row in this repository's archive, and every walker that
+                // assumed the newer shape has been quietly skipping it.
+                if cp_tree.get_name("checkpoint.json").is_some() {
+                    count += 1;
+                    continue;
+                }
+                for sess_entry in cp_tree.iter() {
+                    if sess_entry.kind() != Some(git2::ObjectType::Tree) { continue; }
+                    if let Ok(sess_tree) = repo.find_tree(sess_entry.id()) {
+                        if sess_tree.get_name("checkpoint.json").is_some() {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
     /// Retrieve checkpoints from the shadow branch (survives rebase)
     pub fn get_shadow_checkpoints(repo: &Repository) -> Result<Vec<CheckpointData>, Box<dyn std::error::Error>> {
         let mut checkpoints = Vec::new();
@@ -909,6 +1000,20 @@ impl CheckpointStore {
             for cp_entry in shard_tree.iter() {
                 if cp_entry.kind() != Some(git2::ObjectType::Tree) { continue; }
                 let cp_tree = repo.find_tree(cp_entry.id())?;
+                // A pre-multi-session row keeps checkpoint.json right here
+                // rather than under a numbered folder. Walking straight past
+                // it made an archived checkpoint unreadable for good.
+                if let Some(legacy) = cp_tree.get_name("checkpoint.json") {
+                    let obj = legacy.to_object(repo)?;
+                    if let Some(blob) = obj.as_blob() {
+                        if let Ok(json) = std::str::from_utf8(blob.content()) {
+                            if let Ok(data) = serde_json::from_str::<CheckpointData>(json) {
+                                checkpoints.push(data);
+                            }
+                        }
+                    }
+                    continue;
+                }
                 // Look inside numbered session subfolders
                 for sess_entry in cp_tree.iter() {
                     if sess_entry.kind() != Some(git2::ObjectType::Tree) { continue; }
@@ -986,6 +1091,7 @@ mod tests {
             // Nothing to reuse: these fixtures carry no ast_nodes, so there is
             // no file whose blob OID a later capture could match against.
             file_oids: Default::default(),
+            scope: None,
         }
     }
 
@@ -1138,6 +1244,160 @@ mod tests {
         let found = CheckpointStore::latest_checkpoints(&repo, 2).unwrap();
         let ids: Vec<&str> = found.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec!["newer", "older"]);
+    }
+
+    /// Put a `checkpoint.json` on the shadow branch whose bytes are not a
+    /// checkpoint at all, at a path the layout says is one. Nothing writes
+    /// this on purpose; a run interrupted mid-commit can leave it.
+    fn plant_unparseable_shadow_entry(repo: &Repository, shard: &str, rest: &str) {
+        let sig = Signature::now("Aura Test", "test@aura.local").unwrap();
+        let parent = repo
+            .find_reference(&format!("refs/heads/{}", CheckpointStore::SHADOW_BRANCH))
+            .ok()
+            .and_then(|r| r.peel_to_commit().ok());
+
+        let blob = repo.blob(b"{ this was never valid json").unwrap();
+        let mut sess_tb = repo.treebuilder(None).unwrap();
+        sess_tb.insert("checkpoint.json", blob, 0o100644).unwrap();
+        let sess_oid = sess_tb.write().unwrap();
+
+        let mut cp_tb = repo.treebuilder(None).unwrap();
+        cp_tb.insert("0", sess_oid, 0o040000).unwrap();
+        let cp_oid = cp_tb.write().unwrap();
+
+        let mut shard_tb = repo.treebuilder(None).unwrap();
+        shard_tb.insert(rest, cp_oid, 0o040000).unwrap();
+        let shard_oid = shard_tb.write().unwrap();
+
+        let mut tb = repo
+            .treebuilder(parent.as_ref().and_then(|c| c.tree().ok()).as_ref())
+            .unwrap();
+        tb.insert(shard, shard_oid, 0o040000).unwrap();
+        let tree = repo.find_tree(tb.write().unwrap()).unwrap();
+
+        let parents: Vec<&git2::Commit> = parent.iter().collect();
+        repo.commit(
+            Some(&format!("refs/heads/{}", CheckpointStore::SHADOW_BRANCH)),
+            &sig,
+            &sig,
+            "aura: a torn write",
+            &tree,
+            &parents,
+        )
+        .unwrap();
+    }
+
+    /// Write `shard/rest/checkpoint.json` with no numbered session folder —
+    /// the shape the archive used before it carried several sessions per
+    /// checkpoint.
+    fn plant_flat_shadow_entry(repo: &Repository, shard: &str, rest: &str, data: &CheckpointData) {
+        let sig = Signature::now("Aura Test", "test@aura.local").unwrap();
+        let parent = repo
+            .find_reference(&format!("refs/heads/{}", CheckpointStore::SHADOW_BRANCH))
+            .ok()
+            .and_then(|r| r.peel_to_commit().ok());
+
+        let blob = repo
+            .blob(serde_json::to_string(data).unwrap().as_bytes())
+            .unwrap();
+        let mut cp_tb = repo.treebuilder(None).unwrap();
+        cp_tb.insert("checkpoint.json", blob, 0o100644).unwrap();
+        let cp_oid = cp_tb.write().unwrap();
+
+        let mut shard_tb = repo.treebuilder(None).unwrap();
+        shard_tb.insert(rest, cp_oid, 0o040000).unwrap();
+        let shard_oid = shard_tb.write().unwrap();
+
+        let mut tb = repo
+            .treebuilder(parent.as_ref().and_then(|c| c.tree().ok()).as_ref())
+            .unwrap();
+        tb.insert(shard, shard_oid, 0o040000).unwrap();
+        let tree = repo.find_tree(tb.write().unwrap()).unwrap();
+
+        let parents: Vec<&git2::Commit> = parent.iter().collect();
+        repo.commit(
+            Some(&format!("refs/heads/{}", CheckpointStore::SHADOW_BRANCH)),
+            &sig,
+            &sig,
+            "aura: a checkpoint from the flat layout",
+            &tree,
+            &parents,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn counting_the_shadow_archive_agrees_with_loading_it() {
+        let (_dir, repo, _commits) = repo_with_three_commits();
+        let base = now_ms();
+        for i in 0..3u64 {
+            let data = checkpoint(&format!("ab{i}cdef01"), base + i * 1000);
+            CheckpointStore::condense_to_shadow(&repo, &data, None).unwrap();
+        }
+
+        let loaded = CheckpointStore::get_shadow_checkpoints(&repo).unwrap();
+        assert_eq!(loaded.len(), 3, "the fixture wrote three");
+        assert_eq!(
+            CheckpointStore::count_shadow_checkpoints(&repo).unwrap(),
+            loaded.len(),
+            "the cheap count and the expensive load must never disagree"
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_from_before_numbered_sessions_is_still_archived() {
+        // The layout gained numbered session folders after some checkpoints
+        // had already been written flat. Both walkers used to step straight
+        // over those, so a checkpoint that is sitting right there in the
+        // archive was neither counted nor readable.
+        let (_dir, repo, _commits) = repo_with_three_commits();
+        let data = checkpoint("ab1cdef01", now_ms());
+        CheckpointStore::condense_to_shadow(&repo, &data, None).unwrap();
+        plant_flat_shadow_entry(&repo, "cd", "2cdef01", &checkpoint("cd2cdef01", now_ms() + 1));
+
+        assert_eq!(
+            CheckpointStore::count_shadow_checkpoints(&repo).unwrap(),
+            2,
+            "the flat row is one of the archive's checkpoints"
+        );
+        let ids: Vec<String> = CheckpointStore::get_shadow_checkpoints(&repo)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert!(
+            ids.contains(&"cd2cdef01".to_string()),
+            "the flat row must be readable, not just countable: got {ids:?}"
+        );
+    }
+
+    #[test]
+    fn counting_an_archive_that_was_never_started_is_zero() {
+        let (_dir, repo, _commits) = repo_with_three_commits();
+        assert_eq!(CheckpointStore::count_shadow_checkpoints(&repo).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_checkpoint_too_torn_to_parse_is_still_one_checkpoint() {
+        // The mechanism this asserts is the whole point of the counter: it
+        // walks the tree and never inflates a blob. A checkpoint whose bytes
+        // will not deserialize is invisible to the loader and still counted
+        // here, which is only possible because nothing was deserialized.
+        let (_dir, repo, _commits) = repo_with_three_commits();
+        let data = checkpoint("ab1cdef01", now_ms());
+        CheckpointStore::condense_to_shadow(&repo, &data, None).unwrap();
+        plant_unparseable_shadow_entry(&repo, "cd", "2cdef01");
+
+        assert_eq!(
+            CheckpointStore::get_shadow_checkpoints(&repo).unwrap().len(),
+            1,
+            "the loader can only report what it could parse"
+        );
+        assert_eq!(
+            CheckpointStore::count_shadow_checkpoints(&repo).unwrap(),
+            2,
+            "the count reads the shape of the archive, not its contents"
+        );
     }
 
     #[test]
