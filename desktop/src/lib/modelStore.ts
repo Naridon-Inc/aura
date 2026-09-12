@@ -17,7 +17,8 @@ export type ModelId =
   | "claude-opus-4-7"
   | "claude-opus-4-8"
   | "claude-opus-5"
-  | "claude-fable-5";
+  | "claude-fable-5"
+  | "claude-fable-5-1";
 
 export type TaskClass = "simple_edit" | "chat" | "plan";
 
@@ -49,6 +50,7 @@ export const MODEL_OPTIONS: { id: ModelId; label: string; hint: string }[] = [
   { id: "claude-opus-4-8", label: "Claude Opus 4.8", hint: "Frontier coding. Complex plans" },
   { id: "claude-opus-5", label: "Claude Opus 5", hint: "Frontier. Hardest coding and plans" },
   { id: "claude-fable-5", label: "Claude Fable 5", hint: "Long-horizon work. Hardest projects" },
+  { id: "claude-fable-5-1", label: "Claude Fable 5.1", hint: "Newest Fable. Longest-running work" },
 ];
 
 export const TASK_CLASSES: { id: TaskClass; label: string; hint: string }[] = [

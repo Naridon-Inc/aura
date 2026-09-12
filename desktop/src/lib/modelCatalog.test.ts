@@ -220,3 +220,45 @@ describe("pi in the model picker", () => {
     expect(modelBrandName("pi", rows[0])).toBe("pi");
   });
 });
+
+// The same model list exists in four places: the static consts in this module,
+// the JSON floor `model_catalog.json` that the Rust side compiles in, the
+// `catalog.json` aura-web serves, and the web console's copy of this module.
+// Nothing forced them to agree, and they did not: the served catalog spent
+// weeks listing Antigravity's tier-suffixed ids (`gemini-3.6-flash-high`)
+// while every other copy listed the tier-less bases the backend actually
+// wants, which shows one model three times and takes the Level chip out of
+// the decision. These pin the two copies that ship inside the app.
+describe("the offline model catalog", () => {
+  const floor = require("../../src-tauri/model_catalog.json") as {
+    families: Record<string, { models: { key: string; id: string | null; label: string }[] }>;
+  };
+  const served = require("../../../aura-web/public/models/catalog.json") as typeof floor;
+
+  // One brain per family, so `catalogFor` resolves the static list to compare.
+  const BRAINS: Record<string, BrainChoice> = {
+    anthropic: brain({ id: "cli_wrapper:claude", label: "Claude", kind: "cli_wrapper" }),
+    openai: brain({ id: "cli_wrapper:codex", label: "Codex", kind: "cli_wrapper" }),
+    gemini: brain({ id: "cli_wrapper:gemini", label: "Gemini", kind: "cli_wrapper" }),
+    kimi: brain({ id: "cli_wrapper:kimi", label: "Kimi", kind: "cli_wrapper" }),
+    antigravity: brain({ id: "cli_wrapper:agy", label: "Antigravity", kind: "cli_wrapper" }),
+  };
+
+  for (const [family, b] of Object.entries(BRAINS)) {
+    test(`${family}: the static list matches the floor the app compiles in`, () => {
+      const shown = catalogFor(b, null).map((m) => `${m.key} ${m.id} ${m.label}`);
+      const compiled = floor.families[family].models.map((m) => `${m.key} ${m.id} ${m.label}`);
+      expect(shown).toEqual(compiled);
+    });
+  }
+
+  test("the served catalog agrees with the floor on every family it carries", () => {
+    // The floor may carry a family the server does not yet publish; it must
+    // never disagree about one they both have, because whichever answers
+    // first is what the picker shows.
+    for (const family of Object.keys(served.families)) {
+      expect(floor.families[family]).toBeDefined();
+      expect(served.families[family].models).toEqual(floor.families[family].models);
+    }
+  });
+});

@@ -74,9 +74,10 @@ export type SelectedModel = {
 // window is the default rather than a separate beta variant, so a "… 1M" row
 // would be the same model twice (see isLongContextCapable).
 const ANTHROPIC: CatalogModel[] = [
-  { key: "opus-5", id: "claude-opus-5", label: "Opus 5", isNew: true },
-  { key: "sonnet-5", id: "claude-sonnet-5", label: "Sonnet 5", isNew: true },
-  { key: "fable-5", id: "claude-fable-5", label: "Fable 5", isNew: true },
+  { key: "fable-5-1", id: "claude-fable-5-1", label: "Fable 5.1", isNew: true },
+  { key: "opus-5", id: "claude-opus-5", label: "Opus 5" },
+  { key: "sonnet-5", id: "claude-sonnet-5", label: "Sonnet 5" },
+  { key: "fable-5", id: "claude-fable-5", label: "Fable 5" },
   { key: "opus-4-8-1m", id: "claude-opus-4-8", label: "Opus 4.8 1M", longContext: true },
   { key: "opus-4-8", id: "claude-opus-4-8", label: "Opus 4.8" },
   { key: "opus-4-7-1m", id: "claude-opus-4-7", label: "Opus 4.7 1M", longContext: true },
@@ -91,21 +92,29 @@ const ANTHROPIC: CatalogModel[] = [
 // models_cache.json): Sol = frontier, Terra = balanced, Luna = fast/cheap.
 // codex forwards each via `-c model=<id>`; there is no bare `gpt-5.6`.
 const OPENAI: CatalogModel[] = [
-  { key: "gpt-5-6-sol", id: "gpt-5.6-sol", label: "GPT-5.6 Sol", isNew: true },
-  { key: "gpt-5-6-terra", id: "gpt-5.6-terra", label: "GPT-5.6 Terra", isNew: true },
-  { key: "gpt-5-6-luna", id: "gpt-5.6-luna", label: "GPT-5.6 Luna", isNew: true },
+  { key: "gpt-5-6-sol", id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+  { key: "gpt-5-6-terra", id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
+  { key: "gpt-5-6-luna", id: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
   { key: "gpt-5-5", id: "gpt-5.5", label: "GPT-5.5" },
-  { key: "gpt-5-4", id: "gpt-5.4", label: "GPT-5.4" },
+  { key: "gpt-5-4-mini", id: "gpt-5.4-mini", label: "GPT-5.4 Mini", isNew: true },
+  { key: "gpt-5-3-codex-spark", id: "gpt-5.3-codex-spark", label: "GPT-5.3 Codex Spark", isNew: true },
 ];
 
-// Ids verified against the installed `gemini` CLI (0.45.0 bundles the
-// gemini-3 line) and against `v1beta/models` on 2026-08-01 — the same API
-// the CLI and the native brain both dispatch to. Newest first; `-preview`
-// is the published id for the models Google still labels preview.
+// The installed `gemini` CLI (0.55.1) bundles ids only up to 3.5-flash and
+// 3.1-pro, so it cannot vouch for the newer rows; those come from the model
+// table on ai.google.dev, which is the same `v1beta/models` surface the CLI
+// and the native brain both dispatch to. 3.8 and 3.7 Flash read Stable there
+// on 2026-09-05, and `agy models` lists both as tiered bases, which confirms
+// the spelling a second time. 3.8 Flash Cyber is left out on purpose: it is
+// gated behind Google's Fairwind Program, so the row would 404 for everyone
+// who is not in it. Newest first; `-preview` is the published id for the
+// models Google still labels preview.
 const GEMINI: CatalogModel[] = [
-  { key: "gemini-3-6-flash", id: "gemini-3.6-flash", label: "Gemini 3.6 Flash", isNew: true },
+  { key: "gemini-3-8-flash", id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", isNew: true },
+  { key: "gemini-3-7-flash", id: "gemini-3.7-flash", label: "Gemini 3.7 Flash", isNew: true },
+  { key: "gemini-3-6-flash", id: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
   { key: "gemini-3-5-flash", id: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
-  { key: "gemini-3-1-pro", id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", isNew: true },
+  { key: "gemini-3-1-pro", id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro" },
   { key: "gemini-3-flash", id: "gemini-3-flash-preview", label: "Gemini 3 Flash" },
   { key: "gemini-2-5-pro", id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
   { key: "gemini-2-5-flash", id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
@@ -115,16 +124,12 @@ const XAI: CatalogModel[] = [
   { key: "grok-4-5", id: "grok-4.5", label: "Grok 4.5", isNew: true },
 ];
 
-// The installed `kimi` CLI is the coding product (scope `kimi-code`); its
-// config exposes exactly one selectable model alias, `kimi-code/kimi-for-coding`
-// (display "Kimi-k2.6"), which the managed endpoint routes to the current
-// coding model. No separate `kimi-3`/`k3` id is accepted by this CLI, so we
-// list the one real id rather than invent a menu.
 // Kimi (Moonshot) coding CLI. ids are the model-table keys from the CLI's own
 // `~/.kimi-code/config.toml` and are forwarded verbatim as `kimi -m <id>`.
 // K3 is the current default; the K2.7 pair are the prior line. Newest first.
 const KIMI: CatalogModel[] = [
-  { key: "kimi-k3", id: "kimi-code/k3", label: "K3", isNew: true },
+  { key: "kimi-k3", id: "kimi-code/k3", label: "K3" },
+  { key: "kimi-k3-256k", id: "kimi-code/k3-256k", label: "K3-256k", isNew: true },
   { key: "kimi-k2-7-coding", id: "kimi-code/kimi-for-coding", label: "K2.7 Coding" },
   { key: "kimi-k2-7-coding-highspeed", id: "kimi-code/kimi-for-coding-highspeed", label: "K2.7 Coding Highspeed" },
 ];
@@ -134,11 +139,12 @@ const KIMI: CatalogModel[] = [
 // show ONE row per base model and let the shared Level chip pick the tier —
 // the backend (`aura-agents/antigravity.rs`) re-attaches it as `<base>-<tier>`,
 // clamped to the tiers that base offers. So ids here are the tier-less bases
-// (`gemini-3.6-flash`); ids with no reasoning tier (`claude-sonnet-4-6`,
-// `claude-opus-4-6-thinking`) stand alone. Newest line (3.6 Flash) first.
+// (`gemini-3.8-flash`); ids with no reasoning tier (`claude-sonnet-4-6`,
+// `claude-opus-4-6-thinking`) stand alone. Newest line (3.8 Flash) first.
 const ANTIGRAVITY: CatalogModel[] = [
-  { key: "agy-gemini-3-6-flash", id: "gemini-3.6-flash", label: "Gemini 3.6 Flash", isNew: true },
-  { key: "agy-gemini-3-5-flash", id: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
+  { key: "agy-gemini-3-8-flash", id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", isNew: true },
+  { key: "agy-gemini-3-7-flash", id: "gemini-3.7-flash", label: "Gemini 3.7 Flash", isNew: true },
+  { key: "agy-gemini-3-6-flash", id: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
   { key: "agy-gemini-3-1-pro", id: "gemini-3.1-pro", label: "Gemini 3.1 Pro" },
   { key: "agy-claude-sonnet-4-6", id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
   { key: "agy-claude-opus-4-6-thinking", id: "claude-opus-4-6-thinking", label: "Claude Opus 4.6 · Thinking" },
@@ -190,7 +196,7 @@ export function familyOf(brain: BrainChoice): ModelFamily {
       if (suffix === "gemini") return "gemini";
       if (suffix === "kimi") return "kimi";
       // Antigravity's registry id is `antigravity`; `agy` is the bin alias —
-      // match both so its 11-model list shows instead of a bare "Default".
+      // match both so its real list shows instead of a bare "Default".
       if (suffix === "antigravity" || suffix === "agy") return "antigravity";
       // The engines that publish their own list get that list here too.
       // `cli_wrapper:opencode` and `acp:opencode` are the same engine with

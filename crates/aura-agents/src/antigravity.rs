@@ -47,7 +47,12 @@ impl Antigravity {
     /// with `agy models` — the source of truth for which `<base>-<tier>` ids exist.
     fn agy_tiers(base: &str) -> Option<&'static [&'static str]> {
         match base {
-            "gemini-3.6-flash" | "gemini-3.5-flash" => Some(&["low", "medium", "high"]),
+            // 3.5-flash is gone from `agy models` as of 2026-09-05; a base that
+            // is not on that list can no longer compose an id agy accepts, so it
+            // leaves this table at the same time it leaves the catalog.
+            "gemini-3.8-flash" | "gemini-3.7-flash" | "gemini-3.6-flash" => {
+                Some(&["low", "medium", "high"])
+            }
             "gemini-3.1-pro" => Some(&["low", "high"]), // no medium tier
             "gpt-oss-120b" => Some(&["medium"]),        // only a medium tier ships
             _ => None, // claude-sonnet-4-6, claude-opus-4-6-thinking, unknown → as-is
@@ -265,6 +270,24 @@ mod tests {
             inv.args,
             vec!["--model", "gemini-3.6-flash-medium", "--print", "hello"]
         );
+    }
+
+    /// The flash lines agy added on 2026-09-05. A base the tier table does not
+    /// know falls through to the untiered arm and is sent to `agy` verbatim —
+    /// which is not an id `agy models` lists, so the call fails. Adding a row to
+    /// the catalog without a row here is exactly that failure, and this is what
+    /// catches it.
+    #[test]
+    fn the_newest_flash_bases_compose_a_tier() {
+        for base in ["gemini-3.8-flash", "gemini-3.7-flash"] {
+            let mut r = req(InvokeMode::OneShot, Some(base));
+            r.effort = Some(ReasoningEffort::High);
+            let inv = Antigravity.build_invocation(&r).unwrap();
+            assert_eq!(
+                inv.args,
+                vec!["--model", &format!("{base}-high"), "--print", "hello"]
+            );
+        }
     }
 
     /// A base with no medium tier snaps a Medium chip to the nearest (higher) one.
