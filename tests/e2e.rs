@@ -226,6 +226,28 @@ fn aura_binary() -> String {
     env!("CARGO_BIN_EXE_aura").to_string()
 }
 
+/// Run a command line exactly as printed, with `aura` on PATH.
+///
+/// Gates print commands for a person or an agent to paste, and the only way to
+/// test that promise is to paste it: parse nothing, rebuild nothing, hand the
+/// line to a shell and see whether it works.
+fn run_in_shell(repo: &TestRepo, command: &str) -> std::process::Output {
+    let bin = PathBuf::from(aura_binary());
+    let dir = bin.parent().expect("the test binary lives somewhere");
+    let path = match std::env::var("PATH") {
+        Ok(rest) => format!("{}:{rest}", dir.display()),
+        Err(_) => dir.display().to_string(),
+    };
+    Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("PATH", path)
+        .env("AURA_NO_DAEMON", "1")
+        .current_dir(repo.path())
+        .output()
+        .expect("failed to run the handed-back command")
+}
+
 // ── Checkpoint Tests ──
 
 #[test]
@@ -687,10 +709,26 @@ fn test_deletion_guard_fix_command_clears_the_gate() {
     assert!(out1.contains("validate"), "rejection must name the removed node: {out1}");
     assert!(out1.contains("aura log-intent"), "rejection must hand back the fix command: {out1}");
 
-    // STEP 2 — run the exact kind of fix the guard described: an intent that
-    // signals a removal AND names the removed node.
-    let logged = repo.aura(&["log-intent", "Removed validate because the endpoint was retired"]);
-    assert!(logged.status.success(), "log-intent should exit 0");
+    // STEP 2 — run the command the guard handed back, verbatim, with only its
+    // reason placeholder filled in. Anything less tests a command we wrote
+    // ourselves rather than the one an agent is actually told to run.
+    let handed_back = out1
+        .lines()
+        .find(|l| l.trim_start().starts_with("$ aura log-intent"))
+        .map(|l| l.trim_start().trim_start_matches("$ ").to_string())
+        .unwrap_or_else(|| panic!("the rejection must hand back a command: {out1}"));
+    let filled = {
+        let open = handed_back.find("<state why").expect("the reason is left for a person to write");
+        let close = handed_back[open..].find('>').expect("an unterminated placeholder") + open;
+        format!("{}the endpoint was retired{}", &handed_back[..open], &handed_back[close + 1..])
+    };
+    let ran = run_in_shell(&repo, &filled);
+    assert!(
+        ran.status.success(),
+        "the handed-back command must run as printed: {filled}\n{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr),
+    );
     let log = std::fs::read_to_string(repo.path().join(".aura/intent_log.jsonl"))
         .expect("log-intent must create .aura/intent_log.jsonl — a no-op here means the guard is theatre");
     assert!(
@@ -698,7 +736,11 @@ fn test_deletion_guard_fix_command_clears_the_gate() {
         "log-intent must append the intent row the guard reads, got: {log}"
     );
 
-    // STEP 3 — the deletion is now accounted for, so the gate must clear.
+    // STEP 3 — the deletion is now accounted for, so the gate must clear. Not
+    // this gate alone, either: the unexplained-writes gate runs moments later
+    // and wants a reason on every file, and for a long time the handed-back
+    // command said nothing about files, so following it to the letter bought
+    // one rejection in place of another.
     let cleared = repo.aura(&["capture-context"]);
     assert!(
         cleared.status.success(),

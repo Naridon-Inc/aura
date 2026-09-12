@@ -51,6 +51,10 @@ const INSTRUCTION_VERB: &str = "Removed";
 /// without producing an unreadably long command line.
 const MAX_NAMES_IN_INSTRUCTION: usize = 8;
 
+/// How many paths the same command spells out before it summarises. Matches
+/// the writes gate's own ceiling, because it is the same line of shell.
+const MAX_PATHS_IN_INSTRUCTION: usize = 12;
+
 /// Compare the identifiers that existed in the last checkpoint against the set
 /// still present in the staged tree and return the names that vanished.
 ///
@@ -136,10 +140,17 @@ pub fn is_deletion_accounted(
 /// trailing reason and runs it verbatim will clear [`is_deletion_accounted`] on
 /// the retry. This is what turns the rejection into a fix rather than a wall.
 ///
+/// `writes` are the files the same commit touches, and they are named here for
+/// a reason worth stating: clearing this gate alone was never enough to commit.
+/// The unexplained-writes gate runs moments later and wants a reason on every
+/// file, so a command that accounted for the removal and said nothing about the
+/// files sent the agent straight into a second rejection — technically a fix,
+/// in practice a wall with an extra step. One command now clears both.
+///
 /// Node names are elided after [`MAX_NAMES_IN_INSTRUCTION`] with a "…and N
 /// more" tail so the line stays readable on a mass deletion; the retained
 /// prefix always contains at least one real name.
-pub fn rejection_instruction(deleted_nodes: &[String]) -> String {
+pub fn rejection_instruction(deleted_nodes: &[String], writes: &[String]) -> String {
     let named: Vec<&String> = deleted_nodes
         .iter()
         .filter(|n| !is_ignorable_identifier(n))
@@ -148,8 +159,11 @@ pub fn rejection_instruction(deleted_nodes: &[String]) -> String {
     if named.is_empty() {
         // No auditable name survived (bulk/anonymous removal). Fall back to a
         // path-anchored instruction the agent can complete with the location.
-        return "aura log-intent \"Removed <file/directory> because <state why it is no longer needed>\""
-            .to_string();
+        return format!(
+            "aura log-intent --type Refactor \"{verb} <file/directory> because <state why it is no longer needed>\"{writes}",
+            verb = INSTRUCTION_VERB,
+            writes = writes_flag(writes),
+        );
     }
 
     let shown = named.len().min(MAX_NAMES_IN_INSTRUCTION);
@@ -164,11 +178,32 @@ pub fn rejection_instruction(deleted_nodes: &[String]) -> String {
     }
 
     format!(
-        "aura log-intent \"{verb} {list} because <state why {they} no longer needed>\"",
+        "aura log-intent --type Refactor \"{verb} {list} because <state why {they} no longer needed>\"{writes}",
         verb = INSTRUCTION_VERB,
         list = list,
         they = if named.len() == 1 { "it is" } else { "they are" },
+        writes = writes_flag(writes),
     )
+}
+
+/// The `--writes` tail, or nothing when the commit writes no file anybody has
+/// to own — a commit that only deletes is the one case where the removal is
+/// the whole story.
+fn writes_flag(writes: &[String]) -> String {
+    if writes.is_empty() {
+        return String::new();
+    }
+    let shown = writes.len().min(MAX_PATHS_IN_INSTRUCTION);
+    let mut list = writes
+        .iter()
+        .take(shown)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    if writes.len() > shown {
+        list.push_str(",…");
+    }
+    format!(" --writes {list}")
 }
 
 #[cfg(test)]
@@ -240,7 +275,7 @@ mod tests {
     #[test]
     fn instruction_names_the_removed_nodes() {
         let deleted = vec!["validate".to_string(), "parse_header".to_string()];
-        let cmd = rejection_instruction(&deleted);
+        let cmd = rejection_instruction(&deleted, &[]);
         assert!(cmd.contains("aura log-intent"));
         assert!(cmd.contains("validate"));
         assert!(cmd.contains("parse_header"));
@@ -249,7 +284,7 @@ mod tests {
     #[test]
     fn instruction_elides_a_long_removal_list() {
         let deleted: Vec<String> = (0..20).map(|i| format!("node_{i}")).collect();
-        let cmd = rejection_instruction(&deleted);
+        let cmd = rejection_instruction(&deleted, &[]);
         assert!(cmd.contains("node_0"));
         assert!(cmd.contains("…and"));
         assert!(cmd.contains("more"));
@@ -258,9 +293,39 @@ mod tests {
     #[test]
     fn instruction_falls_back_when_no_named_node() {
         let deleted: Vec<String> = vec!["".to_string(), "__gen".to_string()];
-        let cmd = rejection_instruction(&deleted);
+        let cmd = rejection_instruction(&deleted, &[]);
         assert!(cmd.contains("aura log-intent"));
         assert!(cmd.contains("<file/directory>"));
+    }
+
+    /// The gate after this one wants a reason on every file in the commit, so
+    /// the command has to carry them. Without this the agent clears one gate
+    /// and is stopped by the next for something this one already knew.
+    #[test]
+    fn instruction_declares_the_files_the_commit_writes() {
+        let deleted = vec!["validate".to_string()];
+        let writes = vec!["api.rs".to_string(), "src/billing.rs".to_string()];
+        let cmd = rejection_instruction(&deleted, &writes);
+        assert!(cmd.contains("--writes api.rs,src/billing.rs"), "got: {cmd}");
+        assert!(cmd.contains("--type Refactor"), "the writes gate wants a type too: {cmd}");
+    }
+
+    #[test]
+    fn instruction_elides_a_long_write_list() {
+        let deleted = vec!["validate".to_string()];
+        let writes: Vec<String> = (0..30).map(|i| format!("src/f{i}.rs")).collect();
+        let cmd = rejection_instruction(&deleted, &writes);
+        assert!(cmd.contains("src/f0.rs"));
+        assert!(cmd.contains(",…"), "a long list has to summarise: {cmd}");
+    }
+
+    /// A commit that only removes things writes nothing anybody has to own,
+    /// and a bare `--writes` would be a syntax error handed to an agent.
+    #[test]
+    fn instruction_leaves_off_the_flag_when_nothing_was_written() {
+        let deleted = vec!["validate".to_string()];
+        let cmd = rejection_instruction(&deleted, &[]);
+        assert!(!cmd.contains("--writes"), "got: {cmd}");
     }
 
     /// The load-bearing guarantee: the command we hand back, once its reason is
@@ -269,7 +334,7 @@ mod tests {
     #[test]
     fn generated_instruction_round_trips_through_the_gate() {
         let deleted = vec!["validate".to_string(), "parse_header".to_string()];
-        let cmd = rejection_instruction(&deleted);
+        let cmd = rejection_instruction(&deleted, &[]);
         // Simulate the agent running the command with a concrete reason. The
         // logged intent text is the quoted payload of the command.
         let logged_intent = cmd.replace(

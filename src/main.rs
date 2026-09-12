@@ -3,6 +3,7 @@ mod models;
 mod parser;
 mod hook;
 mod staged_index;
+mod commit_writes;
 mod enable;
 mod cmd_commands;
 mod cmd_migrate;
@@ -5778,11 +5779,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             // The exact, ready-to-run command that makes THESE
-                            // specific removals accountable. It already names the
-                            // removed nodes and opens with a removal keyword, so an
-                            // agent that fills in the reason and runs it verbatim
-                            // clears this gate on the next commit — a fix, not a wall.
-                            let fix_cmd = deletion_guard::rejection_instruction(&deleted_nodes);
+                            // specific removals accountable. It names the removed
+                            // nodes, opens with a removal keyword, and declares the
+                            // files this same commit writes, so an agent that fills
+                            // in the reason and runs it verbatim clears this gate
+                            // AND the writes gate below — a fix, not a wall.
+                            let fix_cmd = deletion_guard::rejection_instruction(
+                                &deleted_nodes,
+                                &commit_writes::staged(&repo, &index),
+                            );
 
                             if config.strict_gatekeeper_mode {
                                 println!("\n  {} {}", "How to Fix:".bold().green(), "This removal is not accounted for. To proceed, log an intent that owns it — run:");
@@ -5828,41 +5833,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // the declared scope. Skipped entirely when --force.
             if !*force {
                 // Real staged writes = added/modified/renamed/typechanged paths in
-                // the tree→index diff. Deletions are the deletion guard's job above.
-                let actual_writes: Vec<String> = {
-                    let mut paths = Vec::new();
-                    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-                    let mut diff_opts = git2::DiffOptions::new();
-                    if let Ok(diff) = repo.diff_tree_to_index(head_tree.as_ref(), Some(&index), Some(&mut diff_opts)) {
-                        for delta in diff.deltas() {
-                            use git2::Delta::{Added, Copied, Modified, Renamed, Typechange};
-                            if matches!(delta.status(), Added | Modified | Renamed | Copied | Typechange) {
-                                if let Some(p) = delta.new_file().path() {
-                                    let s = p.to_string_lossy().to_string();
-                                    // Aura's own bookkeeping is never a "write" the agent must
-                                    // declare. Besides the `.aura/` and `.git/` trees, the
-                                    // per-agent intent handshake files live at the repo root
-                                    // (`.gemini.intent`, `.claude.intent`) — the pre-commit hook
-                                    // writes them, so counting them would flag Aura's own control
-                                    // file as an undeclared write on every commit.
-                                    let name = p
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().to_string())
-                                        .unwrap_or_default();
-                                    let is_aura_control = s.contains(".aura/")
-                                        || s.contains(".git/")
-                                        || name == ".gemini.intent"
-                                        || name == ".claude.intent"
-                                        || name == ".aura.intent";
-                                    if !is_aura_control {
-                                        paths.push(s);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    paths
-                };
+                // the tree→index diff. Deletions are the deletion guard's job above,
+                // which asks `commit_writes` the same question for the same commit.
+                let actual_writes = commit_writes::staged(&repo, &index);
 
                 // Both gates below ask "what was said about this commit", and
                 // both need the same two answers: the log, and the moment the
