@@ -17,7 +17,7 @@
 //
 //     2 members · 1 admin
 //     aura-user   Not signed in yet — seen on a device
-//     Ashiq  [admin]   ashiqwayanad007@gmail.com
+//     Ashiq  [admin]   ashiqwayanad007@example.com
 //
 // Neither row badged `you` — this machine's git has no user.email, so Aura
 // could not match the reader to any row. The Channels tab then said, in the

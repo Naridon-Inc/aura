@@ -94,7 +94,7 @@ function manifest(members: TeamMember[]): TeamManifest {
  *  none of them him. */
 const inheritedRoster = manifest([
   member({
-    email: "ashiqwayanad007@gmail.com",
+    email: "ashiqwayanad007@example.com",
     name: "Ashiq",
     handle: "ashiqwayanad007",
     claimed: true,
@@ -106,7 +106,7 @@ const inheritedRoster = manifest([
     handle: "mck",
     claimed: true,
     admin: true,
-    also_emails: ["mubasheer.ck@hotmail.com"],
+    also_emails: ["mubasheer.ck@example.com"],
   }),
   member({ email: "third@acme.dev", name: "Third", handle: "third" }),
 ]);
@@ -179,17 +179,17 @@ describe("a stranger who has a git identity of their own", () => {
 });
 
 describe("a real teammate whose git email is an alias", () => {
-  // Mubasheer commits locally as mubasheer.ck@hotmail.com, which the admin
+  // Mubasheer commits locally as mubasheer.ck@example.com, which the admin
   // linked to the `mck` seat. `canonical_member_for_email` resolved it
   // server-side, so the report arrives already carrying the proof.
   const ctx = {
     report: report({
-      git_email: "mubasheer.ck@hotmail.com",
+      git_email: "mubasheer.ck@example.com",
       git_name: "Mubasheer CK",
       handle: "mubasheer.ck",
       canonical_handle: "mck",
       canonical_email: "mck@naridon.com",
-      alias_emails: ["mubasheer.ck@hotmail.com"],
+      alias_emails: ["mubasheer.ck@example.com"],
     }),
     manifest: inheritedRoster,
     account: null,
@@ -209,7 +209,7 @@ describe("a real teammate whose git email is an alias", () => {
     expect(choices).toHaveLength(2);
     expect(choices[0]?.handle).toBe("mck");
     expect(choices[1]?.isLocalGit).toBe(true);
-    expect(choices[1]?.email).toBe("mubasheer.ck@hotmail.com");
+    expect(choices[1]?.email).toBe("mubasheer.ck@example.com");
   });
 
   test("and is asked to choose", () => {
@@ -233,7 +233,7 @@ describe("proof by signed-in GitHub account", () => {
       git_email: "",
       github_login: "ashiqwayanad007",
       github_member_handle: "ashiqwayanad007",
-      github_member_email: "ashiqwayanad007@gmail.com",
+      github_member_email: "ashiqwayanad007@example.com",
       github_member_name: "Ashiq",
     }),
     manifest: inheritedRoster,
@@ -383,7 +383,7 @@ describe("deduping", () => {
   test("one person reached by two proofs appears once", () => {
     const choices = buildIdentityChoices({
       report: report({
-        git_email: "mubasheer.ck@hotmail.com",
+        git_email: "mubasheer.ck@example.com",
         handle: "mubasheer.ck",
         canonical_handle: "mck",
         canonical_email: "mck@naridon.com",

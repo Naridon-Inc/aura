@@ -155,7 +155,7 @@ export function buildSelfKeys(opts: {
 
 /** True when `sender` (a message's `from_handle`) identifies the local user.
  *  Tests the sender both verbatim and as an email-local-part so a message
- *  stamped `mubasheer.ck@hotmail.com` matches a `mubasheer.ck` key and
+ *  stamped `mubasheer.ck@example.com` matches a `mubasheer.ck` key and
  *  vice-versa.
  *
  *  A STRONG match (GitHub-anchored handle, pseudonym, declared seat) is always

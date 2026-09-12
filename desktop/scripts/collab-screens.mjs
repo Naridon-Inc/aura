@@ -15,7 +15,11 @@
 // throws still leaves a screenshot behind, and a green run that quietly shot a
 // blank rectangle is worse than no run at all.
 
-import { chromium } from "/Users/muhammed/Documents/naridonmarketer/node_modules/playwright-core/index.mjs";
+// Resolved by name, not by path. This was an absolute import into a sibling
+// project's node_modules, which worked on exactly one laptop and broke for
+// everyone who cloned the repo. `PLAYWRIGHT_CORE` still allows pointing at an
+// installation somewhere else when playwright is not a dependency here.
+const { chromium } = await import(process.env.PLAYWRIGHT_CORE ?? "playwright-core");
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 

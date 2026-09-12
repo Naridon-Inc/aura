@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn two_people_never_share_a_file() {
         let a = cache_path("mo@touchstage.com").unwrap();
-        let b = cache_path("ashiq@touchstage.com").unwrap();
+        let b = cache_path("ashiq@touchstage.example").unwrap();
         assert_ne!(a, b);
     }
 
