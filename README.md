@@ -13,9 +13,9 @@ Signed, per commit, at the symbol level.
 </p>
 
 <p align="center">
-  <img src=".github/assets/semantic-diff.png" width="100%" alt="Aura's semantic diff — a side-by-side change with a plain-language 'what changed / why it changed' header over the raw diff" />
+  <img src=".github/assets/aura-demo.gif" width="849" alt="Terminal recording: an intent contract is approved for src/billing.rs with verify_token marked must-preserve, then a commit that deleted verify_token is blocked, naming the caller that would break" />
   <br>
-  <em>Every change carries the reason it was made and the agent that made it.</em>
+  <em>The agent said it would tune the retry backoff. It also deleted the token check. The commit does not land.</em>
 </p>
 
 ## Quick start
@@ -48,6 +48,12 @@ src/billing.rs
 ```
 
 Building from source instead: `cargo build --release` from the repository root.
+
+<p align="center">
+  <img src=".github/assets/semantic-diff.png" width="100%" alt="Aura's semantic diff — a side-by-side change with a plain-language 'what changed / why it changed' header over the raw diff" />
+  <br>
+  <em>The same record in the desktop app: every change carries the reason it was made and the agent that made it.</em>
+</p>
 
 ## The problem it solves
 
