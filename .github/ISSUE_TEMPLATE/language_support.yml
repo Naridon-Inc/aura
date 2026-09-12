@@ -1,0 +1,33 @@
+name: Language support
+description: Ask for a language Aura does not parse yet
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Aura parses 13 languages through Tree-sitter. Adding a fourteenth is a
+        well-scoped contribution and a good first one — see
+        [issue #11](https://github.com/Naridon-Inc/aura/issues/11) for what it involves.
+
+  - type: input
+    id: language
+    attributes:
+      label: Language
+      placeholder: Elixir
+    validations:
+      required: true
+
+  - type: input
+    id: grammar
+    attributes:
+      label: Tree-sitter grammar
+      description: A link to the grammar crate or repository, if you know of one.
+      placeholder: https://github.com/elixir-lang/tree-sitter-elixir
+
+  - type: textarea
+    id: context
+    attributes:
+      label: What you would use it for
+      description: >
+        Which of your repositories this covers, and roughly how much of your work is in
+        this language. It helps us order the queue.

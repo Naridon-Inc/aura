@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or idea
+    url: https://github.com/Naridon-Inc/aura/discussions
+    about: For anything that is not yet a bug or a specific request.
+  - name: Security issue
+    url: https://github.com/Naridon-Inc/aura/security/policy
+    about: Report it privately. Please do not open a public issue.

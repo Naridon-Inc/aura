@@ -1,0 +1,78 @@
+name: Bug report
+description: Something Aura does that it should not, or does not do that it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report a security issue here. [SECURITY.md](https://github.com/Naridon-Inc/aura/blob/master/SECURITY.md)
+        explains the private channel.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what Aura did instead of what you expected.
+      placeholder: |
+        I ran `git commit -am "tune the backoff"`. The commit landed even though it
+        deleted verify_token, which the intent contract marked must-preserve.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: >
+        The shortest sequence of commands that shows the problem, starting from an
+        empty repository if you can. This is the single most useful part of the report.
+      render: shell
+      placeholder: |
+        mkdir /tmp/demo && cd /tmp/demo && git init
+        aura init
+        …
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: What Aura printed
+      description: >
+        Paste the output, including anything a gate printed when it blocked or allowed
+        the commit. `AURA_DEBUG=1` adds detail.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Aura version
+      description: The output of `aura --version`. If you built from source, the commit.
+      placeholder: "0.19.47"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where it happened
+      options:
+        - The aura CLI
+        - A git hook (a commit was blocked or allowed wrongly)
+        - The desktop app
+        - The MCP server (used from an agent)
+        - The VS Code extension
+        - Somewhere else / not sure
+    validations:
+      required: true

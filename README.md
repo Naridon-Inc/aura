@@ -188,6 +188,16 @@ aura/
 The CLI and every crate build from the root workspace (`cargo build --release`). The
 desktop app builds from [`desktop/`](desktop); the extension from [`extensions/vscode`](extensions/vscode).
 
+## Contributing
+
+Aura is the engine's own first user: every commit in this repository goes
+through the gates you are reading about. Issues labelled
+[`up-for-grabs`](https://github.com/Naridon-Inc/aura/labels/up-for-grabs) are
+scoped to one file or one command and say what "done" looks like.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the build, the three commands CI
+runs, and where in the tree to start.
+
 ## License
 
 Apache License 2.0 — Copyright (c) 2026 Naridon, Inc.
