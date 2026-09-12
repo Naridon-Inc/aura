@@ -2,6 +2,7 @@
 mod models;
 mod parser;
 mod hook;
+mod staged_index;
 mod enable;
 mod cmd_commands;
 mod cmd_migrate;
@@ -4719,8 +4720,13 @@ fn detect_lang_ext(path: &str) -> String {
     .to_string()
 }
 
+/// The repository, as every command should see it.
+///
+/// `staged_index::open` rather than `Repository::open` because commands run
+/// from inside a hook — `capture-context` is one — and there git may have put
+/// the staged content in an index file of its own choosing. See that module.
 fn open_repo() -> Result<Repository, Box<dyn std::error::Error>> {
-    Repository::open(".").map_err(|_| {
+    staged_index::open(".").map_err(|_| {
         format!(
             "{} Not a Git repository. Run {} first, or use {} to set one up.",
             "error:".red().bold(),

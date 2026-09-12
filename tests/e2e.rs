@@ -1204,3 +1204,136 @@ fn test_config_set_strict_mode() {
     assert!(stdout.contains("Strict") || stdout.contains("strict") || stdout.contains("ON"),
         "Status should show strict mode: {}", stdout);
 }
+
+// ══════════════════════════════════════════════════
+// Intent Gate Tests
+// ══════════════════════════════════════════════════
+
+/// The repository the two tests below share: a charge endpoint whose token
+/// check has a caller, and an approved contract saying the token check must
+/// survive. Both then delete it and try to commit — one by staging first, one
+/// with `git commit -a`. The gate must refuse both.
+fn repo_with_a_protected_token_check() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.write_file(
+        "src/auth.rs",
+        "pub fn verify_token(token: &str) -> bool {\n    token.starts_with(\"tok_\") && token.len() == 36\n}\n",
+    );
+    repo.write_file(
+        "src/billing.rs",
+        "pub fn retry_charge(attempt: u32) -> u64 {\n    200u64 << attempt\n}\n",
+    );
+    repo.write_file(
+        "src/api.rs",
+        "pub fn handle_charge(token: &str) -> u64 {\n    if !crate::auth::verify_token(token) {\n        return 0;\n    }\n    crate::billing::retry_charge(1)\n}\n",
+    );
+    repo.commit("feat: charge endpoint with token check");
+
+    let approved = repo.aura(&[
+        "intent-contract",
+        "approve",
+        "--goal",
+        "tune the retry backoff constant",
+        "--path",
+        "src/billing.rs",
+        "--protect",
+        "verify_token",
+        "--agent",
+        "e2e",
+    ]);
+    assert!(
+        approved.status.success(),
+        "approving the contract should succeed: {}",
+        String::from_utf8_lossy(&approved.stderr)
+    );
+    repo
+}
+
+/// What an agent that overreached actually leaves behind: the change it was
+/// asked for, plus the deletion of a function it was told to preserve.
+fn overreach(repo: &TestRepo) {
+    repo.write_file(
+        "src/billing.rs",
+        "pub fn retry_charge(attempt: u32) -> u64 {\n    150u64 << attempt\n}\n",
+    );
+    repo.write_file(
+        "src/auth.rs",
+        "pub fn token_prefix(token: &str) -> &str {\n    token.split('_').next().unwrap_or(\"\")\n}\n",
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_commit_that_drops_a_protected_symbol() {
+    let repo = repo_with_a_protected_token_check();
+    overreach(&repo);
+
+    let staged = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git add failed");
+    assert!(staged.status.success());
+
+    let out = Command::new("git")
+        .args(["commit", "-m", "perf(billing): tune retry backoff"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git commit failed");
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "the commit deleted a protected symbol and should have been refused: {said}"
+    );
+    assert!(
+        said.contains("verify_token"),
+        "the refusal should name the symbol that went missing: {said}"
+    );
+}
+
+/// The same deletion, committed with `-a` instead of `git add`.
+///
+/// git does not write `-a`'s changes into `.git/index`; it builds a second
+/// index and names it in `GIT_INDEX_FILE`. A gate that reads the repository's
+/// default index therefore sees an empty diff and lets the commit through —
+/// which is exactly what happened, on every `commit -am` anyone ever ran. The
+/// bug is invisible to any test that stages first, so this one does not.
+#[test]
+fn the_gate_refuses_it_just_the_same_when_the_commit_stages_itself() {
+    let repo = repo_with_a_protected_token_check();
+    overreach(&repo);
+
+    let out = Command::new("git")
+        .args(["commit", "-am", "perf(billing): tune retry backoff"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git commit failed");
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "`git commit -a` must be checked like any other commit: {said}"
+    );
+    assert!(
+        said.contains("verify_token"),
+        "the refusal should name the symbol that went missing: {said}"
+    );
+
+    let landed = Command::new("git")
+        .args(["log", "--oneline", "-1"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git log failed");
+    assert!(
+        !String::from_utf8_lossy(&landed.stdout).contains("tune retry backoff"),
+        "the refused commit must not be in history"
+    );
+}

@@ -269,7 +269,9 @@ pub fn run_amend(approve_removal: &[String], json: bool) -> i32 {
 
 /// The gate. Returns the process exit code — non-zero blocks the commit.
 pub fn run_verify(json: bool) -> i32 {
-    let Ok(repo) = Repository::open(".") else {
+    // The gate runs as a pre-commit hook, where the content being committed is
+    // not always in `.git/index` — see `staged_index`.
+    let Ok(repo) = crate::staged_index::open(".") else {
         eprintln!("{} not a git repository.", "✗".red());
         return 1;
     };

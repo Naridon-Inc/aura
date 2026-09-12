@@ -364,7 +364,9 @@ pub fn build_context(repo: &Repository, root: &Path, trigger: Trigger, base: &st
 /// verdict. Returns the process exit code (non-zero when a blocking step
 /// failed, so the pre-push hook / CI job fails the build).
 pub fn cmd_run(trigger_str: &str, base: &str, json: bool) -> i32 {
-    let repo = match Repository::open(".") {
+    // `pre-commit` is one of the triggers, so this can run with the staged
+    // content in an index file of git's choosing — see `staged_index`.
+    let repo = match crate::staged_index::open(".") {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Semantic CI: not a git repository ({})", e);
