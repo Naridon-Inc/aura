@@ -33,6 +33,10 @@ docker build --platform "$PLATFORM" \
   -f "$REPO_ROOT/aura-shell/docker/Dockerfile.linux" \
   -t "$IMAGE" "$REPO_ROOT/aura-shell/docker"
 
+# CARGO_BUILD_JOBS is forwarded rather than fixed: the x86_64 leg compiles under
+# qemu, where every rustc costs far more memory than it does natively, and a host
+# that is already swapping will have the whole leg killed mid-link. Setting it to
+# 2 or 3 trades build time for a leg that finishes. Unset means cargo's default.
 # The frontend dist is ensured in its OWN container, before the one that
 # compiles. tauri-build embeds dist at compile time, and a container that writes
 # dist and then compiles against it in the same run gives the compile a
@@ -50,6 +54,13 @@ docker run --rm --platform "$PLATFORM" \
   "$IMAGE" \
   bash /work/aura-shell/scripts/_linux-build-inner.sh
 
+# Empty is not the same as unset here: cargo rejects CARGO_BUILD_JOBS="" outright,
+# so the flag is only passed through when the caller actually set a number.
+JOBS_ENV=()
+if [ -n "${CARGO_BUILD_JOBS:-}" ]; then
+  JOBS_ENV=(-e "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS")
+fi
+
 echo "▸ running $MODE build ($ARCH / $PLATFORM)"
 # node_modules is shadowed by a container-private volume: `bun install` inside
 # the container must NOT overwrite the host's macOS-native node_modules (a
@@ -66,6 +77,7 @@ docker run --rm --platform "$PLATFORM" \
   -e CARGO_TARGET_DIR=/build/target \
   -e ARCH="$ARCH" -e MODE="$MODE" \
   -e TAURI_VERBOSE="${TAURI_VERBOSE:-}" \
+  "${JOBS_ENV[@]}" \
   "$IMAGE" \
   bash /work/aura-shell/scripts/_linux-build-inner.sh
 

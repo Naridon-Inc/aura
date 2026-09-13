@@ -41,6 +41,17 @@ export type ReleaseCta = "mobile-waitlist";
 // one shown after an update.
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: "0.19.48",
+    date: "September 2026",
+    title: "Stop means stop",
+    highlights: [
+      "Stopping an agent now actually stops it \u2014 and if it can't, Aura says so instead of closing the tab on a session that's still running.",
+      "Closing a chat clears its transcript, so the next chat on that project no longer replays the one you ended.",
+      "Codex, Gemini, OpenCode and Pi chats have a Stop button now. Only Claude Code ever had one.",
+      "Long chats stop losing the beginning of the conversation.",
+    ],
+  },
+  {
     version: "0.19.44",
     date: "September 2026",
     title: "A lock the locked-out could open, and the rest of what an audit found",
