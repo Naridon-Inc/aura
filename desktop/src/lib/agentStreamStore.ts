@@ -23,6 +23,7 @@ import {
   type StreamEvent,
   type StreamExitInfo,
 } from "./api";
+import { noteTurnFinished } from "./community";
 import { notify } from "./notifications";
 import { playCompletionChime } from "./completionChime";
 import { basename } from "./paths";
@@ -219,6 +220,11 @@ function applyEvent(entry: Entry, ev: StreamEvent) {
       body: "The turn is done.",
       dedupeKey: `turn-end:${channelOf(entry)}`,
     }).catch(() => {});
+    // A finished turn is the unit of value Aura delivers, so it is also what
+    // earns the one-time ask to star the repo. `noteTurnFinished` counts and
+    // decides; it raises nothing until the threshold, and nothing ever again
+    // after that.
+    noteTurnFinished();
   }
 
   // B1 + B2: aura side effects. Fire a snapshot on Edit/Write/MultiEdit

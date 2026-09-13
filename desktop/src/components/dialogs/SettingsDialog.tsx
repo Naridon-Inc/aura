@@ -25,8 +25,8 @@
 // satisfied.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Beaker,
   ArrowLeft,
+  Beaker,
   BookOpen,
   Boxes,
   Brain,
@@ -52,6 +52,7 @@ import {
   ShieldCheck,
   Smartphone,
   Sparkles,
+  Star,
   Terminal,
   Trash2,
   Upload,
@@ -79,6 +80,7 @@ import {
   type WorkspaceBinding,
 } from "../../lib/api";
 import { setCaptureOptOut } from "../../lib/autoCapture";
+import { chatLink, noteHelpLinkOpened, starLink } from "../../lib/community";
 import { SHORTCUT_GROUPS, comboKeys } from "../../lib/shortcuts";
 import {
   setSidebarGlass,
@@ -308,7 +310,7 @@ const PANE_GROUPS: PaneGroup[] = [
     items: [
       { id: "experimental", label: "Experimental", icon: <Beaker className="h-4 w-4" />, keywords: ["flags", "preview", "lab"] },
       { id: "telemetry", label: "Usage data", icon: <Gauge className="h-4 w-4" />, keywords: ["usage", "anonymous", "metrics", "telemetry"] },
-      { id: "help", label: "Help & support", icon: <LifeBuoy className="h-4 w-4" />, keywords: ["help", "support", "shortcuts", "keyboard", "docs", "documentation", "github", "issue", "bug", "report", "about", "version", "community", "discord"] },
+      { id: "help", label: "Help & support", icon: <LifeBuoy className="h-4 w-4" />, keywords: ["help", "support", "shortcuts", "keyboard", "docs", "documentation", "github", "issue", "bug", "report", "about", "version", "community", "discord", "star", "discussions", "open source"] },
     ],
   },
 ];
@@ -2825,10 +2827,13 @@ const HELP_LINKS: Array<{
     icon: <BookOpen className="h-4 w-4" aria-hidden />,
   },
   {
-    label: "Source on GitHub",
-    hint: "github.com/Naridon-Inc/aura. Fully open source",
-    url: "https://github.com/Naridon-Inc/aura",
-    icon: <ExternalLink className="h-4 w-4" aria-hidden />,
+    // The repo page and the star are the same destination, so this is one row,
+    // not two. Label, hint and URL come from lib/community so the Settings row,
+    // the first-run screen and the earned nudge can never disagree.
+    label: starLink().label,
+    hint: starLink().hint,
+    url: starLink().url,
+    icon: <Star className="h-4 w-4" aria-hidden />,
   },
   {
     label: "Report an issue",
@@ -2837,14 +2842,18 @@ const HELP_LINKS: Array<{
     icon: <Bug className="h-4 w-4" aria-hidden />,
   },
   {
-    label: "Discussions",
-    hint: "Ask questions and share workflows with the community",
-    url: "https://github.com/Naridon-Inc/aura/discussions",
+    label: chatLink().label,
+    hint: chatLink().hint,
+    url: chatLink().url,
     icon: <MessageCircle className="h-4 w-4" aria-hidden />,
   },
 ];
 
 async function openHelpUrl(url: string) {
+  // Opening the repo or the community from here counts the same as doing it
+  // from the first-run screen, so someone who already starred never gets the
+  // earned nudge asking them to.
+  noteHelpLinkOpened(url);
   try {
     const { openUrl } = await import("@tauri-apps/plugin-opener");
     await openUrl(url);

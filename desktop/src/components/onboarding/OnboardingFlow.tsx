@@ -6,6 +6,11 @@
 //   open    -> Open Project (drop-zone + recents)
 //   new     -> New Project (Empty / Clone / Template)
 //
+// Plus one screen that is not part of that walkthrough:
+//
+//   support -> Aura is open source (star + community). Shown once, on a
+//              genuinely new install, on its own — see below.
+//
 // Mount contract matches the legacy OnboardingDialog so exactly one
 // first-run surface exists: it auto-opens when
 // localStorage["aura.onboarding.complete"] !== "1", re-opens on the
@@ -19,27 +24,38 @@ import { SignInScreen } from "./SignInScreen";
 import { ConnectAgentScreen } from "./ConnectAgentScreen";
 import { OpenProjectScreen } from "./OpenProjectScreen";
 import { NewProjectScreen } from "./NewProjectScreen";
+import { SupportAuraScreen } from "./SupportAuraScreen";
+import { markGreeted, noteAppOpened, shouldGreet } from "../../lib/community";
 
 const COMPLETE_KEY = "aura.onboarding.complete";
 
-type Step = "signin" | "agent" | "open" | "new";
+type Step = "signin" | "agent" | "open" | "new" | "support";
 
 export function OnboardingFlow() {
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState<Step>("signin");
   const [newBusy, setNewBusy] = useState(false);
 
-  // No longer auto-opens on first launch. First-run onboarding is now the
-  // pre-populated "Get Started" workspace (Recipe Box) the app boots onto —
-  // seeing a real project beats a four-screen walkthrough — so this flow is
-  // opt-in only, re-opened from Settings via the `aura:open-onboarding` event
-  // below. We still stamp COMPLETE_KEY so anything keying off "onboarded" reads
-  // true from the first launch.
+  // The walkthrough no longer auto-opens on first launch. First-run onboarding
+  // is now the pre-populated "Get Started" workspace (Recipe Box) the app boots
+  // onto — seeing a real project beats a four-screen walkthrough — so those
+  // four screens are opt-in only, re-opened from Settings via the
+  // `aura:open-onboarding` event below. We still stamp COMPLETE_KEY so anything
+  // keying off "onboarded" reads true from the first launch.
+  //
+  // The one thing that does show on a new install is the support screen: a
+  // single ask, on its own, before the person has a project open and anything
+  // to lose by reading it. It never returns — `markGreeted` is stamped whether
+  // they act or skip.
   useEffect(() => {
     try {
       localStorage.setItem(COMPLETE_KEY, "1");
     } catch {
       /* private mode — ignore */
+    }
+    if (shouldGreet(noteAppOpened())) {
+      setStep("support");
+      setOpen(true);
     }
   }, []);
 
@@ -68,10 +84,18 @@ export function OnboardingFlow() {
     setOpen(false);
   }, []);
 
+  // The support screen stands alone: finishing it closes the surface and
+  // spends the one ask this install gets.
+  const finishSupport = useCallback(() => {
+    markGreeted();
+    setOpen(false);
+  }, []);
+
   if (!open) return null;
 
-  // Back target per step (signin is the entry, so no Back there). While a
-  // create is in flight on the New Project screen we drop Back.
+  // Back target per step (signin is the entry, so no Back there; support is a
+  // standalone screen with nowhere behind it). While a create is in flight on
+  // the New Project screen we drop Back.
   const back: (() => void) | null =
     step === "agent"
       ? () => setStep("signin")
@@ -104,6 +128,7 @@ export function OnboardingFlow() {
       {step === "new" && (
         <NewProjectScreen onCreated={() => finish()} onBusyChange={setNewBusy} />
       )}
+      {step === "support" && <SupportAuraScreen onDone={finishSupport} />}
     </OnboardingShell>
   );
 }

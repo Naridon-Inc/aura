@@ -168,3 +168,7 @@ fi
 echo ""
 echo "🚀 Aura is ready!"
 echo "Run 'aura init' inside any Git repository to begin tracking semantic AI decisions."
+echo ""
+echo "Aura is free and open source. Two things that genuinely help:"
+echo "  ★ Star the repo    https://github.com/Naridon-Inc/aura"
+echo "  ◇ Join the others  https://github.com/Naridon-Inc/aura/discussions"
