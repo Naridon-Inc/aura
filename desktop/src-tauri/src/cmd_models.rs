@@ -915,21 +915,27 @@ mod tests {
         assert_eq!(gemini.vendor, "Google");
 
         // The expanded rows must carry the camelCase flags, not drop them.
+        // Which model is the new one changes every catalog refresh, so pin the
+        // flag rather than the row — naming a model here just means this test
+        // breaks the next time the catalogue is updated, which is what it did.
         let rows = cat.family_models("gemini");
-        let pro = rows
+        let fresh = rows
             .iter()
-            .find(|m| m.id == "gemini-3.1-pro-preview")
-            .expect("Gemini 3.1 Pro row present");
-        assert_eq!(pro.is_new, Some(true), "isNew flag lost in parse");
-        assert_eq!(pro.brand_name.as_deref(), Some("Gemini"));
+            .find(|m| m.is_new == Some(true))
+            .expect("isNew flag lost in parse — no gemini row came back flagged new");
+        assert_eq!(fresh.brand_name.as_deref(), Some("Gemini"));
 
-        // A long-context Anthropic row must keep its longContext flag.
+        // Same for the long-context flag on Anthropic's 1M rows.
         let anth = cat.family_models("anthropic");
-        let opus_1m = anth
+        let long = anth
             .iter()
-            .find(|m| m.label == "Opus 4.8 1M")
-            .expect("Opus 4.8 1M row present");
-        assert_eq!(opus_1m.long_context, Some(true), "longContext flag lost in parse");
+            .find(|m| m.long_context == Some(true))
+            .expect("longContext flag lost in parse — no anthropic row came back long");
+        assert!(
+            long.label.contains("1M"),
+            "a longContext row should be one of the 1M models, got {}",
+            long.label
+        );
 
         let xai = cat.family_models("xai");
         assert_eq!(xai.first().map(|m| m.id.as_str()), Some("grok-4.5"));

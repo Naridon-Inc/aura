@@ -131,8 +131,23 @@ pub struct TeamMember {
     pub email: String,
     pub name: String,
     pub handle: String,    // local-part of email, lowercased
+    /// How many commits this person authored, when their first one landed,
+    /// and when their most recent one did.
+    ///
+    /// **Derived, and deliberately absent from [`PersistedTeam`].** All three
+    /// are a pure function of `git log`, recomputed by [`derive_team`] on every
+    /// load, and they still travel to the UI over IPC. They used to be written
+    /// into `team.json` as well — a *tracked* file — so every commit moved
+    /// `last_seen`/`commits`, rewrote the manifest, and that one-line churn got
+    /// swept into the next commit. Forever, in every Aura repo. `git log` is
+    /// already the record; copying it back into a committed file only created a
+    /// second, noisier one. `#[serde(default)]` so manifests written before this
+    /// still deserialize — their stale values are overwritten by the walk.
+    #[serde(default)]
     pub commits: u32,
+    #[serde(default)]
     pub first_seen: i64,
+    #[serde(default)]
     pub last_seen: i64,
     #[serde(default)]
     pub claimed: bool,     // user has identified themselves as this member
@@ -219,6 +234,12 @@ impl Default for TeamMemberSource {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TeamManifest {
     pub team_id: String,
+    /// Absolute path of the checkout this manifest was loaded from.
+    /// Machine-local: [`derive_team`] sets it from the caller and
+    /// [`PersistedTeam`] leaves it out. Writing it both leaked one developer's
+    /// home directory into a tracked file and rewrote that file for every
+    /// teammate who cloned somewhere else.
+    #[serde(default)]
     pub repo_root: String,
     pub created_at: i64,
     #[serde(default)]
@@ -242,8 +263,13 @@ pub struct TeamManifest {
     /// Unix seconds of the last successful GitHub-collaborators sync.
     /// `team_sync_collaborators` throttles on this so the team surface can
     /// call it on every mount without hammering the `gh` API; a `force`
-    /// flag bypasses the throttle. Zero on manifests written before the
-    /// collaborator-roster feature existed.
+    /// flag bypasses the throttle.
+    ///
+    /// **Machine-local** — a throttle marker is not team state, and writing one
+    /// into a tracked file rewrote `team.json` every five minutes the app stayed
+    /// open. It lives in [`collaborator_sync_marks`] for the life of the process
+    /// and is left out of [`PersistedTeam`], so the throttle still holds within a
+    /// session and a restart costs one extra `gh` call.
     #[serde(default)]
     pub collaborators_synced_at: i64,
     /// Human-confirmed "these two are NOT the same person" decisions. The
@@ -858,10 +884,106 @@ pub(crate) fn team_has_peers(repo_root: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The on-disk shape of `team.json` — the *authored* half of the manifest,
+/// and nothing else.
+///
+/// [`TeamManifest`] serializes in two very different directions. Over IPC it
+/// goes to the UI, which wants everything: commit counts, last-seen times,
+/// the repo path. Onto disk it goes into a file that is **committed to git**,
+/// where anything derivable from `git log` is not data but noise — it moves
+/// on every commit, rewrites the file, and lands in the next diff. So the
+/// disk direction gets its own type that simply has no field for the derived
+/// values, rather than a `skip_serializing` that would starve the UI too.
+///
+/// What survives here is what no walk of the history could tell us: who took
+/// a seat, who is an admin, which addresses are the same person, and how the
+/// channels are set up.
+#[derive(Serialize)]
+struct PersistedTeam<'a> {
+    team_id: &'a str,
+    created_at: i64,
+    members: Vec<PersistedMember<'a>>,
+    channels: &'a [String],
+    #[serde(skip_serializing_if = "<[ChannelMeta]>::is_empty")]
+    channel_meta: &'a [ChannelMeta],
+    #[serde(skip_serializing_if = "<[IdentitySplit]>::is_empty")]
+    identity_splits: &'a [IdentitySplit],
+    #[serde(skip_serializing_if = "<[IdentitySplit]>::is_empty")]
+    identity_merges: &'a [IdentitySplit],
+}
+
+/// One roster row as `team.json` keeps it. `name`, `handle` and `source` are
+/// derived for a committer but are the *only* record for someone who holds a
+/// GitHub seat and has not committed yet, so they stay — and unlike commit
+/// counts they do not move when somebody commits.
+#[derive(Serialize)]
+struct PersistedMember<'a> {
+    email: &'a str,
+    name: &'a str,
+    handle: &'a str,
+    claimed: bool,
+    admin: bool,
+    source: TeamMemberSource,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    also_emails: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    github_login: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo_role: Option<&'a str>,
+}
+
+impl<'a> From<&'a TeamManifest> for PersistedTeam<'a> {
+    fn from(m: &'a TeamManifest) -> Self {
+        // In memory the roster is sorted most-recently-seen first: the right
+        // order to render, and the worst order to serialize — two teammates
+        // trading commits would swap places and rewrite the whole array. On
+        // disk it goes out by email, which nothing but an identity change
+        // moves.
+        let mut members: Vec<PersistedMember<'a>> = m
+            .members
+            .iter()
+            .map(|x| PersistedMember {
+                email: &x.email,
+                name: &x.name,
+                handle: &x.handle,
+                claimed: x.claimed,
+                admin: x.admin,
+                source: x.source,
+                also_emails: &x.also_emails,
+                github_login: x.github_login.as_deref(),
+                repo_role: x.repo_role.as_deref(),
+            })
+            .collect();
+        members.sort_by(|a, b| a.email.cmp(b.email));
+
+        PersistedTeam {
+            team_id: &m.team_id,
+            created_at: m.created_at,
+            members,
+            channels: &m.channels,
+            channel_meta: &m.channel_meta,
+            identity_splits: &m.identity_splits,
+            identity_merges: &m.identity_merges,
+        }
+    }
+}
+
+/// Write the authored half of the manifest to `.aura/team/team.json`.
+///
+/// A no-op when the bytes are unchanged — which, now that nothing derived is
+/// persisted, is the overwhelmingly common case. Skipping the write also
+/// leaves the file's mtime alone, so a plain roster refresh stops waking
+/// every watcher in the app.
 fn write_team(repo_root: &str, manifest: &TeamManifest) -> Result<(), String> {
     ensure_dirs(repo_root).map_err(|e| e.to_string())?;
     let path = team_json_path(repo_root);
-    let json = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
+
+    let json =
+        serde_json::to_string_pretty(&PersistedTeam::from(manifest)).map_err(|e| e.to_string())?;
+
+    if fs::read_to_string(&path).is_ok_and(|existing| existing == json) {
+        return Ok(());
+    }
     fs::write(&path, json).map_err(|e| e.to_string())
 }
 
@@ -1451,6 +1573,34 @@ fn author_walk_cache() -> &'static std::sync::Mutex<BTreeMap<String, (u64, Vec<G
 /// every 15 seconds, and `team_identity` re-runs the whole thing a second time
 /// on top of whatever `team_load` just did — so opening the app used to walk
 /// all of history several times over within a second or two of itself.
+/// Per-repo "when did we last ask GitHub for collaborators" marks, for the
+/// life of the process.
+///
+/// This used to live on `TeamManifest::collaborators_synced_at` and therefore
+/// in `team.json`, which is committed — so a five-minute throttle timestamp
+/// became a tracked one-line diff every five minutes the app was open. A
+/// throttle is machine state, not team state. Keeping it here costs one
+/// extra `gh` call per app launch and stops the file moving at all.
+fn collaborator_sync_marks() -> &'static std::sync::Mutex<BTreeMap<String, i64>> {
+    static MARKS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, i64>>> =
+        std::sync::OnceLock::new();
+    MARKS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+fn collaborator_synced_at(repo_root: &str) -> i64 {
+    collaborator_sync_marks()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(repo_root).copied())
+        .unwrap_or(0)
+}
+
+fn mark_collaborators_synced(repo_root: &str, at: i64) {
+    if let Ok(mut m) = collaborator_sync_marks().lock() {
+        m.insert(repo_root.to_string(), at);
+    }
+}
+
 fn cached_author_walk(key: &str, walk: impl FnOnce() -> Vec<GitAuthor>) -> Vec<GitAuthor> {
     let now = now_secs().max(0) as u64;
     if let Ok(cache) = author_walk_cache().lock() {
@@ -1467,7 +1617,16 @@ fn cached_author_walk(key: &str, walk: impl FnOnce() -> Vec<GitAuthor>) -> Vec<G
     authors
 }
 
-fn sync_with_git(repo_root: &str) -> Result<TeamManifest, String> {
+/// Rebuild the roster from `git log` and return it **without touching the
+/// disk**.
+///
+/// This is the honest shape of the roster: `team.json` holds only what a
+/// human decided (who claimed a seat, who is an admin, which emails are the
+/// same person, channel settings), and everything else — commit counts,
+/// first/last seen, provenance, the repo path — is recomputed here from the
+/// history every time. Callers that only need to *read* the team call this;
+/// only a caller that changed an authored field goes on to [`write_team`].
+fn derive_team(repo_root: &str) -> Result<TeamManifest, String> {
     let direct_authors = cached_author_walk(repo_root, || walk_git_authors(repo_root));
     let ancestor_authors = match detect_upstream_remote(repo_root) {
         Some(remote) => cached_author_walk(&format!("{repo_root}\0{remote}"), || {
@@ -1525,6 +1684,14 @@ fn sync_with_git(repo_root: &str) -> Result<TeamManifest, String> {
         identity_splits: Vec::new(),
         identity_merges: Vec::new(),
     });
+
+    // Not persisted (it is this machine's path, not the team's), so it comes
+    // back empty from an existing manifest — restate it from the caller.
+    manifest.repo_root = repo_root.to_string();
+    // Likewise the collaborator-sync throttle: process-local, so a manifest
+    // read from disk carries a zero that would re-trigger the `gh` call on
+    // every mount.
+    manifest.collaborators_synced_at = collaborator_synced_at(repo_root);
 
     // Ensure built-in channels are always present, even if user edited
     // the manifest by hand and dropped one.
@@ -1601,6 +1768,15 @@ fn sync_with_git(repo_root: &str) -> Result<TeamManifest, String> {
     // backfills rosters written before it existed.
     collapse_duplicate_members(&mut manifest);
 
+    Ok(manifest)
+}
+
+/// [`derive_team`], then persist. Used by the load paths that may have
+/// something new to record — a first-ever manifest, an owner auto-promotion,
+/// a duplicate collapse. `write_team` is a no-op when the authored half is
+/// unchanged, so an ordinary refresh still leaves the file alone.
+fn sync_with_git(repo_root: &str) -> Result<TeamManifest, String> {
+    let manifest = derive_team(repo_root)?;
     write_team(repo_root, &manifest)?;
     Ok(manifest)
 }
@@ -1922,6 +2098,7 @@ pub async fn team_sync_collaborators(
         // login) — collapse them so the freshly-synced roster is dup-free on this
         // pass, not only after the next `sync_with_git`.
         collapse_duplicate_members(&mut manifest);
+        mark_collaborators_synced(&repo_root, now);
         manifest.collaborators_synced_at = now;
         write_team(&repo_root, &manifest)?;
         Ok(manifest)
@@ -2440,10 +2617,7 @@ pub async fn team_set_admin(
         if target.is_empty() {
             return Err("target email is required".to_string());
         }
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
         if !local_caller_is_admin(&repo_root, &manifest) {
             return Err("admin only".to_string());
         }
@@ -2496,10 +2670,7 @@ pub async fn team_transfer_admin(
         if to.is_empty() {
             return Err("recipient email is required".to_string());
         }
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
         if !local_caller_is_admin(&repo_root, &manifest) {
             return Err("admin only".to_string());
         }
@@ -2560,10 +2731,7 @@ pub async fn team_alias_add(
         if target.is_empty() {
             return Err("target handle is required".to_string());
         }
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
 
         // Authorise: caller must be either an admin in the manifest OR the
         // owner of the target handle. Without this, anyone in the repo
@@ -2636,10 +2804,7 @@ pub async fn team_alias_remove(
         if target.is_empty() {
             return Err("target handle is required".to_string());
         }
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
 
         let (caller_email, _) = git_local_identity(&repo_root);
         let caller_is_admin = manifest.members.iter().any(|m| {
@@ -2700,10 +2865,7 @@ pub async fn canonical_handle_for_email(
     email: String,
 ) -> Result<Option<String>, String> {
     crate::blocking::run(move || {
-        let manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let manifest = derive_team(&repo_root)?;
         Ok(canonical_member_for_email(&manifest.members, &email).map(|m| m.handle.clone()))
     })
     .await
@@ -3023,10 +3185,7 @@ pub async fn team_identity_suggest_duplicates(
     repo_root: String,
 ) -> Result<Vec<DuplicateSuggestion>, String> {
     crate::blocking::run(move || {
-        let manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let manifest = derive_team(&repo_root)?;
         Ok(compute_duplicate_suggestions(
             &manifest.members,
             &manifest.identity_splits,
@@ -3090,10 +3249,7 @@ pub async fn team_identity_confirm_duplicate(
             return Err("nothing to merge".to_string());
         }
 
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
 
         let mut involved = merged.clone();
         involved.push(survivor.clone());
@@ -3168,10 +3324,7 @@ pub async fn team_identity_reject_duplicate(
             return Err("two distinct emails required".to_string());
         }
 
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
         authorize_identity_edit(&manifest, &repo_root, &[a.clone(), b.clone()])?;
 
         // Normalise: a <= b so the pair dedupes regardless of rejection order.
@@ -4147,10 +4300,7 @@ pub async fn team_channel_update(
         if slug.is_empty() {
             return Err("invalid channel".to_string());
         }
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
         if !manifest.channels.iter().any(|c| c == &slug) {
             return Err("no such channel".to_string());
         }
@@ -4204,10 +4354,7 @@ pub async fn team_channel_member_add(
         if slug.is_empty() || email.is_empty() {
             return Err("channel and email are required".to_string());
         }
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
         if !manifest.channels.iter().any(|c| c == &slug) {
             return Err("no such channel".to_string());
         }
@@ -4239,10 +4386,7 @@ pub async fn team_channel_member_remove(
         if slug.is_empty() || email.is_empty() {
             return Err("channel and email are required".to_string());
         }
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
         if !caller_can_admin_channel(&repo_root, &manifest, &slug) {
             return Err("admin only".to_string());
         }
@@ -4277,10 +4421,7 @@ pub async fn team_channel_admin_set(
         if slug.is_empty() || email.is_empty() {
             return Err("channel and email are required".to_string());
         }
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
         if !manifest.channels.iter().any(|c| c == &slug) {
             return Err("no such channel".to_string());
         }
@@ -4368,10 +4509,7 @@ pub async fn team_channel_tab_add(
         }
         let label = validate_tab_label(&label)?;
         let url = validate_tab_url(&url)?;
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
         if !manifest.channels.iter().any(|c| c == &slug) {
             return Err("no such channel".to_string());
         }
@@ -4428,10 +4566,7 @@ pub async fn team_channel_tab_remove(
         if slug.is_empty() || tab_id.trim().is_empty() {
             return Err("channel and tab id are required".to_string());
         }
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
         let Some(meta) = manifest.channel_meta.iter_mut().find(|c| c.slug == slug) else {
             return Err("no such tab".to_string());
         };
@@ -4462,10 +4597,7 @@ pub async fn team_channel_delete(
         if CORE_CHANNELS.contains(&slug.as_str()) {
             return Err("can't delete a built-in channel".to_string());
         }
-        let mut manifest = match read_team(&repo_root) {
-            Some(m) => m,
-            None => sync_with_git(&repo_root)?,
-        };
+        let mut manifest = derive_team(&repo_root)?;
         if !caller_can_admin_channel(&repo_root, &manifest, &slug) {
             return Err("admin only".to_string());
         }
@@ -5299,6 +5431,195 @@ mod tests {
             "legacy manifest must not gain a channel_meta key: {out}"
         );
         assert_eq!(m.channels, vec!["general".to_string(), "agents".to_string()]);
+    }
+
+    // The churn regression this whole change exists for: `team.json` is a
+    // tracked file, so anything `git log` can already tell us must not be
+    // written into it. A manifest saved by an older build carries the derived
+    // fields; it must still load (nobody loses their claims), it must still
+    // hand the UI everything it had before, and it must go back to disk
+    // without the derived half — one last diff that removes the noise, then
+    // silence.
+    #[test]
+    fn derived_roster_fields_reach_the_ui_but_never_the_file() {
+        let json = r#"{"team_id":"t","repo_root":"/someone/else/laptop","created_at":7,
+            "collaborators_synced_at":1789367931,
+            "members":[{"email":"a@b.com","name":"A","handle":"a","commits":283,
+                        "first_seen":1772826291,"last_seen":1789367931,
+                        "claimed":true,"admin":true,"source":"direct"}],
+            "channels":["general"]}"#;
+        let m: TeamManifest = serde_json::from_str(json).unwrap();
+
+        // Read: the old values still load, and the authored half survives —
+        // that is the half worth committing.
+        assert_eq!(m.members[0].commits, 283);
+        assert_eq!(m.members[0].last_seen, 1_789_367_931);
+        assert!(m.members[0].claimed && m.members[0].admin);
+
+        // IPC direction: the UI must keep getting everything it had before.
+        let wire = serde_json::to_string(&m).unwrap();
+        for key in ["commits", "first_seen", "last_seen", "repo_root"] {
+            assert!(
+                wire.contains(&format!("\"{key}\"")),
+                "the UI still needs {key} over IPC: {wire}"
+            );
+        }
+
+        // Disk direction: derived fields are simply not in the type.
+        let disk = serde_json::to_string(&PersistedTeam::from(&m)).unwrap();
+        for key in [
+            "commits",
+            "first_seen",
+            "last_seen",
+            "repo_root",
+            "collaborators_synced_at",
+        ] {
+            assert!(
+                !disk.contains(&format!("\"{key}\"")),
+                "derived field {key} must not be persisted: {disk}"
+            );
+        }
+        assert!(disk.contains("\"claimed\":true"));
+        assert!(disk.contains("\"admin\":true"));
+        assert!(disk.contains("\"team_id\":\"t\""));
+    }
+
+    // Two loads either side of a commit differ only in derived fields, so the
+    // bytes they would write are identical — which is what lets `write_team`
+    // skip the write and leave the file (and its mtime) alone.
+    #[test]
+    fn a_later_commit_does_not_change_the_persisted_bytes() {
+        let before = test_manifest(vec![test_member("a@b.com", 1_789_367_931, 283)], 0);
+        let after = test_manifest(
+            vec![test_member("a@b.com", 1_789_367_976, 284)],
+            1_789_367_976,
+        );
+        assert_eq!(
+            serde_json::to_string_pretty(&PersistedTeam::from(&before)).unwrap(),
+            serde_json::to_string_pretty(&PersistedTeam::from(&after)).unwrap(),
+            "a new commit must not rewrite team.json"
+        );
+    }
+
+    // The roster renders newest-first, which is exactly the order that would
+    // shuffle the file every time two teammates trade commits. The persisted
+    // view sorts by email instead.
+    #[test]
+    fn persisted_member_order_does_not_follow_activity() {
+        let zoe_ahead = test_manifest(
+            vec![
+                test_member("zoe@b.com", 200, 5),
+                test_member("ann@b.com", 100, 9),
+            ],
+            0,
+        );
+        let ann_ahead = test_manifest(
+            vec![
+                test_member("ann@b.com", 300, 10),
+                test_member("zoe@b.com", 200, 5),
+            ],
+            0,
+        );
+        assert_eq!(
+            serde_json::to_string(&PersistedTeam::from(&zoe_ahead)).unwrap(),
+            serde_json::to_string(&PersistedTeam::from(&ann_ahead)).unwrap(),
+            "who committed last must not reorder the persisted roster"
+        );
+    }
+
+    fn test_member(email: &str, last_seen: i64, commits: u32) -> TeamMember {
+        TeamMember {
+            email: email.into(),
+            name: email.into(),
+            handle: email.into(),
+            commits,
+            first_seen: 1,
+            last_seen,
+            claimed: true,
+            admin: false,
+            activity_text: None,
+            status_emoji: None,
+            voice_channel: None,
+            source: TeamMemberSource::Direct,
+            also_emails: Vec::new(),
+            github_login: None,
+            repo_role: None,
+        }
+    }
+
+    fn test_manifest(members: Vec<TeamMember>, synced_at: i64) -> TeamManifest {
+        TeamManifest {
+            team_id: "t".into(),
+            repo_root: "/r".into(),
+            created_at: 7,
+            members,
+            channels: vec!["general".into()],
+            channel_meta: Vec::new(),
+            collaborators_synced_at: synced_at,
+            identity_splits: Vec::new(),
+            identity_merges: Vec::new(),
+        }
+    }
+
+    // End to end against a real repo, because this is the bug as the user hit
+    // it: make a commit, load the roster, make another commit, load it again —
+    // and `team.json` must be byte-for-byte what it was. Before this change
+    // the second load moved `last_seen` and `commits`, rewrote the file, and
+    // that one-line diff went out with the next commit.
+    #[test]
+    fn committing_again_leaves_team_json_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().expect("utf-8 path").to_string();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let commit = |n: u8| {
+            std::fs::write(format!("{root}/f{n}.txt"), "x").expect("write");
+            git(&["add", "-A"]);
+            git(&["commit", "-q", "-m", "c", "--no-verify"]);
+        };
+
+        git(&["init", "-q", "."]);
+        git(&["config", "user.email", "dev@example.com"]);
+        git(&["config", "user.name", "Dev"]);
+        commit(1);
+
+        let first = sync_with_git(&root).expect("first load");
+        assert_eq!(first.members.len(), 1);
+        assert_eq!(first.members[0].commits, 1, "the UI still gets a real count");
+        let on_disk = std::fs::read_to_string(team_json_path(&root)).expect("team.json written");
+
+        // A second commit, and a fresh walk that must see it. The author walk
+        // is TTL-cached per repo, so clear the entry rather than sleep.
+        commit(2);
+        if let Ok(mut cache) = author_walk_cache().lock() {
+            cache.remove(&root);
+        }
+
+        let second = sync_with_git(&root).expect("second load");
+        assert_eq!(
+            second.members[0].commits, 2,
+            "the new commit must reach the UI"
+        );
+        assert!(
+            second.members[0].last_seen >= first.members[0].last_seen,
+            "last_seen must still advance in memory"
+        );
+        assert_eq!(
+            std::fs::read_to_string(team_json_path(&root)).expect("team.json still there"),
+            on_disk,
+            "a new commit must not rewrite team.json"
+        );
     }
 
     // A private channel's meta deserializes with members preserved and the

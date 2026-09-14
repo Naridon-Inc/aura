@@ -679,16 +679,42 @@ fn refresh_integrations() {
     ensure_aura_gitignore();
 }
 
-/// Create .aura/.gitignore to track only intents and memory in git.
-/// Everything else (snapshots, sessions, sentinel, transcripts) is local runtime state.
-pub(crate) fn ensure_aura_gitignore() {
-    let aura_dir = std::path::Path::new(".aura");
-    if !aura_dir.exists() {
-        return;
-    }
+/// Everything under `.aura/` that is **this machine's**, not the team's.
+///
+/// The split matters more than it looks. `.aura/` is committed, so anything
+/// missing from this list becomes a tracked file that a background loop
+/// rewrites — a sync cursor, a throttle timestamp, a last-seen clock — and
+/// every developer then carries somebody else's runtime state in their diffs
+/// forever. `awareness/` is the sharpest example: it holds the radar event
+/// feed, the push/pull cursors in `sync_state.json`, *and* `identity.key`,
+/// which is a private signing key and must never reach a remote.
+///
+/// Order is presentation only; membership is what the guard below checks.
+const AURA_LOCAL_IGNORES: &[&str] = &[
+    "snapshots/",
+    "sessions/",
+    "transcripts/",
+    "sentinel/",
+    "tracker/",
+    "reviews/",
+    "plans/",
+    "orchestrate/",
+    "worktrees/",
+    "live/",
+    "awareness/",
+    "blocks/",
+    "kg/",
+    "op_log.jsonl",
+    "activity.jsonl",
+    // Pages (`.aura/notes/*.md`) ARE shared, but the live-sync read position
+    // is per-device and must never travel — ignore just that one file.
+    "notes/_sync_cursor.json",
+    ".intent_logged",
+    "last_review.json",
+    "integrations.json",
+];
 
-    let gitignore_path = aura_dir.join(".gitignore");
-    let desired = "\
+const AURA_GITIGNORE_HEADER: &str = "\
 # Aura: track intents + project memory in git, ignore local runtime state
 #
 # TRACKED (committed to git for team context):
@@ -697,31 +723,111 @@ pub(crate) fn ensure_aura_gitignore() {
 #   memory.json       — project knowledge (architecture, decisions, gotchas)
 #
 # IGNORED (local per-machine state):
-snapshots/
-sessions/
-transcripts/
-sentinel/
-tracker/
-reviews/
-plans/
-orchestrate/
-worktrees/
-live/
-.intent_logged
-last_review.json
-integrations.json
 ";
 
-    // Write if missing or outdated
-    let needs_update = if let Ok(existing) = fs::read_to_string(&gitignore_path) {
-        // old versions without orchestrate or the integrations manifest
-        !existing.contains("orchestrate/") || !existing.contains("integrations.json")
-    } else {
-        true
-    };
+/// Make sure `.aura/.gitignore` covers every per-machine path in
+/// [`AURA_LOCAL_IGNORES`].
+///
+/// **Additive, never destructive.** This used to rewrite the whole file
+/// whenever it looked out of date, which meant a team that had extended their
+/// own ignore list lost it the next time we added a rule — so in practice the
+/// check was kept narrow, and repos enabled before a rule existed never got
+/// it. Appending only what is missing makes it safe to widen the list: an old
+/// repo heals on the next `aura enable`, a customised one keeps its edits, and
+/// a repo that is already complete is not touched at all.
+pub(crate) fn ensure_aura_gitignore() {
+    let aura_dir = std::path::Path::new(".aura");
+    if !aura_dir.exists() {
+        return;
+    }
 
-    if needs_update {
-        let _ = fs::write(&gitignore_path, desired);
+    let gitignore_path = aura_dir.join(".gitignore");
+    let existing = fs::read_to_string(&gitignore_path).unwrap_or_default();
+    if existing.trim().is_empty() {
+        let body: String = AURA_LOCAL_IGNORES
+            .iter()
+            .map(|r| format!("{r}\n"))
+            .collect();
+        let _ = fs::write(&gitignore_path, format!("{AURA_GITIGNORE_HEADER}{body}"));
+        return;
+    }
+
+    let missing = missing_aura_ignores(&existing);
+    if missing.is_empty() {
+        return;
+    }
+
+    let mut out = existing;
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    for rule in &missing {
+        out.push_str(rule);
+        out.push('\n');
+    }
+    let _ = fs::write(&gitignore_path, out);
+
+    untrack_local_aura_state(&missing);
+}
+
+/// Which of [`AURA_LOCAL_IGNORES`] an existing `.aura/.gitignore` does not
+/// already cover.
+///
+/// A rule counts as present only as a whole line: a comment that happens to
+/// mention `live/` does not ignore it, and `intent_blocks/` is not `blocks/`.
+/// A negation (`!live/`) is a deliberate opt-back-in, so it counts as covered
+/// too — re-appending the rule would silently overrule the team's own choice.
+fn missing_aura_ignores(existing: &str) -> Vec<&'static str> {
+    let covered = |rule: &str| {
+        existing
+            .lines()
+            .any(|l| l.trim().trim_start_matches('!').trim() == rule)
+    };
+    AURA_LOCAL_IGNORES
+        .iter()
+        .copied()
+        .filter(|r| !covered(r))
+        .collect()
+}
+
+/// Drop newly-ignored `.aura/` paths out of git's index.
+///
+/// A `.gitignore` rule does nothing to a file git is already tracking, which
+/// is exactly the case in every repo that needs this: the runtime file has
+/// been committed for months and keeps landing in diffs. Un-staging it stops
+/// that for good. The file itself is left on disk — this only changes what
+/// git watches — and the removal shows up as one deliberate line in the next
+/// commit rather than as silent churn in every one after it.
+fn untrack_local_aura_state(rules: &[&str]) {
+    for rule in rules {
+        let path = format!(".aura/{}", rule.trim_end_matches('/'));
+
+        // Ask first. Almost every rule names a path this repo never tracked
+        // (often never even created), and `git rm --ignore-unmatch` reports
+        // success either way — so without this check the command would
+        // cheerfully announce untracking a dozen files that were never there.
+        let tracked = std::process::Command::new("git")
+            .args(["ls-files", "--error-unmatch", "--", &path])
+            .output()
+            .map(|o| o.status.success() && !o.stdout.is_empty())
+            .unwrap_or(false);
+        if !tracked {
+            continue;
+        }
+
+        // `--cached` leaves the working copy alone: this changes what git
+        // watches, not what is on disk.
+        let removed = std::process::Command::new("git")
+            .args(["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--", &path])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if removed {
+            println!(
+                "{} {path} is per-machine state — untracked (the files stay on disk)",
+                "✓".green().bold()
+            );
+        }
     }
 }
 
@@ -18155,5 +18261,52 @@ mod init_agent_choice_tests {
     #[test]
     fn a_repeated_name_is_wired_once() {
         assert_eq!(parse_agent_choice("cursor,cursor", AGENTS), Ok(vec![3]));
+    }
+}
+
+#[cfg(test)]
+mod aura_gitignore_tests {
+    use super::{missing_aura_ignores, AURA_LOCAL_IGNORES};
+
+    // The rule that started this: every Aura repo was committing
+    // `.aura/awareness/sync_state.json`, a per-machine push/pull cursor that a
+    // background loop rewrites, because the generated ignore list never named
+    // `awareness/`. The same directory holds `identity.key`.
+    #[test]
+    fn awareness_is_local_state_and_must_be_ignored() {
+        assert!(AURA_LOCAL_IGNORES.contains(&"awareness/"));
+        let before_the_fix = "snapshots/\nsessions/\norchestrate/\nintegrations.json\n";
+        assert!(missing_aura_ignores(before_the_fix).contains(&"awareness/"));
+    }
+
+    // A repo that already has every rule is left completely alone — no
+    // rewrite, no reordering, no touched mtime.
+    #[test]
+    fn a_complete_gitignore_needs_no_change() {
+        let complete: String = AURA_LOCAL_IGNORES
+            .iter()
+            .map(|r| format!("{r}\n"))
+            .collect();
+        assert!(missing_aura_ignores(&complete).is_empty());
+        // Comments and blank lines around the rules change nothing.
+        let padded = format!("# Aura\n\n{complete}\n# end\n");
+        assert!(missing_aura_ignores(&padded).is_empty());
+    }
+
+    // Whole-line matching: a rule must not be considered covered by a comment
+    // that mentions it, nor by a longer path that merely ends with it.
+    #[test]
+    fn a_rule_is_only_covered_by_its_own_line() {
+        let decoys = "# we do not ignore blocks/ here\nintent_blocks/\nmy-live/\n";
+        let missing = missing_aura_ignores(decoys);
+        assert!(missing.contains(&"blocks/"), "a comment must not cover a rule");
+        assert!(missing.contains(&"live/"), "a suffix match must not cover a rule");
+    }
+
+    // A team that deliberately un-ignored something has made a choice; we do
+    // not quietly append the rule back underneath them.
+    #[test]
+    fn an_explicit_negation_is_left_alone() {
+        assert!(!missing_aura_ignores("!kg/\n").contains(&"kg/"));
     }
 }
