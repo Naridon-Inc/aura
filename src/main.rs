@@ -689,6 +689,13 @@ fn refresh_integrations() {
 /// feed, the push/pull cursors in `sync_state.json`, *and* `identity.key`,
 /// which is a private signing key and must never reach a remote.
 ///
+/// Five things belong here, and the grouping below follows them: work queues
+/// this clone still has to drain, agent-run bookkeeping (symlinked into the
+/// primary checkout from every worktree), anything re-derivable from the code,
+/// state that lives only between two moments of one local edit, and caches.
+/// Everything else — the intent log, the roster, pages, taste, goals, the repo
+/// identity — is the team's and stays tracked.
+///
 /// Order is presentation only; membership is what the guard below checks.
 const AURA_LOCAL_IGNORES: &[&str] = &[
     "snapshots/",
@@ -704,8 +711,40 @@ const AURA_LOCAL_IGNORES: &[&str] = &[
     "awareness/",
     "blocks/",
     "kg/",
+    "cache/",
     "op_log.jsonl",
     "activity.jsonl",
+    // Work queues. Every entry is something this clone still has to do —
+    // send a message, attribute a mutation, drain a push. A teammate who
+    // pulls them cannot act on them, and the file rewrites itself the
+    // moment the queue drains.
+    "outbox/",
+    "team/outbox.jsonl",
+    "agent_pending_backfill.json",
+    // Agent-run bookkeeping: the A2A mailbox, the crew ledger and the
+    // wave cursor. In a worktree all three are symlinks into the primary
+    // checkout, so committing them would publish an absolute path from
+    // one machine.
+    "a2a/",
+    "crew/",
+    "tasks/",
+    "waves/",
+    // Derived from the code, and re-derivable at any time. The atlas is
+    // ~17 MB of regenerated index; function history and the change-summary
+    // cache are keyed on content hashes this clone computed.
+    "atlas.json",
+    "atlas.md",
+    "atlas.meaning.json",
+    "function_history/",
+    "change_summaries.jsonl",
+    // In-flight state between two moments of one local edit, and the
+    // per-turn git baselines the desktop restores an edited turn from.
+    // Both are meaningless once the process that wrote them is gone.
+    "edit_reasons.json",
+    "manager-baselines/",
+    // Live-sync collisions this clone detected, resolved locally. The
+    // shared record of a conflict is the sync plane, not a git file.
+    "conflicts.jsonl",
     // Pages (`.aura/notes/*.md`) ARE shared, but the live-sync read position
     // is per-device and must never travel — ignore just that one file.
     "notes/_sync_cursor.json",
@@ -720,6 +759,9 @@ const AURA_GITIGNORE_HEADER: &str = "\
 # TRACKED (committed to git for team context):
 #   .gitignore        — so all devs share the same ignore rules
 #   intent_log.jsonl  — why changes were made (links to git commits)
+#   identity.json     — this repository's permanent id (written once)
+#   team/team.json    — the roster, minus anything derived from git log
+#   notes/, taste/    — pages and the taste rules learned from your commits
 #   memory.json       — project knowledge (architecture, decisions, gotchas)
 #
 # IGNORED (local per-machine state):
@@ -749,25 +791,28 @@ pub(crate) fn ensure_aura_gitignore() {
             .map(|r| format!("{r}\n"))
             .collect();
         let _ = fs::write(&gitignore_path, format!("{AURA_GITIGNORE_HEADER}{body}"));
+        // A file we just wrote carries no negations, so every rule is active.
+        untrack_local_aura_state("");
         return;
     }
 
     let missing = missing_aura_ignores(&existing);
-    if missing.is_empty() {
-        return;
-    }
+    let rules = if missing.is_empty() {
+        existing
+    } else {
+        let mut out = existing;
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        for rule in &missing {
+            out.push_str(rule);
+            out.push('\n');
+        }
+        let _ = fs::write(&gitignore_path, &out);
+        out
+    };
 
-    let mut out = existing;
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    for rule in &missing {
-        out.push_str(rule);
-        out.push('\n');
-    }
-    let _ = fs::write(&gitignore_path, out);
-
-    untrack_local_aura_state(&missing);
+    untrack_local_aura_state(&rules);
 }
 
 /// Which of [`AURA_LOCAL_IGNORES`] an existing `.aura/.gitignore` does not
@@ -798,37 +843,133 @@ fn missing_aura_ignores(existing: &str) -> Vec<&'static str> {
 /// that for good. The file itself is left on disk — this only changes what
 /// git watches — and the removal shows up as one deliberate line in the next
 /// commit rather than as silent churn in every one after it.
-fn untrack_local_aura_state(rules: &[&str]) {
-    for rule in rules {
-        let path = format!(".aura/{}", rule.trim_end_matches('/'));
+fn untrack_local_aura_state(ignore_file: &str) {
+    // Match against OUR rules, in here — never against git's own idea of what
+    // is ignored.
+    //
+    // `git ls-files --ignored` looked like the obvious way to ask the
+    // question, and it is a trap: `.git/info/exclude` or a parent
+    // `.gitignore` very often carries a blanket `/.aura/` (Aura's own repo
+    // does), under which git calls every tracked Aura file ignored — the
+    // intent log, the roster, pages, attestations, all of it — and the
+    // "cleanup" would delete the team's entire record from the index. Only
+    // the names in [`AURA_LOCAL_IGNORES`] may be untracked here, and only
+    // those the repository has not deliberately un-ignored.
+    let active: Vec<&&str> = AURA_LOCAL_IGNORES
+        .iter()
+        .filter(|rule| {
+            !ignore_file
+                .lines()
+                .any(|l| l.trim().strip_prefix('!').map(str::trim) == Some(**rule))
+        })
+        .collect();
 
-        // Ask first. Almost every rule names a path this repo never tracked
-        // (often never even created), and `git rm --ignore-unmatch` reports
-        // success either way — so without this check the command would
-        // cheerfully announce untracking a dozen files that were never there.
-        let tracked = std::process::Command::new("git")
-            .args(["ls-files", "--error-unmatch", "--", &path])
-            .output()
-            .map(|o| o.status.success() && !o.stdout.is_empty())
-            .unwrap_or(false);
-        if !tracked {
-            continue;
-        }
+    let listed = std::process::Command::new("git")
+        .args(["ls-files", "-z", "--cached", "--", ".aura"])
+        .output();
+    let Ok(listed) = listed else {
+        return;
+    };
+    if !listed.status.success() {
+        return;
+    }
+    let paths: Vec<String> = listed
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .filter(|p| active.iter().any(|rule| rule_covers(rule, p)))
+        .collect();
+    if paths.is_empty() {
+        return;
+    }
 
-        // `--cached` leaves the working copy alone: this changes what git
-        // watches, not what is on disk.
-        let removed = std::process::Command::new("git")
-            .args(["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--", &path])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if removed {
-            println!(
-                "{} {path} is per-machine state — untracked (the files stay on disk)",
-                "✓".green().bold()
-            );
+    // `--cached` changes what git watches, never what is on disk, and `-f`
+    // only waives the "staged content differs" refusal — which is precisely
+    // the state these files are always in, since churning is what made them
+    // a problem. Paths arrive on stdin as pathspecs so a repo with hundreds
+    // of them cannot overflow the argument list, and `:(literal)` stops a
+    // filename that happens to contain a glob character from matching more
+    // than itself.
+    let mut rm = match std::process::Command::new("git")
+        .args([
+            "rm",
+            "--cached",
+            "--quiet",
+            "-f",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return,
+    };
+    if let Some(stdin) = rm.stdin.as_mut() {
+        use std::io::Write;
+        for path in &paths {
+            if write!(stdin, ":(literal){path}\0").is_err() {
+                break;
+            }
         }
     }
+    drop(rm.stdin.take());
+    if !rm.wait().map(|st| st.success()).unwrap_or(false) {
+        return;
+    }
+
+    println!(
+        "{} untracked {} of per-machine state ({}) — the files stay on disk",
+        "✓".green().bold(),
+        match paths.len() {
+            1 => "1 file".to_string(),
+            n => format!("{n} files"),
+        },
+        untracked_groups(&paths).join(", ")
+    );
+}
+
+/// Does one [`AURA_LOCAL_IGNORES`] rule cover this tracked path?
+///
+/// The rules are plain gitignore lines, and only three shapes occur in the
+/// list, so this reads them the way git would rather than pulling in a
+/// pattern engine:
+///
+/// - `plans/` — a directory, matched at any depth, and never against the
+///   filename itself (a *file* called `plans` is not the directory).
+/// - `team/outbox.jsonl` — contains a slash, so it is anchored to `.aura/`
+///   and matches that exact path only. This is what keeps the send queue
+///   ignorable without taking `team/team.json` with it.
+/// - `conflicts.jsonl` — a bare name, matched at any depth, like git does.
+fn rule_covers(rule: &str, path: &str) -> bool {
+    let Some(rel) = path.strip_prefix(".aura/") else {
+        return false;
+    };
+    match rule.strip_suffix('/') {
+        Some(dir) => rel.split('/').rev().skip(1).any(|seg| seg == dir),
+        None if rule.contains('/') => rel == rule,
+        None => rel.rsplit('/').next() == Some(rule),
+    }
+}
+
+/// Name the directories, not the files.
+///
+/// `.aura/attest/` alone can hold hundreds of them, and a wall of paths buries
+/// the one line that matters: this was per-machine state, and it is still on
+/// disk. Sorted and de-duplicated so the same repo always reads the same way.
+fn untracked_groups(paths: &[String]) -> Vec<String> {
+    let mut groups: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for path in paths {
+        let rest = path.strip_prefix(".aura/").unwrap_or(path);
+        groups.insert(match rest.split_once('/') {
+            Some((dir, _)) => format!(".aura/{dir}/"),
+            None => format!(".aura/{rest}"),
+        });
+    }
+    groups.into_iter().collect()
 }
 
 /// Read `--agents` into indices of `agents`.
@@ -5587,6 +5728,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // written months ago and is never rewritten, and where it works on
             // macOS, which has no `timeout(1)` for the old hook's guard to use.
             hook_guard::arm_time_budget();
+
+            // Heal the ignore rules here, before anything reads the index.
+            //
+            // A rule added in a new Aura version only reaches a repository
+            // that runs `aura init` or `aura enable` again — which nobody
+            // does, so the repos already churning per-machine state through
+            // their diffs are exactly the ones that never get the fix. This
+            // is the one place that runs in every Aura repo on every commit,
+            // and it is the right moment: an untrack lands *inside* the
+            // commit being made, so the cleanup is atomic and visible in one
+            // diff instead of showing up later as a mysteriously dirty index.
+            //
+            // Costs one small file read when the rules are already complete,
+            // which is every commit after the first.
+            ensure_aura_gitignore();
 
             // Detect rebase/pull and migrate shadow branch if needed
             if let Ok(repo) = Repository::open(".") {
@@ -18266,7 +18422,154 @@ mod init_agent_choice_tests {
 
 #[cfg(test)]
 mod aura_gitignore_tests {
-    use super::{missing_aura_ignores, AURA_LOCAL_IGNORES};
+    use super::{missing_aura_ignores, rule_covers, untracked_groups, AURA_LOCAL_IGNORES};
+
+    /// Everything a `.aura/` sweep of four live repositories found being
+    /// rewritten by a loop, derived from the code, or symlinked out of a
+    /// worktree. Each one had been churning a line into every commit.
+    const MACHINE_STATE: &[&str] = &[
+        "awareness/",
+        "outbox/",
+        "team/outbox.jsonl",
+        "agent_pending_backfill.json",
+        "a2a/",
+        "crew/",
+        "tasks/",
+        "waves/",
+        "atlas.json",
+        "atlas.md",
+        "atlas.meaning.json",
+        "function_history/",
+        "change_summaries.jsonl",
+        "edit_reasons.json",
+        "manager-baselines/",
+        "conflicts.jsonl",
+        "cache/",
+    ];
+
+    /// The team's own record. Ignoring any of these would take real work
+    /// away from the repository, which is the opposite failure and a worse
+    /// one — so they are asserted, not assumed.
+    const TEAM_STATE: &[&str] = &[
+        "intent_log.jsonl",
+        "identity.json",
+        "intent_contract.json",
+        "goals.jsonl",
+        "usage_by_dev.jsonl",
+        "team/team.json",
+        "team/keys.jsonl",
+        "notes/",
+        "taste/",
+        "skills/",
+        "attest/",
+        "pipelines/",
+    ];
+
+    #[test]
+    fn every_machine_state_path_the_sweep_found_is_ignored() {
+        for path in MACHINE_STATE {
+            assert!(
+                AURA_LOCAL_IGNORES.contains(path),
+                "{path} is per-machine state and must be ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn team_state_is_never_ignored() {
+        for path in TEAM_STATE {
+            assert!(
+                !AURA_LOCAL_IGNORES.contains(path),
+                "{path} is the team's record and must stay tracked"
+            );
+        }
+        // The narrow rules must stay narrow: ignoring the send queue inside
+        // `team/` must not take the roster or the public keys with it.
+        assert!(AURA_LOCAL_IGNORES.contains(&"team/outbox.jsonl"));
+        assert!(!AURA_LOCAL_IGNORES.contains(&"team/"));
+        assert!(AURA_LOCAL_IGNORES.contains(&"notes/_sync_cursor.json"));
+        assert!(!AURA_LOCAL_IGNORES.contains(&"notes/"));
+    }
+
+    // The bug this nearly shipped with: `git ls-files --ignored` calls every
+    // tracked Aura file ignored in a repository whose `.git/info/exclude`
+    // carries a blanket `/.aura/` — Aura's own repository does — and the
+    // untrack would have deleted the team's whole record from the index.
+    // Matching happens against the rule list instead, so a path only leaves
+    // the index when a rule in that list names it.
+    #[test]
+    fn only_the_rule_list_can_untrack_anything() {
+        let team_record = [
+            ".aura/intent_log.jsonl",
+            ".aura/identity.json",
+            ".aura/team/team.json",
+            ".aura/team/keys.jsonl",
+            ".aura/notes/team/a-page.md",
+            ".aura/taste/observations.jsonl",
+            ".aura/attest/019df260.json",
+            ".aura/skills/pr/review.md",
+            ".aura/.gitignore",
+        ];
+        for path in team_record {
+            for rule in AURA_LOCAL_IGNORES {
+                assert!(
+                    !rule_covers(rule, path),
+                    "rule `{rule}` must not cover the team's {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_rule_covers_exactly_what_git_would() {
+        // A directory rule matches at any depth, but never a file of that name.
+        assert!(rule_covers("plans/", ".aura/plans/ACTIVE_PLAN.json"));
+        assert!(rule_covers("waves/", ".aura/orchestrate/waves/1.json"));
+        assert!(!rule_covers("plans/", ".aura/plans"));
+        // A rule with a slash is anchored to `.aura/` — this is the whole
+        // reason the send queue can be ignored and the roster cannot.
+        assert!(rule_covers("team/outbox.jsonl", ".aura/team/outbox.jsonl"));
+        assert!(!rule_covers("team/outbox.jsonl", ".aura/team/team.json"));
+        assert!(!rule_covers("notes/_sync_cursor.json", ".aura/notes/page.md"));
+        // A bare name matches at any depth.
+        assert!(rule_covers("conflicts.jsonl", ".aura/conflicts.jsonl"));
+        assert!(rule_covers("atlas.json", ".aura/sub/atlas.json"));
+        assert!(!rule_covers("atlas.json", ".aura/atlas.meaning.json"));
+        // Nothing outside `.aura/` is ours to touch.
+        assert!(!rule_covers("cache/", "src/cache/mod.rs"));
+    }
+
+    // A team that un-ignored something has made a choice, and the untrack
+    // must respect it as well as the append does.
+    #[test]
+    fn a_negated_rule_untracks_nothing() {
+        let ignore_file = "plans/\n!plans/\n";
+        let negated = |rule: &str| {
+            ignore_file
+                .lines()
+                .any(|l| l.trim().strip_prefix('!').map(str::trim) == Some(rule))
+        };
+        assert!(negated("plans/"));
+        assert!(!negated("waves/"));
+    }
+
+    #[test]
+    fn the_untrack_report_names_directories_not_files() {
+        let paths: Vec<String> = [
+            ".aura/attest/a.json",
+            ".aura/attest/b.json",
+            ".aura/attest/c.json",
+            ".aura/conflicts.jsonl",
+            ".aura/team/outbox.jsonl",
+        ]
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+        assert_eq!(
+            untracked_groups(&paths),
+            vec![".aura/attest/", ".aura/conflicts.jsonl", ".aura/team/"]
+        );
+    }
 
     // The rule that started this: every Aura repo was committing
     // `.aura/awareness/sync_state.json`, a per-machine push/pull cursor that a
