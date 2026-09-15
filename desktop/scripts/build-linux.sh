@@ -45,12 +45,20 @@ docker build --platform "$PLATFORM" \
 # compiled cleanly in the next container. Splitting the two is the fix; the
 # build container below only verifies freshness and refuses to compile a stale
 # one (see _linux-build-inner.sh).
+#
+# NODE_OPTIONS carries the same heap the mac path sets in build-release.sh. The
+# container inherits none of the host's environment, so without this the dist
+# build runs on node's default ~2 GB old-space and dies mid-transform with
+# "Reached heap limit Allocation failed" — which surfaces as SIGABRT from bun
+# and an exit status the caller can easily read as success. 0.19.49's arm64 leg
+# hit it at 8442 modules; the mac legs never did, because they had 8 GB.
 echo "▸ ensuring the frontend dist ($ARCH / $PLATFORM)"
 docker run --rm --platform "$PLATFORM" \
   -v "$REPO_ROOT":/work \
   -v aura-linux-nodemods:/work/aura-shell/node_modules \
   -v aura-linux-dist:/work/aura-shell/dist \
   -e ARCH="$ARCH" -e MODE=dist \
+  -e NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=8192}" \
   "$IMAGE" \
   bash /work/aura-shell/scripts/_linux-build-inner.sh
 

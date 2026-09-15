@@ -1,6 +1,6 @@
 [package]
 name = "aura-shell"
-version = "0.19.48"
+version = "0.19.49"
 description = "Aura desktop shell — Tauri 2 binary backed by every aura-* Rust crate."
 authors = ["Aura"]
 edition = "2021"
