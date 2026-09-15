@@ -397,14 +397,7 @@ impl SemanticParser {
             }
 
             // Behavioral Analysis: Is this a stub?
-            let stub_patterns = ["TODO", "FIXME", "todo!", "panic!", "unimplemented!", "return None", "pass"];
-            let mut is_stub = false;
-            for pattern in &stub_patterns {
-                if content.contains(pattern) {
-                    is_stub = true;
-                    break;
-                }
-            }
+            let is_stub = looks_half_finished(content, ext);
 
             // Extract line numbers
             let start_line = node.start_position().row as u32 + 1; // tree-sitter is 0-based
@@ -583,6 +576,64 @@ impl SemanticParser {
 /// `let function loadFavorites() {…} FAVORITES = []`. A line boundary can never
 /// split a token. Scanning for `\n` bytes is UTF-8 safe — a newline byte cannot
 /// occur inside a multi-byte sequence.
+/// Does this block of source look like something nobody finished?
+///
+/// The markers below used to be matched as bare substrings anywhere in the
+/// body, which is why a component containing the sentence "'all' passes
+/// everything through untouched" was reported as a placeholder: `pass` is a
+/// substring of `passes`, and so of `password`, `passed` and `bypass`. The
+/// same held for `TODO` inside `TODOS` and for a `return None` that was a
+/// function's real answer rather than a hole in it.
+///
+/// So each marker is matched in the shape it actually takes:
+///
+/// * `todo!()`, `unimplemented!()`, `panic!()` — Rust macros. A substring is
+///   exactly right; the `!` makes them unambiguous.
+/// * `TODO` / `FIXME` — comment markers. Matched as whole words, so `TODOS`
+///   and `fixmeister` do not count, and case is respected: these are shouted
+///   by convention, and lowercase `todo` appears in ordinary prose.
+/// * `pass` — Python's do-nothing statement, and only that. It has to be a
+///   line of its own in a `.py` file; the English verb never is.
+/// * `return None` — likewise only a hole when it is the whole line, and only
+///   in the two languages that spell it that way.
+fn looks_half_finished(content: &str, ext: &str) -> bool {
+    const MACROS: [&str; 3] = ["todo!", "unimplemented!", "panic!"];
+    if MACROS.iter().any(|m| content.contains(m)) {
+        return true;
+    }
+
+    if contains_word(content, "TODO") || contains_word(content, "FIXME") {
+        return true;
+    }
+
+    let bare_lines = || content.lines().map(str::trim);
+
+    if ext == "py" && bare_lines().any(|l| l == "pass") {
+        return true;
+    }
+
+    if matches!(ext, "py" | "rs") && bare_lines().any(|l| l == "return None" || l == "return None;") {
+        return true;
+    }
+
+    false
+}
+
+/// `needle` appearing in `haystack` with a non-alphanumeric character (or
+/// nothing at all) on each side — the difference between `TODO` and `TODOS`.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let boundary = |i: usize| -> bool {
+        match bytes.get(i) {
+            None => true,
+            Some(c) => !(c.is_ascii_alphanumeric() || *c == b'_'),
+        }
+    };
+    haystack
+        .match_indices(needle)
+        .any(|(i, _)| (i == 0 || boundary(i - 1)) && boundary(i + needle.len()))
+}
+
 fn line_start(source: &str, offset: usize) -> usize {
     source[..offset].rfind('\n').map_or(0, |i| i + 1)
 }
@@ -682,7 +733,7 @@ impl SemanticParser {
 
 #[cfg(test)]
 mod tests {
-    use super::SemanticParser;
+    use super::{contains_word, looks_half_finished, SemanticParser};
 
     const COMPONENT: &str = r#"
 export function Card({ title }: { title: string }) {
@@ -736,5 +787,51 @@ export function Separator() {
         let plain = "export function add(a: number, b: number): number { return a + b; }";
         let nodes = parser.parse_file(plain, "ts").expect("parse ts");
         assert!(!nodes.is_empty(), "plain TypeScript stopped parsing");
+    }
+
+    // The half-finished check used to match its markers as bare substrings, so
+    // an ordinary sentence was enough to have working code reported as a
+    // placeholder. These name the words that actually caused it.
+    #[test]
+    fn prose_containing_a_marker_word_is_not_half_finished() {
+        for body in [
+            "// 'all' passes everything through untouched\nreturn releases;",
+            "const ok = await verifyPassword(input);",
+            "// a bypass nobody asked for\nreturn value;",
+            "if (check.passed) { return true; }",
+            "// TODOS are listed on the board, not here\nreturn board;",
+        ] {
+            assert!(
+                !looks_half_finished(body, "ts"),
+                "reported as half-finished: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_placeholder_is_still_caught() {
+        assert!(looks_half_finished("fn f() { todo!() }", "rs"));
+        assert!(looks_half_finished("fn f() { unimplemented!() }", "rs"));
+        assert!(looks_half_finished("// TODO: wire this up\nreturn 1;", "ts"));
+        assert!(looks_half_finished("// FIXME broken\nreturn 1;", "ts"));
+        assert!(looks_half_finished("def f():\n    pass", "py"));
+        assert!(looks_half_finished("def f():\n    return None", "py"));
+    }
+
+    #[test]
+    fn python_no_op_does_not_leak_into_other_languages() {
+        // `pass` is a statement in Python and a verb everywhere else.
+        assert!(!looks_half_finished("const pass = true;\npass", "ts"));
+        assert!(!looks_half_finished("let pass = 1;", "rs"));
+    }
+
+    #[test]
+    fn contains_word_respects_boundaries() {
+        assert!(contains_word("a TODO here", "TODO"));
+        assert!(contains_word("TODO", "TODO"));
+        assert!(contains_word("(TODO)", "TODO"));
+        assert!(!contains_word("TODOS", "TODO"));
+        assert!(!contains_word("XTODO", "TODO"));
+        assert!(!contains_word("TODO_LIST", "TODO"));
     }
 }
