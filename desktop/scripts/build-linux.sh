@@ -64,6 +64,9 @@ docker run --rm --platform "$PLATFORM" \
 
 # Empty is not the same as unset here: cargo rejects CARGO_BUILD_JOBS="" outright,
 # so the flag is only passed through when the caller actually set a number.
+# macOS still ships bash 3.2, where "${arr[@]}" on an empty array counts as an
+# unbound variable under `set -u` — the ${arr[@]+...} guard is what keeps an
+# uncapped build (the common case) from dying before docker is even called.
 JOBS_ENV=()
 if [ -n "${CARGO_BUILD_JOBS:-}" ]; then
   JOBS_ENV=(-e "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS")
@@ -85,7 +88,7 @@ docker run --rm --platform "$PLATFORM" \
   -e CARGO_TARGET_DIR=/build/target \
   -e ARCH="$ARCH" -e MODE="$MODE" \
   -e TAURI_VERBOSE="${TAURI_VERBOSE:-}" \
-  "${JOBS_ENV[@]}" \
+  ${JOBS_ENV[@]+"${JOBS_ENV[@]}"} \
   "$IMAGE" \
   bash /work/aura-shell/scripts/_linux-build-inner.sh
 

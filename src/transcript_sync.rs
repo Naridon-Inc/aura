@@ -49,8 +49,15 @@ use serde_json::Value;
 use crate::config::ConfigManager;
 
 /// Turns posted in one run. A stop hook fires per turn, so the steady state is
-/// one or two; the cap only bounds a catch-up after the tool was offline.
-const MAX_TURNS_PER_RUN: usize = 60;
+/// one exchange; the cap only bounds a catch-up after the tool was offline.
+///
+/// Raised from 60 when tool calls started travelling: one agent turn is now a
+/// reply plus every call it made and every result it got back, which on a
+/// working turn is routinely thirty rows rather than one. At 60 a single busy
+/// turn hit the cap, and the remainder only moved if the hook fired again —
+/// so the last turn of a session, the one most worth reading, was the one that
+/// got left behind.
+const MAX_TURNS_PER_RUN: usize = 240;
 
 /// How much of a turn is worth storing. The console renders these as chat
 /// bubbles, and a 200 KB paste is not a bubble. Truncation is marked so a
@@ -62,11 +69,18 @@ const MAX_BODY: usize = 16_000;
 /// gigabyte file end to end.
 const BACKFILL_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 
-/// One thing somebody said, on its way to `session_messages`.
+/// One thing that happened in a session, on its way to `session_messages`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Turn {
-    /// "user" or "assistant" — the two roles the console renders. Tool calls,
-    /// tool results and thinking blocks are deliberately not turns.
+    /// `user`, `assistant`, `tool_use` or `tool_result`.
+    ///
+    /// Prose used to be the only thing sent, on the reasoning that tool
+    /// plumbing stays local. It made the console's transcript unreadable: the
+    /// filter rail counted `Tool calls 0` on every session ever opened, and
+    /// with the calls gone the replies either side of them became adjacent and
+    /// ran together into one paragraph. A session's work *is* its tool calls,
+    /// so they travel now. Thinking blocks still do not — they are the model's
+    /// scratch, not a record of what it did.
     pub role: &'static str,
     pub body: String,
     /// The moment it was said, from the transcript's own `timestamp`. Without
@@ -153,13 +167,11 @@ fn save_marks(marks: &BTreeMap<String, u64>) {
     }
 }
 
-/// Text a person or an agent actually composed, out of one transcript line.
+/// The prose of one transcript line — what a person or an agent composed.
 ///
-/// Everything else in that file is machinery: tool calls and their results,
-/// thinking blocks, the harness's own reminders, compaction summaries, and the
-/// sidechain lines a subagent writes. A transcript pane that showed those
-/// would be a log, not a conversation — and the desktop's own tailer makes the
-/// same cut (`UserPrompt` + `AssistantText`, "tool plumbing stays local").
+/// A thin read over [`turns_of_line`], kept because most callers only want the
+/// conversation. The work that happened between two replies is in the turns it
+/// drops, so anything rendering a session reads the full walk instead.
 pub fn turn_of(line: &str) -> Option<Turn> {
     turn_of_line(line, false)
 }
@@ -173,62 +185,223 @@ pub fn turn_of(line: &str) -> Option<Turn> {
 /// the parent's file, and attributing those to the parent puts words in the
 /// wrong mouth.
 pub fn turn_of_line(line: &str, allow_sidechain: bool) -> Option<Turn> {
-    let value: Value = serde_json::from_str(line).ok()?;
+    turns_of_line(line, allow_sidechain)
+        .into_iter()
+        .find(|t| t.role == "user" || t.role == "assistant")
+}
+
+/// Everything one transcript line records, in the order it happened.
+///
+/// A line is not one turn. An assistant line is a list of content blocks —
+/// prose, then a tool call, then more prose, then another call — and the user
+/// line that answers it carries the results. Reading only the prose blocks,
+/// which is what this module did until 2026-09-16, threw away the half of a
+/// session that says what the agent actually *did*, and left the replies
+/// either side of a call touching each other with nothing between them.
+///
+/// So walk the blocks and emit each one as its own turn. Order is the whole
+/// contract: the console pairs a result with the most recent unanswered call
+/// by position, because a `session_messages` row carries no link back to the
+/// call it answers.
+///
+/// Still dropped, and deliberately: thinking blocks (the model's scratch, not
+/// a record of what it did), the harness's own reminders and compaction
+/// summaries, and — unless this file *is* a worker's transcript — sidechain
+/// lines, which belong to a sub-agent and not to the session reading them.
+pub fn turns_of_line(line: &str, allow_sidechain: bool) -> Vec<Turn> {
+    let none = Vec::new();
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return none;
+    };
 
     if !allow_sidechain && value.get("isSidechain").and_then(Value::as_bool) == Some(true) {
-        return None;
+        return none;
     }
     // Harness bookkeeping that is rendered to nobody, or rendered only inside
     // the local transcript viewer.
     for flag in ["isMeta", "isCompactSummary", "isVisibleInTranscriptOnly"] {
         if value.get(flag).and_then(Value::as_bool) == Some(true) {
-            return None;
+            return none;
         }
     }
 
-    let role = match value.get("type").and_then(Value::as_str)? {
-        "user" => "user",
-        "assistant" => "assistant",
-        _ => return None,
+    let role = match value.get("type").and_then(Value::as_str) {
+        Some("user") => "user",
+        Some("assistant") => "assistant",
+        _ => return none,
     };
 
-    let content = value.get("message")?.get("content")?;
-    let body = match content {
+    let at = value
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let Some(content) = value.get("message").and_then(|m| m.get("content")) else {
+        return none;
+    };
+
+    let mut turns: Vec<Turn> = Vec::new();
+    // Prose arrives in runs of text blocks. They are gathered rather than
+    // emitted one by one, so two paragraphs of one reply stay one reply — and
+    // flushed the moment a tool call interrupts them, so what the agent said
+    // before the call is not glued to what it said after.
+    let mut prose: Vec<String> = Vec::new();
+
+    match content {
+        Value::String(text) => prose.push(text.clone()),
+        Value::Array(blocks) => {
+            for block in blocks {
+                match block.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        if let Some(t) = block.get("text").and_then(Value::as_str) {
+                            prose.push(t.to_string());
+                        }
+                    }
+                    Some("tool_use") => {
+                        flush_prose(&mut turns, &mut prose, role, &at);
+                        if let Some(turn) = tool_use_turn(block, &at) {
+                            turns.push(turn);
+                        }
+                    }
+                    Some("tool_result") => {
+                        flush_prose(&mut turns, &mut prose, role, &at);
+                        if let Some(turn) = tool_result_turn(block, &at) {
+                            turns.push(turn);
+                        }
+                    }
+                    // `thinking`, `redacted_thinking`, `image`, and whatever
+                    // the harness adds next: not a record of what was done.
+                    _ => {}
+                }
+            }
+        }
+        _ => return none,
+    }
+
+    flush_prose(&mut turns, &mut prose, role, &at);
+    turns
+}
+
+/// Emit the prose gathered so far as one turn, if there is any worth sending.
+fn flush_prose(turns: &mut Vec<Turn>, prose: &mut Vec<String>, role: &'static str, at: &Option<String>) {
+    if prose.is_empty() {
+        return;
+    }
+    let joined = std::mem::take(prose).join("\n");
+    let body = joined.trim();
+    if body.is_empty() || is_machinery(body) {
+        return;
+    }
+    turns.push(Turn {
+        role,
+        body: clip(body),
+        at: at.clone(),
+    });
+}
+
+/// A `tool_use` block as the console reads one: `{"name":…,"input":…}`.
+///
+/// The body has to survive `JSON.parse` at the other end, so it is never cut
+/// mid-string the way prose is. An input too large to send has its long leaves
+/// shortened instead, and an input that is still too large after that is
+/// replaced by a note saying so — a call that says what it was is worth far
+/// more than no row at all.
+fn tool_use_turn(block: &Value, at: &Option<String>) -> Option<Turn> {
+    let name = block.get("name").and_then(Value::as_str)?;
+    let input = block.get("input").cloned().unwrap_or(Value::Null);
+
+    let body = {
+        let whole = serde_json::json!({ "name": name, "input": input }).to_string();
+        if whole.len() <= MAX_BODY {
+            whole
+        } else {
+            let mut trimmed = input;
+            clip_leaves(&mut trimmed);
+            let shorter = serde_json::json!({ "name": name, "input": trimmed }).to_string();
+            if shorter.len() <= MAX_BODY {
+                shorter
+            } else {
+                serde_json::json!({
+                    "name": name,
+                    "input": { "aura_note": "this call's input was too large to store" },
+                })
+                .to_string()
+            }
+        }
+    };
+
+    Some(Turn {
+        role: "tool_use",
+        body,
+        at: at.clone(),
+    })
+}
+
+/// A `tool_result` block — the output, as text.
+///
+/// Unlike a call, a result has no shape to preserve: the console renders it as
+/// the terminal output or file content it is, so an over-long one is cut the
+/// same way prose is.
+fn tool_result_turn(block: &Value, at: &Option<String>) -> Option<Turn> {
+    let content = block.get("content")?;
+    let text = match content {
         Value::String(s) => s.clone(),
-        Value::Array(blocks) => blocks
+        Value::Array(parts) => parts
             .iter()
-            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("\n"),
         _ => return None,
     };
-
-    let body = body.trim();
-    if body.is_empty() || is_machinery(body) {
+    let text = text.trim();
+    if text.is_empty() {
         return None;
     }
-
-    let body = if body.len() > MAX_BODY {
-        // Cut on a char boundary — a multi-byte character split down the
-        // middle is not valid UTF-8 and the POST would be rejected whole.
-        let mut end = MAX_BODY;
-        while end > 0 && !body.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}\n\n… truncated at {MAX_BODY} characters", &body[..end])
-    } else {
-        body.to_string()
-    };
-
     Some(Turn {
-        role,
-        body,
-        at: value
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        role: "tool_result",
+        body: clip(text),
+        at: at.clone(),
     })
+}
+
+/// Shorten every long string inside a JSON value, in place.
+///
+/// Used on a tool input that will not fit. A `Write` carries the whole file it
+/// is writing, so the one long leaf is what blew the budget; clipping leaves
+/// keeps the call's shape — which path, which flags — and loses only the bulk.
+fn clip_leaves(value: &mut Value) {
+    /// How much of any one field survives. Small enough that even a call with
+    /// a dozen long fields fits, large enough to read as a real excerpt.
+    const LEAF: usize = 900;
+    match value {
+        Value::String(s) => {
+            if s.len() > LEAF {
+                let mut end = LEAF;
+                while end > 0 && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let dropped = s.len() - end;
+                *s = format!("{}… (+{dropped} characters)", &s[..end]);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(clip_leaves),
+        Value::Object(map) => map.values_mut().for_each(clip_leaves),
+        _ => {}
+    }
+}
+
+/// Cut a body to `MAX_BODY`, marked, on a character boundary — a multi-byte
+/// character split down the middle is not valid UTF-8 and the POST would be
+/// rejected whole.
+fn clip(body: &str) -> String {
+    if body.len() <= MAX_BODY {
+        return body.to_string();
+    }
+    let mut end = MAX_BODY;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n\n… truncated at {MAX_BODY} characters", &body[..end])
 }
 
 /// Text that arrived in a user turn without a person typing it.
@@ -283,7 +456,11 @@ fn scan(
             break; // partial trailer — leave it for next time
         }
         consumed += line.len();
-        if let Some(turn) = turn_of_line(line.trim_end(), allow_sidechain) {
+        // Every turn the line records, not just its prose — a line is a reply
+        // *and* the calls it made. They share one resume offset because they
+        // share one line: a run that stops mid-line would otherwise mark past
+        // calls it never delivered.
+        for turn in turns_of_line(line.trim_end(), allow_sidechain) {
             // The offset *past* this line, so a run that stops early can mark
             // exactly the turns it delivered and no more.
             turns.push((turn, start + consumed as u64));
@@ -666,6 +843,169 @@ mod tests {
         assert_eq!(turns[0].1, whole.len() as u64 + 1);
         // The mark stops after the complete line, not at end-of-file.
         assert_eq!(resume, whole.len() as u64 + 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_turn_travels_as_its_prose_and_its_calls_in_order() {
+        // The console pairs a result with the most recent unanswered call by
+        // position, so the order these come out in is the whole contract.
+        let line = r#"{"type":"assistant","message":{"content":[
+            {"type":"thinking","thinking":"weighing options"},
+            {"type":"text","text":"Reading the config first."},
+            {"type":"tool_use","name":"Read","input":{"file_path":"a.toml"}},
+            {"type":"text","text":"Now the retry."},
+            {"type":"tool_use","name":"Edit","input":{"file_path":"b.rs"}}
+        ]}}"#;
+        let turns = turns_of_line(line, false);
+        let shape: Vec<&str> = turns.iter().map(|t| t.role).collect();
+        assert_eq!(
+            shape,
+            ["assistant", "tool_use", "assistant", "tool_use"],
+            "prose flushes before each call it precedes"
+        );
+        assert_eq!(turns[0].body, "Reading the config first.");
+        assert_eq!(turns[2].body, "Now the retry.");
+
+        let call: Value = serde_json::from_str(&turns[1].body).expect("a call is valid JSON");
+        assert_eq!(call["name"], "Read");
+        assert_eq!(call["input"]["file_path"], "a.toml");
+    }
+
+    #[test]
+    fn two_replies_on_one_line_do_not_become_one_paragraph() {
+        // Sending only prose made the halves either side of a call adjacent,
+        // and the console's fold joined them with nothing between: "…a roster
+        // you can actually see.Now the server actions."
+        let line = r#"{"type":"assistant","message":{"content":[
+            {"type":"text","text":"a roster you can actually see."},
+            {"type":"tool_use","name":"Edit","input":{}},
+            {"type":"text","text":"Now the server actions."}
+        ]}}"#;
+        let bodies: Vec<String> = turns_of_line(line, false)
+            .into_iter()
+            .filter(|t| t.role == "assistant")
+            .map(|t| t.body)
+            .collect();
+        assert_eq!(bodies, ["a roster you can actually see.", "Now the server actions."]);
+    }
+
+    #[test]
+    fn a_tool_result_travels_as_its_output() {
+        let line = r#"{"type":"user","message":{"content":[
+            {"type":"tool_result","content":"3 files changed"}
+        ]}}"#;
+        let turns = turns_of_line(line, false);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].role, "tool_result");
+        assert_eq!(turns[0].body, "3 files changed");
+        // …but the prose-only read still sees nothing, so the five older
+        // tests keep meaning what they meant.
+        assert_eq!(turn_of(line), None);
+    }
+
+    #[test]
+    fn a_result_split_into_blocks_is_still_one_output() {
+        let line = r#"{"type":"user","message":{"content":[
+            {"type":"tool_result","content":[{"type":"text","text":"line one"},
+                                             {"type":"text","text":"line two"}]}
+        ]}}"#;
+        let turns = turns_of_line(line, false);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].body, "line one\nline two");
+    }
+
+    #[test]
+    fn a_call_too_large_to_send_still_says_what_it_was() {
+        // A `Write` carries the whole file. The row has to stay parseable at
+        // the other end, so the long leaf is shortened rather than the JSON
+        // cut in half.
+        let huge = "x".repeat(MAX_BODY * 2);
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [
+                {"type": "tool_use", "name": "Write",
+                 "input": {"file_path": "big.txt", "content": huge}}
+            ]}
+        })
+        .to_string();
+
+        let turns = turns_of_line(&line, false);
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].body.len() <= MAX_BODY, "a call must fit the column");
+        let call: Value =
+            serde_json::from_str(&turns[0].body).expect("a clipped call is still valid JSON");
+        assert_eq!(call["name"], "Write");
+        assert_eq!(call["input"]["file_path"], "big.txt", "the shape survives");
+        assert!(
+            call["input"]["content"].as_str().unwrap().contains("characters)"),
+            "the bulk is marked as dropped"
+        );
+    }
+
+    #[test]
+    fn a_call_that_is_all_bulk_still_names_itself() {
+        // Thousands of short fields: clipping leaves saves nothing, so the
+        // input becomes a note. A row saying which tool ran beats no row.
+        let mut input = serde_json::Map::new();
+        for i in 0..4000 {
+            input.insert(format!("field_{i}"), Value::String("a value here".into()));
+        }
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [
+                {"type": "tool_use", "name": "Mystery", "input": Value::Object(input)}
+            ]}
+        })
+        .to_string();
+
+        let turns = turns_of_line(&line, false);
+        assert!(turns[0].body.len() <= MAX_BODY);
+        let call: Value = serde_json::from_str(&turns[0].body).expect("still valid JSON");
+        assert_eq!(call["name"], "Mystery");
+        assert!(call["input"]["aura_note"].is_string());
+    }
+
+    #[test]
+    fn an_over_long_result_is_cut_on_a_character_boundary() {
+        // A multi-byte character split down the middle is not valid UTF-8 and
+        // the POST would be rejected whole.
+        let line = serde_json::json!({
+            "type": "user",
+            "message": { "content": [
+                {"type": "tool_result", "content": "é".repeat(MAX_BODY)}
+            ]}
+        })
+        .to_string();
+        let turns = turns_of_line(&line, false);
+        assert_eq!(turns[0].role, "tool_result");
+        assert!(turns[0].body.ends_with(&format!("… truncated at {MAX_BODY} characters")));
+    }
+
+    #[test]
+    fn a_sidechains_calls_stay_out_of_the_sessions_transcript_too() {
+        let line = r#"{"type":"assistant","isSidechain":true,"message":{"content":[
+            {"type":"tool_use","name":"Read","input":{}}
+        ]}}"#;
+        assert!(turns_of_line(line, false).is_empty());
+        assert_eq!(turns_of_line(line, true).len(), 1);
+    }
+
+    #[test]
+    fn scanning_delivers_the_calls_as_well_as_the_words() {
+        let dir = std::env::temp_dir().join(format!("aura-ts-calls-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("t.jsonl");
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"on it"},{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#;
+        fs::write(&path, format!("{line}\n")).unwrap();
+
+        let (turns, resume) = scan(&path, 0, false).unwrap();
+        let shape: Vec<&str> = turns.iter().map(|(t, _)| t.role).collect();
+        assert_eq!(shape, ["assistant", "tool_use"]);
+        // Both came off one line, so both carry that line's end offset — a
+        // run stopping between them must not mark past the call it dropped.
+        assert_eq!(turns[0].1, turns[1].1);
+        assert_eq!(resume, line.len() as u64 + 1);
         let _ = fs::remove_dir_all(&dir);
     }
 }
