@@ -22,7 +22,55 @@ struct PolledMessage {
     body: String,
     #[serde(default)]
     source: Option<String>,
+    /// How the phone asked for this turn to run — `{mode, model, effort}` from
+    /// the mobile composer. Absent on turns from older clients.
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
     created_at: DateTime<Utc>,
+}
+
+/// Turn the phone composer's settings into the words the agent reads.
+///
+/// The mobile composer offers three ways to run a turn — make changes (the
+/// default), plan first, or only answer — plus an extended-thinking switch.
+/// The cloud stores that choice on the message; this is where it takes
+/// effect, as a short instruction ahead of the user's own text, so every
+/// brain backend honours it the same way. A turn with no settings, or the
+/// default mode, is passed through untouched.
+fn apply_turn_settings(body: String, metadata: Option<&serde_json::Value>) -> String {
+    let Some(meta) = metadata else { return body };
+    let mode = meta.get("mode").and_then(|v| v.as_str()).unwrap_or("agent");
+    let extended = meta.get("effort").and_then(|v| v.as_str()) == Some("extended");
+    let mut lead: Vec<&str> = Vec::new();
+    match mode {
+        "plan" => lead.push(
+            "[Plan mode] Explore the code and write a step-by-step plan first. \
+             Do not edit any files until I approve the plan.",
+        ),
+        "ask" => lead.push(
+            "[Ask mode] Answer and investigate only. Do not edit files or run \
+             commands that change anything.",
+        ),
+        _ => {}
+    }
+    if extended {
+        lead.push("Take extra time to reason carefully before you answer.");
+    }
+    if lead.is_empty() {
+        return body;
+    }
+    format!("{}\n\n{}", lead.join("\n"), body)
+}
+
+/// The phone's Stop button arrives as a user message carrying
+/// `metadata.control = "stop"`. It is a request, not a turn: the session is
+/// held the way the desktop's own Pause holds it, so no further step starts
+/// until the next instruction arrives.
+fn is_stop_request(metadata: Option<&serde_json::Value>) -> bool {
+    metadata
+        .and_then(|m| m.get("control"))
+        .and_then(|v| v.as_str())
+        == Some("stop")
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,11 +117,23 @@ pub fn spawn_inbox_poller(app: AppHandle, session_id: String) {
                         }
                         let runtime: tauri::State<'_, crate::cmd_manager::ManagerRuntime> =
                             app.state();
+                        if is_stop_request(m.metadata.as_ref()) {
+                            if let Err(e) = crate::cmd_manager::manager_pause(
+                                app.clone(),
+                                runtime,
+                                session_id.clone(),
+                            )
+                            .await
+                            {
+                                warn!(target: "cloud_inbox", "stop failed: {e}");
+                            }
+                            continue;
+                        }
                         if let Err(e) = crate::cmd_manager::inject_user_message_from_cloud(
                             app.clone(),
                             runtime,
                             session_id.clone(),
-                            m.body,
+                            apply_turn_settings(m.body, m.metadata.as_ref()),
                         )
                         .await
                         {
@@ -121,4 +181,42 @@ async fn poll_once(
     }
     let body: PollResp = resp.json().await.map_err(|e| format!("parse: {e}"))?;
     Ok(body.messages)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_turn_settings, is_stop_request};
+    use serde_json::json;
+
+    #[test]
+    fn only_a_stop_control_is_a_stop_request() {
+        assert!(is_stop_request(Some(&json!({ "mode": "agent", "control": "stop" }))));
+        assert!(!is_stop_request(Some(&json!({ "mode": "plan" }))));
+        assert!(!is_stop_request(Some(&json!({ "control": "sleep" }))));
+        assert!(!is_stop_request(None));
+    }
+
+    #[test]
+    fn no_settings_passes_the_turn_through() {
+        assert_eq!(apply_turn_settings("fix it".into(), None), "fix it");
+        let agent = json!({ "mode": "agent", "effort": "standard" });
+        assert_eq!(apply_turn_settings("fix it".into(), Some(&agent)), "fix it");
+    }
+
+    #[test]
+    fn plan_mode_asks_for_a_plan_before_edits() {
+        let meta = json!({ "mode": "plan" });
+        let out = apply_turn_settings("add retries".into(), Some(&meta));
+        assert!(out.starts_with("[Plan mode]"));
+        assert!(out.ends_with("\n\nadd retries"));
+    }
+
+    #[test]
+    fn ask_mode_and_extended_thinking_stack() {
+        let meta = json!({ "mode": "ask", "effort": "extended", "model": "Sonnet" });
+        let out = apply_turn_settings("why is this slow?".into(), Some(&meta));
+        assert!(out.starts_with("[Ask mode]"));
+        assert!(out.contains("Take extra time to reason"));
+        assert!(out.ends_with("why is this slow?"));
+    }
 }

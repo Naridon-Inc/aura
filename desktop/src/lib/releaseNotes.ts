@@ -41,6 +41,16 @@ export type ReleaseCta = "mobile-waitlist";
 // one shown after an update.
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: "0.19.51",
+    date: "September 2026",
+    title: "Your phone's choices now reach this computer",
+    highlights: [
+      "Ask for a plan first, or just an answer, from the Aura phone app and the agent here follows it. Before, those requests arrived as ordinary ones, free to edit.",
+      "Stop on your phone pauses the session here, the same as pressing Pause. The step already underway finishes; nothing new starts until you say so.",
+      "Asking for more careful thinking from your phone reaches the agent too.",
+    ],
+  },
+  {
     version: "0.19.48",
     date: "September 2026",
     title: "Stop means stop",

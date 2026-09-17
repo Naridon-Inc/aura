@@ -1,6 +1,6 @@
 [package]
 name = "aura"
-version = "0.19.50"
+version = "0.19.51"
 edition = "2024"
 
 # Public release workspace: the aura CLI (root package) + its vendored

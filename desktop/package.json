@@ -1,7 +1,7 @@
 {
   "name": "aura-shell",
   "private": true,
-  "version": "0.19.50",
+  "version": "0.19.51",
   "type": "module",
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
