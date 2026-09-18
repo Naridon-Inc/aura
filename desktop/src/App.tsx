@@ -269,6 +269,8 @@ import {
   pushEvent,
   readPersistedSession,
   streamChannel,
+  waitForAgentStream,
+  configureChatHistory,
 } from "./lib/agentStreamStore";
 import { ResumeDialog } from "./components/agent/ResumeDialog";
 import { AuraImpactsBanner } from "./components/AuraImpactsBanner";
@@ -2358,7 +2360,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
             .catch((e) => console.warn("[intent] auto-log failed", e));
         }
         if (mode === "stream") {
-          const tabId = `stream:${agentId}@${root}`;
+          const tabId = `chat-${crypto.randomUUID()}`;
           editor.openAgent({
             sessionId: tabId,
             agentId,
@@ -2368,7 +2370,9 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
             mode: "stream",
           });
           if (!prompt.trim() && attachments.length === 0) return;
-          const channel = streamChannel(agentId, root);
+          const channel = `${streamChannel(agentId, root)}_${tabId}`;
+          configureChatHistory(channel, `aura.structured-chat.${tabId}`);
+          await waitForAgentStream(channel);
           // Pin agent_id + repo_root on the store entry so applyEvent
           // can fire snapshots and read the intent log without yet
           // another lookup. The channel string sanitizes path
@@ -2416,6 +2420,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
             resume,
             attachments.length > 0 ? attachments : undefined,
             permissionMode === "default" ? undefined : permissionMode,
+            undefined, undefined, { channel, clientTurnId: turnId },
           );
         } else {
           // Same autonomy the non-interactive stream path forwards (the
@@ -2894,6 +2899,21 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     }
     window.addEventListener("aura:workspace-launched", onLaunched);
     return () => window.removeEventListener("aura:workspace-launched", onLaunched);
+  }, []);
+
+  // "Claude is ready in kyoto — Open kyoto": an agent whose launch finished
+  // after the user switched projects is filed back where it was started (see
+  // lib/agentTabFiling.ts), and its toast offers the way there.
+  useEffect(() => {
+    function onOpenPlace(ev: Event) {
+      const root = (ev as CustomEvent<{ root?: string }>).detail?.root;
+      if (!root) return;
+      loadProjectAtRef.current?.(root).catch((err) =>
+        console.error("open place failed:", err),
+      );
+    }
+    window.addEventListener("aura:open-place", onOpenPlace);
+    return () => window.removeEventListener("aura:open-place", onOpenPlace);
   }, []);
 
   // Automations surface → "New orchestrated run" opens the heavyweight

@@ -106,6 +106,10 @@ impl PermissionRegistry {
         }
     }
 
+    pub fn cancel_prompt(&self, id: &str) {
+        if let Ok(mut slots) = self.slots.lock() { slots.remove(id); }
+    }
+
     pub fn list_pending(&self) -> Vec<PendingPrompt> {
         self.slots
             .lock()

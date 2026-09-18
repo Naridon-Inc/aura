@@ -37,9 +37,9 @@ impl AgentProvider for Codex {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            stream: false,
+            stream: true,
             pty: true,
-            resume: false,
+            resume: true,
         }
     }
 
@@ -85,6 +85,10 @@ impl AgentProvider for Codex {
                     args.extend(policy.codex_args());
                 }
                 args.push("exec".into());
+                if req.mode == InvokeMode::StreamJson { args.push("--json".into()); }
+                if let Some(sid) = req.resume_session_id {
+                    args.extend(["resume".into(), sid.into()]);
+                }
                 args.push(req.prompt.into());
                 Ok(Invocation {
                     bin: "codex".into(),

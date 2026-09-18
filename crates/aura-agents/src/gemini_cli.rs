@@ -47,9 +47,9 @@ impl AgentProvider for GeminiCli {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            stream: false,
+            stream: true,
             pty: true,
-            resume: false,
+            resume: true,
         }
     }
 
@@ -89,12 +89,17 @@ impl AgentProvider for GeminiCli {
                     args.extend(["-m".into(), model.into()]);
                 }
                 args.extend(["-p".into(), req.steered_prompt(false)]);
+                if req.mode == InvokeMode::StreamJson {
+                    args.extend(["--output-format".into(), "stream-json".into()]);
+                    if let Some(sid) = req.resume_session_id { args.extend(["--resume".into(), sid.into()]); }
+                }
                 // Cross-agent permission mode → `--approval-mode <…>`. When no
                 // policy is set we keep gemini's existing non-interactive
                 // `--yolo` default (byte-identical to the pre-feature build).
                 match req.approval.and_then(|a| a.gemini_args()) {
                     Some(mode_args) => args.extend(mode_args),
-                    None => args.push("--yolo".into()),
+                    None if req.mode != InvokeMode::StreamJson => args.push("--yolo".into()),
+                    None => {},
                 }
                 Ok(Invocation {
                     bin: "gemini".into(),

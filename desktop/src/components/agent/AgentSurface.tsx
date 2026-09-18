@@ -1,16 +1,5 @@
-// Tab body for an agent session. PTY-only as of the bubble-UI cutover:
-// every coding-agent CLI we ship (claude/gemini/codex/cursor) is a
-// full TUI, so we host the agent in xterm.js and let it drive its
-// own native surface (slash commands, vim mode, file picker). The
-// stream-json bubble path was retired because the parser kept
-// drifting on every claude version bump — a bug factory for
-// chat-turn glue, stale resume crashes, and lost tool renders.
-//
-// AgentTerminalView hooks the raw `agent-pty:<id>` events into xterm.
-// The chat-bubble UI was removed — every supported agent CLI is a TUI
-// that mangles when rendered as parsed blocks, so terminal is the
-// only view.
-
+import { ChatHeader, ChatViewSwitcher } from "../chat/ChatHeader";
+// A live session has two presentations: its native CLI and the shared chat UI.
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../lib/api";
@@ -18,7 +7,11 @@ import { refreshSessions } from "../../lib/sessionsCache";
 import { openPopout } from "../../lib/popout";
 import type { TabMenuItem } from "../TabMenu";
 import type { AgentTab, WorkSplitDirection } from "../../lib/editorStore";
-import { treeLeaves, treePaneCount, useEditorStore } from "../../lib/editorStore";
+import {
+  treeLeaves,
+  treePaneCount,
+  useEditorStore,
+} from "../../lib/editorStore";
 import { forgetAgentSession } from "../../lib/agentSessionStore";
 import { forgetAgentEvent } from "../../lib/agentEventStore";
 import { forgetAgentRecord } from "../../lib/agentRecordStore";
@@ -39,6 +32,7 @@ import {
   setResumedHistory,
   streamChannel,
 } from "../../lib/agentStreamStore";
+import { StreamChatView } from "./StreamChatView";
 import { AgentTerminalView } from "./AgentTerminalView";
 import { AgentBlocksView } from "./AgentBlocksView";
 import { OpenAiCompatChatView } from "./OpenAiCompatChatView";
@@ -118,8 +112,16 @@ export function buildAgentTabMenuItems(opts: {
     onSelect: () => window.dispatchEvent(new Event("aura:open-history")),
   });
   items.push({ kind: "separator" });
-  items.push({ kind: "item", label: "Split right", onSelect: fire("split-right") });
-  items.push({ kind: "item", label: "Split down", onSelect: fire("split-down") });
+  items.push({
+    kind: "item",
+    label: "Split right",
+    onSelect: fire("split-right"),
+  });
+  items.push({
+    kind: "item",
+    label: "Split down",
+    onSelect: fire("split-down"),
+  });
   items.push({
     kind: "item",
     label: "Detach to window",
@@ -140,7 +142,11 @@ export function buildAgentTabMenuItems(opts: {
     });
   }
   items.push({ kind: "separator" });
-  items.push({ kind: "item", label: "Open Story", onSelect: fire("open-story") });
+  items.push({
+    kind: "item",
+    label: "Open Story",
+    onSelect: fire("open-story"),
+  });
   items.push({
     kind: "item",
     label: "Readable chat ⇄ Terminal",
@@ -190,7 +196,11 @@ type AgentSurfaceProps = {
   onClosePane?: () => void;
 };
 
-export function AgentSurface({ tab, paneIndex, onClosePane }: AgentSurfaceProps) {
+export function AgentSurface({
+  tab,
+  paneIndex,
+  onClosePane,
+}: AgentSurfaceProps) {
   // `chat` mode = HTTP chat-completions adapter (Ollama / HF / Together /
   // Groq / OpenRouter / vLLM). Hosted entirely in JS, no PTY — so it
   // gets its own surface instead of the xterm-backed PtySurface. Every
@@ -198,14 +208,26 @@ export function AgentSurface({ tab, paneIndex, onClosePane }: AgentSurfaceProps)
   // through to the PTY surface; "stream" is no longer reachable from
   // any user gesture, kept for defensively rehydrating an old tab.
   if (tab.mode === "chat") {
-    return <OpenAiCompatChatView tab={tab} />;
+    return (
+      <OpenAiCompatChatView
+        key={`${tab.sessionId}:${tab.openaiCompatProfile}`}
+        tab={tab}
+      />
+    );
   }
-  return <PtySurface tab={tab} paneIndex={paneIndex} onClosePane={onClosePane} />;
+  if (tab.mode === "stream")
+    return <StreamChatView key={tab.sessionId} tab={tab} />;
+  return (
+    <PtySurface tab={tab} paneIndex={paneIndex} onClosePane={onClosePane} />
+  );
 }
 
 function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
   const store = useEditorStore();
   const channel = streamChannel(tab.agentId, tab.repoRoot);
+  // The workspace activity channel stays shared for the HUD and side panels.
+  // The reading pane has its own history so sibling PTYs cannot mix replies.
+  const transcriptChannel = `${channel}_${tab.sessionId}`;
   // The dead-PTY "Agent exited · Restart" banner lives in AgentTerminalView
   // (it owns its own exit listener), so the surface no longer mirrors that
   // state here — it only tracks an in-flight Restart to debounce double-fires.
@@ -353,7 +375,8 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           // (two PTYs, one conversation). First to claim it keeps it; a sibling
           // that lands on an in-flight id starts fresh. Released in the finally.
           if (resumeId) {
-            if (tryClaimResume(tab.repoRoot, resumeId)) claimedResume = resumeId;
+            if (tryClaimResume(tab.repoRoot, resumeId))
+              claimedResume = resumeId;
             else {
               resumeId = undefined;
               spawnCwd = tab.repoRoot;
@@ -377,7 +400,8 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           // project's session). No match → fresh, never a stranger's.
           resumeId = tab.resumeSessionId ?? undefined;
           if (!resumeId) {
-            resumeId = (await api.codexLatestSession(tab.repoRoot)) ?? undefined;
+            resumeId =
+              (await api.codexLatestSession(tab.repoRoot)) ?? undefined;
             if (cancelled) return;
           }
         } else if (tab.agentId === "opencode") {
@@ -505,7 +529,8 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
         const takenBySiblings = new Set(
           store.agentTabs
             .filter(
-              (x) => x.sessionId !== tab.sessionId && x.repoRoot === tab.repoRoot,
+              (x) =>
+                x.sessionId !== tab.sessionId && x.repoRoot === tab.repoRoot,
             )
             .map((x) => x.resumeSessionId)
             .filter((v): v is string => !!v),
@@ -539,7 +564,10 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
         store.bindAgentResumeSession(tab.sessionId, mine.session_id);
         unlisten = await listen<import("../../lib/api").StreamEvent>(
           `claude-session:${tab.sessionId}`,
-          (e) => pushEvent(channel, e.payload),
+          (e) => {
+            pushEvent(channel, e.payload);
+            pushEvent(transcriptChannel, e.payload, { passive: true });
+          },
         );
         if (cancelled) {
           unlisten?.();
@@ -562,7 +590,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
         // is then the only thing standing between the user and a hole in the
         // transcript: it resumes from where this tab was last read to, which is
         // why `tab.sessionId` goes to both calls.
-        if (getChannelEvents(channel).length === 0) {
+        if (getChannelEvents(transcriptChannel).length === 0) {
           try {
             const history = await api.claudeLoadSession(
               mine.file_path,
@@ -570,9 +598,11 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
               tab.sessionId,
             );
             if (cancelled) return;
-            if (getChannelEvents(channel).length === 0) {
-              setResumedHistory(channel, history);
+            if (getChannelEvents(transcriptChannel).length === 0) {
+              setResumedHistory(transcriptChannel, history);
             }
+            if (getChannelEvents(channel).length === 0)
+              setResumedHistory(channel, history);
           } catch {
             /* best-effort — a missing/locked file just means no pre-roll */
           }
@@ -600,7 +630,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           .catch(() => {});
       }
     };
-  }, [tab.sessionId, tab.repoRoot, tab.agentId, channel]);
+  }, [tab.sessionId, tab.repoRoot, tab.agentId, channel, transcriptChannel]);
 
   // Clear the in-flight Restart flag whenever the tab's sessionId changes —
   // a successful restart() swaps in a fresh child id, and that transition is
@@ -616,7 +646,8 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
   // window event.
   useEffect(() => {
     function onRerun(e: Event) {
-      const detail = (e as CustomEvent<{ sessionId: string; text: string }>).detail;
+      const detail = (e as CustomEvent<{ sessionId: string; text: string }>)
+        .detail;
       if (!detail || detail.sessionId !== tab.sessionId) return;
       api.agentPtySendPrompt(tab.sessionId, detail.text).catch((err) => {
         console.warn("[pty] rerun failed:", err);
@@ -862,7 +893,9 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
 
   const inSplit =
     !!store.splitLayout &&
-    treeLeaves(store.splitLayout).some((p) => paneRefMatches(p, "agent", tab.sessionId));
+    treeLeaves(store.splitLayout).some((p) =>
+      paneRefMatches(p, "agent", tab.sessionId),
+    );
 
   // Detach this live session into its own OS window. The PTY lives in the
   // Rust backend keyed by session id, so the popout re-attaches to the same
@@ -940,7 +973,8 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
       }
     }
     window.addEventListener(AGENT_PANE_ACTION_EVENT, onPaneAction);
-    return () => window.removeEventListener(AGENT_PANE_ACTION_EVENT, onPaneAction);
+    return () =>
+      window.removeEventListener(AGENT_PANE_ACTION_EVENT, onPaneAction);
     // Re-bind when the gating state changes so the handler closes over
     // fresh values (split membership, restarting flag, the close-pane
     // callback). splitAgent/stop/restart/detach read tab.sessionId, which
@@ -979,9 +1013,13 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
               the parsed events keep filling the transcript and answers can be
               typed the instant the user flips back. */}
           <div
-            className="absolute inset-0"
+            className="absolute inset-0 flex flex-col"
+            inert={view === "chat"}
+            aria-hidden={view === "chat"}
             style={{ visibility: view === "chat" ? "hidden" : "visible" }}
           >
+            <ChatHeader title={tab.agentLabel} workspace={tab.repoRoot} switcher={<ChatViewSwitcher value={view} onChange={setMainView} disabled={paused} />} />
+            <div className="flex-1 min-h-0 relative">
             <AgentTerminalView
               sessionId={tab.sessionId}
               agentId={tab.agentId}
@@ -998,38 +1036,22 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
               // remounts on the new id with no banner.
               onAutoRespawn={() => spawnTab(tab)}
             />
+            </div>
           </div>
-          {view === "chat" && (
-            <div className="absolute inset-0">
+          {!paused && (
+            <div className="absolute inset-0" inert={view !== "chat"} aria-hidden={view !== "chat"} style={{ visibility: view === "chat" ? "visible" : "hidden" }}>
               <NormalizedTranscript
-                channel={channel}
+                key={tab.sessionId}
+                channel={transcriptChannel}
                 agentId={tab.agentId}
                 repoRoot={tab.repoRoot}
                 ptySessionId={tab.sessionId}
                 onRespondInTerminal={() => setMainView("terminal")}
+                viewSwitcher={<ChatViewSwitcher value={view} onChange={setMainView} />}
               />
             </div>
           )}
-          {/* Not while paused: the paused pane keeps its actions in a band at
-              the top right, and this toggle sat directly on top of "Start
-              agent" — same z-index, later in the DOM, so it won the paint and
-              covered the only button on the screen that does anything. */}
-          {!paused && (
-            <div className="absolute top-2 right-2 z-10 flex items-center rounded-md overflow-hidden shadow-sm"
-              style={{ border: "1px solid var(--color-line-soft)", background: "var(--color-bg-1)" }}
-            >
-              <ViewToggleButton
-                active={view === "terminal"}
-                onClick={() => setMainView("terminal")}
-                label="Terminal"
-              />
-              <ViewToggleButton
-                active={view === "chat"}
-                onClick={() => setMainView("chat")}
-                label="Chat"
-              />
-            </div>
-          )}
+
         </div>
         {sideView === "blocks" && (
           <div
@@ -1054,37 +1076,6 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
         />
       )}
     </div>
-  );
-}
-
-
-
-/** Compact Terminal⇄Chat segmented toggle shown over the agent surface when the
- *  engine has a wired normalizer. Active = arctic-blue accent wash; inactive =
- *  muted text. Two of these sit flush in a single bordered group. */
-function ViewToggleButton({
-  active,
-  onClick,
-  label,
-}: {
-  active: boolean;
-  onClick: () => void;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="px-2 h-6 text-xs font-medium transition-colors hover:text-text-1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
-      style={{
-        background: active
-          ? "color-mix(in srgb, var(--color-accent) 16%, transparent)"
-          : "transparent",
-        color: active ? "var(--color-accent)" : "var(--color-text-3)",
-      }}
-    >
-      {label}
-    </button>
   );
 }
 

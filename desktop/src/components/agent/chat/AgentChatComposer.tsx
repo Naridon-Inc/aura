@@ -1,3 +1,7 @@
+import { ComposerFrame, ComposerToolbar, ChatModePicker, promptForChatMode, type ChatMode } from "../../chat/ChatComposer";
+import { BrainSwitcherModal } from "../../manager/BrainSwitcherModal";
+import * as Popover from "@radix-ui/react-popover";
+import { ChevronDown } from "lucide-react";
 //! The CLI agent's composer, built to the same spec as the Aura brain's.
 //!
 //! What was here before was a bare `<textarea>` and a send button. The brain's
@@ -40,7 +44,7 @@ import { ArrowUp } from "lucide-react";
 import { api } from "../../../lib/api";
 import type { BrainChoice, ModelCatalog } from "../../../lib/api";
 import { toast } from "../../../lib/toast";
-import { catalogFor, type CatalogModel } from "../../../lib/modelCatalog";
+import { familyOf, rowKey, type CatalogModel } from "../../../lib/modelCatalog";
 import {
   TiptapComposer,
   type SlashItem,
@@ -54,7 +58,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "../../ui/dropdown-menu";
-import { AgentIcon } from "../AgentIcon";
+
 import {
   composerKey,
   pushHistory,
@@ -116,6 +120,7 @@ export function AgentChatComposer({
   const commands = commandsForAgent(agentId);
   const composerRef = useRef<TiptapComposerHandle | null>(null);
   const [text, setText] = useState("");
+  const [mode, setMode] = useState<ChatMode>("build");
 
   const draftKey = composerKey(DRAFT_PREFIX, ptySessionId);
   const histKey = composerKey(HISTORY_PREFIX, ptySessionId);
@@ -133,6 +138,10 @@ export function AgentChatComposer({
   // some unrelated state change, i.e. after you typed. Which is exactly when
   // you no longer want it.
   const [hasHistory, setHasHistory] = useState(false);
+  const latestText = useRef(text);
+  latestText.current = text;
+  useEffect(() => () => writeDraft(draftKey, latestText.current), [draftKey]);
+  const sending = useRef(false);
   useEffect(() => {
     historyRef.current = readHistory(histKey);
     historyPosRef.current = 0;
@@ -183,7 +192,8 @@ export function AgentChatComposer({
 
   async function send() {
     const body = text.trim();
-    if (!body) return;
+    if (!body || sending.current) return;
+    sending.current = true;
     // Optimistic clear, restored on failure — losing what someone typed to a
     // silent error is the one outcome worth extra code to avoid.
     setText("");
@@ -193,11 +203,12 @@ export function AgentChatComposer({
     writeHistory(histKey, historyRef.current);
     setHasHistory(true);
     writeDraft(draftKey, "");
-    const ok = await sendLine(body);
+    const ok = await sendLine(body.startsWith("/") ? body : promptForChatMode(body, mode));
     if (!ok) {
       setText(body);
       composerRef.current?.setMarkdown(body, "end");
     }
+    sending.current = false;
     composerRef.current?.focus();
   }
 
@@ -303,8 +314,8 @@ export function AgentChatComposer({
   );
 
   return (
-    <div className="p-dock">
-      <div
+    <div className="chat-composer">
+      <ComposerFrame
         className="composer"
         onKeyDownCapture={(e) => {
           // Esc is Stop while the agent is working. Captured at the root
@@ -329,7 +340,7 @@ export function AgentChatComposer({
           placeholder={
             running
               ? "Queue a follow-up. It lands when the agent finishes"
-              : "Message the agent. @ for files, / for its commands"
+              : "Ask to make changes, @mention files, run /commands"
           }
           onChange={setText}
           onSubmit={() => void send()}
@@ -346,16 +357,14 @@ export function AgentChatComposer({
           slashRows={slashRows}
         />
 
-        <div className="composer-bottom">
-          {commands?.model && (
+        <ComposerToolbar mode={<ChatModePicker value={mode} onChange={setMode} modes={["build", "plan", "ask"]} />} model={<>{commands?.model && (
             <AgentModelChip
               agentId={agentId}
               commands={commands}
               onSend={sendLine}
               onSwitchToTerminal={onSwitchToTerminal}
             />
-          )}
-          <AgentCommandChip
+          )}</>} options={<><AgentCommandChip
             agentId={agentId}
             onSend={sendLine}
             onCompose={(line) => {
@@ -365,9 +374,7 @@ export function AgentChatComposer({
               composerRef.current?.setMarkdown(line, "end");
               composerRef.current?.focus();
             }}
-          />
-
-          <div className="right justify-end" style={{ minWidth: 96 }}>
+          /></>} actions={<div className="right justify-end" style={{ minWidth: 96 }}>
             {running ? (
               <Button
                 type="button"
@@ -375,7 +382,8 @@ export function AgentChatComposer({
                 size="sm"
                 className="font-mono"
                 disabled={interrupting}
-                onClick={() => void stop()}
+                aria-label="Stop response"
+              onClick={() => void stop()}
                 title={
                   interrupting
                     ? "Waiting for the agent to stop"
@@ -393,6 +401,7 @@ export function AgentChatComposer({
               variant={running ? "subtle" : "default"}
               size="sm"
               className={running ? "font-mono text-accent" : "font-mono"}
+              aria-label="Send message"
               disabled={!canSend}
               onClick={() => void send()}
               title={running ? "Queue this (↵)" : "Send (↵)"}
@@ -408,9 +417,8 @@ export function AgentChatComposer({
               <ArrowUp className="ico-12" strokeWidth={2} aria-hidden />
               <span className="send-kbd">⏎</span>
             </Button>
-          </div>
-        </div>
-      </div>
+          </div>} />
+      </ComposerFrame>
     </div>
   );
 }
@@ -464,80 +472,20 @@ function AgentModelChip({
     };
   }, [model?.kind]);
 
-  // Provider scoping happens here and nowhere else: describe this CLI as the
-  // `cli_wrapper` brain it is, so `familyOf` resolves it to the right vendor,
-  // then ask the shared catalog for that one family. A Gemini session therefore
-  // lists Gemini models and only Gemini models — the rest of the catalog is not
-  // filtered out for tidiness, it is unreachable, because those ids mean
-  // nothing to this binary.
-  const rows = useMemo<CatalogModel[]>(() => {
-    if (model?.kind !== "inline") return [];
-    const brain: BrainChoice = {
-      id: `cli_wrapper:${agentId}`,
-      label: agentId,
-      kind: "cli_wrapper",
-      active: true,
-      // A CLI authenticates out-of-band (its own login), which is exactly what
-      // these two flags mean for every other cli_wrapper brain.
-      requires_api_key: false,
-      has_api_key: true,
-    };
-    return catalogFor(brain, live);
-  }, [agentId, model?.kind, live]);
-
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [switching, setSwitching] = useState(false);
+  const brain = useMemo<BrainChoice>(() => ({ id: `cli_wrapper:${agentId}`, label: agentId, kind: "cli_wrapper", active: true, requires_api_key: false, has_api_key: true }), [agentId]);
+  const [favorites, setFavorites] = useState<string[]>([]);
   if (!model) return null;
-
-  if (model.kind === "picker") {
-    return (
-      <ChipButton
-        chevron={false}
-        title={`Open ${agentId}'s own model chooser in the terminal`}
-        onClick={() => {
-          void onSend(model.line).then((ok) => {
-            if (ok) onSwitchToTerminal?.();
-          });
-        }}
-      >
-        <AgentIcon agentId={agentId} size={12} />
-        <span className="chip-label">{model.label}</span>
-      </ChipButton>
-    );
-  }
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <ChipButton
-          active={!!sent}
-          title={`Switch the model this ${agentId} session runs`}
-        >
-          <AgentIcon agentId={sent?.brand ?? agentId} size={12} />
-          <span className="chip-label">{sent ? sent.label : "Model"}</span>
-        </ChipButton>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-[220px]">
-        {rows.map((row) => (
-          <DropdownMenuItem
-            key={row.key}
-            // A row with no wire id ("Default") has nothing to type, so it
-            // can't switch anything — leave it unselectable rather than send a
-            // malformed line.
-            disabled={!row.id}
-            onSelect={() => {
-              if (!row.id) return;
-              void onSend(model.line(row.id)).then((ok) => {
-                if (ok) setSent(row);
-              });
-            }}
-          >
-            <AgentIcon agentId={row.brand ?? agentId} size={14} />
-            <span className="flex-1">{row.label}</span>
-            {row.isNew && <span className="text-xs text-accent">NEW</span>}
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
+  if (model.kind === "picker") return <button type="button" className="composer-selector composer-model-selector" onClick={() => { void onSend(model.line).then(ok => { if (ok) onSwitchToTerminal?.(); }); }} title={`Open ${agentId}’s model chooser in CLI`}>{model.label}<ChevronDown size={12} /></button>;
+  return <Popover.Root open={open} onOpenChange={setOpen}><Popover.Trigger asChild><button type="button" className="composer-selector composer-model-selector" aria-label={`Model: ${sent?.label ?? "Agent default"}`}><span>{sent?.label ?? "Agent default"}</span><ChevronDown size={12} /></button></Popover.Trigger><Popover.Portal><Popover.Content className="chat-menu-surface composer-catalog-popover" align="start" side="top" sideOffset={8} collisionPadding={12} style={{zIndex:60}}>
+    <BrainSwitcherModal embedded allowDefault={false} brains={[brain]} liveCatalog={live} value={sent ? {brainId:brain.id, family:familyOf(brain), modelId:sent.id, label:sent.label, longContext:!!sent.longContext} : null} favorites={favorites} activeChoice={brain} loading={switching} loadError={error} onPick={async (_brain, row) => {
+      if (!row.id || switching) return;
+      setSwitching(true); setError(null);
+      try { if (await onSend(model.line(row.id))) { setSent(row); setOpen(false); } else setError("The model did not change. Try again."); } finally { setSwitching(false); }
+    }} onPickAuto={() => {}} onToggleFav={(id, row) => { const key = rowKey(id, row); setFavorites(items => items.includes(key) ? items.filter(item => item !== key) : [...items, key]); }} onClose={() => setOpen(false)} />
+  </Popover.Content></Popover.Portal></Popover.Root>;
 }
 
 /** Every command this CLI ships, as a menu.

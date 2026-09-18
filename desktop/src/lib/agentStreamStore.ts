@@ -24,6 +24,7 @@ import {
   type StreamExitInfo,
 } from "./api";
 import { noteTurnFinished } from "./community";
+import { writeChatHistory } from "./chatHistory";
 import { notify } from "./notifications";
 import { playCompletionChime } from "./completionChime";
 import { basename } from "./paths";
@@ -56,6 +57,7 @@ export type StreamSessionState = {
    *  on-disk conversation via the picker. Drives the session-info card
    *  at the top of the bubble view. Cleared on /clear or new session. */
   resumedSession: ClaudeSession | null;
+  storageError?: string;
 };
 
 type PendingTool = {
@@ -76,6 +78,9 @@ type Entry = {
    *  the live listener. The cleanup compares its captured gen with the
    *  current one and only unlistens if they match. */
   gen: number;
+  attaching?: Promise<void>;
+  historyKey?: string;
+  persistTimer?: ReturnType<typeof setTimeout>;
   /** Repo root + agent id pinned via bindChannelMeta on send dispatch.
    *  Channel string sanitizes path separators so we can't recover the
    *  real disk path from it; the dispatcher passes the original. */
@@ -107,7 +112,12 @@ function ensureEntry(channel: string): Entry {
   let e = entries.get(channel);
   if (e) return e;
   e = {
-    state: { events: [], sessionId: null, running: false, resumedSession: null },
+    state: {
+      events: [],
+      sessionId: null,
+      running: false,
+      resumedSession: null,
+    },
     subs: new Set(),
     unlistenStream: null,
     unlistenDone: null,
@@ -158,9 +168,13 @@ export function setPermissionMode(channel: string, mode: PermissionMode) {
  *  bubble *before* awaiting the backend, so it shows up instantly even
  *  if the backend takes a tick to spin up — no race with listener
  *  attach. The backend does not emit UserPrompt for the same reason. */
-export function pushEvent(channel: string, ev: StreamEvent) {
+export function pushEvent(
+  channel: string,
+  ev: StreamEvent,
+  options?: { passive?: boolean },
+) {
   const entry = ensureEntry(channel);
-  applyEvent(entry, ev);
+  applyEvent(entry, ev, options?.passive);
 }
 
 // Fleet-wide subscribers (the HUD publisher) — notified on ANY channel change so
@@ -190,8 +204,28 @@ function trimEvents(prev: StreamEvent[], next: StreamEvent): StreamEvent[] {
   return init && tail[0] !== init ? [init, ...tail, next] : [...tail, next];
 }
 
-function applyEvent(entry: Entry, ev: StreamEvent) {
-  const events = trimEvents(entry.state.events, ev);
+export function configureChatHistory(channel: string, historyKey: string) {
+  ensureEntry(channel).historyKey = historyKey;
+}
+function scheduleHistory(entry: Entry) {
+  if (!entry.historyKey || entry.persistTimer) return;
+  entry.persistTimer = setTimeout(() => {
+    entry.persistTimer = undefined;
+    void writeChatHistory(entry.historyKey!, entry.state.events).catch(() => {
+      entry.state = {
+        ...entry.state,
+        storageError:
+          "Chat history could not be saved. Copy the conversation to keep a backup.",
+      };
+      emit(entry);
+    });
+  }, 200);
+}
+
+function applyEvent(entry: Entry, ev: StreamEvent, passive = false) {
+  const events = entry.historyKey
+    ? [...entry.state.events, ev]
+    : trimEvents(entry.state.events, ev);
   const wasRunning = entry.state.running;
   let sessionId = entry.state.sessionId;
   let running = entry.state.running;
@@ -207,6 +241,14 @@ function applyEvent(entry: Entry, ev: StreamEvent) {
     running = false;
   }
   entry.state = { ...entry.state, events, sessionId, running };
+  scheduleHistory(entry);
+
+  // A per-PTY transcript mirrors the workspace stream without repeating
+  // snapshots, watchdogs, notifications or completion sounds.
+  if (passive) {
+    emit(entry);
+    return;
+  }
 
   // W7 ambient — turn-end. A streamed agent run just finished (running
   // true → false). Play the completion chime (always, the delight cue)
@@ -408,10 +450,16 @@ export function getChannelEvents(channel: string): StreamEvent[] {
  *  subscribing. The HUD publisher reads this on a tick to build the fleet
  *  roster + per-status counts — it can't call `useAgentStream` once per
  *  agent. Keyed by channel (`streamChannel(agentId, repoRoot)`). */
-export function getAllStreamStates(): Map<string, { running: boolean; hasEvents: boolean }> {
+export function getAllStreamStates(): Map<
+  string,
+  { running: boolean; hasEvents: boolean }
+> {
   const out = new Map<string, { running: boolean; hasEvents: boolean }>();
   for (const [channel, e] of entries) {
-    out.set(channel, { running: e.state.running, hasEvents: e.state.events.length > 0 });
+    out.set(channel, {
+      running: e.state.running,
+      hasEvents: e.state.events.length > 0,
+    });
   }
   return out;
 }
@@ -431,18 +479,27 @@ export function useAllStreamStates(): Map<string, { running: boolean; hasEvents:
   return getAllStreamStates();
 }
 
+export async function waitForAgentStream(channel: string): Promise<void> {
+  const entry = ensureEntry(channel);
+  if (entry.unlistenStream && entry.unlistenDone) return;
+  if (!entry.attaching) {
+    entry.attaching = attach(channel, entry, entry.gen).finally(() => {
+      entry.attaching = undefined;
+    });
+  }
+  await entry.attaching;
+  if (!entry.unlistenStream || !entry.unlistenDone)
+    throw new Error("Chat connection closed. Please try again.");
+}
+
 async function attach(channel: string, entry: Entry, gen: number) {
   console.log("[agent-stream] attaching listener for", channel);
   // Two listeners: one for events, one for the done sentinel. They
   // resolve independently — store each as soon as it lands so we don't
   // lose the events listener if the done listener is slow.
-  const evUn = await listen<StreamEvent>(
-    `agent-stream:${channel}`,
-    (e) => {
-      console.log("[agent-stream]", channel, "←", e.payload.kind, e.payload);
-      applyEvent(entry, e.payload);
-    },
-  );
+  const evUn = await listen<StreamEvent>(`agent-stream:${channel}`, (e) => {
+    applyEvent(entry, e.payload);
+  });
   // If a stale generation tries to install a listener, drop it on the
   // floor — a newer attach has already taken over.
   if (entry.gen !== gen) {
@@ -459,6 +516,7 @@ async function attach(channel: string, entry: Entry, gen: number) {
         entry.state = { ...entry.state, running: false };
         emit(entry);
       }
+      if (entry.subs.size === 0) detach(channel, entry);
     },
   );
   if (entry.gen !== gen) {
@@ -479,7 +537,7 @@ const IDLE_DROP_MS = 5 * 60_000;
 const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function detach(channel: string, entry: Entry) {
-  if (entry.subs.size > 0) return;
+  if (entry.subs.size > 0 || entry.state.running) return;
   // Bumping gen invalidates any in-flight attach() so its late-arriving
   // listener Promise can self-clean instead of installing a zombie.
   entry.gen += 1;
@@ -509,9 +567,7 @@ function detach(channel: string, entry: Entry) {
   idleTimers.set(channel, timer);
 }
 
-export function useAgentStream(
-  channel: string | null,
-): StreamSessionState {
+export function useAgentStream(channel: string | null): StreamSessionState {
   const [, force] = useState(0);
 
   useEffect(() => {
@@ -530,8 +586,7 @@ export function useAgentStream(
     // Capture gen so a late attach knows whether the world has moved
     // on and it should self-clean instead of installing a stale listener.
     if (!entry.unlistenStream) {
-      const gen = entry.gen;
-      attach(channel, entry, gen).catch(() => {});
+      waitForAgentStream(channel).catch(() => {});
     }
     return () => {
       entry.subs.delete(fn);
@@ -539,9 +594,22 @@ export function useAgentStream(
     };
   }, [channel]);
 
-  if (!channel) return { events: [], sessionId: null, running: false, resumedSession: null };
+  if (!channel)
+    return {
+      events: [],
+      sessionId: null,
+      running: false,
+      resumedSession: null,
+    };
   const entry = entries.get(channel);
-  return entry?.state ?? { events: [], sessionId: null, running: false, resumedSession: null };
+  return (
+    entry?.state ?? {
+      events: [],
+      sessionId: null,
+      running: false,
+      resumedSession: null,
+    }
+  );
 }
 
 /** Subscribe to the active permission mode for a channel. Used by the
@@ -681,6 +749,13 @@ export function setResumedHistory(channel: string, events: StreamEvent[]) {
   entry.state = {
     ...entry.state,
     events,
+    sessionId:
+      [...events]
+        .reverse()
+        .find(
+          (e): e is Extract<StreamEvent, { kind: "system_init" }> =>
+            e.kind === "system_init" && !!e.session_id,
+        )?.session_id ?? entry.state.sessionId,
     running: false,
   };
   emit(entry);

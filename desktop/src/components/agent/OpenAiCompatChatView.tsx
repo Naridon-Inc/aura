@@ -15,15 +15,22 @@
 // editor-grade rendering open the agent's output in a file tab.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { onExternalAnchorClick } from "../../lib/openExternal";
 import { listen } from "@tauri-apps/api/event";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { remarkCallouts } from "../markdown/remarkCallouts";
-import { calloutFromBlockquote } from "../markdown/Callout";
 import { api, type OpenAiCompatProfile } from "../../lib/api";
 import type { AgentTab } from "../../lib/editorStore";
-import { AgentIcon, brandFor } from "./AgentIcon";
+import {
+  accumulateCompletion,
+  type CompletionState,
+} from "../../lib/chatCompletion";
+import {
+  ComposerFrame,
+  ComposerToolbar,
+  ChatModePicker,
+} from "../chat/ChatComposer";
+import { ArrowUp, Square } from "lucide-react";
+import { ChatTimeline } from "./normalized/NormalizedTranscript";
+import { toTranscriptGroups } from "./normalized/blockMap";
+import type { NormalizedEvent } from "../../lib/agentProtocol";
 
 type Props = {
   tab: AgentTab;
@@ -31,7 +38,7 @@ type Props = {
 
 type ChatRole = "user" | "assistant" | "system";
 
-type Message = {
+type Message = CompletionState & {
   /** Stable client-side id. Also used as the React key. */
   id: string;
   role: ChatRole;
@@ -40,6 +47,7 @@ type Message = {
   streaming?: boolean;
   /** Non-empty when the request errored mid-flight. */
   error?: string;
+  cancelled?: boolean;
 };
 
 // localStorage key — keeps the conversation across reloads/restarts so
@@ -49,23 +57,36 @@ function historyKey(sessionId: string, profile: string | undefined): string {
   return `aura.openai-compat.chat.${sessionId}.${profile ?? "_"}`;
 }
 
-function loadHistory(sessionId: string, profile: string | undefined): Message[] {
+function loadHistory(
+  sessionId: string,
+  profile: string | undefined,
+): Message[] {
   try {
     const raw = localStorage.getItem(historyKey(sessionId, profile));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter(
-        (m): m is Message =>
-          m &&
-          typeof m.id === "string" &&
-          typeof m.role === "string" &&
-          typeof m.content === "string",
-      )
-      // Strip the in-flight flag from any message that was mid-stream when
-      // the shell died; otherwise the "Stop" button would appear forever.
-      .map((m) => ({ ...m, streaming: false }));
+    return (
+      parsed
+        .filter(
+          (m): m is Message =>
+            m &&
+            typeof m.id === "string" &&
+            (m.role === "user" ||
+              m.role === "assistant" ||
+              m.role === "system") &&
+            typeof m.content === "string",
+        )
+        // Strip the in-flight flag from any message that was mid-stream when
+        // the shell died; otherwise the "Stop" button would appear forever.
+        .map((m) => ({
+          ...m,
+          streaming: false,
+          error: m.streaming
+            ? "Response interrupted when the app closed. Partial output is saved."
+            : m.error,
+        }))
+    );
   } catch {
     return [];
   }
@@ -97,8 +118,24 @@ export function OpenAiCompatChatView({ tab }: Props) {
   const [messages, setMessages] = useState<Message[]>(() =>
     loadHistory(tab.sessionId, profileName),
   );
-  const [composer, setComposer] = useState("");
+  const [composer, setComposer] = useState(() => {
+    try {
+      return sessionStorage.getItem(`aura.model-draft.${tab.sessionId}`) ?? "";
+    } catch {
+      return "";
+    }
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(`aura.model-draft.${tab.sessionId}`, composer);
+    } catch {
+      /* draft preference */
+    }
+  }, [composer, tab.sessionId]);
   const [streaming, setStreaming] = useState(false);
+  const [streamReady, setStreamReady] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const stuckToBottom = useRef(true);
   // Track the turn id of the in-flight assistant bubble. Used by the
   // Stop button to call `openai_compat_cancel` and by the event
   // listener to know which bubble to append into.
@@ -152,20 +189,30 @@ export function OpenAiCompatChatView({ tab }: Props) {
   // bubble.
   useEffect(() => {
     if (!profileName) return;
+    setStreamReady(false);
     let unlisten: (() => void) | null = null;
     let cancelled = false;
     (async () => {
       const stop = await listen<{
         profile: string;
         turn_id: string;
-        kind: "delta" | "done" | "error";
+        kind: "delta" | "done" | "error" | "event";
+        data?: unknown;
         content?: string;
         message?: string;
       }>(`openai-compat:chunk:${profileName}`, (e) => {
         const payload = e.payload;
         const active = activeTurnRef.current;
         if (!active || active.turnId !== payload.turn_id) return;
-        if (payload.kind === "delta") {
+        if (payload.kind === "event") {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === active.assistantId
+                ? accumulateCompletion(m, payload.data)
+                : m,
+            ),
+          );
+        } else if (payload.kind === "delta") {
           const chunk = payload.content ?? "";
           if (!chunk) return;
           setMessages((prev) => {
@@ -211,12 +258,35 @@ export function OpenAiCompatChatView({ tab }: Props) {
         return;
       }
       unlisten = stop;
-    })();
+      setStreamReady(true);
+    })().catch((e) => {
+      if (!cancelled)
+        setSendError(`Could not connect to the response stream. ${String(e)}`);
+    });
     return () => {
       cancelled = true;
       unlisten?.();
+      const active = activeTurnRef.current;
+      activeTurnRef.current = null;
+      if (active) {
+        saveHistory(
+          tab.sessionId,
+          profileName,
+          messagesRef.current.map((m) =>
+            m.id === active.assistantId
+              ? {
+                  ...m,
+                  streaming: false,
+                  error:
+                    "Response interrupted when the tab closed. Partial output is saved.",
+                }
+              : m,
+          ),
+        );
+        void api.openaiCompatCancel(profileName, active.turnId).catch(() => {});
+      }
     };
-  }, [profileName]);
+  }, [profileName, tab.sessionId]);
 
   // Persist history on every change so a shell crash mid-conversation
   // doesn't lose the thread. Strip the volatile `streaming` flag at
@@ -232,17 +302,24 @@ export function OpenAiCompatChatView({ tab }: Props) {
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
-    const distanceFromBottom = el.scrollHeight - el.clientHeight - el.scrollTop;
-    if (distanceFromBottom < 120) {
-      el.scrollTop = el.scrollHeight;
-    }
+    const selection = window.getSelection();
+    if (
+      selection &&
+      !selection.isCollapsed &&
+      selection.anchorNode &&
+      el.contains(selection.anchorNode)
+    )
+      return;
+    if (stuckToBottom.current) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
   const send = useCallback(async () => {
     const text = composer.trim();
     if (!text) return;
     if (!profile) return;
-    if (streaming) return;
+    if (activeTurnRef.current || !streamReady) return;
+    setSendError(null);
+    setCleared(null);
 
     const userMsg: Message = {
       id: newId(),
@@ -267,15 +344,21 @@ export function OpenAiCompatChatView({ tab }: Props) {
     // Rust side doesn't have to know about our internal id/streaming
     // flags.
     const baseHistory = messagesRef.current
-      .filter((m) => !m.error)
+      .filter((m) => !m.error && !m.cancelled)
       .map(({ role, content }) => ({ role, content }));
-    const payload = [...baseHistory, { role: userMsg.role, content: userMsg.content }];
+    const payload = [
+      ...baseHistory,
+      { role: userMsg.role, content: userMsg.content },
+    ];
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
 
     try {
       await api.openaiCompatChat(profile.name, turnId, payload);
     } catch (e) {
+      if (activeTurnRef.current?.turnId !== turnId) return;
       const msg = String(e);
+      setSendError(msg);
+      setComposer((current) => current || text);
       setMessages((prev) => {
         const idx = prev.findIndex((m) => m.id === assistantMsg.id);
         if (idx < 0) return prev;
@@ -286,251 +369,277 @@ export function OpenAiCompatChatView({ tab }: Props) {
       setStreaming(false);
       activeTurnRef.current = null;
     }
-  }, [composer, profile, streaming]);
+  }, [composer, profile, streamReady]);
 
   const stop = useCallback(async () => {
     const active = activeTurnRef.current;
     if (!active || !profile) return;
     try {
       await api.openaiCompatCancel(profile.name, active.turnId);
+      if (activeTurnRef.current?.turnId !== active.turnId) return;
+      activeTurnRef.current = null;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === active.assistantId
+            ? { ...m, streaming: false, cancelled: true }
+            : m,
+        ),
+      );
+      setStreaming(false);
     } catch (e) {
-      console.warn("[openai-compat] cancel failed:", e);
+      setSendError(`Could not stop the response. ${String(e)}`);
     }
-    // Don't tear down activeTurnRef here — the cancel races against
-    // in-flight chunks; we let the eventual `done` payload do the
-    // bookkeeping so the assistant bubble shows whatever made it
-    // through before the upstream tore down.
   }, [profile]);
 
+  const [cleared, setCleared] = useState<Message[] | null>(null);
   const clear = useCallback(() => {
     if (streaming) return;
+    setCleared(messagesRef.current);
     setMessages([]);
   }, [streaming]);
 
   // Keyboard model: Enter sends, Shift+Enter adds a newline. Familiar
   // from every other chat surface in the shell (Composer, Manager).
   function onComposerKey(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (
+      e.key === "Enter" &&
+      !e.shiftKey &&
+      !e.nativeEvent.isComposing &&
+      e.keyCode !== 229
+    ) {
       e.preventDefault();
       void send();
     }
   }
 
-  const brand = brandFor("openai-compat");
   const displayLabel = profile?.name ?? profileName ?? "Local Model";
   const subtitle = useMemo(() => {
     if (!profile) return tab.sessionId.slice(0, 8) + " · openai-compat";
     return `${profile.model} · ${shortBase(profile.base_url)}`;
   }, [profile, tab.sessionId]);
 
+  const groups = useMemo(() => {
+    const normalized: NormalizedEvent[] = [];
+    for (const m of messages) {
+      const env = {
+        sessionId: tab.sessionId,
+        turnId: m.id,
+        ts: 0,
+        source: m.role === "user" ? ("user" as const) : ("agent" as const),
+      };
+      if (m.role === "system") {
+        normalized.push({
+          ...env,
+          id: m.id,
+          kind: "raw",
+          label: "System context",
+          payload: m.content,
+        });
+        continue;
+      }
+      if (m.reasoning)
+        normalized.push({
+          ...env,
+          id: `${m.id}:reasoning`,
+          kind: "reasoning",
+          text: m.reasoning,
+          partial: m.streaming,
+        });
+      if (m.content)
+        normalized.push({
+          ...env,
+          id: m.id,
+          kind: "text",
+          role: m.role,
+          text: m.content,
+          partial: m.streaming,
+        });
+      if (m.refusal)
+        normalized.push({
+          ...env,
+          id: `${m.id}:refusal`,
+          kind: "text",
+          role: "assistant",
+          text: m.refusal,
+        });
+      for (const t of m.tools ?? [])
+        normalized.push({
+          ...env,
+          id: `${m.id}:tool:${t.index}`,
+          kind: "raw",
+          label: `Tool request · ${t.name || "receiving arguments"}`,
+          payload: {
+            ...t,
+            status: "Requested by the model. This chat does not execute tools.",
+          },
+        });
+      for (const [i, part] of (m.parts ?? []).entries())
+        normalized.push({
+          ...env,
+          id: `${m.id}:part:${i}`,
+          kind: "raw",
+          label: "Model content",
+          payload: part,
+        });
+      if (m.usage)
+        normalized.push({
+          ...env,
+          id: `${m.id}:usage`,
+          kind: "usage",
+          contextTokens: m.usage.input,
+          outputTokens: m.usage.output,
+        });
+      if (m.role === "assistant" && !m.streaming)
+        normalized.push({
+          ...env,
+          id: `${m.id}:result`,
+          kind: "result",
+          subtype: m.cancelled ? "cancelled" : m.error ? "error" : "success",
+          text:
+            m.error ??
+            (m.finishReason === "length"
+              ? "Output limit reached. Continue the conversation for more."
+              : m.finishReason === "content_filter"
+                ? "The provider filtered part of this response."
+                : undefined),
+          errors: m.error ? [m.error] : undefined,
+          totalTokens: m.usage?.total,
+        });
+    }
+    return toTranscriptGroups(normalized, tab.sessionId);
+  }, [messages, tab.sessionId]);
   return (
-    <div className="h-full w-full flex flex-col bg-bg-content">
-      {/* Header — same chrome shape as AgentSurface's PTY header so
-          tab strip + workpane feel cohesive across kinds. */}
-      <div
-        className="flex items-center gap-2.5 h-11 px-3 border-b bg-bg-chrome"
-        style={{
-          borderBottomColor: `color-mix(in srgb, ${brand.fg} 22%, var(--color-line-soft))`,
-          boxShadow: `inset 0 -2px 0 0 color-mix(in srgb, ${brand.fg} 38%, transparent)`,
-        }}
-      >
-        <div
-          className="flex items-center justify-center flex-shrink-0"
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: 7,
-            background: brand.bg,
-            border: `1px solid ${brand.ring}`,
-          }}
-        >
-          <AgentIcon agentId="openai-compat" size={20} />
-        </div>
-        <div className="flex flex-col leading-tight min-w-0">
-          <span className="text-text-1 text-base font-semibold truncate">
-            {displayLabel}
-          </span>
-          <span className="text-text-5 text-2xs font-mono truncate">
-            {subtitle}
-          </span>
-        </div>
-        <div className="ml-auto flex items-center gap-1.5">
-          {profile?.api_key ? null : profile ? (
-            <span
-              className="text-2xs font-mono px-1.5 py-0.5 rounded"
-              style={{
-                // "No key set" is a caveat you may need to act on, not a
-                // feature — the amber slot, same as every other warning chip.
-                color: "var(--color-amber)",
-                background: "color-mix(in srgb, var(--color-amber) 10%, transparent)",
-                border: "1px solid color-mix(in srgb, var(--color-amber) 40%, transparent)",
-              }}
-              title="No API key set. Fine for Ollama, required for hosted endpoints."
-            >
-              no-key
-            </span>
-          ) : null}
-          <button
-            type="button"
-            onClick={clear}
-            disabled={messages.length === 0 || streaming}
-            className="px-2 h-6 rounded text-xs font-medium border transition-colors disabled:opacity-40"
-            style={{
-              background: "color-mix(in srgb, var(--color-bg-1) 70%, transparent)",
-              color: "var(--color-text-3)",
-              borderColor: "var(--color-line-soft)",
-            }}
-            title="Clear conversation"
-          >
-            Clear
-          </button>
-        </div>
-      </div>
-
-      {profileError && (
-        <div
-          role="alert"
-          className="px-4 py-2 text-sm border-b"
-          style={{
-            color: "var(--color-red)",
-            background: "color-mix(in srgb, var(--color-red) 10%, transparent)",
-            borderBottomColor: "color-mix(in srgb, var(--color-red) 40%, transparent)",
-          }}
-        >
-          {profileError}
-        </div>
-      )}
-
-      <div
-        ref={scrollerRef}
-        className="flex-1 min-h-0 overflow-y-auto"
-        style={{ background: "var(--color-bg-content)" }}
-      >
-        <div className="max-w-[860px] mx-auto px-6 py-5 flex flex-col gap-4">
-          {messages.length === 0 && (
-            <div className="text-text-5 text-base py-8 text-center">
-              {profile
-                ? `Send a message to ${profile.model}.`
-                : "Configure a profile in Settings → Local & Custom Models."}
+    <ChatTimeline
+      groups={groups}
+      running={streaming}
+      agentId="openai-compat"
+      repoRoot={tab.repoRoot}
+      controls={
+        <>
+          {cleared && (
+            <div className="chat-notice">
+              Conversation cleared.{" "}
+              <button
+                type="button"
+                className="underline"
+                onClick={() => {
+                  setMessages(cleared);
+                  setCleared(null);
+                }}
+              >
+                Undo
+              </button>
             </div>
           )}
-          {messages.map((m) => (
-            <Bubble key={m.id} message={m} />
-          ))}
-        </div>
-      </div>
+          {profileError && (
+            <div role="alert" className="chat-notice">
+              {profileError}
+            </div>
+          )}
+          {sendError && (
+            <div role="alert" className="chat-notice">
+              {sendError}
+            </div>
+          )}
+        </>
+      }
+      composer={
+        <div className="chat-composer">
+          <div className="mx-auto max-w-[760px]">
+            <ComposerFrame>
+              <textarea
+                ref={composerRef}
+                aria-label="Message the model"
+                value={composer}
+                onChange={(e) => setComposer(e.target.value)}
+                onKeyDown={onComposerKey}
+                placeholder={
+                  profile
+                    ? `Message ${profile.model}…`
+                    : "Set up a model in Settings"
+                }
+                disabled={!profile || !streamReady}
+                rows={2}
+                className="flex-1 resize-none bg-transparent text-[13px] text-text-1 outline-none placeholder:text-text-4"
+              />
+              <ComposerToolbar
+                mode={
+                  <ChatModePicker
+                    value="ask"
+                    modes={["ask"]}
+                    onChange={() => {}}
+                  />
+                }
+                model={
+                  <span
+                    className="composer-selector composer-model-selector"
+                    title={subtitle}
+                  >
+                    {profile?.model || displayLabel}
+                  </span>
+                }
+                options={
+                  <>
+                    {!streaming &&
+                      messages.some((m) => m.error || m.cancelled) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const last = [...messages]
+                              .reverse()
+                              .find((m) => m.role === "user");
+                            if (last) setComposer(last.content);
+                            composerRef.current?.focus();
+                          }}
+                        >
+                          Retry last message
+                        </button>
+                      )}
 
-      <div
-        className="flex-shrink-0 border-t px-4 py-3 flex gap-2 items-end"
-        style={{
-          borderTopColor: "var(--color-line-soft)",
-          background: "var(--color-bg-1)",
-        }}
-      >
-        <textarea
-          ref={composerRef}
-          value={composer}
-          onChange={(e) => setComposer(e.target.value)}
-          onKeyDown={onComposerKey}
-          placeholder={
-            profile
-              ? `Message ${profile.model} (Enter to send, Shift+Enter for newline)`
-              : "Pick a profile in Settings first"
-          }
-          disabled={!profile || streaming}
-          rows={2}
-          className="flex-1 min-w-0 resize-none rounded bg-bg-0 border border-line-soft text-text-1 text-base px-3 py-2 placeholder:text-text-5 focus:outline-none focus:border-line disabled:opacity-50"
-        />
-        {streaming ? (
-          <button
-            type="button"
-            onClick={stop}
-            className="px-3 h-9 rounded text-sm font-medium border transition-colors"
-            style={{
-              background: "color-mix(in srgb, var(--color-red) 10%, transparent)",
-              color: "var(--color-red)",
-              borderColor: "color-mix(in srgb, var(--color-red) 40%, transparent)",
-            }}
-            title="Stop the in-flight turn"
-          >
-            Stop
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => void send()}
-            disabled={!composer.trim() || !profile}
-            className="px-4 h-9 rounded text-sm font-medium border transition-colors disabled:opacity-40"
-            style={{
-              background: brand.bg,
-              color: brand.fg,
-              borderColor: brand.ring,
-            }}
-          >
-            Send
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Bubble({ message }: { message: Message }) {
-  const isUser = message.role === "user";
-  const align = isUser ? "items-end" : "items-start";
-  const bg = isUser
-    ? "color-mix(in srgb, var(--color-bg-3) 100%, transparent)"
-    : "color-mix(in srgb, var(--color-bg-1) 80%, transparent)";
-  const border = isUser ? "var(--color-line-soft)" : "var(--color-line-soft)";
-  const roleLabel = isUser ? "You" : "Assistant";
-  return (
-    <div className={`flex flex-col ${align} gap-1 w-full`}>
-      <span className="section-label">
-        {roleLabel}
-      </span>
-      <div
-        className="max-w-[90%] rounded-lg px-3.5 py-2 text-md leading-[1.55] text-text-1"
-        style={{
-          background: bg,
-          border: `1px solid ${border}`,
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-        }}
-      >
-        {isUser ? (
-          // User text isn't markdown — render as plain text so backticks
-          // and asterisks come through literally (the model rendering them
-          // back is enough).
-          <span>{message.content}</span>
-        ) : message.content ? (
-          <ReactMarkdown remarkPlugins={[remarkGfm, remarkCallouts]} components={mdComponents()}>
-            {message.content}
-          </ReactMarkdown>
-        ) : (
-          <span
-            className="inline-block w-1.5 h-3 align-baseline animate-pulse"
-            style={{ background: "var(--color-text-3)" }}
-            aria-label="streaming"
-          />
-        )}
-        {message.streaming && message.content && (
-          <span
-            className="inline-block w-1.5 h-3 ml-0.5 align-baseline animate-pulse"
-            style={{ background: "var(--color-text-3)" }}
-            aria-label="streaming"
-          />
-        )}
-        {message.error && (
-          <div
-            className="mt-2 text-sm"
-            style={{ color: "var(--color-red)" }}
-            role="alert"
-          >
-            {message.error}
+                    <button
+                      type="button"
+                      disabled={!messages.length || streaming}
+                      onClick={clear}
+                    >
+                      Clear conversation
+                    </button>
+                  </>
+                }
+                actions={
+                  <>
+                    {streaming ? (
+                      <button
+                        type="button"
+                        className="chat-send"
+                        onClick={stop}
+                        aria-label="Stop"
+                        title="Stop response"
+                      >
+                        <Square size={14} />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="chat-send"
+                        aria-label="Send"
+                        title="Send message"
+                        onClick={() => void send()}
+                        disabled={!composer.trim() || !profile || !streamReady}
+                      >
+                        <ArrowUp size={16} />
+                      </button>
+                    )}
+                  </>
+                }
+              />
+            </ComposerFrame>
+            <p className="mt-2 text-[10.5px] text-text-4">
+              Enter to send · Shift+Enter for a new line
+            </p>
           </div>
-        )}
-      </div>
-    </div>
+        </div>
+      }
+    />
   );
 }
 
@@ -546,55 +655,3 @@ function shortBase(url: string): string {
 // Minimal markdown component map — code blocks render in a tinted
 // surface, links open in a new tab. Kept inline so this surface
 // doesn't pull a styling dep across the agent folder.
-function mdComponents() {
-  return {
-    p: (p: any) => <p {...p} className="my-2 first:mt-0 last:mb-0" />,
-    a: (p: any) => (
-      <a
-        {...p}
-        target="_blank"
-        rel="noreferrer"
-        onClick={onExternalAnchorClick}
-        className="text-accent hover:underline"
-      />
-    ),
-    ul: (p: any) => <ul {...p} className="list-disc pl-5 my-2 space-y-1" />,
-    ol: (p: any) => <ol {...p} className="list-decimal pl-5 my-2 space-y-1" />,
-    code: ({ inline, className, children, ...rest }: any) => {
-      if (inline) {
-        return (
-          <code
-            className="bg-bg-3 text-text-1 px-1 py-[1px] rounded text-base font-mono"
-            {...rest}
-          >
-            {children}
-          </code>
-        );
-      }
-      return (
-        <code
-          className={`${className ?? ""} block font-mono text-base`}
-          {...rest}
-        >
-          {children}
-        </code>
-      );
-    },
-    pre: (p: any) => (
-      <pre
-        className="bg-bg-0 border border-line-soft my-2 p-3 rounded overflow-x-auto"
-        {...p}
-      />
-    ),
-    h1: (p: any) => <h1 {...p} className="text-lg font-semibold mt-3 mb-2" />,
-    h2: (p: any) => <h2 {...p} className="text-lg font-semibold mt-3 mb-2" />,
-    h3: (p: any) => <h3 {...p} className="text-md font-semibold mt-3 mb-1" />,
-    blockquote: (p: any) =>
-      calloutFromBlockquote(p.className, p.children) ?? (
-        <blockquote
-          {...p}
-          className="border-l-2 border-line pl-3 text-text-3 my-2"
-        />
-      ),
-  };
-}

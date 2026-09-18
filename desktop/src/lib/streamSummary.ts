@@ -20,6 +20,10 @@ export function summarizeEvents(events: StreamEvent[]): string | null {
     if (e.kind === "assistant_text" && e.text) {
       return condense(e.text);
     }
+    if (e.kind === "content_block" && e.payload && typeof e.payload === "object") {
+      const b = e.payload as Record<string, unknown>;
+      if (b.type === "text" && typeof b.text === "string" && b.text) return condense(b.text);
+    }
     if (e.kind === "tool_use") {
       return `→ ${e.name}${toolHint(e.name, e.input)}`;
     }

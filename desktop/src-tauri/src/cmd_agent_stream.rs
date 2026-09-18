@@ -16,7 +16,7 @@
 //! `system_init` event from claude carries the new session id back so
 //! the next send can continue the thread.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -29,6 +29,10 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::cmd_aurawatch::WatchRegistry;
+#[path = "chat_acp.rs"]
+mod chat_acp;
+#[path = "chat_provider_events.rs"]
+mod chat_provider_events;
 
 /// Tracks the live child process per channel so the React side can
 /// kill a turn mid-flight when the user clicks Stop. We hold the OS
@@ -42,6 +46,8 @@ use crate::cmd_aurawatch::WatchRegistry;
 #[derive(Default)]
 pub struct ChildRegistry {
     pub by_channel: Mutex<HashMap<String, u32>>,
+    acp_cancel: Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    interrupted: Mutex<HashSet<String>>,
 }
 
 impl ChildRegistry {
@@ -49,6 +55,17 @@ impl ChildRegistry {
         Self::default()
     }
 
+    fn reserve(&self, channel: &str) -> Result<(), String> {
+        let mut entries = self
+            .by_channel
+            .lock()
+            .map_err(|_| "Agent registry unavailable")?;
+        if entries.contains_key(channel) {
+            return Err("This chat already has a running response".into());
+        }
+        entries.insert(channel.into(), 0);
+        Ok(())
+    }
     fn set(&self, channel: &str, pid: u32) {
         if let Ok(mut g) = self.by_channel.lock() {
             g.insert(channel.to_string(), pid);
@@ -56,13 +73,22 @@ impl ChildRegistry {
     }
 
     fn clear(&self, channel: &str) {
+        if let Ok(mut entries) = self.interrupted.lock() {
+            entries.remove(channel);
+        }
+        if let Ok(mut entries) = self.acp_cancel.lock() {
+            entries.remove(channel);
+        }
         if let Ok(mut g) = self.by_channel.lock() {
             g.remove(channel);
         }
     }
 
     fn get(&self, channel: &str) -> Option<u32> {
-        self.by_channel.lock().ok().and_then(|g| g.get(channel).copied())
+        self.by_channel
+            .lock()
+            .ok()
+            .and_then(|g| g.get(channel).copied())
     }
 
     /// Every channel that still has a live pid, and forget them all.
@@ -74,13 +100,14 @@ impl ChildRegistry {
     /// costing money, after the app was quit.
     pub fn take_all(&self) -> Vec<(String, u32)> {
         match self.by_channel.lock() {
-            Ok(mut g) => g.drain().collect(),
+            Ok(mut g) => g.drain().filter(|(_, pid)| *pid > 0).collect(),
             Err(_) => Vec::new(),
         }
     }
 
     /// Stop every registered child, escalating to SIGKILL where needed.
     pub fn kill_all(&self) {
+        if let Ok(entries) = self.acp_cancel.lock() { for tx in entries.values() { let _ = tx.send(true); } }
         for (channel, pid) in self.take_all() {
             let outcome = crate::child_reaper::terminate_tree(pid);
             if outcome == crate::child_reaper::Outcome::Survived {
@@ -91,6 +118,16 @@ impl ChildRegistry {
                 );
             }
         }
+    }
+}
+
+struct ChannelLease {
+    app: AppHandle,
+    channel: String,
+}
+impl Drop for ChannelLease {
+    fn drop(&mut self) {
+        self.app.state::<ChildRegistry>().clear(&self.channel);
     }
 }
 
@@ -107,6 +144,14 @@ pub struct ImageAttachment {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamEvent {
+    /// Preserve provider content and its stable identity, including new block
+    /// types. The shared chat adapter decides how to display it.
+    ContentBlock {
+        event_id: String,
+        role: String,
+        payload: Value,
+        turn_id: String,
+    },
     /// Synthesised by us, not by the agent — surfaces the prompt as a
     /// bubble before the agent has had a chance to respond.
     UserPrompt {
@@ -123,6 +168,8 @@ pub enum StreamEvent {
     AssistantText {
         text: String,
         turn_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id: Option<String>,
     },
     /// Per-assistant-message token accounting, lifted from the model's
     /// `message.usage`. `context_tokens` is everything fed INTO this call
@@ -171,10 +218,7 @@ pub enum StreamEvent {
     },
     /// Anything we can't parse. Keeps the surface honest — we don't
     /// silently drop output the user might need.
-    RawError {
-        message: String,
-        turn_id: String,
-    },
+    RawError { message: String, turn_id: String },
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -196,6 +240,9 @@ pub async fn agent_stream_send(
     permission_mode: Option<String>,
     effort: Option<String>,
     fast: Option<bool>,
+    channel: Option<String>,
+    client_turn_id: Option<String>,
+    model: Option<String>,
 ) -> Result<TurnHandle, String> {
     let attachments = attachments.unwrap_or_default();
     // Cross-agent reasoning effort for this launch — `None` keeps the agent
@@ -220,10 +267,15 @@ pub async fn agent_stream_send(
     // [A-Za-z0-9/_:-] — paths with spaces silently no-op the emit and
     // the UI sits there with no bubbles. Sanitize before forming the
     // topic; the React side runs the same scrub so both halves agree.
-    let sanitized = sanitize_channel(&format!("{agent_id}@{repo_root}"));
+    let sanitized = sanitize_channel(&channel.unwrap_or_else(|| format!("{agent_id}@{repo_root}")));
+    app.state::<ChildRegistry>().reserve(&sanitized)?;
+    let lease = ChannelLease {
+        app: app.clone(),
+        channel: sanitized.clone(),
+    };
     let topic = format!("agent-stream:{sanitized}");
     let done_topic = format!("agent-stream-done:{sanitized}");
-    let turn_id = format!("turn-{}", Uuid::new_v4());
+    let turn_id = client_turn_id.unwrap_or_else(|| format!("turn-{}", Uuid::new_v4()));
 
     // The frontend pushes the UserPrompt bubble synchronously into its
     // store *before* awaiting this invoke — so we never emit one here.
@@ -243,6 +295,44 @@ pub async fn agent_stream_send(
     let provider = reg
         .get(&agent_id)
         .ok_or_else(|| format!("unknown agent: {agent_id}"))?;
+    if matches!(agent_id.as_str(), "kimi" | "gemini" | "opencode") {
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        app.state::<ChildRegistry>()
+            .acp_cancel
+            .lock()
+            .map_err(|_| "Cancel registry unavailable")?
+            .insert(sanitized.clone(), cancel_tx);
+        let handle = TurnHandle {
+            turn_id: turn_id.clone(),
+            topic: topic.clone(),
+            done_topic: done_topic.clone(),
+        };
+        let bin = provider.bin_name().to_string();
+        tokio::spawn(async move {
+            let _lease = lease;
+            chat_acp::run(
+                app,
+                &agent_id,
+                &bin,
+                &repo_root,
+                &prompt,
+                resume_session.as_deref(),
+                model.as_deref(),
+                permission_mode.as_deref(),
+                &sanitized,
+                &turn_id,
+                &attachments,
+                cancel_rx,
+            )
+            .await;
+        });
+        return Ok(handle);
+    }
+    if !attachments.is_empty() && agent_id != "claude" {
+        return Err(
+            "This agent uses file attachments through its native Terminal controls.".into(),
+        );
+    }
     let use_stdin_json = agent_id == "claude" && !attachments.is_empty();
     let mut inv = provider
         .build_invocation(&aura_agents::InvokeRequest {
@@ -252,8 +342,12 @@ pub async fn agent_stream_send(
             attachments_via_stdin: use_stdin_json,
             effort,
             fast,
-            model: None,
-            approval: None,
+            model: model.as_deref(),
+            approval: if agent_id != "claude" && permission_mode.as_deref() == Some("plan") {
+                Some(aura_agents::ApprovalPolicy::Plan)
+            } else {
+                None
+            },
         })
         .map_err(|e| format!("build invocation for {agent_id}: {e}"))?;
     // Enforce the fleet agent-CLI config policy (e.g. codex service_tier repair).
@@ -307,7 +401,12 @@ pub async fn agent_stream_send(
         }
     }
 
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
     if use_stdin_json {
         cmd.stdin(Stdio::piped());
     }
@@ -318,9 +417,7 @@ pub async fn agent_stream_send(
     // running after the turn is cancelled.
     crate::child_reaper::own_process_group(&mut cmd);
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn {bin}: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("spawn {bin}: {e}"))?;
     if let Some(pid) = child.id() {
         let registry: tauri::State<'_, ChildRegistry> = app.state();
         registry.set(&sanitized, pid);
@@ -362,8 +459,8 @@ pub async fn agent_stream_send(
                     "content": content,
                 }
             });
-            let mut buf = serde_json::to_vec(&line)
-                .map_err(|e| format!("encode user message: {e}"))?;
+            let mut buf =
+                serde_json::to_vec(&line).map_err(|e| format!("encode user message: {e}"))?;
             buf.push(b'\n');
             stdin
                 .write_all(&buf)
@@ -385,75 +482,102 @@ pub async fn agent_stream_send(
     // Provider-declared signal — only providers that emit Anthropic
     // stream-json get the structured parser. Today that's just claude;
     // tomorrow it could be any provider that adopts the same shape.
-    let parse_stream_json = inv.stdout_is_stream_json;
+    let parse_stream_json = inv.stdout_is_stream_json
+        || matches!(
+            agent_id.as_str(),
+            "codex" | "gemini" | "cursor" | "opencode" | "kimi" | "pi"
+        );
 
     tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout).lines();
-        let mut accumulated_text = String::new();
-        while let Ok(Some(line)) = reader.next_line().await {
-            if parse_stream_json {
-                for ev in parse_claude_line(&line, &turn_for_task) {
-                    // AuraWatch tap. Cheap O(1) lookup; drops the
-                    // event on the floor when this repo isn't being
-                    // watched. Done before the emit so a saturated
-                    // watcher can never stall the main bubble feed.
-                    if let StreamEvent::ToolUse { name, input, .. } = &ev {
-                        let file = input
-                            .get("file_path")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        let watch: tauri::State<'_, WatchRegistry> =
-                            app_for_task.state();
-                        watch
-                            .observe(
-                                &app_for_task,
-                                &repo_for_task,
-                                &channel_for_task,
-                                name,
-                                file.as_deref(),
-                            )
-                            .await;
-                    }
-                    let _ = app_for_task.emit(&topic_for_task, ev);
+        let _lease = lease;
+        // Drain both pipes concurrently. A full stderr pipe must never block stdout.
+        let stderr_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr).lines();
+            let mut text = String::new();
+            while let Ok(Some(line)) = reader.next_line().await {
+                text.push_str(&line);
+                text.push('\n');
+                if text.len() > 64 * 1024 {
+                    let cut = text
+                        .char_indices()
+                        .find(|(i, _)| *i >= text.len() - 32 * 1024)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    text.drain(..cut);
                 }
-            } else {
-                // Non-claude agents: accumulate stdout, emit one bubble
-                // at the end so partial lines don't fragment the bubble.
-                accumulated_text.push_str(&line);
-                accumulated_text.push('\n');
+            }
+            text
+        });
+        let started = std::time::Instant::now();
+        let mut parser = chat_provider_events::ProviderParser::new(&agent_id, &turn_for_task);
+        let mut reader = BufReader::new(stdout).lines();
+        loop {
+            match reader.next_line().await {
+                Ok(Some(line)) => {
+                    let events = if parse_stream_json {
+                        parser.parse(&line)
+                    } else {
+                        vec![StreamEvent::AssistantText {
+                            event_id: None,
+                            text: format!("{line}\n"),
+                            turn_id: turn_for_task.clone(),
+                        }]
+                    };
+                    for ev in events {
+                        if let StreamEvent::ToolUse { name, input, .. } = &ev {
+                            let file = input.get("file_path").and_then(Value::as_str);
+                            let watch: tauri::State<'_, WatchRegistry> = app_for_task.state();
+                            watch
+                                .observe(
+                                    &app_for_task,
+                                    &repo_for_task,
+                                    &channel_for_task,
+                                    name,
+                                    file,
+                                )
+                                .await;
+                        }
+                        let _ = app_for_task.emit(&topic_for_task, ev);
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = app_for_task.emit(
+                        &topic_for_task,
+                        StreamEvent::RawError {
+                            message: format!("Output stream failed: {e}"),
+                            turn_id: turn_for_task.clone(),
+                        },
+                    );
+                    break;
+                }
             }
         }
-        if !accumulated_text.is_empty() {
-            let _ = app_for_task.emit(
-                &topic_for_task,
-                StreamEvent::AssistantText {
-                    text: accumulated_text.trim_end().to_string(),
-                    turn_id: turn_for_task.clone(),
-                },
-            );
-        }
-
-        // Drain stderr — non-fatal warnings still ride here.
-        let mut err_reader = BufReader::new(stderr).lines();
-        let mut err_buf = String::new();
-        while let Ok(Some(line)) = err_reader.next_line().await {
-            err_buf.push_str(&line);
-            err_buf.push('\n');
-        }
-        let trimmed_err = err_buf.trim();
-        if !trimmed_err.is_empty() {
-            let _ = app_for_task.emit(
-                &topic_for_task,
-                StreamEvent::RawError {
-                    message: trimmed_err.to_string(),
-                    turn_id: turn_for_task.clone(),
-                },
-            );
-        }
-
+        let err_buf = stderr_task.await.unwrap_or_default();
         let exit = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
         let registry: tauri::State<'_, ChildRegistry> = app_for_task.state();
-        registry.clear(&channel_for_task);
+        // Lease releases the channel after all terminal events.
+        let _ = registry;
+        let interrupted = registry
+            .interrupted
+            .lock()
+            .map(|s| s.contains(&channel_for_task))
+            .unwrap_or(false);
+        if interrupted {
+            let _ = app_for_task.emit(
+                &topic_for_task,
+                StreamEvent::ContentBlock {
+                    event_id: format!("{turn_for_task}:cancelled"),
+                    role: "assistant".into(),
+                    payload: json!({"type":"turn_cancelled"}),
+                    turn_id: turn_for_task.clone(),
+                },
+            );
+        } else {
+            for ev in parser.finish(exit, started.elapsed().as_millis() as u64, err_buf.trim()) {
+                let _ = app_for_task.emit(&topic_for_task, ev);
+            }
+        }
         let _ = app_for_task.emit(
             &done_topic_for_task,
             ExitInfo {
@@ -494,20 +618,21 @@ pub fn agent_stream_interrupt(
     registry: State<'_, ChildRegistry>,
     channel: String,
 ) -> Result<bool, String> {
-    let Some(pid) = registry.get(&channel) else {
+    if let Ok(entries) = registry.acp_cancel.lock() {
+        if let Some(tx) = entries.get(&channel) {
+            let _ = tx.send(true);
+            return Ok(true);
+        }
+    }
+    let Some(pid) = registry.get(&channel).filter(|p| *p > 0) else {
         return Ok(false);
     };
-
+    registry.interrupted.lock().map_err(|_| "Cancellation registry unavailable")?.insert(channel.clone());
     let outcome = crate::child_reaper::terminate_tree(pid);
-    if outcome.may_forget() {
-        registry.clear(&channel);
-    } else {
-        tracing::warn!(
-            channel = %channel,
-            pid,
-            "agent child survived SIGKILL; keeping the pid so Stop can retry"
-        );
+    if !outcome.may_forget() {
+        tracing::warn!(channel = %channel, pid, "agent child survived SIGKILL; keeping the pid so Stop can retry");
     }
+    // The reader owns the slot until it reaps the child and reports cancellation.
     Ok(outcome.signalled())
 }
 
@@ -531,7 +656,7 @@ fn sanitize_channel(raw: &str) -> String {
 // Parse one JSONL line from `claude -p --output-format stream-json
 // --verbose`. Returns 0..N normalized events (an assistant message can
 // carry multiple content blocks, each becoming its own event).
-fn parse_claude_line(line: &str, turn_id: &str) -> Vec<StreamEvent> {
+pub(crate) fn parse_claude_line(line: &str, turn_id: &str) -> Vec<StreamEvent> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return vec![];
@@ -581,19 +706,20 @@ fn parse_claude_line(line: &str, turn_id: &str) -> Vec<StreamEvent> {
                 .and_then(Value::as_array);
             let mut out = Vec::new();
             if let Some(arr) = blocks {
-                for b in arr {
+                for (index, b) in arr.iter().enumerate() {
                     let bt = b.get("type").and_then(Value::as_str).unwrap_or("");
                     match bt {
                         "text" => {
-                            let text = b
-                                .get("text")
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .to_string();
-                            if !text.is_empty() {
+                            if let Some(text) = b.get("text").and_then(Value::as_str) {
+                                let record = v.get("uuid").and_then(Value::as_str).or_else(|| {
+                                    v.get("message")
+                                        .and_then(|m| m.get("id"))
+                                        .and_then(Value::as_str)
+                                });
                                 out.push(StreamEvent::AssistantText {
-                                    text,
+                                    text: text.to_string(),
                                     turn_id: turn_id.to_string(),
+                                    event_id: record.map(|id| format!("{id}:{index}")),
                                 });
                             }
                         }
@@ -616,17 +742,21 @@ fn parse_claude_line(line: &str, turn_id: &str) -> Vec<StreamEvent> {
                                 turn_id: turn_id.to_string(),
                             });
                         }
-                        "image" => {
-                            if let Some(img) = parse_image_block(b) {
-                                out.push(StreamEvent::Image {
-                                    role: "assistant".to_string(),
-                                    media_type: img.0,
-                                    data: img.1,
-                                    turn_id: turn_id.to_string(),
-                                });
-                            }
+                        _ => {
+                            let record = v.get("uuid").and_then(Value::as_str).or_else(|| {
+                                v.get("message")
+                                    .and_then(|m| m.get("id"))
+                                    .and_then(Value::as_str)
+                            });
+                            out.push(StreamEvent::ContentBlock {
+                                event_id: record
+                                    .map(|id| format!("{id}:{index}"))
+                                    .unwrap_or_default(),
+                                role: "assistant".to_string(),
+                                payload: b.clone(),
+                                turn_id: turn_id.to_string(),
+                            });
                         }
-                        _ => {}
                     }
                 }
             }
@@ -694,18 +824,18 @@ fn parse_claude_line(line: &str, turn_id: &str) -> Vec<StreamEvent> {
                             Some(Value::String(s)) => s.clone(),
                             Some(Value::Array(items)) => items
                                 .iter()
-                                .filter_map(|i| {
-                                    i.get("text").and_then(Value::as_str).map(str::to_string)
+                                .map(|i| {
+                                    i.get("text")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| i.to_string())
                                 })
                                 .collect::<Vec<_>>()
                                 .join("\n"),
                             Some(other) => other.to_string(),
                             None => String::new(),
                         };
-                        let is_error = b
-                            .get("is_error")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
+                        let is_error = b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                         out.push(StreamEvent::ToolResult {
                             tool_use_id,
                             content,
@@ -719,22 +849,16 @@ fn parse_claude_line(line: &str, turn_id: &str) -> Vec<StreamEvent> {
         }
         "result" => {
             let success = v.get("subtype").and_then(Value::as_str) == Some("success");
-            let duration_ms = v
-                .get("duration_ms")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+            let duration_ms = v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
             let cost_usd = v
                 .get("total_cost_usd")
                 .or_else(|| v.get("cost_usd"))
                 .and_then(Value::as_f64);
             let total_tokens = v
                 .get("usage")
-                .and_then(|u| u.get("total_tokens").or_else(|| u.get("input_tokens")))
+                .and_then(|u| u.get("total_tokens"))
                 .and_then(Value::as_u64);
-            let message = v
-                .get("result")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            let message = v.get("result").and_then(Value::as_str).map(str::to_string);
             vec![StreamEvent::Result {
                 success,
                 duration_ms,
@@ -744,7 +868,16 @@ fn parse_claude_line(line: &str, turn_id: &str) -> Vec<StreamEvent> {
                 turn_id: turn_id.to_string(),
             }]
         }
-        _ => vec![],
+        _ => vec![StreamEvent::ContentBlock {
+            event_id: v
+                .get("uuid")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            role: "assistant".to_string(),
+            payload: v,
+            turn_id: turn_id.to_string(),
+        }],
     }
 }
 
@@ -785,9 +918,7 @@ fn write_mcp_config(channel: &str) -> Option<PathBuf> {
     let bin = mcp_bin_path()?;
     let sock = crate::cmd_permission_socket::socket_path();
     let Some(mut dir) = dirs::home_dir() else {
-        eprintln!(
-            "[mcp-config] no home dir — claude will launch WITHOUT the permission gate"
-        );
+        eprintln!("[mcp-config] no home dir — claude will launch WITHOUT the permission gate");
         return None;
     };
     dir.push(".aura");
@@ -862,5 +993,64 @@ fn parse_image_block(b: &Value) -> Option<(String, String)> {
             Some(("url".to_string(), url))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod chat_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_typed_content_and_stable_identity() {
+        let line = r#"{"type":"assistant","uuid":"record-a","message":{"id":"message-a","content":[{"type":"text","text":"Hello"},{"type":"thinking","thinking":"Check"},{"type":"document","source":{"data":"abc"}}]}}"#;
+        let events = parse_claude_line(line, "turn");
+        assert_eq!(events.len(), 3);
+        for (i, event) in events.iter().enumerate() {
+            match event {
+                StreamEvent::ContentBlock {
+                    event_id, payload, ..
+                } => {
+                    assert_eq!(event_id, &format!("record-a:{i}"));
+                    assert!(payload.get("type").is_some());
+                }
+                StreamEvent::AssistantText { event_id, text, .. } => {
+                    assert_eq!(event_id.as_deref(), Some("record-a:0"));
+                    assert_eq!(text, "Hello");
+                }
+                _ => panic!("content was dropped"),
+            }
+        }
+    }
+
+    #[test]
+    fn tool_results_keep_non_text_resources() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"text","text":"Read resource"},{"type":"resource_link","uri":"file:///example"}]}]}}"#;
+        let events = parse_claude_line(line, "turn");
+        match &events[0] {
+            StreamEvent::ToolResult { content, .. } => {
+                assert!(content.contains("Read resource"));
+                assert!(content.contains("resource_link"));
+            }
+            _ => panic!("missing tool result"),
+        }
+    }
+
+    #[test]
+    fn unknown_record_is_inspectable_and_input_tokens_are_not_total_tokens() {
+        assert!(matches!(
+            parse_claude_line(r#"{"type":"future_event","data":42}"#, "t")[0],
+            StreamEvent::ContentBlock { .. }
+        ));
+        let events = parse_claude_line(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":12}}"#,
+            "t",
+        );
+        assert!(matches!(
+            events[0],
+            StreamEvent::Result {
+                total_tokens: None,
+                ..
+            }
+        ));
     }
 }

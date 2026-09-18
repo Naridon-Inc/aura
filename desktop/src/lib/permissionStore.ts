@@ -47,6 +47,9 @@ function emit() {
 
 async function attach() {
   if (STORE.unlisten) return;
+  await listen<{ prompt_id: string }>("permission:closed", ev => {
+    STORE.pending = STORE.pending.filter(p => p.prompt_id !== ev.payload.prompt_id); emit();
+  });
   STORE.unlisten = await listen<PermissionPrompt>(
     "permission:prompt",
     (ev) => {
@@ -113,15 +116,10 @@ export async function decidePrompt(
   decision: "allow" | "allow_always" | "deny",
   updatedInput?: unknown,
 ): Promise<void> {
+  // Remove only after acknowledgement. A failed reply remains actionable.
+  await api.permissionRespond(promptId, decision, updatedInput);
   STORE.pending = STORE.pending.filter((p) => p.prompt_id !== promptId);
   emit();
-  try {
-    await api.permissionRespond(promptId, decision, updatedInput);
-  } catch (err) {
-    // Surface the error in the console — the user already moved on
-    // visually so a toast would be redundant.
-    console.warn("permission_respond failed:", err);
-  }
 }
 
 function shortInputPreview(name: string, input: unknown): string {

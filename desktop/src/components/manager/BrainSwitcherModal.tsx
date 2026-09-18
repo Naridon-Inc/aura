@@ -1,35 +1,25 @@
-// BrainSwitcherModal — a Cmd-K-style brain/model switcher, the same rich
-// treatment the branch dropdown got (BranchSwitcherModal). Where the inline
-// BrainPicker is a small anchored popover, this is a centred command palette:
-// fuzzy-filter at the top, arrow keys to move, Enter to pick. Every row is a
-// concrete (brain, model) pair — the family it routes through, its key status
-// (amber when the API key is missing → the row can't run), a NEW pill, and a
-// favourite star. An "Auto" row leads (follow the active brain on its default).
-//
-// It's presentation-only: BrainPicker owns the data load + the real `pick()`
-// (managerSetBrainOverride + lift brain/model), and hands this modal prepared
-// brains/catalog/favorites plus the callbacks. So the wording and behaviour can
-// never drift between the inline popover and this surface.
-//
-// Renders through a portal at z-[60] (over the composer), Esc / backdrop
-// mousedown closes. Arctic-blue marks the selected row; amber is reserved for
-// the missing-key status only.
-
-import { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { Search } from "lucide-react";
-import { AsciiSpinner } from "../ui/ascii-spinner";
-
+// Searchable model catalog shared by the anchored chat picker and the larger
+// switcher. BrainPicker owns routing and persistence; this component only
+// presents available choices and returns the exact selected pair.
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { Check, Search, Star, RotateCcw, X } from "lucide-react";
 import type { BrainChoice, ModelCatalog } from "../../lib/api";
 import {
   catalogFor,
   familyOf,
-  modelBrandId,
   rowKey,
   type CatalogModel,
   type SelectedModel,
 } from "../../lib/modelCatalog";
-import { AgentIcon } from "../agent/AgentIcon";
+import "../chat/ChatComposer.css";
 
 type Props = {
   brains: BrainChoice[];
@@ -39,30 +29,18 @@ type Props = {
   activeChoice: BrainChoice | null;
   loading: boolean;
   loadError: string | null;
-  /** Pick a concrete (brain, model) row. */
   onPick: (brain: BrainChoice, model: CatalogModel) => void;
-  /** Pick "Auto" — follow the active brain on its default model. */
   onPickAuto: () => void;
-  /** Toggle a row's favourite star. */
   onToggleFav: (brainId: string, model: CatalogModel) => void;
   onClose: () => void;
-  /** Optional config block pinned below the rows (e.g. defaults + auto-routing).
-   *  Rendered outside the scrollable navigable list so its own controls
-   *  (selects, disclosures) never collide with arrow-key row navigation. */
-  footer?: React.ReactNode;
-  /** Per-turn controls (Fast + Effort) pinned just below the filter, above the
-   *  model list (#17). Rendered outside the navigable list so its buttons never
-   *  collide with arrow-key row navigation. */
-  turnControls?: React.ReactNode;
+  footer?: ReactNode;
+  turnControls?: ReactNode;
+  embedded?: boolean;
+  allowDefault?: boolean;
 };
-
-/** A brain whose required API key is absent can't run — its rows are shown but
- *  unselectable until the key is added. */
 function isUnusable(brain: BrainChoice): boolean {
   return brain.requires_api_key && !brain.has_api_key;
 }
-
-/** Does the lifted selection point at this exact (brain, model) row? */
 function isRowSelected(
   value: SelectedModel | null,
   brainId: string,
@@ -75,10 +53,6 @@ function isRowSelected(
     value.longContext === !!model.longContext
   );
 }
-
-// One flattened, navigable entry — the Auto pseudo-row plus every (brain,
-// model) pair, each tagged with the brain it sits under so the list can paint
-// group headers as the brain changes.
 type Entry =
   | { kind: "auto" }
   | { kind: "model"; brain: BrainChoice; model: CatalogModel; first: boolean };
@@ -97,170 +71,181 @@ export function BrainSwitcherModal({
   onClose,
   footer,
   turnControls,
+  embedded = false,
+  allowDefault = true,
 }: Props) {
   const [query, setQuery] = useState("");
   const [idx, setIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-
+  const listId = useId();
   useEffect(() => {
-    const id = requestAnimationFrame(() => inputRef.current?.focus());
-    return () => cancelAnimationFrame(id);
+    const frame = requestAnimationFrame(() => inputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
   }, []);
-
   const q = query.trim().toLowerCase();
-
-  // Build the flat, filtered entry list. A model row matches on its label, its
-  // brain's label, or its family; the Auto row shows when the query is empty or
-  // literally matches "auto".
   const entries = useMemo<Entry[]>(() => {
     const out: Entry[] = [];
-    if (!q || "auto".includes(q)) out.push({ kind: "auto" });
+    if (allowDefault && (!q || "auto default".includes(q))) out.push({ kind: "auto" });
     for (const brain of brains) {
-      const family = familyOf(brain);
       let first = true;
       for (const model of catalogFor(brain, liveCatalog)) {
-        const hay = `${model.label} ${brain.label} ${family}`.toLowerCase();
-        if (q && !hay.includes(q)) continue;
+        if (!allowDefault && !model.id) continue;
+        if (
+          q &&
+          !`${model.label} ${model.id} ${brain.label} ${familyOf(brain)}`
+            .toLowerCase()
+            .includes(q)
+        )
+          continue;
         out.push({ kind: "model", brain, model, first });
         first = false;
       }
     }
     return out;
-  }, [brains, liveCatalog, q]);
-
-  // Keep the highlight in range as the filter narrows, and scrolled into view.
+  }, [brains, liveCatalog, q, allowDefault]);
+  useEffect(
+    () =>
+      setIdx((i) => Math.min(Math.max(0, i), Math.max(0, entries.length - 1))),
+    [entries.length],
+  );
   useEffect(() => {
-    setIdx((i) => Math.min(Math.max(0, i), Math.max(0, entries.length - 1)));
-  }, [entries.length]);
-  useEffect(() => {
-    const el = listRef.current?.querySelector<HTMLElement>(`[data-row="${idx}"]`);
-    el?.scrollIntoView({ block: "nearest" });
+    listRef.current
+      ?.querySelector<HTMLElement>(`[data-row="${idx}"]`)
+      ?.scrollIntoView({ block: "nearest" });
   }, [idx]);
-
-  function pickEntry(e: Entry) {
-    if (e.kind === "auto") {
-      onPickAuto();
-      return;
-    }
-    if (isUnusable(e.brain)) return; // disabled — needs an API key
-    onPick(e.brain, e.model);
+  function pickEntry(entry: Entry) {
+    if (entry.kind === "auto") onPickAuto();
+    else if (!isUnusable(entry.brain)) onPick(entry.brain, entry.model);
   }
-
-  function onKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Escape") {
+  function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.nativeEvent.isComposing) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      e.stopPropagation();
-      onClose();
-      return;
-    }
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setIdx((i) => Math.min(entries.length - 1, i + 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setIdx((i) => Math.max(0, i - 1));
+      const direction = e.key === "ArrowDown" ? 1 : -1;
+      let next = idx + direction;
+      while (next >= 0 && next < entries.length) {
+        const entry = entries[next];
+        if (entry.kind === "auto" || !isUnusable(entry.brain)) {
+          setIdx(next);
+          break;
+        }
+        next += direction;
+      }
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const entry = entries[idx];
-      if (entry) pickEntry(entry);
+      if (entries[idx]) pickEntry(entries[idx]);
     }
   }
-
-  return createPortal(
+  const panel = (
     <div
-      className="fixed inset-0 z-[60] flex items-start justify-center pt-[14vh]"
-      style={{ background: "rgba(0,0,0,0.4)", backdropFilter: "blur(3px)" }}
-      onMouseDown={onClose}
-      onKeyDown={onKeyDown}
+      className={`chat-model-catalog ${embedded ? "" : "chat-menu-surface"}`}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          onClose();
+        }
+      }}
     >
-      <div
-        className="w-full max-w-[460px] overflow-hidden rounded-xl shadow-2xl"
-        style={{ background: "var(--color-bg-1)", border: "1px solid var(--color-line)" }}
-        onMouseDown={(ev) => ev.stopPropagation()}
-      >
-        {/* Filter */}
-        <div className="flex items-center gap-2.5 border-b border-line-soft px-3 py-2">
-          <Search size={14} className="shrink-0 text-text-4" />
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={(ev) => {
-              setQuery(ev.target.value);
-              setIdx(0);
-            }}
-            placeholder="Switch model…"
-            className="flex-1 bg-transparent text-base text-text-1 placeholder:text-text-4 focus:outline-none"
-          />
-          <span className="text-2xs tracking-wider text-text-5">esc</span>
-        </div>
-
-        {turnControls}
-
-        {loadError && (
-          <div
-            className="border-b border-line-soft px-3.5 py-2 text-sm"
-            style={{ color: "var(--color-red)", background: "color-mix(in srgb, var(--color-red) 10%, transparent)" }}
-          >
-            {loadError}
-          </div>
-        )}
-
-        {/* Rows */}
-        <div ref={listRef} className="max-h-[56vh] overflow-y-auto py-1">
-          {loading && brains.length === 0 ? (
-            <div className="flex items-center gap-1.5 px-3.5 py-3 text-sm text-text-4">
-              <AsciiSpinner />
-              Loading models…
-            </div>
-          ) : entries.length === 0 ? (
-            <div className="px-3.5 py-3 text-sm text-text-4">No models match.</div>
-          ) : (
-            entries.map((entry, i) => {
-              if (entry.kind === "auto") {
-                return (
-                  <AutoRow
-                    key="auto"
-                    index={i}
-                    active={i === idx}
-                    selected={value == null}
-                    activeChoice={activeChoice}
-                    onHover={() => setIdx(i)}
-                    onPick={onPickAuto}
-                  />
-                );
-              }
-              return (
-                <BrainModelRow
-                  key={rowKey(entry.brain.id, entry.model)}
-                  index={i}
-                  brain={entry.brain}
-                  model={entry.model}
-                  showHeader={entry.first}
-                  active={i === idx}
-                  selected={isRowSelected(value, entry.brain.id, entry.model)}
-                  favorited={favorites.includes(rowKey(entry.brain.id, entry.model))}
-                  unusable={isUnusable(entry.brain)}
-                  onHover={() => setIdx(i)}
-                  onPick={() => pickEntry(entry)}
-                  onToggleFav={() => onToggleFav(entry.brain.id, entry.model)}
-                />
-              );
-            })
-          )}
-        </div>
-
-        {/* Config footer — defaults + auto-routing, pinned below the navigable
-            rows. Optional; collapsed by default so the modal stays a fast
-            per-turn switcher. */}
-        {footer}
+      <div className="chat-catalog-top">
+        <strong>Choose model</strong>
+        <button
+          type="button"
+          className="composer-control-icon"
+          aria-label="Close model picker"
+          onClick={onClose}
+        >
+          <X size={14} />
+        </button>
       </div>
-    </div>,
-    document.body,
+      <div className="chat-catalog-search">
+        <Search size={15} aria-hidden />
+        <input
+          ref={inputRef}
+          role="combobox"
+          aria-label="Search models"
+          aria-expanded
+          aria-autocomplete="list"
+          aria-controls={listId}
+          aria-activedescendant={entries[idx] ? `${listId}-${idx}` : undefined}
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setIdx(0);
+          }}
+          onKeyDown={onKeyDown}
+          placeholder="Search models or providers…"
+        />
+      </div>
+      {turnControls}
+        {loadError && (
+        <p role="alert" className="chat-catalog-error">
+          {loadError}
+        </p>
+      )}
+      <div
+        id={listId}
+        ref={listRef}
+        role="listbox"
+        aria-label="Available models"
+        className="chat-catalog-list"
+      >
+        {loading && brains.length === 0 ? (
+          <p className="chat-menu-empty">Loading models…</p>
+        ) : !entries.length ? (
+          <p className="chat-menu-empty">No models match “{query}”.</p>
+        ) : (
+          entries.map((entry, i) =>
+            entry.kind === "auto" ? (
+              <AutoRow
+                key="auto"
+                id={`${listId}-${i}`}
+                index={i}
+                active={i === idx}
+                selected={value == null}
+                activeChoice={activeChoice}
+                onHover={() => setIdx(i)}
+                onPick={onPickAuto}
+              />
+            ) : (
+              <BrainModelRow
+                key={rowKey(entry.brain.id, entry.model)}
+                id={`${listId}-${i}`}
+                index={i}
+                brain={entry.brain}
+                model={entry.model}
+                showHeader={entry.first}
+                active={i === idx}
+                selected={isRowSelected(value, entry.brain.id, entry.model)}
+                favorited={favorites.includes(
+                  rowKey(entry.brain.id, entry.model),
+                )}
+                unusable={isUnusable(entry.brain)}
+                onHover={() => setIdx(i)}
+                onPick={() => pickEntry(entry)}
+                onToggleFav={() => onToggleFav(entry.brain.id, entry.model)}
+              />
+            ),
+          )
+        )}
+      </div>
+      {footer && <div className="chat-catalog-footer">{footer}</div>}
+    </div>
   );
+  if (embedded) return panel;
+  return <Dialog.Root open onOpenChange={open => { if (!open) onClose(); }}><Dialog.Portal>
+    <Dialog.Overlay className="chat-catalog-backdrop" />
+    <Dialog.Content aria-describedby={undefined} style={{position:"fixed", left:"50%", top:"50%", transform:"translate(-50%, -50%)", zIndex:80, maxWidth:"calc(100vw - 24px)"}}>
+      <Dialog.Title className="sr-only">Choose model</Dialog.Title>
+      {panel}
+    </Dialog.Content>
+  </Dialog.Portal></Dialog.Root>;
+
 }
 
 function AutoRow({
+  id,
   index,
   active,
   selected,
@@ -268,6 +253,7 @@ function AutoRow({
   onHover,
   onPick,
 }: {
+  id: string;
   index: number;
   active: boolean;
   selected: boolean;
@@ -278,35 +264,30 @@ function AutoRow({
   return (
     <button
       type="button"
+      role="option"
+      id={id}
+      aria-selected={selected}
       data-row={index}
+      data-active={active}
+      className="chat-catalog-auto"
       onMouseEnter={onHover}
-      onMouseDown={(e) => {
-        e.preventDefault();
-        onPick();
-      }}
-      className={
-        "flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors " +
-        (active ? "bg-bg-card" : "hover:bg-state-hover")
-      }
+      onClick={onPick}
     >
-      <svg
-        viewBox="0 0 24 24"
-        width={12}
-        height={12}
-        className="shrink-0 text-text-4"
-      >
-        <use href="#i-sparkles" />
-      </svg>
-      <span className="flex-1 text-base text-text-1">Follow the active brain</span>
-      <span className="text-xs text-text-4">
-        {activeChoice ? activeChoice.label : "whichever brain is active"}
+      <RotateCcw size={15} />
+      <span>
+        Auto
+        <small>
+          {activeChoice
+            ? `Default for ${activeChoice.label}`
+            : "Use the active agent’s default"}
+        </small>
       </span>
-      {selected && <span className="text-accent text-sm">✓</span>}
+      {selected && <Check size={14} />}
     </button>
   );
 }
-
 function BrainModelRow({
+  id,
   index,
   brain,
   model,
@@ -319,6 +300,7 @@ function BrainModelRow({
   onPick,
   onToggleFav,
 }: {
+  id: string;
   index: number;
   brain: BrainChoice;
   model: CatalogModel;
@@ -331,91 +313,46 @@ function BrainModelRow({
   onPick: () => void;
   onToggleFav: () => void;
 }) {
-  const missingKey = brain.requires_api_key && !brain.has_api_key;
-  // Brand each row by who actually MAKES the model (Claude / Gemini / GPT
-  // mark), not the brain it routes through — the vendor logo the user asked
-  // for. Mirrors the inline BrainPicker row so the two surfaces never drift.
-  const family = familyOf(brain);
-  const iconId = modelBrandId(family, brain.id, model);
   return (
     <>
       {showHeader && (
-        <div className="flex items-center gap-1.5 px-3 pt-2 pb-0.5">
-          <AgentIcon agentId={brain.id} size={13} />
-          {brain.requires_api_key && (
-            <span
-              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                brain.has_api_key ? "bg-accent-green" : "bg-text-5"
-              }`}
-              title={brain.has_api_key ? "API key connected" : "API key missing"}
-              aria-hidden
-            />
-          )}
-          {/* The brain's own name, as it is written — uppercasing it turned
-              "Claude (Anthropic API)" into shouting, and the caps were doing
-              a job the icon and the divider already do. */}
-          <span className="text-xs font-medium text-text-3">{brain.label}</span>
-          {brain.active && (
-            <span className="text-2xs text-accent" title="The globally-active brain">
-              active
-            </span>
-          )}
-          {missingKey && <span className="ml-auto text-2xs text-text-4">needs key</span>}
+        <div className="chat-catalog-group">
+          {brain.label}
+          {isUnusable(brain) && <span>API key needed</span>}
         </div>
       )}
       <div
-        data-row={index}
+        className="chat-catalog-row"
+        data-active={active}
         onMouseEnter={onHover}
-        onMouseDown={(e) => {
-          e.preventDefault();
-          if (!unusable) onPick();
-        }}
-        title={unusable ? "Add this brain's API key in Settings → Brains to use it" : undefined}
-        className={
-          "group/row flex items-center gap-2 pl-8 pr-3 py-1 text-sm transition-colors " +
-          (unusable
-            ? "opacity-50 cursor-not-allowed"
-            : active
-              ? "bg-bg-card cursor-pointer"
-              : "hover:bg-state-hover cursor-pointer") +
-          (selected ? " text-text-1" : " text-text-2")
-        }
       >
-        <AgentIcon agentId={iconId} size={14} />
-        {/* One compact line: just the model label. The brand logo (left) and
-            the group header (above) already name the vendor, so a separate
-            "Claude" sub-line only made every row taller for no new info. */}
-        <span className="min-w-0 truncate font-medium">{model.label}</span>
-        {model.isNew && (
-          <span
-            className="text-2xs font-medium px-1 py-px rounded"
-            style={{
-              color: "var(--color-accent)",
-              background: "color-mix(in srgb, var(--color-accent) 16%, transparent)",
-            }}
-          >
-            New
-          </span>
-        )}
         <button
           type="button"
-          className={`ml-auto transition-opacity ${
-            favorited
-              ? "opacity-100 text-accent"
-              : "opacity-0 group-hover/row:opacity-60 focus-visible:opacity-100 text-text-3 hover:!opacity-100"
-          }`}
-          title={favorited ? "Unfavorite" : "Favorite"}
-          onMouseDown={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onToggleFav();
-          }}
+          role="option"
+          id={id}
+          data-row={index}
+          aria-selected={selected}
+          disabled={unusable}
+          onClick={onPick}
+          title={
+            unusable
+              ? "Add an API key in Settings to use this model"
+              : (model.id ?? undefined)
+          }
         >
-          <svg viewBox="0 0 24 24" width={12} height={12} className="shrink-0">
-            <use href={favorited ? "#i-star-fill" : "#i-star"} />
-          </svg>
+          <span>{model.label}</span>
+          {selected && <Check size={14} />}
         </button>
-        {selected && <span className="text-accent text-sm w-4 text-center">✓</span>}
+        <button
+          type="button"
+          className="chat-catalog-favorite"
+          data-favorite={favorited}
+          aria-label={`${favorited ? "Unfavorite" : "Favorite"} ${model.label}`}
+          aria-pressed={favorited}
+          onClick={onToggleFav}
+        >
+          <Star size={13} fill={favorited ? "currentColor" : "none"} />
+        </button>
       </div>
     </>
   );

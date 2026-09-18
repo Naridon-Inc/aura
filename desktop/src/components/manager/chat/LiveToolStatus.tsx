@@ -22,7 +22,7 @@ import { useState } from "react";
 import { describeTool } from "./toolDescribe";
 import { ToolCard } from "./ToolCard";
 import { FileDiffTool, isFileDiffTool } from "./FileDiffTool";
-import type { StreamBlock, ToolStatus } from "./types";
+import { toolStatus, type StreamBlock, type ToolStatus } from "./types";
 
 type ToolBlock = Extract<StreamBlock, { kind: "tool" }>;
 
@@ -30,8 +30,7 @@ type ToolBlock = Extract<StreamBlock, { kind: "tool" }>;
  *  else ok. The same derivation `ToolCard` uses, kept local so the bar and
  *  the cards it expands to agree. */
 function statusOf(t: ToolBlock): ToolStatus {
-  if (!t.result) return "running";
-  return t.result.is_error ? "error" : "ok";
+  return toolStatus(t.result);
 }
 
 /** Render one tool block the way the bubble would on its own — an inline
@@ -40,7 +39,9 @@ function statusOf(t: ToolBlock): ToolStatus {
  *  its diff. */
 function renderToolBlock(t: ToolBlock, key: string | number) {
   if (isFileDiffTool(t.name, t.input)) {
-    return <FileDiffTool key={key} name={t.name} input={t.input} result={t.result} />;
+    return (
+      <FileDiffTool key={key} name={t.name} input={t.input} result={t.result} />
+    );
   }
   return <ToolCard key={key} name={t.name} input={t.input} result={t.result} />;
 }
@@ -60,12 +61,17 @@ export function LiveToolStatus({ tools }: { tools: ToolBlock[] }) {
   const activeStatus = statusOf(active);
 
   const allDone = runningIdx === -1;
-  const anyError = tools.some((t) => t.result?.is_error);
+  const anyError = tools.some((t) => statusOf(t) === "error");
+  const cancelled = tools.filter((t) => statusOf(t) === "cancelled").length;
+  const unknown = tools.filter((t) => statusOf(t) === "unknown").length;
+  const failures = tools.filter((t) => statusOf(t) === "error").length;
 
   // Headline: while the run is live it IS the active step (verb · subject),
   // so the one bar morphs action→action as the stream advances. Once settled
   // it folds into a count + the last subject — the calm post-run summary.
-  const verb = allDone ? `Ran ${tools.length} steps` : activeView.verb;
+  const verb = allDone
+    ? `${tools.length} steps${failures + cancelled + unknown ? ` · ${failures + cancelled + unknown} incomplete` : ""}`
+    : activeView.verb;
   const subject = activeView.subject;
 
   return (
@@ -76,12 +82,16 @@ export function LiveToolStatus({ tools }: { tools: ToolBlock[] }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        title={open ? "Collapse steps" : "Show every step"}
+        title={`${open ? "Collapse steps" : "Show every step"} · ${failures} failed · ${cancelled} cancelled · ${unknown} without results`}
+        aria-expanded={open}
         className="aura-tool-row"
       >
         {/* Chevron fills the fixed leading column so the verb after it lands at
             the same x as every other row's verb. */}
-        <span className="aura-tool-glyph" style={{ color: "var(--color-text-4)" }}>
+        <span
+          className="aura-tool-glyph"
+          style={{ color: "var(--color-text-4)" }}
+        >
           <Chevron dir={open ? "up" : "down"} />
         </span>
         <span
@@ -93,7 +103,10 @@ export function LiveToolStatus({ tools }: { tools: ToolBlock[] }) {
         {!allDone && (
           <span
             className="shrink-0 tabular-nums text-xs"
-            style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-3)" }}
+            style={{
+              fontFamily: "var(--font-mono)",
+              color: "var(--color-text-3)",
+            }}
           >
             · {tools.length} steps
           </span>
@@ -102,7 +115,6 @@ export function LiveToolStatus({ tools }: { tools: ToolBlock[] }) {
             active pulses, pending hollow), the active step's subject, and its
             result metric once it lands. Pushed right as one unit. */}
         <span className="ml-auto flex items-center gap-2 min-w-0">
-          <StepDots tools={tools} activeIdx={activeIdx} />
           {subject && (
             <span
               className={`min-w-0 truncate text-sm ${activeView.mono ? "font-mono" : ""}`}
@@ -114,8 +126,11 @@ export function LiveToolStatus({ tools }: { tools: ToolBlock[] }) {
           )}
           {activeStatus !== "running" && activeView.metric && (
             <span
-              className="shrink-0 tabular-nums text-xs"
-              style={{ fontFamily: "var(--font-mono)", color: "var(--color-text-3)" }}
+              className="min-w-0 truncate tabular-nums text-[10.5px]"
+              style={{
+                fontFamily: "var(--font-mono)",
+                color: "var(--color-text-3)",
+              }}
             >
               {activeView.metric}
             </span>
@@ -128,61 +143,6 @@ export function LiveToolStatus({ tools }: { tools: ToolBlock[] }) {
         </div>
       )}
     </div>
-  );
-}
-
-/** A compact rail of step pips — done (filled), active (pulsing), pending
- *  (hollow). Caps at 8 visible so a long run doesn't sprawl; the overflow
- *  count rides along as "+N". */
-function StepDots({
-  tools,
-  activeIdx,
-  className = "",
-}: {
-  tools: ToolBlock[];
-  activeIdx: number;
-  className?: string;
-}) {
-  const MAX = 8;
-  const overflow = tools.length - MAX;
-  const shown = overflow > 0 ? tools.slice(0, MAX) : tools;
-  return (
-    <span className={`flex items-center gap-1 shrink-0 ${className}`} aria-hidden>
-      {shown.map((t, i) => {
-        const st = statusOf(t);
-        const isActive = i === activeIdx;
-        const bg =
-          st === "error"
-            ? "var(--color-red)"
-            : st === "ok"
-              ? "var(--color-text-3)"
-              : isActive
-                ? "var(--color-text-2)"
-                : "transparent";
-        return (
-          <span
-            key={t.tool_use_id || i}
-            className={isActive && st === "running" ? "animate-pulse" : ""}
-            style={{
-              width: 5,
-              height: 5,
-              borderRadius: "50%",
-              background: bg,
-              border:
-                bg === "transparent" ? "1px solid var(--color-line)" : "none",
-            }}
-          />
-        );
-      })}
-      {overflow > 0 && (
-        <span
-          className="tabular-nums t-2xs"
-          style={{ color: "var(--color-text-4)", fontFamily: "var(--font-mono)" }}
-        >
-          +{overflow}
-        </span>
-      )}
-    </span>
   );
 }
 

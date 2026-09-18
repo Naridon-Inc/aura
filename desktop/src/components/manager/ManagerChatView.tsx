@@ -1,3 +1,5 @@
+import { ChatHeader } from "../chat/ChatHeader";
+import { History } from "lucide-react";
 // Chat surface for a Manager session. Talks to the Rust-side brain
 // (Anthropic Messages API streaming + tool calling). Each user message
 // fires `manager_chat`, which spawns `brain::run_turn` server-side; the
@@ -71,6 +73,8 @@ import {
   getManagerLiveBlocks,
   setManagerLiveBlocks,
 } from "../../lib/managerStore";
+import { PlanPreview } from "../chat/PlanPreview";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { ManagerComposer, type ComposerAttachment } from "./ManagerComposer";
 import { type SlashItem } from "./TiptapComposer";
 import { liveAgentLabel, useAgentSurface } from "../../lib/agentSurface";
@@ -86,7 +90,11 @@ import { ManagerQueueStack, type QueuedMessage } from "./ManagerQueueStack";
 import { CrewComposerBlock } from "./chat/CrewComposerBlock";
 import { ScoutCard } from "./ScoutCard";
 import { WaveDispatchPanel } from "./WaveDispatchPanel";
-import { useEditorStore, getActiveWorkspaceRoot, openManagerSession } from "../../lib/editorStore";
+import {
+  useEditorStore,
+  getActiveWorkspaceRoot,
+  openManagerSession,
+} from "../../lib/editorStore";
 import { openPlanWizard } from "../../lib/planWizardStore";
 import {
   buildGoalDirective,
@@ -96,7 +104,11 @@ import {
 import { openPopout } from "../../lib/popout";
 import { pendingPlanToMarkdown, planPageId } from "../../lib/planMarkdown";
 import { plainLine } from "../../lib/plainPreview";
-import { handleChatSlash, type SlashInteractive, type SlashResumeRow } from "../../lib/chatSlashHandler";
+import {
+  handleChatSlash,
+  type SlashInteractive,
+  type SlashResumeRow,
+} from "../../lib/chatSlashHandler";
 import { buildSteeringText } from "../../lib/managerSteering";
 import { playCompletionChime } from "../../lib/completionChime";
 import { notify } from "../../lib/notifications";
@@ -116,7 +128,7 @@ import { getAgentIdentity, accentTint } from "../../lib/agentIdentity";
 import { useFlagPrefs } from "../../lib/settingsStore";
 import { AgentIcon } from "../agent/AgentIcon";
 import { Segment } from "../ui/segment";
-import { Kbd } from "../ui/kbd";
+
 // Chat-render layer — de-monolithed out of this file into focused modules.
 // The registry that *produces* a ToolView (toolDescribe) and the cards that
 // *consume* it (ToolCard) evolve independently against chat/types.
@@ -157,14 +169,15 @@ import {
   brainAgentId,
 } from "./chat/StatusLine";
 import { QuestionCard, formatRelativeApprovalTime } from "./chat/QuestionCard";
-import { QuestionInputOverlay } from "./chat/QuestionInputOverlay";
-import { MessageScrollbackRail, type RailAnchor } from "./chat/MessageScrollbackRail";
+import {
+  MessageScrollbackRail,
+  type RailAnchor,
+} from "./chat/MessageScrollbackRail";
 import { compactNumber } from "../../lib/compactNumber";
 import { useDismiss } from "../../lib/useDismiss";
 import { formatDuration, formatLiveDuration } from "../../lib/duration";
 import { buildTurnCost } from "../../lib/turnCost";
 import { TurnCostTip } from "../TurnCostTip";
-import { sentenceCase } from "@shared/textCase";
 import { percent } from "../../lib/percent";
 // AURA-1298
 import { ImageLightbox } from "../media/ImageLightbox";
@@ -409,7 +422,10 @@ const saveBrain = saveSessionBrain;
 
 function newQueueId(): string {
   try {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    if (
+      typeof crypto !== "undefined" &&
+      typeof crypto.randomUUID === "function"
+    ) {
       return crypto.randomUUID();
     }
   } catch {
@@ -600,15 +616,15 @@ export function ManagerChatView({ session }: Props) {
   // choice on the session via `manager_set_brain_override`; we also pass
   // the id per-turn into `brainChatTurn` for the native path and route
   // `useBrainTrait` by the chosen brain's kind.
-  const [brainOverride, setBrainOverride] = useState<BrainChoice | null>(
-    () => loadBrain(session.id),
+  const [brainOverride, setBrainOverride] = useState<BrainChoice | null>(() =>
+    loadBrain(session.id),
   );
   // #251 — the exact model the next turn runs (composer model picker). Set
   // alongside `brainOverride` (the picker lifts both), threaded per-turn as
   // `model` + `long_context` into `brainChatTurn`. Per-session-persisted so
   // a reload restores the chip.
-  const [modelOverride, setModelOverride] = useState<SelectedModel | null>(
-    () => loadModel(session.id),
+  const [modelOverride, setModelOverride] = useState<SelectedModel | null>(() =>
+    loadModel(session.id),
   );
   useEffect(() => {
     setModelOverride(loadModel(session.id));
@@ -627,7 +643,9 @@ export function ManagerChatView({ session }: Props) {
   // W2 — type-ahead message queue. Populated while a turn is in flight (the
   // composer enqueues instead of dropping), drained one-per-turn-end.
   // Per-session-persisted (text + run-options; attachments are in-memory).
-  const [queue, setQueue] = useState<QueuedMessage[]>(() => loadQueue(session.id));
+  const [queue, setQueue] = useState<QueuedMessage[]>(() =>
+    loadQueue(session.id),
+  );
   // Why the brain last went idle. The queue must drain ONLY after a *clean*
   // turn-end — NOT when the user hit Stop, the brain paused to ask a question,
   // or the turn errored, all of which also flip `busy` false and would
@@ -674,8 +692,7 @@ export function ManagerChatView({ session }: Props) {
   const atBottomRef = useRef(true);
   const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
-    atBottomRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   }, []);
   // How many of the most-recent timeline entries are mounted. Older turns stay
   // out of the DOM until the user asks for them, so a 400-turn import scrolls
@@ -990,7 +1007,10 @@ export function ManagerChatView({ session }: Props) {
           // The brain reported this turn's context fill — feed the composer's
           // context-window meter. Overwrite (not accumulate): the counts are the
           // full running context each turn, not a delta.
-          setUsage({ inputTokens: c.input_tokens, outputTokens: c.output_tokens });
+          setUsage({
+            inputTokens: c.input_tokens,
+            outputTokens: c.output_tokens,
+          });
         } else if (c.kind === "cost") {
           // Dollars for the turn that just finished, plus the key's running
           // total. Overwrite: `cost_usd` is this response, `spend_usd` is
@@ -1084,7 +1104,13 @@ export function ManagerChatView({ session }: Props) {
     }
     for (const entry of session.ribbon ?? []) {
       const sys = ribbonAsSystem(entry);
-      if (sys) out.push({ kind: "system", at: entry.at, text: sys.text, tone: sys.tone });
+      if (sys)
+        out.push({
+          kind: "system",
+          at: entry.at,
+          text: sys.text,
+          tone: sys.tone,
+        });
     }
     // A handled slash command is now PERSISTED into session.chat (a `user`
     // turn for the typed command + a `system` turn for the output) so it
@@ -1098,7 +1124,8 @@ export function ManagerChatView({ session }: Props) {
     // echoed user line and all.
     const persistedSystemTexts = new Map<string, number>();
     for (const t of chat) {
-      if ((t.role as string) === "system") persistedSystemTexts.set(t.text, t.at);
+      if ((t.role as string) === "system")
+        persistedSystemTexts.set(t.text, t.at);
     }
     for (const s of slashLog) {
       const persistedAt = persistedSystemTexts.get(s.text);
@@ -1116,11 +1143,25 @@ export function ManagerChatView({ session }: Props) {
           turn: { role: "user", text: s.cmd, at: s.at },
         });
       }
-      out.push({ kind: "system", at: s.at, text: s.text, tone: s.tone, rich: s.rich, interactive: s.interactive, notice: s.notice });
+      out.push({
+        kind: "system",
+        at: s.at,
+        text: s.text,
+        tone: s.tone,
+        rich: s.rich,
+        interactive: s.interactive,
+        notice: s.notice,
+      });
     }
     out.sort((a, b) => a.at - b.at);
     return out;
-  }, [session.chat, session.ribbon, session.objective, session.created_at, slashLog]);
+  }, [
+    session.chat,
+    session.ribbon,
+    session.objective,
+    session.created_at,
+    slashLog,
+  ]);
 
   // Settled-Scout regrouping. While Scout runs, the live `ScoutCard`
   // (driven by `pending_scout`) shows proper Architecture / Security / UX
@@ -1226,10 +1267,9 @@ export function ManagerChatView({ session }: Props) {
       // Flattened before the slice: an agent opens a turn with a heading
       // more often than not, and 120 characters of `## Fixed the retry`
       // spends the label on syntax.
-      const preview = plainLine(stripModeDirective(entry.turn.text ?? "")).slice(
-        0,
-        120,
-      );
+      const preview = plainLine(
+        stripModeDirective(entry.turn.text ?? ""),
+      ).slice(0, 120);
       anchors.push({ id: `t-${idx}`, preview: preview || "(empty)", role });
     });
     return anchors;
@@ -1428,7 +1468,10 @@ export function ManagerChatView({ session }: Props) {
   // Same resolution order the turn itself uses, so the composer's commands
   // and mode belong to the engine the next message will actually reach.
   const turnBrainId =
-    brainOverride?.id ?? modelOverride?.brainId ?? activeBrain?.provider_id ?? null;
+    brainOverride?.id ??
+    modelOverride?.brainId ??
+    activeBrain?.provider_id ??
+    null;
   const agent = useAgentSurface(turnBrainId, resolvedRepoRoot, busy);
   const agentLabel = brainOverride?.label ?? liveAgentLabel(turnBrainId);
   const agentSlashRows = useMemo<SlashItem[]>(
@@ -1534,9 +1577,7 @@ export function ManagerChatView({ session }: Props) {
       let pipeMarker = "";
       if (pipeTargetSessionId && trimmed) {
         try {
-          const bytes = Array.from(
-            new TextEncoder().encode(trimmed + "\r"),
-          );
+          const bytes = Array.from(new TextEncoder().encode(trimmed + "\r"));
           await api.agentPtyWrite(pipeTargetSessionId, bytes);
           pipeMarker =
             "[↪ PIPED. User also wrote this message directly into an open agent PTY tab. Do NOT dispatch a new agent for the same ask; respond conversationally and only act if explicitly asked.]\n\n";
@@ -1735,7 +1776,16 @@ export function ManagerChatView({ session }: Props) {
         setUndelivered({
           text: trimmed,
           reason: e instanceof Error ? e.message : String(e),
-          args: [msg, attachments, mode, pipeTargetSessionId, effort, fast, approval, goal],
+          args: [
+            msg,
+            attachments,
+            mode,
+            pipeTargetSessionId,
+            effort,
+            fast,
+            approval,
+            goal,
+          ],
         });
       }
     },
@@ -1848,7 +1898,16 @@ export function ManagerChatView({ session }: Props) {
       };
       // Nothing to redirect — behave like a normal send.
       if (!busy) {
-        void send(message, attachments, mode, pipeTargetSessionId, effort, fast, approval, goal);
+        void send(
+          message,
+          attachments,
+          mode,
+          pipeTargetSessionId,
+          effort,
+          fast,
+          approval,
+          goal,
+        );
         return;
       }
       steerPendingRef.current = true;
@@ -1942,7 +2001,11 @@ export function ManagerChatView({ session }: Props) {
     // the steer flag, so intermediate re-renders (e.g. the setQueue that parks
     // the steer message while the interrupt is still in flight) don't clear it
     // early and swallow the redirect.
-    if (wasBusy && !busy && (lastExitRef.current === "clean" || steerPendingRef.current)) {
+    if (
+      wasBusy &&
+      !busy &&
+      (lastExitRef.current === "clean" || steerPendingRef.current)
+    ) {
       steerPendingRef.current = false;
       setQueue((q) => {
         if (q.length === 0) return q;
@@ -2063,7 +2126,13 @@ export function ManagerChatView({ session }: Props) {
         })
         .catch((e) => console.warn("[plan→page] archive failed", e));
     }
-  }, [session.pending_plan, session.id, session.projects, editor, resolvedRepoRoot]);
+  }, [
+    session.pending_plan,
+    session.id,
+    session.projects,
+    editor,
+    resolvedRepoRoot,
+  ]);
 
   // Fork the conversation at a turn — clone every turn up to (and
   // including) `chatIndex` into a fresh Manager session, then open it
@@ -2079,7 +2148,12 @@ export function ManagerChatView({ session }: Props) {
         if (target === "workspace") {
           const root = resolvedRepoRoot;
           if (root) {
-            await openPopout({ kind: "manager", root, sessionId: newSid, label });
+            await openPopout({
+              kind: "manager",
+              root,
+              sessionId: newSid,
+              label,
+            });
             return;
           }
           // No repo root to scope a window to — fall back to an in-app tab.
@@ -2158,28 +2232,13 @@ export function ManagerChatView({ session }: Props) {
     !!session.pending_scout;
   if (hasLiveContent) hadContentRef.current = true;
   const showEmptyState = !hasLiveContent && !hadContentRef.current && !error;
-  // A clubbed set of 1–4 questions (the brain batched them in one `ask_user`).
-  // A set always renders as the keyboard/click-driven QuestionCard regardless
-  // of its first question's kind — the roomy single-text overlay can't hold a
-  // set.
-  const questionIsSet =
-    !!session.pending_question &&
-    (session.pending_question.items?.length ?? 0) > 1;
-  // A choice/multi question — or any set — fuses onto the composer as one
-  // stacked panel, but only when nothing (a queued message) sits between them
-  // in the dock. A lone free-text question uses the roomy overlay and never
-  // fuses.
-  const fuseQuestion =
-    !!session.pending_question &&
-    (questionIsSet || session.pending_question.kind !== "text") &&
-    queue.length === 0;
+  // Questions of every kind share one focused flow above the composer.
+  const fuseQuestion = !!session.pending_question && queue.length === 0;
   // The plan-paused banner fuses onto the composer the same way a docked
   // question does — one stacked panel, no floating gap. Only when nothing
   // (a queued message) sits between them in the dock.
   const fusePlan =
-    !!session.pending_plan &&
-    !session.pending_question &&
-    queue.length === 0;
+    !!session.pending_plan && !session.pending_question && queue.length === 0;
   // An action slash command (`/resume`) returns a live picker. It docks to the
   // composer — flush above the input as one compact panel — instead of
   // floating as a bulky card mid-stream. The most recent un-dismissed resume
@@ -2206,7 +2265,8 @@ export function ManagerChatView({ session }: Props) {
   let windowStart = Math.max(0, timeline.length - visibleCount);
   while (
     windowStart > 0 &&
-    (turnGroups.consumed.has(windowStart) || scoutGroups.consumed.has(windowStart)) &&
+    (turnGroups.consumed.has(windowStart) ||
+      scoutGroups.consumed.has(windowStart)) &&
     !turnGroups.startAt.has(windowStart) &&
     !scoutGroups.startAt.has(windowStart)
   ) {
@@ -2215,608 +2275,633 @@ export function ManagerChatView({ session }: Props) {
   const hiddenCount = windowStart;
   return (
     <ChatRepoRootContext.Provider value={repoRootForChat}>
-    <ChatSpendContext.Provider value={chatSpend}>
-    <div className="relative flex flex-col h-full min-h-0">
-      {/* Scroll region + scrollback rail share ONE positioning context so the
+      <ChatSpendContext.Provider value={chatSpend}>
+        <div className="relative flex flex-col h-full min-h-0">
+          <ChatHeader title="Aura" workspace={repoRootForChat} status={busy ? "Working" : undefined} actions={<button type="button" className="chat-icon-button" aria-label="Chat history" onClick={() => window.dispatchEvent(new Event("aura:manager:open-history"))}><History size={15} /></button>} />
+          {/* Scroll region + scrollback rail share ONE positioning context so the
           rail spans only the messages and ends above the composer dock (not
           running to the very bottom of the pane). Also an OS-drop zone for
           "composer": a file dragged from Finder onto the conversation (not
           just the tiny input box) routes to the composer as an attachment. */}
-      <div className="relative flex-1 min-h-0 flex flex-col" data-os-drop="composer">
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        className="p-scroll flex flex-col"
-      >
-        {showEmptyState && (
-          <ChatEmptyState
-            onPick={(prompt) => void send(prompt, [], "ask")}
-            projectLabel={session.projects[0]?.label}
-            repoRoot={repoRootForChat ?? undefined}
-            machineName={machineName ?? undefined}
-          />
-        )}
-        {hiddenCount > 0 && (
-          <button
-            type="button"
-            onClick={revealEarlier}
-            className="self-center my-3 px-3 py-1.5 rounded-full text-xs text-[var(--color-text-3)] border border-[var(--color-border)] hover:text-[var(--color-text-1)] hover:bg-[var(--color-muted)] transition-colors"
+          <div
+            className="relative flex-1 min-h-0 flex flex-col"
+            data-os-drop="composer"
           >
-            Show earlier messages · {hiddenCount} hidden
-          </button>
-        )}
-        {timeline.map((entry, idx) => {
-          // Windowed render — older turns stay out of the DOM (returned as
-          // null) so a long imported history scrolls smoothly. We keep the map
-          // over the FULL timeline so `idx` remains the absolute index the
-          // group/scout lookups inside renderTimelineEntry are keyed by.
-          if (idx < hiddenCount) return null;
-          const prev = timeline[idx - 1];
-          // Wall-clock seam — when a conversation is paused (cancelled,
-          // closed, walked away from) and picked back up later, the jump in
-          // `at` between two adjacent entries marks real elapsed time. Above
-          // the threshold we draw a wiggly divider so a turn answered an hour
-          // later doesn't read as an immediate reply. Both ends must be real
-          // epoch stamps (legacy turns can carry 0 / undefined `at`); cap at
-          // 60 days so a bad-data jump from epoch 0 never renders an absurd
-          // "20000d later". Suppress it for the first visible entry — there's
-          // nothing mounted above it to seam against.
-          const gapSec =
-            prev && idx > hiddenCount && prev.at > 0 && entry.at > 0
-              ? entry.at - prev.at
-              : 0;
-          const gapDivider =
-            gapSec >= TIME_GAP_MIN_SEC && gapSec <= 60 * 86400 ? (
-              <TimeGapDivider seconds={gapSec} />
-            ) : null;
-          const node = renderTimelineEntry();
-          return (
-            <Fragment key={idx}>
-              {gapDivider}
-              {node}
-            </Fragment>
-          );
-
-          function renderTimelineEntry() {
-          // Settled-Scout block — the first index of a finalized Scout run
-          // renders the regrouped agent block; every other folded-in system
-          // line renders nothing (its content lives in the block).
-          if (scoutGroups.startAt.has(idx)) {
-            const specs = scoutGroups.startAt.get(idx)!;
-            return specs.length > 0 ? <SettledScoutBlock specialists={specs} /> : null;
-          }
-          if (scoutGroups.consumed.has(idx)) return null;
-          // #2 — cohesive assistant-turn group. A contiguous run of ≥2
-          // assistant turns (the CLI-wrapper "one reply, N scattered bubbles"
-          // case) renders as ONE block: a single agent header up top, then the
-          // member turns stacked beneath it. The start index owns the whole
-          // group; every other member renders nothing here (it's drawn inside
-          // the block). A lone assistant turn falls through to the normal
-          // single-turn path below, unchanged.
-          if (turnGroups.startAt.has(idx)) {
-            const members = turnGroups.startAt.get(idx)!;
-            // Header brain: the first member that recorded one (a CLI-wrapper
-            // run tags its turns, e.g. "cli:claude"); null → the generic Aura
-            // header. The group renders ONE header, then each member turn.
-            let headerBrain: string | null = null;
-            for (const m of members) {
-              const me = timeline[m];
-              if (me.kind === "turn" && me.turn.brain) {
-                headerBrain = me.turn.brain;
-                break;
-              }
-            }
-            return (
-              <AssistantTurnGroup headerBrain={headerBrain}>
-                {members.map((m, i) =>
-                  renderAssistantTurn(m, true, i === members.length - 1),
-                )}
-              </AssistantTurnGroup>
-            );
-          }
-          if (turnGroups.consumed.has(idx)) return null;
-          if (entry.kind === "turn") {
-            // A persisted `system` turn is a client-handled slash command's
-            // output (`/team`, `/loop`, …) appended to session.chat so it
-            // survives a reload. It must render as the same calm SystemCard the
-            // ephemeral slashLog used — a plain markdown body, never an "Aura"
-            // agent bubble. Tone is `info` (the persisted ChatTurn carries no
-            // tone field); that's exactly the chrome-free calm markdown render.
-            if ((entry.turn.role as string) === "system") {
-              return <SystemCard text={entry.turn.text} tone="info" />;
-            }
-            if (entry.turn.role !== "user") {
-              // A lone assistant turn — same node the group renders per member.
-              return renderAssistantTurn(idx, false, true);
-            }
-            const chatIndex = session.chat
-              ? session.chat.indexOf(entry.turn)
-              : -1;
-            return (
-              <div key={idx} data-rail-id={`t-${idx}`}>
-                <ChatBubble
-                  turn={entry.turn}
-                  chatIndex={chatIndex >= 0 ? chatIndex : null}
-                  busy={busy}
-                  durationSec={null}
-                  onEditResend={onEditResend}
-                  onFork={onForkTurn}
+            <div
+              ref={scrollRef}
+              onScroll={onScroll}
+              className="p-scroll flex flex-col"
+            >
+              {showEmptyState && (
+                <ChatEmptyState
+                  onPick={(prompt) => void send(prompt, [], "ask")}
+                  projectLabel={session.projects[0]?.label}
+                  repoRoot={repoRootForChat ?? undefined}
+                  machineName={machineName ?? undefined}
                 />
-              </div>
-            );
-          }
-          // An action command (`/resume`) returns a live, clickable control
-          // instead of a markdown body. It does NOT render inline here — it
-          // docks to the composer (see `dockedResume` / `fuseResume` in the
-          // dock below) so it reads as a compact action panel pinned to the
-          // input, not a bulky card floating mid-stream. Skip it in the flow.
-          if (entry.interactive?.kind === "resume") {
-            return null;
-          }
-          // A designed system notice — render the compact card, not a flat
-          // markdown run. `plan-mode` = the "Switched to Plan mode" card.
-          if (entry.kind === "system" && entry.notice === "plan-mode") {
-            return <PlanModeNotice />;
-          }
-          // A rich slash output (`/help`, `/loop`, `/agents`, …) is a full
-          // markdown document — render it as a calm system card so its list,
-          // bold and code read properly, instead of collapsing into one
-          // italic line (or, for tone "ok", a bare milestone label). The rich
-          // check runs FIRST so an "ok" slash result still gets the card.
-          if (entry.rich) {
-            return <SystemCard text={entry.text} tone={entry.tone} />;
-          }
-          // A completed-work event (tone "ok" — "Task #N done", a shipped
-          // wave) reads as a milestone, not an aside. Antigravity-style: a
-          // centered rule with the caption inset, marking a major thing
-          // finished, instead of a left-margin system aside.
-          if (entry.tone === "ok") {
-            return <MilestoneDivider text={entry.text} />;
-          }
-          return <SystemLine text={entry.text} tone={entry.tone} />;
-          }
+              )}
+              {hiddenCount > 0 && (
+                <button
+                  type="button"
+                  onClick={revealEarlier}
+                  className="self-center my-3 px-3 py-1.5 rounded-full text-xs text-[var(--color-text-3)] border border-[var(--color-border)] hover:text-[var(--color-text-1)] hover:bg-[var(--color-muted)] transition-colors"
+                >
+                  Show earlier messages · {hiddenCount} hidden
+                </button>
+              )}
+              {timeline.map((entry, idx) => {
+                // Windowed render — older turns stay out of the DOM (returned as
+                // null) so a long imported history scrolls smoothly. We keep the map
+                // over the FULL timeline so `idx` remains the absolute index the
+                // group/scout lookups inside renderTimelineEntry are keyed by.
+                if (idx < hiddenCount) return null;
+                const prev = timeline[idx - 1];
+                // Wall-clock seam — when a conversation is paused (cancelled,
+                // closed, walked away from) and picked back up later, the jump in
+                // `at` between two adjacent entries marks real elapsed time. Above
+                // the threshold we draw a wiggly divider so a turn answered an hour
+                // later doesn't read as an immediate reply. Both ends must be real
+                // epoch stamps (legacy turns can carry 0 / undefined `at`); cap at
+                // 60 days so a bad-data jump from epoch 0 never renders an absurd
+                // "20000d later". Suppress it for the first visible entry — there's
+                // nothing mounted above it to seam against.
+                const gapSec =
+                  prev && idx > hiddenCount && prev.at > 0 && entry.at > 0
+                    ? entry.at - prev.at
+                    : 0;
+                const gapDivider =
+                  gapSec >= TIME_GAP_MIN_SEC && gapSec <= 60 * 86400 ? (
+                    <TimeGapDivider seconds={gapSec} />
+                  ) : null;
+                const node = renderTimelineEntry();
+                return (
+                  <Fragment key={idx}>
+                    {gapDivider}
+                    {node}
+                  </Fragment>
+                );
 
-          // Render one assistant turn (used both standalone and as a group
-          // member). Computes the time-taken stat + the cross-brain handoff
-          // divider off the timeline, then draws the ChatBubble. Pulled out of
-          // the inline branch so the cohesive group can reuse the exact same
-          // per-turn rendering for each of its members.
-          //
-          // `inGroup` — this turn is one segment of a cohesive AssistantTurnGroup
-          // (the CLI-wrapper "one reply, N bubbles" case). The group header
-          // already carries the brand, so member segments drop the redundant
-          // per-message "Claude" model chip. `isLast` — only the final segment
-          // draws the action-row footer (copy / model / more), so the whole run
-          // reads as ONE message with one footer instead of N stamped bubbles.
-          // A lone turn passes inGroup=false, isLast=true (unchanged behaviour).
-          function renderAssistantTurn(
-            turnIdx: number,
-            inGroup = false,
-            isLast = true,
-          ) {
-            const e = timeline[turnIdx];
-            if (e.kind !== "turn") return null;
-            const turn = e.turn;
-            const chatIndex = session.chat ? session.chat.indexOf(turn) : -1;
-            // Time-taken — the gap to the nearest prior turn (the prompt it
-            // answered). `at` is epoch seconds; clamp out multi-day gaps (a
-            // thread resumed days later isn't "thinking").
-            let durationSec: number | null = null;
-            for (let j = turnIdx - 1; j >= 0; j--) {
-              const p = timeline[j];
-              if (p.kind === "turn") {
-                const d = turn.at - p.turn.at;
-                if (d >= 0 && d <= 86400) durationSec = d;
-                break;
-              }
-            }
-            // Brain-handoff marker: if this assistant turn ran on a different
-            // brain than the nearest prior assistant turn that recorded one,
-            // the user swapped models mid-thread — surface a "Continued on X"
-            // divider so the seamless cross-agent continuation is visible
-            // (the backend already carries the full transcript across).
-            let switchedToBrain: string | null = null;
-            if (turn.brain) {
-              for (let j = turnIdx - 1; j >= 0; j--) {
-                const p = timeline[j];
-                if (p.kind === "turn" && p.turn.role !== "user" && p.turn.brain) {
-                  if (p.turn.brain !== turn.brain) {
-                    switchedToBrain = turn.brain;
+                function renderTimelineEntry() {
+                  // Settled-Scout block — the first index of a finalized Scout run
+                  // renders the regrouped agent block; every other folded-in system
+                  // line renders nothing (its content lives in the block).
+                  if (scoutGroups.startAt.has(idx)) {
+                    const specs = scoutGroups.startAt.get(idx)!;
+                    return specs.length > 0 ? (
+                      <SettledScoutBlock specialists={specs} />
+                    ) : null;
                   }
-                  break;
+                  if (scoutGroups.consumed.has(idx)) return null;
+                  // #2 — cohesive assistant-turn group. A contiguous run of ≥2
+                  // assistant turns (the CLI-wrapper "one reply, N scattered bubbles"
+                  // case) renders as ONE block: a single agent header up top, then the
+                  // member turns stacked beneath it. The start index owns the whole
+                  // group; every other member renders nothing here (it's drawn inside
+                  // the block). A lone assistant turn falls through to the normal
+                  // single-turn path below, unchanged.
+                  if (turnGroups.startAt.has(idx)) {
+                    const members = turnGroups.startAt.get(idx)!;
+                    // Header brain: the first member that recorded one (a CLI-wrapper
+                    // run tags its turns, e.g. "cli:claude"); null → the generic Aura
+                    // header. The group renders ONE header, then each member turn.
+                    let headerBrain: string | null = null;
+                    for (const m of members) {
+                      const me = timeline[m];
+                      if (me.kind === "turn" && me.turn.brain) {
+                        headerBrain = me.turn.brain;
+                        break;
+                      }
+                    }
+                    return (
+                      <AssistantTurnGroup headerBrain={headerBrain}>
+                        {members.map((m, i) =>
+                          renderAssistantTurn(
+                            m,
+                            true,
+                            i === members.length - 1,
+                          ),
+                        )}
+                      </AssistantTurnGroup>
+                    );
+                  }
+                  if (turnGroups.consumed.has(idx)) return null;
+                  if (entry.kind === "turn") {
+                    // A persisted `system` turn is a client-handled slash command's
+                    // output (`/team`, `/loop`, …) appended to session.chat so it
+                    // survives a reload. It must render as the same calm SystemCard the
+                    // ephemeral slashLog used — a plain markdown body, never an "Aura"
+                    // agent bubble. Tone is `info` (the persisted ChatTurn carries no
+                    // tone field); that's exactly the chrome-free calm markdown render.
+                    if ((entry.turn.role as string) === "system") {
+                      return <SystemCard text={entry.turn.text} tone="info" />;
+                    }
+                    if (entry.turn.role !== "user") {
+                      // A lone assistant turn — same node the group renders per member.
+                      return renderAssistantTurn(idx, false, true);
+                    }
+                    const chatIndex = session.chat
+                      ? session.chat.indexOf(entry.turn)
+                      : -1;
+                    return (
+                      <div key={idx} data-rail-id={`t-${idx}`}>
+                        <ChatBubble
+                          turn={entry.turn}
+                          chatIndex={chatIndex >= 0 ? chatIndex : null}
+                          busy={busy}
+                          durationSec={null}
+                          onEditResend={onEditResend}
+                          onFork={onForkTurn}
+                        />
+                      </div>
+                    );
+                  }
+                  // An action command (`/resume`) returns a live, clickable control
+                  // instead of a markdown body. It does NOT render inline here — it
+                  // docks to the composer (see `dockedResume` / `fuseResume` in the
+                  // dock below) so it reads as a compact action panel pinned to the
+                  // input, not a bulky card floating mid-stream. Skip it in the flow.
+                  if (entry.interactive?.kind === "resume") {
+                    return null;
+                  }
+                  // A designed system notice — render the compact card, not a flat
+                  // markdown run. `plan-mode` = the "Switched to Plan mode" card.
+                  if (entry.kind === "system" && entry.notice === "plan-mode") {
+                    return <PlanModeNotice />;
+                  }
+                  // A rich slash output (`/help`, `/loop`, `/agents`, …) is a full
+                  // markdown document — render it as a calm system card so its list,
+                  // bold and code read properly, instead of collapsing into one
+                  // italic line (or, for tone "ok", a bare milestone label). The rich
+                  // check runs FIRST so an "ok" slash result still gets the card.
+                  if (entry.rich) {
+                    return <SystemCard text={entry.text} tone={entry.tone} />;
+                  }
+                  // A completed-work event (tone "ok" — "Task #N done", a shipped
+                  // wave) reads as a milestone, not an aside. Antigravity-style: a
+                  // centered rule with the caption inset, marking a major thing
+                  // finished, instead of a left-margin system aside.
+                  if (entry.tone === "ok") {
+                    return <MilestoneDivider text={entry.text} />;
+                  }
+                  return <SystemLine text={entry.text} tone={entry.tone} />;
                 }
-              }
-            }
-            return (
-              <div key={turnIdx} data-rail-id={`t-${turnIdx}`}>
-                {switchedToBrain && (
-                  <BrainHandoffDivider
-                    brain={switchedToBrain}
-                    chat={session.chat ?? []}
-                  />
-                )}
-                <ChatBubble
-                  turn={turn}
-                  chatIndex={chatIndex >= 0 ? chatIndex : null}
-                  busy={busy}
-                  durationSec={durationSec}
-                  inGroup={inGroup}
-                  showActions={isLast}
-                  onEditResend={onEditResend}
-                  onFork={onForkTurn}
+
+                // Render one assistant turn (used both standalone and as a group
+                // member). Computes the time-taken stat + the cross-brain handoff
+                // divider off the timeline, then draws the ChatBubble. Pulled out of
+                // the inline branch so the cohesive group can reuse the exact same
+                // per-turn rendering for each of its members.
+                //
+                // `inGroup` — this turn is one segment of a cohesive AssistantTurnGroup
+                // (the CLI-wrapper "one reply, N bubbles" case). The group header
+                // already carries the brand, so member segments drop the redundant
+                // per-message "Claude" model chip. `isLast` — only the final segment
+                // draws the action-row footer (copy / model / more), so the whole run
+                // reads as ONE message with one footer instead of N stamped bubbles.
+                // A lone turn passes inGroup=false, isLast=true (unchanged behaviour).
+                function renderAssistantTurn(
+                  turnIdx: number,
+                  inGroup = false,
+                  isLast = true,
+                ) {
+                  const e = timeline[turnIdx];
+                  if (e.kind !== "turn") return null;
+                  const turn = e.turn;
+                  const chatIndex = session.chat
+                    ? session.chat.indexOf(turn)
+                    : -1;
+                  // Time-taken — the gap to the nearest prior turn (the prompt it
+                  // answered). `at` is epoch seconds; clamp out multi-day gaps (a
+                  // thread resumed days later isn't "thinking").
+                  let durationSec: number | null = null;
+                  for (let j = turnIdx - 1; j >= 0; j--) {
+                    const p = timeline[j];
+                    if (p.kind === "turn") {
+                      const d = turn.at - p.turn.at;
+                      if (d >= 0 && d <= 86400) durationSec = d;
+                      break;
+                    }
+                  }
+                  // Brain-handoff marker: if this assistant turn ran on a different
+                  // brain than the nearest prior assistant turn that recorded one,
+                  // the user swapped models mid-thread — surface a "Continued on X"
+                  // divider so the seamless cross-agent continuation is visible
+                  // (the backend already carries the full transcript across).
+                  let switchedToBrain: string | null = null;
+                  if (turn.brain) {
+                    for (let j = turnIdx - 1; j >= 0; j--) {
+                      const p = timeline[j];
+                      if (
+                        p.kind === "turn" &&
+                        p.turn.role !== "user" &&
+                        p.turn.brain
+                      ) {
+                        if (p.turn.brain !== turn.brain) {
+                          switchedToBrain = turn.brain;
+                        }
+                        break;
+                      }
+                    }
+                  }
+                  return (
+                    <div key={turnIdx} data-rail-id={`t-${turnIdx}`}>
+                      {switchedToBrain && (
+                        <BrainHandoffDivider
+                          brain={switchedToBrain}
+                          chat={session.chat ?? []}
+                        />
+                      )}
+                      <ChatBubble
+                        turn={turn}
+                        chatIndex={chatIndex >= 0 ? chatIndex : null}
+                        busy={busy}
+                        durationSec={durationSec}
+                        inGroup={inGroup}
+                        showActions={isLast}
+                        onEditResend={onEditResend}
+                        onFork={onForkTurn}
+                      />
+                    </div>
+                  );
+                }
+              })}
+              {liveHandoffBrain && (
+                // #1 — the switch shows the instant the turn goes in-flight, above
+                // the live area, instead of waiting for a turn on the new brain to
+                // persist (which never happens when that brain hangs with no output).
+                <BrainHandoffDivider
+                  brain={liveHandoffBrain}
+                  chat={session.chat ?? []}
                 />
-              </div>
-            );
-          }
-        })}
-        {liveHandoffBrain && (
-          // #1 — the switch shows the instant the turn goes in-flight, above
-          // the live area, instead of waiting for a turn on the new brain to
-          // persist (which never happens when that brain hangs with no output).
-          <BrainHandoffDivider brain={liveHandoffBrain} chat={session.chat ?? []} />
-        )}
-        {/* Subscribes to the stream store itself, so a token re-renders this
+              )}
+              {/* Subscribes to the stream store itself, so a token re-renders this
             subtree alone — the settled timeline above stays mounted and
             untouched. It renders nothing until a block lands, and owns the
             scroll re-pin at the same post-commit moment this component's own
             blocks-keyed effect used to run it. */}
-        <StreamingBlocks
-          store={streamStore}
-          streaming={busy}
-          onAdvance={pinToBottom}
-        />
-        {/* #3 — the live "Running …" status for the in-flight command no
+              <StreamingBlocks
+                store={streamStore}
+                streaming={busy}
+                onAdvance={pinToBottom}
+              />
+              {/* #3 — the live "Running …" status for the in-flight command no
             longer floats loose here in the stream; it's now DOCKED as a slim
             strip flush atop the composer (see <RunningCommandStatus docked />
             just above <ManagerComposer>), so it reads as composer chrome and
             collapses back into the transcript the moment the turn finishes. */}
-        {/* Wave timeline — aggregates all "Wave N dispatched/shipped/…"
+              {/* Wave timeline — aggregates all "Wave N dispatched/shipped/…"
             events from agent prose into ONE structured block. Each wave
             is one row that progresses through states; per-turn wave
             events are filtered out (AgentMessageBody) to prevent
             duplication. */}
-        <WaveTimeline chat={session.chat ?? []} />
-        {/* Live dispatch strip — shows per-task agent activity derived
+              <WaveTimeline chat={session.chat ?? []} />
+              {/* Live dispatch strip — shows per-task agent activity derived
             from the ribbon (task_dispatched → task_completed/failed).
             Auto-hides when nothing is in flight. */}
-        <LiveDispatchStrip ribbon={session.ribbon ?? []} />
-        {/* The running agent's own plan, when the brain for this turn is
+              <LiveDispatchStrip ribbon={session.ribbon ?? []} />
+              {/* The running agent's own plan, when the brain for this turn is
             one that keeps a live agent. Sits with the other live strips
             rather than in the transcript — it is what the agent intends
             *now*, restated in full whenever it changes. */}
-        <AgentPlanStrip plan={agent.surface.plan} agentLabel={agentLabel} />
-        {/* ScoutCard precedes PlanCard. While Scout is in flight, the
+              <AgentPlanStrip
+                plan={agent.surface.plan}
+                agentLabel={agentLabel}
+              />
+              {/* ScoutCard precedes PlanCard. While Scout is in flight, the
             brain's plan envelope is parked and we render the live
             specialist card; once Scout finalizes, `pending_scout`
             clears and `pending_plan` populates so PlanCard takes over. */}
-        {session.pending_scout && (
-          <ScoutCard sessionId={session.id} scout={session.pending_scout} />
-        )}
-        {/* PlanCard renders INLINE in the timeline (Cursor-parity) — not
+              {session.pending_scout && (
+                <ScoutCard
+                  sessionId={session.id}
+                  scout={session.pending_scout}
+                />
+              )}
+              {/* PlanCard renders INLINE in the timeline (Cursor-parity) — not
             docked at the bottom — so the prepared plan flows as a chat
             element next to the agent's prose, then the user can either
             decide inline or click "Open" to expand it as a full PlanTab. */}
-        {session.pending_plan && (
-          <PlanCard
-            sessionId={session.id}
-            plan={session.pending_plan}
-            onError={setError}
-            onBuildStart={onBuildStart}
-            repoRoot={resolvedRepoRoot}
-          />
-        )}
-        {(busy || planBuilding) &&
-          !session.pending_question &&
-          !session.pending_plan &&
-          !session.pending_scout &&
-          !error && (
-            planBuilding ? (
-              <PlanningStatusLine label="Building your plan" startedAt={turnStartRef.current} />
-            ) : runningTool ? (
-              // A command is running — the docked RunningCommandStatus strip
-              // atop the composer already carries the live "Running … · 12s"
-              // status, so suppress the generic "Working…" line here to avoid
-              // two near-identical in-flight rows stacked on each other.
-              null
-            ) : hasStreamBlocks ? (
-              // The answer is already streaming above — keep a quiet, timed
-              // "Working…" line beneath it so the turn never looks finished
-              // while the brain is still producing tokens or running tools.
-              <ThinkingLine label="Working…" startedAt={turnStartRef.current} />
-            ) : justAnswered ? (
-              <PlanningStatusLine startedAt={turnStartRef.current} />
-            ) : (
-              <ThinkingLine startedAt={turnStartRef.current} />
-            )
-          )}
-        {/* #3 — stall watchdog. When a turn is genuinely waiting on the brain
+              {session.pending_plan && (
+                <PlanCard
+                  sessionId={session.id}
+                  plan={session.pending_plan}
+                  onError={setError}
+                  onBuildStart={onBuildStart}
+                  repoRoot={resolvedRepoRoot}
+                />
+              )}
+              {(busy || planBuilding) &&
+                !session.pending_question &&
+                !session.pending_plan &&
+                !session.pending_scout &&
+                !error &&
+                (planBuilding ? (
+                  <PlanningStatusLine
+                    label="Building your plan"
+                    startedAt={turnStartRef.current}
+                  />
+                ) : runningTool ? // atop the composer already carries the live "Running … · 12s" // A command is running — the docked RunningCommandStatus strip
+                // status, so suppress the generic "Working…" line here to avoid
+                // two near-identical in-flight rows stacked on each other.
+                null : hasStreamBlocks ? (
+                  // The answer is already streaming above — keep a quiet, timed
+                  // "Working…" line beneath it so the turn never looks finished
+                  // while the brain is still producing tokens or running tools.
+                  <ThinkingLine
+                    label="Working…"
+                    startedAt={turnStartRef.current}
+                  />
+                ) : justAnswered ? (
+                  <PlanningStatusLine startedAt={turnStartRef.current} />
+                ) : (
+                  <ThinkingLine startedAt={turnStartRef.current} />
+                ))}
+              {/* #3 — stall watchdog. When a turn is genuinely waiting on the brain
             (not building a plan, not running a tool, no pending question/plan)
             and it has streamed nothing for a while, surface a calm "may be
             stuck" notice with a Stop. Anchored on last-activity, so a turn that
             keeps producing output never trips it — only true silence (a hung
             CLI wrapper) does. Suppressed while a tool runs: that has its own
             live timer and is legitimately long. */}
-        {busy &&
-          !planBuilding &&
-          !runningTool &&
-          !session.pending_question &&
-          !session.pending_plan &&
-          !session.pending_scout &&
-          !error && (
-            <StallNotice
-              getIdleSince={() => lastActivityRef.current}
-              brainLabel={liveBrainLabel}
-              onStop={stopTurn}
-            />
-          )}
-        {/* AURA-1296 — the undeliverable notice carries the error text
+              {busy &&
+                !planBuilding &&
+                !runningTool &&
+                !session.pending_question &&
+                !session.pending_plan &&
+                !session.pending_scout &&
+                !error && (
+                  <StallNotice
+                    getIdleSince={() => lastActivityRef.current}
+                    brainLabel={liveBrainLabel}
+                    onStop={stopTurn}
+                  />
+                )}
+              {/* AURA-1296 — the undeliverable notice carries the error text
             itself, so the plain red line steps aside while it is showing. */}
-        {undelivered && (
-          <UndeliverableMessage
-            text={undelivered.text}
-            reason={undelivered.reason}
-            onDismiss={() => {
-              setUndelivered(null);
-              setError(null);
-            }}
-            onRestart={async () => {
-              const args = undelivered.args;
-              // Bring the session back first; a session that is already
-              // running answers with an error we don't care about.
-              await api.managerResume(session.id).catch(() => {});
-              setUndelivered(null);
-              setError(null);
-              await send(...args);
-            }}
-          />
-        )}
-        {error && !undelivered && (
-          <div
-            role="alert"
-            aria-live="assertive"
-            className="text-red text-xs px-2 py-1 bg-red/10 rounded border border-red/30 mt-2"
-          >
-            {error}
-          </div>
-        )}
-      </div>
-      {/* Scrollback rail — a slim minimap on the right edge for jumping
+              {undelivered && (
+                <UndeliverableMessage
+                  text={undelivered.text}
+                  reason={undelivered.reason}
+                  onDismiss={() => {
+                    setUndelivered(null);
+                    setError(null);
+                  }}
+                  onRestart={async () => {
+                    const args = undelivered.args;
+                    // Bring the session back first; a session that is already
+                    // running answers with an error we don't care about.
+                    await api.managerResume(session.id).catch(() => {});
+                    setUndelivered(null);
+                    setError(null);
+                    await send(...args);
+                  }}
+                />
+              )}
+              {error && !undelivered && (
+                <div
+                  role="alert"
+                  aria-live="assertive"
+                  className="text-red text-xs px-2 py-1 bg-red/10 rounded border border-red/30 mt-2"
+                >
+                  {error}
+                </div>
+              )}
+            </div>
+            {/* Scrollback rail — a slim minimap on the right edge for jumping
           between turns in a long conversation. Reads bubble offsets off the
           live scroll DOM (the `data-rail-id` stamps above); self-hides when
           there are fewer than two turns. */}
-        <MessageScrollbackRail scrollRef={scrollRef} anchors={railAnchors} />
-      </div>
-      {/* The composer dock floats seamlessly under the message stream — no
-          hard rule between them. The `.p-dock` class still supplies the
-          padding/flex rhythm; we only drop its `border-top` hairline so the
-          composer reads as part of the conversation surface, not a docked
-          panel. */}
-      <div
-        className="p-dock"
-        // OS-drop zone for "composer" too — the sibling zone above only covers
-        // the message scroll region, so a screenshot dropped on the dock chrome
-        // (the input's padding, a docked question card, the queue stack, the
-        // running-command strip) used to hit-test to no zone and silently drop.
-        // Cover the whole dock so any drop onto what the user reads as "the
-        // composer" attaches, matching the terminal's full-pane drop target.
-        data-os-drop="composer"
-        style={{
-          borderTop: "none",
-          // A docked choice/multi question — the plan-paused banner — or the
-          // `/resume` picker fuses onto the composer as one panel; drop the
-          // dock's flex gap so they meet on a single hairline. (A non-empty
-          // queue sits between them, so only fuse when it's empty.)
-          gap: fuseQuestion || fusePlan || fuseResume ? 0 : undefined,
-        }}
-      >
-        {/* A lone free-text question gets the roomy `QuestionInputOverlay`;
-            choice / multi-choice — and any clubbed SET — keep the
-            keyboard/click-driven `QuestionCard`. When the queue is empty the
-            card fuses onto the composer below it. The `key` is the question's
-            tool_use_id so a fresh set after answering one remounts with clean
-            per-question state instead of reusing the prior answers. */}
-        {session.pending_question &&
-          (!questionIsSet && session.pending_question.kind === "text" ? (
-            <QuestionInputOverlay
-              sessionId={session.id}
-              question={session.pending_question}
-              onError={setError}
-              onAnswered={onQuestionAnswered}
+            <MessageScrollbackRail
+              scrollRef={scrollRef}
+              anchors={railAnchors}
             />
-          ) : (
-            <QuestionCard
-              key={session.pending_question.tool_use_id}
-              sessionId={session.id}
-              question={session.pending_question}
-              docked={fuseQuestion}
-              onError={setError}
-              onAnswered={onQuestionAnswered}
-            />
-          ))}
-        {/* Brain paused on plan decision. The composer stays interactive
+          </div>
+          {/* The fixed footer has a shared separator and compact inset composer. */}
+          <div
+            className="p-dock"
+            data-os-drop="composer"
+            style={{
+              // A docked choice/multi question — the plan-paused banner — or the
+              // `/resume` picker fuses onto the composer as one panel; drop the
+              // dock's flex gap so they meet on a single hairline. (A non-empty
+              // queue sits between them, so only fuse when it's empty.)
+              gap: fuseQuestion || fusePlan || fuseResume ? 0 : undefined,
+            }}
+          >
+            {session.pending_question && (
+              <QuestionCard
+                key={session.pending_question.tool_use_id}
+                sessionId={session.id}
+                question={session.pending_question}
+                docked={fuseQuestion}
+                onError={setError}
+                onAnswered={onQuestionAnswered}
+              />
+            )}
+            {/* Brain paused on plan decision. The composer stays interactive
             — sending a message starts a fresh turn — but the user often
             reads "no agent reply" as "input is broken". This hint
             clarifies what's happening and points at the resolution. */}
-        {session.pending_plan && !session.pending_question && (
-          <div
-            className={`flex items-center gap-2 px-3 py-1.5 t-xs ${
-              fusePlan ? "" : "mb-1"
-            }`}
-            style={{
-              // A paused brain is a stall, so the strip wears the same amber
-              // as `.aura-stall-notice` in the stylesheet rather than the
-              // accent — a stalled turn and a selected row must not look
-              // alike. The "Open plan" button below keeps the accent: that
-              // one IS the thing you press to clear the stall.
-              background:
-                "color-mix(in srgb, var(--color-amber) 8%, var(--color-bg-card))",
-              border:
-                "1px solid color-mix(in srgb, var(--color-amber) 30%, transparent)",
-              // When fused, the banner becomes the composer's header strip:
-              // round only the top, drop the seam border so it meets the
-              // composer (which squares its own top via .composer-docked) on
-              // one hairline — one stacked panel, no floating gap.
-              borderRadius: fusePlan
-                ? "var(--radius-sm) var(--radius-sm) 0 0"
-                : "var(--radius-sm)",
-              borderBottom: fusePlan ? "none" : undefined,
-              color: "var(--color-text-2)",
-            }}
-          >
-            <span
-              className="inline-block w-1.5 h-1.5 rounded-full"
-              style={{ background: "var(--color-amber)" }}
-            />
-            <span className="flex-1">
-              Brain paused on plan decision. Build or Cancel to continue, or
-              send a new message to start a fresh turn.
-            </span>
-            {/* Always-present escape hatch: even if the inline plan chip
-                scrolled out of view, this opens the plan in its own tab so
-                the user can never "lose" a proposed plan. */}
-            <button
-              type="button"
-              onClick={() => {
-                const plan = session.pending_plan;
-                if (!plan) return;
-                openPlanWizard(
-                  pendingPlanToTabInput(plan),
-                  resolvedRepoRoot,
-                  session.id,
-                );
-              }}
-              className="shrink-0 t-2xs t-ui px-2 py-0.5 transition-opacity hover:opacity-80"
-              style={{
-                color: "var(--color-accent)",
-                border:
-                  "1px solid color-mix(in srgb, var(--color-accent) 40%, transparent)",
-                borderRadius: "var(--radius-xs)",
-              }}
-            >
-              Open plan
-            </button>
-          </div>
-        )}
-        {/* `/resume` picker — a compact action panel docked flush above the
+            {session.pending_plan && !session.pending_question && (
+              <div className={`chat-plan-dock ${fusePlan ? "is-docked" : ""}`}>
+                <ListTree size={16} className="text-text-3 shrink-0" />
+                <div>
+                  <strong>{session.pending_plan.title}</strong>
+                  <small>Review the plan before building</small>
+                </div>
+                <button
+                  type="button"
+                  className="chat-plan-secondary"
+                  onClick={() => {
+                    const plan = session.pending_plan;
+                    if (plan)
+                      openPlanWizard(
+                        pendingPlanToTabInput(plan),
+                        resolvedRepoRoot,
+                        session.id,
+                      );
+                  }}
+                >
+                  Review plan <SquareArrowOutUpRight size={13} />
+                </button>
+              </div>
+            )}
+            {/* `/resume` picker — a compact action panel docked flush above the
             composer (fused into one unit when nothing sits between them),
             instead of a bulky card floating mid-stream. */}
-        {dockedResume?.interactive?.kind === "resume" && (
-          <ResumePicker
-            sessions={dockedResume.interactive.sessions}
-            docked={fuseResume}
-            onPick={(row) => {
-              if (row.agentId && row.agentSessionId) {
-                // A Claude Code thread — import it into a fresh native Aura
-                // chat (transcript and all) before opening, the same path the
-                // header history dropdown uses. On failure, fall back to the
-                // history dropdown so there's always a way back.
-                const root = resolvedRepoRoot;
-                if (root) {
-                  void api
-                    .managerImportAgentSession(row.agentId, root, row.agentSessionId)
-                    .then((newSid) => openManagerSession(newSid, row.title))
-                    .catch(() =>
-                      window.dispatchEvent(
-                        new CustomEvent("aura:manager:open-history"),
-                      ),
-                    );
+            {dockedResume?.interactive?.kind === "resume" && (
+              <ResumePicker
+                sessions={dockedResume.interactive.sessions}
+                docked={fuseResume}
+                onPick={(row) => {
+                  if (row.agentId && row.agentSessionId) {
+                    // A Claude Code thread — import it into a fresh native Aura
+                    // chat (transcript and all) before opening, the same path the
+                    // header history dropdown uses. On failure, fall back to the
+                    // history dropdown so there's always a way back.
+                    const root = resolvedRepoRoot;
+                    if (root) {
+                      void api
+                        .managerImportAgentSession(
+                          row.agentId,
+                          root,
+                          row.agentSessionId,
+                        )
+                        .then((newSid) => openManagerSession(newSid, row.title))
+                        .catch(() =>
+                          window.dispatchEvent(
+                            new CustomEvent("aura:manager:open-history"),
+                          ),
+                        );
+                    }
+                  } else {
+                    openManagerSession(row.id, row.title);
+                  }
+                  // The picker did its job — drop it so a resumed-away thread
+                  // doesn't leave a stale list behind in this conversation.
+                  setSlashLog((prev) =>
+                    prev.filter((s) => s.at !== dockedResume.at),
+                  );
+                }}
+                onDismiss={() =>
+                  setSlashLog((prev) =>
+                    prev.filter((s) => s.at !== dockedResume.at),
+                  )
                 }
-              } else {
-                openManagerSession(row.id, row.title);
-              }
-              // The picker did its job — drop it so a resumed-away thread
-              // doesn't leave a stale list behind in this conversation.
-              setSlashLog((prev) =>
-                prev.filter((s) => s.at !== dockedResume.at),
-              );
-            }}
-            onDismiss={() =>
-              setSlashLog((prev) =>
-                prev.filter((s) => s.at !== dockedResume.at),
-              )
-            }
-          />
-        )}
-        <ManagerQueueStack
-          queue={queue}
-          busy={busy}
-          onRemove={removeQueued}
-          onEdit={editQueued}
-          onPromote={promoteQueued}
-          onMove={moveQueued}
-          onClear={clearQueue}
-        />
-        {/* Live Crew telemetry — a collapsible strip showing the autonomous
+              />
+            )}
+            <ManagerQueueStack
+              queue={queue}
+              busy={busy}
+              onRemove={removeQueued}
+              onEdit={editQueued}
+              onPromote={promoteQueued}
+              onMove={moveQueued}
+              onClear={clearQueue}
+            />
+            {/* Live Crew telemetry — a collapsible strip showing the autonomous
             work-loop's agents (working now / just landed + proof / failed),
             the way Claude Code surfaces its sub-agents. Renders nothing when no
             agent is working and nothing is queued, so it never adds chrome. */}
-        {crewSpawning && (
-          <div className="px-1 pb-1">
-            <PlanningStatusLine label="Spinning up the crew" />
-          </div>
-        )}
-        <CrewComposerBlock
-          repoRoot={resolvedRepoRoot}
-          onActiveChange={onCrewActiveChange}
-        />
-        {/* Docked in-flight strip — the live "Running … · 12s" status, pinned
+            {crewSpawning && (
+              <div className="px-1 pb-1">
+                <PlanningStatusLine label="Spinning up the crew" />
+              </div>
+            )}
+            <CrewComposerBlock
+              repoRoot={resolvedRepoRoot}
+              onActiveChange={onCrewActiveChange}
+            />
+            {/* Docked in-flight strip — the live "Running … · 12s" status, pinned
             flush atop the composer (squared bottom + negative margin closes the
             dock's 6px gap) so it reads as one unit with the input while the
             turn runs, then collapses away the moment it finishes. */}
-        {runningTool && <RunningCommandStatus tool={runningTool} docked />}
-        <ManagerComposer
-          repoRoot={resolvedRepoRoot}
-          workspaceLabel={session.projects[0]?.label}
-          // Same composer, one changed word. `@mention files` is dropped on a
-          // remote conversation because the picker indexes this laptop's
-          // checkout — offering it would attach the wrong copy of a file that
-          // exists in both places, which is worse than not offering it.
-          placeholder={
-            machineName
-              ? `Ask about the code on ${machineName}, run /commands`
-              : undefined
-          }
-          // Square the composer's top so the docked running strip (which rounds
-          // only its top) meets it on a single hairline — one stacked unit, no
-          // floating gap — exactly as the question/plan/resume banners fuse.
-          docked={fuseQuestion || fusePlan || fuseResume || !!runningTool}
-          busy={busy}
-          usage={usage}
-          spend={spend}
-          sessionId={session.id}
-          // Presence enables the composer's Goal toggle. The toggle no longer
-          // fires on click — arming it tags the next Send (the `goal` flag on
-          // onSend/onQueue), which routes the message into the chat with a
-          // "Sent as goal" badge and steers the brain to plan it via the crew
-          // loop. This callback is kept only as the enable-gate.
-          onPlanGoal={() => {}}
-          onBrainOverrideChange={setBrainOverride}
-          modelOverride={modelOverride}
-          onModelOverrideChange={setModelOverride}
-          onSend={(msg, attachments, mode, pipeTo, effort, fast, approval, goal) =>
-            void send(msg, attachments, mode, pipeTo, effort, fast, approval, goal)
-          }
-          onQueue={(msg, attachments, mode, pipeTo, effort, fast, approval, goal) =>
-            enqueue(msg, attachments, mode, pipeTo, effort, fast, approval, goal)
-          }
-          onSteer={(msg, attachments, mode, pipeTo, effort, fast, approval, goal) =>
-            steer(msg, attachments, mode, pipeTo, effort, fast, approval, goal)
-          }
-          onStop={stopTurn}
-          agentCommands={agentSlashRows}
-          agentModes={agent.surface.modes}
-          agentMode={agent.surface.current_mode}
-          onAgentModeChange={agent.setMode}
-          agentModeError={agent.modeError}
-        />
-      </div>
-    </div>
-    </ChatSpendContext.Provider>
+            {runningTool && <RunningCommandStatus tool={runningTool} docked />}
+            <ManagerComposer
+              repoRoot={resolvedRepoRoot}
+              workspaceLabel={session.projects[0]?.label}
+              // Same composer, one changed word. `@mention files` is dropped on a
+              // remote conversation because the picker indexes this laptop's
+              // checkout — offering it would attach the wrong copy of a file that
+              // exists in both places, which is worse than not offering it.
+              placeholder={
+                machineName
+                  ? `Ask about the code on ${machineName}, run /commands`
+                  : undefined
+              }
+              // Square the composer's top so the docked running strip (which rounds
+              // only its top) meets it on a single hairline — one stacked unit, no
+              // floating gap — exactly as the question/plan/resume banners fuse.
+              docked={fuseQuestion || fusePlan || fuseResume || !!runningTool}
+              busy={busy}
+              usage={usage}
+              spend={spend}
+              sessionId={session.id}
+              // Presence enables the composer's Goal toggle. The toggle no longer
+              // fires on click — arming it tags the next Send (the `goal` flag on
+              // onSend/onQueue), which routes the message into the chat with a
+              // "Sent as goal" badge and steers the brain to plan it via the crew
+              // loop. This callback is kept only as the enable-gate.
+              onPlanGoal={() => {}}
+              onBrainOverrideChange={setBrainOverride}
+              modelOverride={modelOverride}
+              onModelOverrideChange={setModelOverride}
+              onSend={(
+                msg,
+                attachments,
+                mode,
+                pipeTo,
+                effort,
+                fast,
+                approval,
+                goal,
+              ) =>
+                void send(
+                  msg,
+                  attachments,
+                  mode,
+                  pipeTo,
+                  effort,
+                  fast,
+                  approval,
+                  goal,
+                )
+              }
+              onQueue={(
+                msg,
+                attachments,
+                mode,
+                pipeTo,
+                effort,
+                fast,
+                approval,
+                goal,
+              ) =>
+                enqueue(
+                  msg,
+                  attachments,
+                  mode,
+                  pipeTo,
+                  effort,
+                  fast,
+                  approval,
+                  goal,
+                )
+              }
+              onSteer={(
+                msg,
+                attachments,
+                mode,
+                pipeTo,
+                effort,
+                fast,
+                approval,
+                goal,
+              ) =>
+                steer(
+                  msg,
+                  attachments,
+                  mode,
+                  pipeTo,
+                  effort,
+                  fast,
+                  approval,
+                  goal,
+                )
+              }
+              onStop={stopTurn}
+              agentCommands={agentSlashRows}
+              agentModes={agent.surface.modes}
+              agentMode={agent.surface.current_mode}
+              onAgentModeChange={agent.setMode}
+              agentModeError={agent.modeError}
+            />
+          </div>
+        </div>
+      </ChatSpendContext.Provider>
     </ChatRepoRootContext.Provider>
   );
 }
-
-
 
 // ── Stream-block accumulators ────────────────────────────────────────────
 
@@ -2851,8 +2936,13 @@ function upsertReasoning(blocks: StreamBlock[], idx: number, text: string): Stre
   return [...blocks, added].sort((a, b) => a.block_idx - b.block_idx);
 }
 
-function upsertTool(blocks: StreamBlock[], tool: StreamBlock & { kind: "tool" }): StreamBlock[] {
-  const i = blocks.findIndex((b) => b.kind === "tool" && b.block_idx === tool.block_idx);
+function upsertTool(
+  blocks: StreamBlock[],
+  tool: StreamBlock & { kind: "tool" },
+): StreamBlock[] {
+  const i = blocks.findIndex(
+    (b) => b.kind === "tool" && b.block_idx === tool.block_idx,
+  );
   if (i >= 0) {
     const next = blocks.slice();
     const cur = next[i] as typeof tool;
@@ -2861,9 +2951,10 @@ function upsertTool(blocks: StreamBlock[], tool: StreamBlock & { kind: "tool" })
     next[i] = { ...tool, result: cur.result, started_at: cur.started_at };
     return next;
   }
-  return [...blocks, { ...tool, started_at: tool.started_at ?? Date.now() }].sort(
-    (a, b) => a.block_idx - b.block_idx,
-  );
+  return [
+    ...blocks,
+    { ...tool, started_at: tool.started_at ?? Date.now() },
+  ].sort((a, b) => a.block_idx - b.block_idx);
 }
 
 function attachResult(
@@ -2880,8 +2971,6 @@ function attachResult(
   }
   return next;
 }
-
-
 
 // ── Live running-command status (#3) ─────────────────────────────────────
 //
@@ -2991,20 +3080,6 @@ function RunningCommandStatus({
       role="status"
       aria-live="polite"
     >
-      {/* Spinner — a 1.5px ring with a transparent top, the same in-flight
-          glyph the WaveStatusPip uses, tinted amber for "running". */}
-      <span
-        aria-hidden
-        className="shrink-0 inline-block"
-        style={{
-          width: 12,
-          height: 12,
-          borderRadius: "50%",
-          border: `1.5px solid ${warn}`,
-          borderTopColor: "transparent",
-          animation: "aura-chat-spin 0.9s linear infinite",
-        }}
-      />
       <span
         className="t-2xs t-ui shrink-0"
         style={{ color: warn, fontWeight: 600 }}
@@ -3024,7 +3099,10 @@ function RunningCommandStatus({
       {elapsed > 0 && (
         <span
           className="ml-auto shrink-0 tabular-nums t-2xs"
-          style={{ color: "var(--color-text-3)", fontFamily: "var(--font-mono)" }}
+          style={{
+            color: "var(--color-text-3)",
+            fontFamily: "var(--font-mono)",
+          }}
         >
           {formatLiveDuration(elapsed)}
         </span>
@@ -3032,8 +3110,6 @@ function RunningCommandStatus({
     </div>
   );
 }
-
-
 
 // ── Interactive plan card ───────────────────────────────────────────────
 //
@@ -3044,7 +3120,7 @@ function RunningCommandStatus({
 // `aura propose-plan` wakes up with the verb, then either fans out
 // subagents (Build) or backs off and asks the user a follow-up (Cancel).
 
-function PlanCard({
+export function PlanCard({
   sessionId,
   plan,
   onError,
@@ -3064,7 +3140,9 @@ function PlanCard({
   grouped?: boolean;
   repoRoot?: string | null;
 }) {
-  const [submitting, setSubmitting] = useState<"build" | "revise" | "cancel" | null>(null);
+  const [submitting, setSubmitting] = useState<
+    "build" | "revise" | "cancel" | null
+  >(null);
   const [revisionOpen, setRevisionOpen] = useState(false);
   const [revisionFeedback, setRevisionFeedback] = useState("");
   // Bucket N3 — opt-in team broadcast on Build. Default off so the
@@ -3115,7 +3193,16 @@ function PlanCard({
         setSubmitting(null);
       }
     },
-    [submitting, sessionId, plan.id, onError, onBuildStart, notifyTeam, parallelism, revisionFeedback],
+    [
+      submitting,
+      sessionId,
+      plan.id,
+      onError,
+      onBuildStart,
+      notifyTeam,
+      parallelism,
+      revisionFeedback,
+    ],
   );
 
   // "Open plan" → the proper fullscreen wizard overlay (Document / Tasks),
@@ -3158,271 +3245,79 @@ function PlanCard({
     }
   }, [approving, approvedBy, repoRoot, sessionId, plan.id, onError]);
 
-  // Keyboard shortcuts: Enter = Build, Esc = Cancel. Only when focus is
-  // not in an input/textarea (so the chat composer keeps its own Enter).
-  useEffect(() => {
-    if (submitting) return;
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
-      if (e.key === "Enter") {
-        e.preventDefault();
-        void decide("build");
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        void decide("cancel");
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [plan.id, submitting, decide]);
-
-  const [optionsOpen, setOptionsOpen] = useState(false);
-  const optionsRef = useRef<HTMLDivElement | null>(null);
-  useDismiss(optionsOpen, () => setOptionsOpen(false), optionsRef);
-
   const description = plan.summary?.trim() || plan.objective?.trim() || "";
-  const phaseCount = plan.phases?.length ?? 0;
-  const stepCount = plan.todos.length;
-  // Compact one-line meta: "6 phases · 8 steps". Omit a count when zero so
-  // a phases-only or steps-only plan doesn't read "0 phases".
-  const metaLine = [
-    phaseCount > 0 ? `${phaseCount} phase${phaseCount === 1 ? "" : "s"}` : null,
-    stepCount > 0 ? `${stepCount} step${stepCount === 1 ? "" : "s"}` : null,
+  const meta = [
+    plan.phases?.length ? `${plan.phases.length} phases` : null,
+    `${plan.todos.length} task${plan.todos.length === 1 ? "" : "s"}`,
+    approvedBy
+      ? `Approved by ${approvedBy}${approvedAt ? ` · ${formatRelativeApprovalTime(approvedAt)}` : ""}`
+      : null,
   ]
     .filter(Boolean)
     .join(" · ");
-  // Live status the inline chip carries (Antigravity-style "waiting for the
-  // update"): the plan sits "Awaiting review" until the user acts, flips to
-  // "Building…/Cancelling…" the instant they decide, and reads "Approved"
-  // once stamped. `amber` = in-flight, `accent` = ready, `muted` = winding
-  // down. The chip is the surface; clicking it opens the full Plan tab.
-  const status: { label: string; tone: "accent" | "amber" | "muted"; pulse: boolean } =
+  const status =
     submitting === "build"
-      ? { label: "Building…", tone: "amber", pulse: true }
+      ? "Building…"
       : submitting === "cancel"
-        ? { label: "Cancelling…", tone: "muted", pulse: true }
-        : submitting === "revise"
-          ? { label: "Sending feedback…", tone: "amber", pulse: true }
+        ? "Cancelling…"
         : approvedBy
-          ? { label: "Approved", tone: "accent", pulse: false }
-          : { label: "Awaiting review", tone: "accent", pulse: true };
-  // The "amber" tone above is the plan mid-flight (Building… / Sending
-  // feedback…) — genuinely the in-flight slot, so it takes --color-amber.
-  // The "accent" tone is Approved / Awaiting review: states you can act on,
-  // which is what the accent is for.
-  const statusColor =
-    status.tone === "amber"
-      ? "var(--color-amber)"
-      : status.tone === "muted"
-        ? "var(--color-text-3)"
-        : "var(--color-accent)";
-
-  // Compact inline plan chip (Antigravity-style). The plan does NOT take
-  // over the chat view — it surfaces as a single clickable strip in the
-  // stream that carries a live status ("Awaiting review" → "Building…")
-  // and, on click, opens the full Plan tab (phases, architecture, file
-  // refs, todos). The footer keeps a primary Build + a chevron menu that
-  // folds the secondary controls (Approve, parallelism, Notify team,
-  // Cancel) so the resting card stays a chip, not a wall. The full
-  // decision bar also lives on the Plan tab itself.
+          ? "Approved"
+          : "Ready for review";
   return (
-    <div
-      className={`aura-block w-full flex flex-col overflow-hidden ${grouped ? "mt-1" : "mt-2"} mb-2`}
-    >
-      {/* The whole strip is the open-tab affordance. */}
-      <button
-        type="button"
-        onClick={openAsTab}
-        className="w-full text-left flex items-start gap-3 px-3 py-2.5 transition-colors hover:bg-state-hover"
-        title="Open the full plan (phases, architecture, file refs) in its own tab"
-      >
-        <span
-          className="flex items-center justify-center shrink-0 mt-[1px]"
-          style={{
-            width: 22,
-            height: 22,
-            background: "color-mix(in srgb, var(--color-accent) 12%, transparent)",
-            color: "var(--color-accent)",
-            borderRadius: "var(--radius-sm)",
-          }}
-        >
-          <ListTree size={13} strokeWidth={2} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="aura-block-label">PLAN</span>
-            <span
-              className="inline-flex items-center gap-1 t-2xs t-ui"
-              style={{ color: statusColor }}
-            >
-              <span
-                className={`inline-block rounded-full ${status.pulse ? "animate-pulse" : ""}`}
-                style={{ width: 5, height: 5, background: statusColor }}
-              />
-              {status.label}
-            </span>
-          </div>
-          <div
-            className="t-sm t-heading mt-0.5 truncate"
-            style={{ color: "var(--color-text-1)" }}
-          >
-            {plan.title}
-          </div>
-          {description && (
-            <div
-              className="t-xs mt-0.5 line-clamp-1"
-              style={{ color: "var(--color-text-2)" }}
-            >
-              {description}
-            </div>
-          )}
-          {(metaLine || approvedBy) && (
-            <div
-              className="t-2xs mt-1 flex items-center gap-1.5 flex-wrap"
-              style={{ color: "var(--color-text-3)", fontFamily: "var(--font-mono)" }}
-            >
-              {metaLine && <span>{metaLine}</span>}
-              {metaLine && approvedBy && <span>·</span>}
-              {approvedBy && (
-                <span>
-                  approved by @{approvedBy}
-                  {approvedAt ? ` · ${formatRelativeApprovalTime(approvedAt)}` : ""}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-        <span
-          className="shrink-0 self-center inline-flex items-center gap-1 t-2xs t-ui"
-          style={{ color: "var(--color-accent)" }}
-        >
-          View plan
-          <SquareArrowOutUpRight size={11} strokeWidth={2} />
-        </span>
-      </button>
-      <div
-        className="flex items-center justify-between gap-2 px-3 py-2 border-t"
-        style={{ borderColor: "var(--color-line-soft)" }}
-      >
-        <span
-          className="t-2xs"
-          style={{
-            color: "var(--color-text-3)",
-            fontFamily: "var(--font-mono)",
-            letterSpacing: "0.04em",
-          }}
-        >
-          ⏎ BUILD · ESC CANCEL
-        </span>
-        <div className="relative flex items-stretch" ref={optionsRef}>
-          <button
-            type="button"
-            disabled={submitting !== null}
-            onClick={() => void decide("build")}
-            className="t-sm px-2.5 py-1 flex items-center disabled:opacity-50 transition-opacity"
-            style={{
-              background: "var(--color-accent)",
-              color: "var(--color-bg-0)",
-              borderTopLeftRadius: "var(--radius-sm)",
-              borderBottomLeftRadius: "var(--radius-sm)",
-              fontWeight: 500,
-            }}
-          >
-            {submitting === "build" ? "Building…" : "Build"}
-            {/* Not the shared `Kbd`: this cap sits inside a filled accent
-                button, so it has to invert against that fill rather than
-                against the page, which is what the shared one paints for.
-                The glyph, though, was wrong — it read ⌘⏎ while the strip
-                fifteen pixels above it read "⏎ BUILD · ESC CANCEL" and the
-                handler is a bare `e.key === "Enter"`. One card, two answers
-                for one key. */}
-            <kbd
-              className="font-mono t-2xs ml-1.5"
-              style={{
-                background: "rgba(0,0,0,0.18)",
-                color: "rgba(0,0,0,0.72)",
-                padding: "1px 4px",
-                borderRadius: "var(--radius-xs)",
-              }}
-            >
-              ⏎
-            </kbd>
-          </button>
-          <button
-            type="button"
-            disabled={submitting !== null}
-            onClick={() => setOptionsOpen((v) => !v)}
-            aria-label="Plan options"
-            className="px-1.5 flex items-center disabled:opacity-50 transition-opacity"
-            style={{
-              background: "var(--color-accent)",
-              color: "var(--color-bg-0)",
-              borderTopRightRadius: "var(--radius-sm)",
-              borderBottomRightRadius: "var(--radius-sm)",
-              borderLeft: "1px solid rgba(0,0,0,0.18)",
-            }}
-          >
-            <ChevronDown size={12} strokeWidth={2} />
-          </button>
-          {optionsOpen && (
-            <div
-              className="absolute right-0 z-20 flex flex-col py-1"
-              style={{
-                top: "calc(100% + 4px)",
-                minWidth: 220,
-                background: "var(--color-bg-1)",
-                border: "1px solid var(--color-line)",
-                borderRadius: "var(--radius-md)",
-                boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
-              }}
-            >
-              {/* Approve — stamp the plan with the user's handle without
-                  building. Hidden once stamped so the menu stays tidy. */}
-              {!approvedBy && (
+    <div className={grouped ? "mt-1" : "mt-2"}>
+      <PlanPreview
+        title={plan.title}
+        summary={description}
+        status={status}
+        meta={meta}
+        onOpen={openAsTab}
+        actions={
+          <>
+            <Popover>
+              <PopoverTrigger asChild>
                 <button
                   type="button"
-                  disabled={approving || submitting !== null}
-                  onClick={() => {
-                    setOptionsOpen(false);
-                    void approve();
-                  }}
-                  className="px-3 py-1.5 t-sm text-left disabled:opacity-50 transition-colors hover:bg-state-hover"
-                  style={{ color: "var(--color-text-2)" }}
-                  title="Stamp this plan with your handle + timestamp. Persists across reload; does not Build."
+                  className="chat-plan-secondary"
+                  aria-label="Plan options"
+                  disabled={submitting !== null}
                 >
-                  {approving ? "Approving…" : "Approve plan"}
+                  <MoreHorizontal size={16} />
                 </button>
-              )}
-              {/* Parallelism — Auto / Parallel / Serial dispatch mode. */}
-              <div className="px-3 pt-1.5 pb-1">
-                <div
-                  className="t-2xs t-ui mb-1"
-                  style={{ color: "var(--color-text-3)" }}
-                >
-                  Parallelism
-                </div>
-                <ParallelismControl
-                  value={parallelism}
-                  onChange={setParallelism}
-                  disabled={submitting !== null}
-                />
-              </div>
-              <label
-                className="px-3 py-1.5 t-sm flex items-center gap-2 select-none cursor-pointer hover:bg-state-hover"
-                style={{ color: "var(--color-text-2)" }}
-                title="Send 'Plan built: <title>' to your team via aura msg when this kicks off."
+              </PopoverTrigger>
+              <PopoverContent
+                align="end"
+                side="top"
+                className="unified-composer-options"
               >
-                <input
-                  type="checkbox"
-                  checked={notifyTeam}
-                  onChange={(e) => setNotifyTeam(e.target.checked)}
-                  disabled={submitting !== null}
-                  className="cursor-pointer"
-                />
-                Notify team
-              </label>
-              <button
+                <div className="composer-menu-heading">Plan options</div>
+                {!approvedBy && (
+                  <button
+                    type="button"
+                    className="chat-plan-secondary"
+                    disabled={approving || submitting !== null}
+                    onClick={() => void approve()}
+                  >
+                    {approving ? "Approving…" : "Approve plan"}
+                  </button>
+                )}
+                <div className="px-2 py-2">
+                  <div className="composer-menu-heading">Run tasks</div>
+                  <ParallelismControl
+                    value={parallelism}
+                    onChange={setParallelism}
+                    disabled={submitting !== null}
+                  />
+                </div>
+                <label className="flex items-center gap-2 px-2 py-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={notifyTeam}
+                    onChange={(e) => setNotifyTeam(e.target.checked)}
+                    disabled={submitting !== null}
+                  />
+                  Notify team when building starts
+                </label>
+                <button
                 type="button"
                 disabled={submitting !== null}
                 onClick={() => setRevisionOpen((value) => !value)}
@@ -3436,7 +3331,9 @@ function PlanCard({
                   <textarea
                     autoFocus
                     value={revisionFeedback}
-                    onChange={(event) => setRevisionFeedback(event.target.value)}
+                    onChange={(event) =>
+                      setRevisionFeedback(event.target.value)
+                    }
                     rows={3}
                     maxLength={8000}
                     placeholder="What should the plan change?"
@@ -3463,31 +3360,55 @@ function PlanCard({
                   </button>
                 </div>
               )}
-              <div
-                className="my-1"
-                style={{ borderTop: "1px solid var(--color-line)" }}
-              />
-              <button
-                type="button"
-                disabled={submitting !== null}
-                onClick={() => {
-                  setOptionsOpen(false);
-                  void decide("cancel");
-                }}
-                className="px-3 py-1.5 t-sm text-left disabled:opacity-50 transition-colors hover:bg-state-hover"
-                style={{ color: "var(--color-text-2)" }}
-              >
-                {submitting === "cancel" ? "Cancelling…" : "Cancel plan"}
-                <Kbd className="ml-1.5">esc</Kbd>
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-      {/* v0.2.31 LL.1 — Orchestrator Mode lives inside the PlanCard so the
-          user can fan out specialist lanes (one Brain per lane, isolated
-          context) without leaving the plan surface. Collapsed by default. */}
-      <PlanOrchestratorSection plan={plan} repoRoot={repoRoot ?? null} />
+<button
+                  type="button"
+                  className="chat-plan-secondary"
+                  disabled={submitting !== null}
+                  onClick={() => void decide("cancel")}
+                >
+                  {submitting === "cancel" ? "Cancelling…" : "Cancel plan"}
+                </button>
+              </PopoverContent>
+            </Popover>
+            <button
+              type="button"
+              className="chat-plan-secondary"
+              onClick={openAsTab}
+            >
+              Review plan
+            </button>
+            <button
+              type="button"
+              className="chat-primary-action"
+              disabled={submitting !== null}
+              onClick={() => void decide("build")}
+            >
+              {submitting === "build" ? "Building…" : "Build"}
+            </button>
+          </>
+        }
+        extra={
+          <PlanOrchestratorSection plan={plan} repoRoot={repoRoot ?? null} />
+        }
+      >
+        {plan.todos.length > 0 && (
+          <ol className="chat-plan-tasks">
+            {plan.todos.slice(0, 3).map((todo, i) => (
+              <li key={i}>
+                <span className="chat-task-mark" aria-hidden />
+                <span>{todo.description}</span>
+              </li>
+            ))}
+            {plan.todos.length > 3 && (
+              <li>
+                <span className="text-xs text-text-3">
+                  {plan.todos.length - 3} more in the full plan
+                </span>
+              </li>
+            )}
+          </ol>
+        )}
+      </PlanPreview>
     </div>
   );
 }
@@ -3507,23 +3428,18 @@ function PlanOrchestratorSection({
   const [open, setOpen] = useState(false);
   const laneCount = plan.todos?.length ?? 0;
   return (
-    <div
-      className="border-t"
-      style={{ borderColor: "var(--color-line-soft)" }}
-    >
+    <div className="border-t" style={{ borderColor: "var(--color-line-soft)" }}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full px-3 py-1.5 flex items-center justify-between t-2xs"
+        className="w-full px-4 py-3 flex items-center justify-between text-xs"
         style={{
           color: "var(--color-text-3)",
-          fontFamily: "var(--font-mono)",
-          letterSpacing: "0.04em",
           background: open ? "var(--color-bg-1)" : "transparent",
         }}
       >
         <span>
-          [ ORCHESTRATOR ] {laneCount} LANE{laneCount === 1 ? "" : "S"}
+          Agent assignments · {laneCount} task{laneCount === 1 ? "" : "s"}
         </span>
         <ChevronDown
           size={12}
@@ -3631,11 +3547,21 @@ function pendingPlanToTabInput(plan: PendingPlan) {
   };
 }
 
-
 // ── Persisted bubbles + system lines ────────────────────────────────────
 
-function SystemLine({ text, tone }: { text: string; tone: "info" | "warn" | "ok" }) {
-  const cls = tone === "warn" ? "system-line warn" : tone === "ok" ? "system-line ok" : "system-line";
+function SystemLine({
+  text,
+  tone,
+}: {
+  text: string;
+  tone: "info" | "warn" | "ok";
+}) {
+  const cls =
+    tone === "warn"
+      ? "system-line warn"
+      : tone === "ok"
+        ? "system-line ok"
+        : "system-line";
   return (
     <div className={cls}>
       <span style={{ opacity: 0.7 }}>· </span>
@@ -3651,7 +3577,13 @@ function SystemLine({ text, tone }: { text: string; tone: "info" | "warn" | "ok"
 // echoes as their own bubble just above, so the result needs no header. A
 // `warn`/`ok` result keeps a single quiet leading glyph in the tone colour as
 // a subtle signal; the default `info` tone gets no chrome at all.
-function SystemCard({ text, tone }: { text: string; tone: "info" | "warn" | "ok" }) {
+function SystemCard({
+  text,
+  tone,
+}: {
+  text: string;
+  tone: "info" | "warn" | "ok";
+}) {
   if (tone === "info") {
     return (
       <div className="my-1.5">
@@ -3660,13 +3592,15 @@ function SystemCard({ text, tone }: { text: string; tone: "info" | "warn" | "ok"
     );
   }
   const accent =
-    tone === "warn"
-      ? "var(--color-accent)"
-      : "var(--color-accent-green)";
+    tone === "warn" ? "var(--color-accent)" : "var(--color-accent-green)";
   const Glyph = tone === "warn" ? AlertTriangle : Check;
   return (
     <div className="my-1.5 flex items-start gap-1.5">
-      <Glyph size={13} className="mt-[3px] shrink-0" style={{ color: accent }} />
+      <Glyph
+        size={13}
+        className="mt-[3px] shrink-0"
+        style={{ color: accent }}
+      />
       <div className="min-w-0 flex-1">
         <MarkdownBody source={text} />
       </div>
@@ -3796,7 +3730,10 @@ function ResumePicker({
             aria-label={`Resume ${s.title}`}
             onClick={() => onPick(s)}
             className="group flex items-center gap-2 px-2 py-1 text-left transition-colors"
-            style={{ borderRadius: "var(--radius-xs)", background: "transparent" }}
+            style={{
+              borderRadius: "var(--radius-xs)",
+              background: "transparent",
+            }}
             onMouseEnter={(e) => {
               e.currentTarget.style.background = "var(--color-bg-2)";
             }}
@@ -3899,7 +3836,9 @@ function parseScoutSpecialistLine(text: string): SettledSpecialist | null {
   // Treat any not-completed signal — timed out, errored, or a calm
   // "skipped" the backend now emits — as the non-done (Skipped) state.
   const status: SettledSpecialist["status"] =
-    /time(?:d)?\s*out|timeout|failed|error|skip/i.test(body) ? "failed" : "done";
+    /time(?:d)?\s*out|timeout|failed|error|skip/i.test(body)
+      ? "failed"
+      : "done";
   return { kind, label: SCOUT_KIND_LABEL[kind], body, status };
 }
 
@@ -3908,7 +3847,11 @@ function parseScoutSpecialistLine(text: string): SettledSpecialist | null {
 // card. The collapsed row carries a plain-language summary; expanding it
 // shows each reviewer's note. Skipped reviewers (claude missing / timed
 // out) degrade quietly — no alarming "N timed out" shout.
-function SettledScoutBlock({ specialists }: { specialists: SettledSpecialist[] }) {
+function SettledScoutBlock({
+  specialists,
+}: {
+  specialists: SettledSpecialist[];
+}) {
   const [open, setOpen] = useState(false);
   const total = specialists.length;
   const reviewed = specialists.filter((s) => s.status === "done").length;
@@ -3930,14 +3873,9 @@ function SettledScoutBlock({ specialists }: { specialists: SettledSpecialist[] }
         title={open ? "Collapse" : "Expand plan review"}
       >
         <span className="aura-tool-glyph">
-          <span
-            aria-hidden
-            className="inline-block rounded-full"
-            style={{
-              width: 6,
-              height: 6,
-              background: "var(--color-text-4)",
-            }}
+          <ChevronRight
+            size={13}
+            style={{ transform: open ? "rotate(90deg)" : undefined }}
           />
         </span>
         <span className="aura-tool-chip-verb">Reviewed the plan</span>
@@ -3947,14 +3885,20 @@ function SettledScoutBlock({ specialists }: { specialists: SettledSpecialist[] }
         >
           {reviewerStatus}
         </span>
-        <span className="ml-auto shrink-0" style={{ color: "var(--color-text-4)" }}>
+        <span
+          className="ml-auto shrink-0"
+          style={{ color: "var(--color-text-4)" }}
+        >
           <ScoutChevron dir={open ? "up" : "down"} />
         </span>
       </button>
       {open && (
         <div className="aura-tool-substream">
           {specialists.map((s, i) => (
-            <div key={`${s.kind}-${i}`} className="flex items-start gap-2.5 py-1">
+            <div
+              key={`${s.kind}-${i}`}
+              className="flex items-start gap-2.5 py-1"
+            >
               <span className="shrink-0 mt-[1px]">
                 <AgentIcon agentId="claude" size={13} />
               </span>
@@ -4008,13 +3952,15 @@ function ScoutChevron({ dir }: { dir: "up" | "down" }) {
   );
 }
 
-function SpecialistStatusChip({ status }: { status: SettledSpecialist["status"] }) {
+function SpecialistStatusChip({
+  status,
+}: {
+  status: SettledSpecialist["status"];
+}) {
   const failed = status === "failed";
   // Status colours only (green = ok, warning-amber = skipped). A skipped
   // reviewer reads as a calm "Skipped", never an alarming failure.
-  const tone = failed
-    ? "var(--color-accent)"
-    : "var(--color-accent-green)";
+  const tone = failed ? "var(--color-accent)" : "var(--color-accent-green)";
   return (
     <span
       className="t-2xs t-ui px-1.5 py-0.5 shrink-0"
@@ -4054,7 +4000,13 @@ function MilestoneDivider({ text }: { text: string }) {
 // makes that legible: "you swapped models here, and the thread came with it",
 // reassuring the user (who switches when a provider's limits hit) that nothing
 // was dropped. Carries the new brain's own logo so the handoff is scannable.
-function BrainHandoffDivider({ brain, chat }: { brain: string; chat: ChatTurn[] }) {
+function BrainHandoffDivider({
+  brain,
+  chat,
+}: {
+  brain: string;
+  chat: ChatTurn[];
+}) {
   const [open, setOpen] = useState(false);
   const label = humanizeBrainId(brain);
   return (
@@ -4071,7 +4023,12 @@ function BrainHandoffDivider({ brain, chat }: { brain: string; chat: ChatTurn[] 
           className="aura-milestone-label"
           aria-expanded={open}
           title={`The conversation carried over to ${label}. The full thread came with it. Click for session details.`}
-          style={{ background: "transparent", border: 0, cursor: "pointer", font: "inherit" }}
+          style={{
+            background: "transparent",
+            border: 0,
+            cursor: "pointer",
+            font: "inherit",
+          }}
         >
           <AgentIcon agentId={brainAgentId(brain)} size={12} />
           Continued on {label}
@@ -4127,15 +4084,23 @@ function TimeGapDivider({ seconds }: { seconds: number }) {
   );
 }
 
-function ribbonAsSystem(entry: RibbonEntry): { text: string; tone: "info" | "warn" | "ok" } | null {
+function ribbonAsSystem(
+  entry: RibbonEntry,
+): { text: string; tone: "info" | "warn" | "ok" } | null {
   const ev = entry.event;
   switch (ev.kind) {
     case "task_dispatched":
-      return { text: `Sent task #${ev.task_id} to ${ev.agent_id}`, tone: "info" };
+      return {
+        text: `Sent task #${ev.task_id} to ${ev.agent_id}`,
+        tone: "info",
+      };
     case "task_completed":
       return ev.exit_code === 0
         ? { text: `Task #${ev.task_id} done`, tone: "ok" }
-        : { text: `Task #${ev.task_id} exited with ${ev.exit_code}`, tone: "warn" };
+        : {
+            text: `Task #${ev.task_id} exited with ${ev.exit_code}`,
+            tone: "warn",
+          };
     case "task_failed":
       return { text: `Task #${ev.task_id} failed: ${ev.error}`, tone: "warn" };
     case "zone_collision":
@@ -4155,10 +4120,14 @@ function ribbonAsSystem(entry: RibbonEntry): { text: string; tone: "info" | "war
       const n = ev.deletions.length;
       const head = `. Aura: task #${ev.task_id} flagged ${n} function deletion${n === 1 ? "" : "s"}`;
       const sample = ev.deletions.slice(0, 3).join(", ");
-      const more = ev.deletions.length > 3 ? ` (+${ev.deletions.length - 3} more)` : "";
+      const more =
+        ev.deletions.length > 3 ? ` (+${ev.deletions.length - 3} more)` : "";
       const detail = sample ? ` · ${sample}${more}` : "";
       const tail = ev.reason ? ` · ${ev.reason}` : "";
-      return { text: `${head}${detail}${tail}. Review the worktree before merging.`, tone: "warn" };
+      return {
+        text: `${head}${detail}${tail}. Review the worktree before merging.`,
+        tone: "warn",
+      };
     }
     case "paused":
       return { text: "Paused", tone: "info" };
@@ -4338,7 +4307,8 @@ const ChatBubble = memo(function ChatBubble({
   onFork?: (chatIndex: number, target: "tab" | "workspace") => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const visibleText = turn.role === "user" ? stripModeDirective(turn.text) : turn.text;
+  const visibleText =
+    turn.role === "user" ? stripModeDirective(turn.text) : turn.text;
   // The turn kept its raw `[GOAL …]` steering prefix (stripped from the visible
   // text above) — badge it so "send as goal" is legible after reload, from the
   // persisted turn alone.
@@ -4350,8 +4320,10 @@ const ChatBubble = memo(function ChatBubble({
   const moreRef = useRef<HTMLDivElement | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   // Experimental "Saved ~N tokens" chip — gated on the reactive settings flag.
-  const { show_token_savings: showSavings, show_message_tokens: showMsgTokens } =
-    useFlagPrefs();
+  const {
+    show_token_savings: showSavings,
+    show_message_tokens: showMsgTokens,
+  } = useFlagPrefs();
   // Read through context rather than a prop: these totals move once per turn,
   // and threading them down would defeat the memo that keeps the whole settled
   // transcript still while a reply streams.
@@ -4459,12 +4431,9 @@ const ChatBubble = memo(function ChatBubble({
               border: "1px solid var(--color-line-soft)",
             }}
           >
-            <div
-              className="t-xs t-ui"
-              style={{ color: "var(--color-text-2)" }}
-            >
-              Resend from this point. Also rewind project files to where
-              they were when you sent this?
+            <div className="t-xs t-ui" style={{ color: "var(--color-text-2)" }}>
+              Resend from this point. Also rewind project files to where they
+              were when you sent this?
             </div>
             <div className="flex items-center justify-end gap-2">
               <button
@@ -4566,7 +4535,10 @@ const ChatBubble = memo(function ChatBubble({
           >
             {turn.answered_question}
           </div>
-          <div className="t-base px-3 py-2" style={{ color: "var(--color-text-1)" }}>
+          <div
+            className="t-base px-3 py-2"
+            style={{ color: "var(--color-text-1)" }}
+          >
             {visibleText}
           </div>
           <BubbleActions onCopy={copyText} copied={copied} onEdit={null} />
@@ -4651,130 +4623,130 @@ const ChatBubble = memo(function ChatBubble({
         return changes ? <TurnChanges summary={changes} /> : null;
       })()}
       {showActions && (
-      <div className="aura-msg-actions">
-        {durationSec != null && (
-          // The time taken is the handle for the turn's cost: hover it for what
-          // this message billed, what the chat has billed, what every key has
-          // billed — then the model, the window and the tokens behind those
-          // figures. Same card the coding-agent transcript hangs off its own
-          // elapsed time, so "what did that reply cost me" is answered the same
-          // way wherever you are.
-          <TurnCostTip
-            cost={buildTurnCost({
-              // The exact model id when the turn recorded one; the brain that
-              // ran it either way, so history from before turns carried a model
-              // still reads "Gemini" rather than going blank.
-              model: turn.model ?? null,
-              agent: turn.brain ? humanizeBrainId(turn.brain) : null,
-              // `at` is epoch SECONDS here, and the duration is the gap back to
-              // the prompt this turn answered.
-              startMs: (turn.at - durationSec) * 1000,
-              endMs: turn.at * 1000,
-              inputTokens: turn.input_tokens,
-              outputTokens: turn.output_tokens,
-              // Stamped on the turn when it settled — the very figure that went
-              // into the spend ledger, never a re-pricing of the counts above.
-              costUsd: turn.cost_usd,
-              costEstimated: turn.cost_estimated,
-              sessionCostUsd: chatSpend.sessionUsd,
-              sessionEstimated: chatSpend.sessionEstimated,
-              sessionPartial: chatSpend.sessionPartial,
-              totalCostUsd: chatSpend.totalUsd,
-              totalEstimated: chatSpend.totalEstimated,
-              billing: billingForBrain(turn.brain),
-            })}
+        <div className="aura-msg-actions">
+          {durationSec != null && (
+            // The time taken is the handle for the turn's cost: hover it for what
+            // this message billed, what the chat has billed, what every key has
+            // billed — then the model, the window and the tokens behind those
+            // figures. Same card the coding-agent transcript hangs off its own
+            // elapsed time, so "what did that reply cost me" is answered the same
+            // way wherever you are.
+            <TurnCostTip
+              cost={buildTurnCost({
+                // The exact model id when the turn recorded one; the brain that
+                // ran it either way, so history from before turns carried a model
+                // still reads "Gemini" rather than going blank.
+                model: turn.model ?? null,
+                agent: turn.brain ? humanizeBrainId(turn.brain) : null,
+                // `at` is epoch SECONDS here, and the duration is the gap back to
+                // the prompt this turn answered.
+                startMs: (turn.at - durationSec) * 1000,
+                endMs: turn.at * 1000,
+                inputTokens: turn.input_tokens,
+                outputTokens: turn.output_tokens,
+                // Stamped on the turn when it settled — the very figure that went
+                // into the spend ledger, never a re-pricing of the counts above.
+                costUsd: turn.cost_usd,
+                costEstimated: turn.cost_estimated,
+                sessionCostUsd: chatSpend.sessionUsd,
+                sessionEstimated: chatSpend.sessionEstimated,
+                sessionPartial: chatSpend.sessionPartial,
+                totalCostUsd: chatSpend.totalUsd,
+                totalEstimated: chatSpend.totalEstimated,
+                billing: billingForBrain(turn.brain),
+              })}
+            >
+              <span className="dur cursor-default">
+                {formatDuration(durationSec)}
+              </span>
+            </TurnCostTip>
+          )}
+          {/* AURA-1296 — WHEN it finished, next to how long it took. */}
+          {durationSec != null && <TurnCompletedAt atSec={turn.at} />}
+          {showSavings &&
+            typeof turn.saved_tokens === "number" &&
+            turn.saved_tokens > 0 && (
+              <span
+                className="saved"
+                title="Estimated tokens saved by using Aura's code map and Q&A instead of reading whole files. An estimate, not an exact count."
+              >
+                Saved ~{compactNumber(turn.saved_tokens)} tokens
+              </span>
+            )}
+          {showMsgTokens &&
+            (typeof turn.input_tokens === "number" ||
+              typeof turn.output_tokens === "number") && (
+              <span
+                className="msg-tokens"
+                title="Tokens this reply actually used, reported by the model. Input (context sent in) and output (text generated back)."
+              >
+                {typeof turn.input_tokens === "number" &&
+                  `${compactNumber(turn.input_tokens)} in`}
+                {typeof turn.input_tokens === "number" &&
+                  typeof turn.output_tokens === "number" &&
+                  " · "}
+                {typeof turn.output_tokens === "number" &&
+                  `${compactNumber(turn.output_tokens)} out`}
+              </span>
+            )}
+          <button
+            type="button"
+            onClick={copyText}
+            title={copied ? "Copied" : "Copy"}
+            aria-label={copied ? "Copied message" : "Copy message"}
           >
-            <span className="dur cursor-default">
-              {formatDuration(durationSec)}
-            </span>
-          </TurnCostTip>
-        )}
-        {/* AURA-1296 — WHEN it finished, next to how long it took. */}
-        {durationSec != null && <TurnCompletedAt atSec={turn.at} />}
-        {showSavings &&
-          typeof turn.saved_tokens === "number" &&
-          turn.saved_tokens > 0 && (
-            <span
-              className="saved"
-              title="Estimated tokens saved by using Aura's code map and Q&A instead of reading whole files. An estimate, not an exact count."
-            >
-              Saved ~{compactNumber(turn.saved_tokens)} tokens
-            </span>
-          )}
-        {showMsgTokens &&
-          (typeof turn.input_tokens === "number" ||
-            typeof turn.output_tokens === "number") && (
-            <span
-              className="msg-tokens"
-              title="Tokens this reply actually used, reported by the model. Input (context sent in) and output (text generated back)."
-            >
-              {typeof turn.input_tokens === "number" &&
-                `${compactNumber(turn.input_tokens)} in`}
-              {typeof turn.input_tokens === "number" &&
-                typeof turn.output_tokens === "number" &&
-                " · "}
-              {typeof turn.output_tokens === "number" &&
-                `${compactNumber(turn.output_tokens)} out`}
-            </span>
-          )}
-        <button
-          type="button"
-          onClick={copyText}
-          title={copied ? "Copied" : "Copy"}
-          aria-label={copied ? "Copied message" : "Copy message"}
-        >
-          {copied ? (
-            <Check size={13} aria-hidden="true" />
-          ) : (
-            <Copy size={13} aria-hidden="true" />
-          )}
-        </button>
-        {/* Model provenance lives here now — small + minimal, kept in the
+            {copied ? (
+              <Check size={13} aria-hidden="true" />
+            ) : (
+              <Copy size={13} aria-hidden="true" />
+            )}
+          </button>
+          {/* Model provenance lives here now — small + minimal, kept in the
             same left cluster as the time-taken + copy so it reads as one
             compact group, not a loud suffix on a brand line. Suppressed inside
             a group: the group header already brands the run once, so repeating
             "Claude" on every segment's footer is the noise the user flagged. */}
-        {turn.brain && !inGroup && (
-          <span className="model" title="Model that ran this turn">
-            <AgentIcon agentId={brainAgentId(turn.brain)} size={11} />
-            {humanizeBrainId(turn.brain)}
-          </span>
-        )}
-        <div className="aura-more" ref={moreRef}>
-          <button
-            type="button"
-            title="More"
-            aria-label="More options"
-            aria-haspopup="menu"
-            aria-expanded={moreOpen}
-            onClick={() => setMoreOpen((v) => !v)}
-          >
-            <MoreHorizontal size={14} aria-hidden="true" />
-          </button>
-          {moreOpen && (
-            <div className="aura-more-menu" role="menu">
-              <button
-                type="button"
-                role="menuitem"
-                disabled={!canFork}
-                onClick={() => fork("tab")}
-              >
-                <GitBranch size={13} />
-                Fork to new tab
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                disabled={!canFork}
-                onClick={() => fork("workspace")}
-              >
-                <SquareArrowOutUpRight size={13} />
-                Fork to new window
-              </button>
-            </div>
+          {turn.brain && !inGroup && (
+            <span className="model" title="Model that ran this turn">
+              <AgentIcon agentId={brainAgentId(turn.brain)} size={11} />
+              {humanizeBrainId(turn.brain)}
+            </span>
           )}
+          <div className="aura-more" ref={moreRef}>
+            <button
+              type="button"
+              title="More"
+              aria-label="More options"
+              aria-haspopup="menu"
+              aria-expanded={moreOpen}
+              onClick={() => setMoreOpen((v) => !v)}
+            >
+              <MoreHorizontal size={14} aria-hidden="true" />
+            </button>
+            {moreOpen && (
+              <div className="aura-more-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!canFork}
+                  onClick={() => fork("tab")}
+                >
+                  <GitBranch size={13} />
+                  Fork to new tab
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!canFork}
+                  onClick={() => fork("workspace")}
+                >
+                  <SquareArrowOutUpRight size={13} />
+                  Fork to new window
+                </button>
+              </div>
+            )}
+          </div>
         </div>
-      </div>
       )}
     </div>
   );
@@ -4800,8 +4772,10 @@ function ChatHandoverCard({ text }: { text: string }) {
     <div
       className="overflow-hidden rounded-lg border"
       style={{
-        borderColor: "color-mix(in srgb, var(--color-accent) 26%, var(--color-line))",
-        background: "color-mix(in srgb, var(--color-accent) 5%, var(--color-bg-1))",
+        borderColor:
+          "color-mix(in srgb, var(--color-accent) 26%, var(--color-line))",
+        background:
+          "color-mix(in srgb, var(--color-accent) 5%, var(--color-bg-1))",
       }}
     >
       <button
@@ -4816,13 +4790,26 @@ function ChatHandoverCard({ text }: { text: string }) {
           aria-hidden
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M8 2.5l5 2.5-5 2.5-5-2.5 5-2.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-            <path d="M3 8l5 2.5L13 8M3 11l5 2.5L13 11" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+            <path
+              d="M8 2.5l5 2.5-5 2.5-5-2.5 5-2.5Z"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinejoin="round"
+            />
+            <path
+              d="M3 8l5 2.5L13 8M3 11l5 2.5L13 11"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinejoin="round"
+            />
           </svg>
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-baseline gap-1.5">
-            <span className="t-sm font-semibold" style={{ color: "var(--color-text-1)" }}>
+            <span
+              className="t-sm font-semibold"
+              style={{ color: "var(--color-text-1)" }}
+            >
               Context carried over
             </span>
             <span className="t-xs" style={{ color: "var(--color-text-4)" }}>
@@ -4830,13 +4817,19 @@ function ChatHandoverCard({ text }: { text: string }) {
             </span>
           </span>
           {!open ? (
-            <span className="mt-0.5 block truncate t-sm" style={{ color: "var(--color-text-3)" }}>
+            <span
+              className="mt-0.5 block truncate t-sm"
+              style={{ color: "var(--color-text-3)" }}
+            >
               {gist}
             </span>
           ) : null}
         </span>
         <span className="flex shrink-0 items-center gap-2">
-          <span className="font-mono t-xs" style={{ color: "var(--color-text-4)" }}>
+          <span
+            className="font-mono t-xs"
+            style={{ color: "var(--color-text-4)" }}
+          >
             {lines} lines
           </span>
           <ChevronDown
@@ -4852,9 +4845,12 @@ function ChatHandoverCard({ text }: { text: string }) {
       {open ? (
         <div
           className="border-t"
-          style={{ borderColor: "var(--color-line-soft)", background: "var(--color-bg-0)" }}
+          style={{
+            borderColor: "var(--color-line-soft)",
+            background: "var(--color-bg-0)",
+          }}
         >
-          <div className="max-h-[520px] overflow-auto px-3.5 py-3">
+          <div className="max-h-[min(520px,calc(100dvh-100px))] overflow-auto px-3.5 py-3">
             <MarkdownBody source={text} />
           </div>
         </div>
@@ -5019,15 +5015,23 @@ function parseProverBlock(block: string, goal: string): ProverReport {
       checks.push(last);
       continue;
     }
-    const stub = line.match(/^[\s]*(?:⚠️|⚠)\s+(\w+)\s+'([^']+)'\s+exists but is a STUB/i);
+    const stub = line.match(
+      /^[\s]*(?:⚠️|⚠)\s+(\w+)\s+'([^']+)'\s+exists but is a STUB/i,
+    );
     if (stub) {
       last = { status: "stub", node_type: stub[1], node_name: stub[2] };
       checks.push(last);
       continue;
     }
-    const missing = line.match(/^[\s]*✗\s+(\w+)\s+'([^']+)'\s+(MISSING|not found)/i);
+    const missing = line.match(
+      /^[\s]*✗\s+(\w+)\s+'([^']+)'\s+(MISSING|not found)/i,
+    );
     if (missing) {
-      last = { status: "missing", node_type: missing[1], node_name: missing[2] };
+      last = {
+        status: "missing",
+        node_type: missing[1],
+        node_name: missing[2],
+      };
       checks.push(last);
       continue;
     }
@@ -5197,10 +5201,14 @@ function parseWaveEvent(text: string): WaveEvent | null {
   const wave = Number(m[1]);
   const agentCandidate = m[2]?.trim();
   const agent =
-    agentCandidate && looksLikeAgentToken(agentCandidate) ? agentCandidate : undefined;
+    agentCandidate && looksLikeAgentToken(agentCandidate)
+      ? agentCandidate
+      : undefined;
   // If the parens weren't an agent attribution, keep them in the prose
   // (e.g. "Wave 4 (FTS) shipped..." should still read normally).
-  const rest = (agent ? m[3] : (agentCandidate ? `(${agentCandidate}) ${m[3]}` : m[3])).trim();
+  const rest = (
+    agent ? m[3] : agentCandidate ? `(${agentCandidate}) ${m[3]}` : m[3]
+  ).trim();
   const lower = rest.toLowerCase();
   let status: WaveStatus = "info";
   if (/\bship(ped|ping)\b/.test(lower)) status = "shipped";
@@ -5304,16 +5312,6 @@ function DispatchChip({ dispatch }: { dispatch: LiveDispatch }) {
       <AgentIcon agentId={identity.id} size={11} />
       {identity.tag}
       <span style={{ color: "var(--color-text-3)" }}>#{dispatch.task_id}</span>
-      <span
-        style={{
-          display: "inline-block",
-          width: 5,
-          height: 5,
-          borderRadius: "50%",
-          background: identity.accent,
-          animation: "aura-pulse 1.4s ease-in-out infinite",
-        }}
-      />
     </span>
   );
 }
@@ -5484,88 +5482,24 @@ function WaveTimelineRow({ wave }: { wave: AggregatedWave }) {
 }
 
 function WaveStatusPip({ status }: { status: WaveStatus }) {
-  // Shipped → solid green tick. In-flight (running/firing/dispatched) →
-  // spinning ring. Waiting → soft pulsing ring. Blocked → red bang.
-  // Anything else → muted hollow ring.
-  const SIZE = 14;
-  if (status === "shipped") {
-    const color = "var(--color-accent-green)";
-    return (
-      <span
-        title="Shipped"
-        className="shrink-0 inline-flex items-center justify-center"
-        style={{
-          width: SIZE,
-          height: SIZE,
-          borderRadius: "50%",
-          background: color,
-        }}
-      >
-        <PipTick color="var(--color-bg-content)" />
-      </span>
-    );
-  }
-  if (status === "blocked") {
-    const color = "var(--color-red)";
-    return (
-      <span
-        title="Blocked"
-        className="shrink-0 inline-flex items-center justify-center"
-        style={{
-          width: SIZE,
-          height: SIZE,
-          borderRadius: "50%",
-          background: color,
-        }}
-      >
-        <PipBang color="var(--color-bg-content)" />
-      </span>
-    );
-  }
-  if (status === "running" || status === "firing" || status === "dispatched") {
-    const color = "var(--color-accent)";
-    return (
-      <span
-        title={sentenceCase(status)}
-        className="shrink-0 inline-block"
-        style={{
-          width: SIZE,
-          height: SIZE,
-          borderRadius: "50%",
-          border: `1.5px solid ${color}`,
-          borderTopColor: "transparent",
-          animation: "aura-chat-spin 0.9s linear infinite",
-        }}
-      />
-    );
-  }
-  if (status === "waiting") {
-    const color = "var(--color-accent)";
-    return (
-      <span
-        title="Waiting"
-        className="shrink-0 inline-block"
-        style={{
-          width: SIZE,
-          height: SIZE,
-          borderRadius: "50%",
-          border: `1.5px solid ${color}`,
-          animation: "aura-pulse 1.6s ease-in-out infinite",
-        }}
-      />
-    );
-  }
+  const label = status.charAt(0).toUpperCase() + status.slice(1);
   return (
     <span
-      aria-hidden
-      className="shrink-0 inline-block"
-      style={{
-        width: SIZE,
-        height: SIZE,
-        borderRadius: "50%",
-        border: "1.5px solid var(--color-line)",
-      }}
-    />
+      className="chat-task-mark"
+      title={label}
+      aria-label={label}
+      style={{ color: status === "blocked" ? "var(--color-red)" : undefined }}
+    >
+      {status === "shipped" ? (
+        <PipTick color="currentColor" />
+      ) : status === "blocked" ? (
+        <PipBang color="currentColor" />
+      ) : ["running", "firing", "dispatched"].includes(status) ? (
+        "−"
+      ) : (
+        ""
+      )}
+    </span>
   );
 }
 

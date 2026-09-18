@@ -24,7 +24,7 @@ import { auraThemeName, ensureAuraThemes } from "../../../lib/monacoTheme";
 import { installMonacoEnvironment } from "../../../lib/monacoEnv";
 import { useResolvedTheme } from "../../../lib/themeStore";
 import { StatusPip } from "./StatusLine";
-import type { ToolResult, ToolStatus } from "./types";
+import { toolStatus, type ToolResult } from "./types";
 import { basename } from "../../../lib/paths";
 
 installMonacoEnvironment();
@@ -113,13 +113,29 @@ export function FileDiffTool({
     [data?.path],
   );
   const stats = useMemo(
-    () => (data ? quickLineDelta(data.oldContent, data.newContent) : { added: 0, removed: 0 }),
+    () =>
+      data
+        ? quickLineDelta(data.oldContent, data.newContent)
+        : { added: 0, removed: 0 },
     [data],
   );
 
   if (!data) return null;
-  const status: ToolStatus = !result ? "running" : result.is_error ? "error" : "ok";
-  const verb = data.isNew ? "Writing" : "Editing";
+  const status = toolStatus(result);
+  const verb =
+    status === "running"
+      ? data.isNew
+        ? "Writing"
+        : "Editing"
+      : status === "ok"
+        ? data.isNew
+          ? "Wrote"
+          : "Edited"
+        : status === "cancelled"
+          ? "Cancelled"
+          : status === "unknown"
+            ? "No result"
+            : "Failed";
   const label = basename(data.path) || data.path || "file";
 
   // Collapsed — a flat uniform row matching the read/edit tool lines: a fixed
@@ -146,7 +162,8 @@ export function FileDiffTool({
           <span
             className="shrink-0 t-2xs px-1 rounded"
             style={{
-              background: "color-mix(in srgb, var(--color-accent) 14%, transparent)",
+              background:
+                "color-mix(in srgb, var(--color-accent) 14%, transparent)",
               color: "var(--color-accent)",
             }}
           >
@@ -158,7 +175,9 @@ export function FileDiffTool({
           style={{ fontFamily: "var(--font-mono)" }}
         >
           {stats.added > 0 && (
-            <span style={{ color: "var(--color-accent-green)" }}>+{stats.added}</span>
+            <span style={{ color: "var(--color-accent-green)" }}>
+              +{stats.added}
+            </span>
           )}
           {stats.removed > 0 && (
             <span style={{ color: "var(--color-red)" }}>−{stats.removed}</span>
@@ -198,7 +217,8 @@ export function FileDiffTool({
           <span
             className="shrink-0 t-2xs px-1 rounded"
             style={{
-              background: "color-mix(in srgb, var(--color-accent) 14%, transparent)",
+              background:
+                "color-mix(in srgb, var(--color-accent) 14%, transparent)",
               color: "var(--color-accent)",
             }}
           >
@@ -210,7 +230,9 @@ export function FileDiffTool({
           style={{ fontFamily: "var(--font-mono)" }}
         >
           {stats.added > 0 && (
-            <span style={{ color: "var(--color-accent-green)" }}>+{stats.added}</span>
+            <span style={{ color: "var(--color-accent-green)" }}>
+              +{stats.added}
+            </span>
           )}
           {stats.removed > 0 && (
             <span style={{ color: "var(--color-red)" }}>−{stats.removed}</span>

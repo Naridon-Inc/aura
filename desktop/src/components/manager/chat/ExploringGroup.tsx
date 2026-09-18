@@ -33,6 +33,8 @@ export function isReadOnlyTool(block: ToolBlock): boolean {
 export function ExploringGroup({ tools }: { tools: ToolBlock[] }) {
   const [open, setOpen] = useState(false);
   const running = tools.some((t) => !t.result);
+  const failed = tools.filter((t) => t.result?.is_error).length;
+  const missing = tools.filter((t) => t.result?.status).length;
 
   // A compact list of the distinct subjects the run touched — the basenames /
   // patterns the registry already extracted — so the collapsed header is
@@ -58,20 +60,11 @@ export function ExploringGroup({ tools }: { tools: ToolBlock[] }) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="aura-tool-row"
+        aria-expanded={open}
       >
-        <span className="aura-tool-glyph">
-          <span
-            aria-hidden
-            className={`inline-block rounded-full ${running ? "animate-pulse" : ""}`}
-            style={{
-              width: 6,
-              height: 6,
-              background: running ? "var(--color-text-3)" : "var(--color-text-4)",
-            }}
-          />
-        </span>
+        <span className="aura-tool-glyph"><Chevron dir={open ? "up" : "down"} /></span>
         <span className="aura-tool-chip-verb">
-          {running ? "Exploring…" : "Explored"}
+          {running ? "Exploring…" : failed ? `Exploration · ${failed} failed` : missing ? "Exploration incomplete" : "Explored"}
         </span>
         <span
           className="shrink-0 text-right tabular-nums t-2xs"
@@ -88,9 +81,7 @@ export function ExploringGroup({ tools }: { tools: ToolBlock[] }) {
             {subjectLabel}
           </span>
         )}
-        <span className="ml-auto shrink-0" style={{ color: "var(--color-text-4)" }}>
-          <Chevron dir={open ? "up" : "down"} />
-        </span>
+
       </button>
       {open && (
         <div className="aura-tool-substream">

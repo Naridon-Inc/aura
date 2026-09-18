@@ -1345,6 +1345,7 @@ export function resultMetric(
   result?: ToolResult,
 ): string | undefined {
   if (!result) return undefined;
+  if (result.status) return result.status === "cancelled" ? "cancelled" : "no result reported";
   if (result.is_error) {
     const first = result.content.split("\n")[0] ?? "";
     return truncate(first, 60);

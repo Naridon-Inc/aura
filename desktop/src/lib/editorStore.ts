@@ -15,7 +15,10 @@
 
 import { useEffect, useState } from "react";
 import { api, type FileContent } from "./api";
-import { readFile as readFileWherever, writeFile as writeFileWherever } from "./place/workApi";
+import {
+  readFile as readFileWherever,
+  writeFile as writeFileWherever,
+} from "./place/workApi";
 import { clearAgentTerminalTitle } from "./agentTerminalTitles";
 import { forgetAgentRecord } from "./agentRecordStore";
 import { toast } from "./toast";
@@ -28,6 +31,15 @@ import {
 } from "./featureFlags";
 import { pruneOversizedCaches, setDurable } from "./localStore";
 import { createPlaceRegistry } from "./placeStates";
+import { bindSpawnPlaceReader, takeSpawnOrigin } from "./agentSpawnOrigin";
+import {
+  holderWithAgentTab,
+  listWithSession,
+  localPlaceRoot,
+  placeForArrivingTab,
+  type FilingLayout,
+} from "./agentTabFiling";
+import { normalizeRoot } from "./remotePlaces";
 import {
   releaseTerminalSession,
   releaseNativeTerminalSession,
@@ -504,7 +516,10 @@ export function treeReplace(
     const tabs = t.tabs.map((r) => (samePaneRef(r, target) ? next : r));
     return tabs === t.tabs ? t : { ...t, tabs };
   }
-  return { ...t, children: t.children.map((c) => treeReplace(c, target, next)) };
+  return {
+    ...t,
+    children: t.children.map((c) => treeReplace(c, target, next)),
+  };
 }
 
 /** Remove `target` from every leaf's tab list. Empty leaves are
@@ -581,7 +596,9 @@ export function treeSplitAt(
   const orderedPair = (): WorkSplitTree[] => {
     const sourceLeaf = makeLeaf([source], 0);
     const newPane = makeLeaf([empty], 0);
-    return position === "before" ? [newPane, sourceLeaf] : [sourceLeaf, newPane];
+    return position === "before"
+      ? [newPane, sourceLeaf]
+      : [sourceLeaf, newPane];
   };
 
   if (t.kind === "leaf") {
@@ -693,7 +710,10 @@ export function treeReorder(
     children.splice(dstIdx, 0, moved);
     return { ...t, children };
   }
-  return { ...t, children: t.children.map((c) => treeReorder(c, srcLeafId, dstLeafId)) };
+  return {
+    ...t,
+    children: t.children.map((c) => treeReorder(c, srcLeafId, dstLeafId)),
+  };
 }
 
 /** Append `ref` to the tab list of leaf `paneId`. No-op if pane not
@@ -718,7 +738,10 @@ export function treeAddTab(
       activeIndex: focusNew ? tabs.length - 1 : t.activeIndex,
     };
   }
-  return { ...t, children: t.children.map((c) => treeAddTab(c, paneId, ref, focusNew)) };
+  return {
+    ...t,
+    children: t.children.map((c) => treeAddTab(c, paneId, ref, focusNew)),
+  };
 }
 
 /** Set the active tab inside a pane by tab index. */
@@ -732,7 +755,10 @@ export function treeSetActiveTab(
     if (index < 0 || index >= t.tabs.length) return t;
     return { ...t, activeIndex: index };
   }
-  return { ...t, children: t.children.map((c) => treeSetActiveTab(c, paneId, index)) };
+  return {
+    ...t,
+    children: t.children.map((c) => treeSetActiveTab(c, paneId, index)),
+  };
 }
 
 /** Find the leaf whose currently-active tab matches `ref`. */
@@ -1130,6 +1156,10 @@ function adoptState(next: State) {
   }
 }
 
+// An agent spawn reads the place on screen as it STARTS, so its tab can go
+// back there if the user has moved on by the time the CLI answers.
+bindSpawnPlaceReader(livePlaceKey);
+
 let state: State = {
   files: [],
   agentTabs: [],
@@ -1160,7 +1190,10 @@ let state: State = {
   prTabs: [],
   activePrTabId: null,
   inboxOpen: false,
-  activeInbox: false, activeSessions: false, traceTool: null, traceToolArg: null,
+  activeInbox: false,
+  activeSessions: false,
+  traceTool: null,
+  traceToolArg: null,
   traceView: "overview",
   // Aura dashboard tab retired — the chat-first WorkSurfaceEmpty owns
   // the empty state, and the Manager lives in the right-rail. Default
@@ -1424,7 +1457,12 @@ export function forgetManagerSessionEverywhere(sessionId: string): number {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         const kept = parsed.filter(
-          (e) => !(e && typeof e.sessionId === "string" && e.sessionId === sessionId),
+          (e) =>
+            !(
+              e &&
+              typeof e.sessionId === "string" &&
+              e.sessionId === sessionId
+            ),
         );
         if (kept.length !== parsed.length) {
           slots += 1;
@@ -1611,7 +1649,9 @@ function sanitizeRefForPersist(ref: WorkPaneRef): WorkPaneRef | null {
 
 function sanitizeTreeForPersist(t: WorkSplitTree): WorkSplitTree | null {
   if (t.kind === "leaf") {
-    const tabs = t.tabs.map(sanitizeRefForPersist).filter((r): r is WorkPaneRef => !!r);
+    const tabs = t.tabs
+      .map(sanitizeRefForPersist)
+      .filter((r): r is WorkPaneRef => !!r);
     if (tabs.length === 0) return null;
     return {
       kind: "leaf",
@@ -1689,7 +1729,11 @@ function validateTree(v: unknown): WorkSplitTree | null {
   if (!v || typeof v !== "object") return null;
   const node = v as { kind?: unknown };
   if (node.kind === "leaf") {
-    const leaf = v as { paneId?: unknown; tabs?: unknown; activeIndex?: unknown };
+    const leaf = v as {
+      paneId?: unknown;
+      tabs?: unknown;
+      activeIndex?: unknown;
+    };
     if (typeof leaf.paneId !== "string") return null;
     if (!Array.isArray(leaf.tabs)) return null;
     const tabs: WorkPaneRef[] = [];
@@ -1699,15 +1743,23 @@ function validateTree(v: unknown): WorkSplitTree | null {
       // Drop section/nav surfaces on restore — they open from the nav rail on
       // demand and must never come back as phantom tabs. The shape branches
       // below stay as a record but are unreachable for these kinds.
-      if (typeof r.kind === "string" && EPHEMERAL_SURFACE_KINDS.has(r.kind)) continue;
-      if (r.kind === "agent" && typeof r.id === "string") tabs.push({ kind: "agent", id: r.id });
+      if (typeof r.kind === "string" && EPHEMERAL_SURFACE_KINDS.has(r.kind))
+        continue;
+      if (r.kind === "agent" && typeof r.id === "string")
+        tabs.push({ kind: "agent", id: r.id });
       // Manager refs only survive restore when the native chat is enabled —
       // otherwise a persisted split that held an "Aura" pane is dropped so it
       // can't re-mount the gated surface.
-      else if (r.kind === "manager" && typeof r.id === "string" && AURA_MANAGER_ENABLED)
+      else if (
+        r.kind === "manager" &&
+        typeof r.id === "string" &&
+        AURA_MANAGER_ENABLED
+      )
         tabs.push({ kind: "manager", id: r.id });
-      else if (r.kind === "file" && typeof r.path === "string") tabs.push({ kind: "file", path: r.path });
-      else if (r.kind === "tasks" && typeof r.id === "string") tabs.push({ kind: "tasks", id: r.id });
+      else if (r.kind === "file" && typeof r.path === "string")
+        tabs.push({ kind: "file", path: r.path });
+      else if (r.kind === "tasks" && typeof r.id === "string")
+        tabs.push({ kind: "tasks", id: r.id });
       else if (
         r.kind === "task" &&
         typeof r.id === "string" &&
@@ -1718,12 +1770,22 @@ function validateTree(v: unknown): WorkSplitTree | null {
           id: r.id,
           repoRoot: (r as { repoRoot: string }).repoRoot,
         });
-      else if (r.kind === "standup" && typeof r.id === "string") tabs.push({ kind: "standup", id: r.id });
-      else if (r.kind === "pages" && typeof r.id === "string") tabs.push({ kind: "pages", id: r.id });
-      else if (r.kind === "automations" && typeof r.id === "string") tabs.push({ kind: "automations", id: r.id });
-      else if (r.kind === "channels" && typeof r.id === "string") tabs.push({ kind: "channels", id: r.id });
-      else if (r.kind === "commons" && typeof r.id === "string" && COMMONS_ENABLED) tabs.push({ kind: "commons", id: r.id });
-      else if (r.kind === "app" && typeof r.id === "string" && COMMONS_ENABLED) tabs.push({ kind: "app", id: r.id });
+      else if (r.kind === "standup" && typeof r.id === "string")
+        tabs.push({ kind: "standup", id: r.id });
+      else if (r.kind === "pages" && typeof r.id === "string")
+        tabs.push({ kind: "pages", id: r.id });
+      else if (r.kind === "automations" && typeof r.id === "string")
+        tabs.push({ kind: "automations", id: r.id });
+      else if (r.kind === "channels" && typeof r.id === "string")
+        tabs.push({ kind: "channels", id: r.id });
+      else if (
+        r.kind === "commons" &&
+        typeof r.id === "string" &&
+        COMMONS_ENABLED
+      )
+        tabs.push({ kind: "commons", id: r.id });
+      else if (r.kind === "app" && typeof r.id === "string" && COMMONS_ENABLED)
+        tabs.push({ kind: "app", id: r.id });
       // Trace/Studio page tabs (#222) — persisted so the open-order
       // survives reload. `sessions`/`graph` stay gated on their feature
       // flags (matching `hydrateFromSnapshot`) so a stale entry can't
@@ -1736,7 +1798,11 @@ function validateTree(v: unknown): WorkSplitTree | null {
         tabs.push({ kind: "replay", id: r.id });
       else if (r.kind === "prove" && typeof r.id === "string")
         tabs.push({ kind: "prove", id: r.id });
-      else if (r.kind === "graph" && typeof r.id === "string" && CODE_MAP_ENABLED)
+      else if (
+        r.kind === "graph" &&
+        typeof r.id === "string" &&
+        CODE_MAP_ENABLED
+      )
         tabs.push({ kind: "graph", id: r.id });
       // A cloud conversation lives on the board, not on this disk, so it
       // re-reads itself on mount and is safe to restore — the root may be
@@ -1758,7 +1824,11 @@ function validateTree(v: unknown): WorkSplitTree | null {
       ) {
         const tool = (r as { tool: TraceToolKind }).tool;
         const arg = sanitizeTraceArg((r as { arg?: unknown }).arg);
-        tabs.push(arg ? { kind: "trace", id: r.id, tool, arg } : { kind: "trace", id: r.id, tool });
+        tabs.push(
+          arg
+            ? { kind: "trace", id: r.id, tool, arg }
+            : { kind: "trace", id: r.id, tool },
+        );
       }
       // screenshare is session-only and stripped on persist, so a
       // round-trip would never contain it; we deliberately don't
@@ -2455,9 +2525,11 @@ async function openFile(path: string, opts?: OpenFileOpts) {
     const nextLayout = state.splitLayout
       ? syncIntoSplit(state.splitLayout)
       : layoutWithRef(fileRef);
-    const wantsView = !!opts?.defaultView && existing.defaultView !== opts.defaultView;
+    const wantsView =
+      !!opts?.defaultView && existing.defaultView !== opts.defaultView;
     const wantsOriginal =
-      opts?.diffOriginal !== undefined && existing.diffOriginal !== opts.diffOriginal;
+      opts?.diffOriginal !== undefined &&
+      existing.diffOriginal !== opts.diffOriginal;
     if (wantsView || wantsOriginal) {
       const idx = state.files.findIndex((f) => f.path === path);
       const next = state.files.slice();
@@ -2589,7 +2661,8 @@ function restorePanelGroups(snap: WorkspaceSnapshot): {
       }
       if (!layout) continue;
       const activeAlive =
-        treeFindLeafByRef(layout, { kind: "terminal", id: g.activeTermId }) != null;
+        treeFindLeafByRef(layout, { kind: "terminal", id: g.activeTermId }) !=
+        null;
       const firstRef = treeLeafNodes(layout)
         .flatMap((l) => l.tabs)
         .find((r) => r.kind === "terminal");
@@ -2611,12 +2684,19 @@ function restorePanelGroups(snap: WorkspaceSnapshot): {
     }));
   }
   let panelActiveGroupId = snap.panelActiveGroupId ?? null;
-  if (panelActiveGroupId == null || !groups.some((g) => g.groupId === panelActiveGroupId)) {
+  if (
+    panelActiveGroupId == null ||
+    !groups.some((g) => g.groupId === panelActiveGroupId)
+  ) {
     panelActiveGroupId = groups[0]?.groupId ?? null;
   }
-  const activeGroup = groups.find((g) => g.groupId === panelActiveGroupId) ?? null;
+  const activeGroup =
+    groups.find((g) => g.groupId === panelActiveGroupId) ?? null;
   let panelActiveTermId = snap.panelActiveTermId ?? null;
-  if (panelActiveTermId == null || findPanelGroupOf(groups, panelActiveTermId) == null) {
+  if (
+    panelActiveTermId == null ||
+    findPanelGroupOf(groups, panelActiveTermId) == null
+  ) {
     panelActiveTermId = activeGroup?.activeTermId ?? null;
   }
   return { terminalGroups: groups, panelActiveGroupId, panelActiveTermId };
@@ -2741,7 +2821,10 @@ function switchWorkspace(prev: string | null, next: string): WorkspaceSwitch {
     graphOpen: false,
     activeGraph: false,
     inboxOpen: false,
-    activeInbox: false, activeSessions: false, traceTool: null, traceToolArg: null,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
+    traceToolArg: null,
     activeDashboard: false,
     traceView: "overview",
     sidebarTab: state.sidebarTab,
@@ -2767,7 +2850,9 @@ function switchWorkspace(prev: string | null, next: string): WorkspaceSwitch {
       // does (strip section/nav surfaces, obey flag gates) so both restore
       // paths produce one identical model instead of a raw passthrough here
       // and a validated tree there.
-      splitLayout: restored.splitLayout ? validateTree(restored.splitLayout) : null,
+      splitLayout: restored.splitLayout
+        ? validateTree(restored.splitLayout)
+        : null,
       terminalGroups: panel.terminalGroups,
       panelActiveGroupId: panel.panelActiveGroupId,
       panelActiveTermId: panel.panelActiveTermId,
@@ -2797,7 +2882,8 @@ function switchWorkspace(prev: string | null, next: string): WorkspaceSwitch {
     // openFile once the project finishes loading, and that folds each one
     // into the layout. Everything else the snapshot restored gets a tree now
     // rather than falling through to the legacy strip.
-    if (!hydrated.splitLayout) hydrated.splitLayout = seedLayoutForState(hydrated);
+    if (!hydrated.splitLayout)
+      hydrated.splitLayout = seedLayoutForState(hydrated);
     adoptState(hydrated);
   } else {
     adoptState(wiped);
@@ -2900,7 +2986,10 @@ function emptyState(): State {
     graphOpen: false,
     activeGraph: false,
     inboxOpen: false,
-    activeInbox: false, activeSessions: false, traceTool: null, traceToolArg: null,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
+    traceToolArg: null,
     activeDashboard: false,
     traceView: "overview",
     sidebarTab: state?.sidebarTab ?? readSidebarTab(),
@@ -3130,7 +3219,24 @@ function setActive(path: string) {
     !state.activeGraph
   )
     return;
-  setState({ ...state, activePath: path, activeAgentId: null, activeTermId: null, activeManagerId: null, activeInspector: false, activeReplay: false, activePlanBuilder: false, activeProve: false, activeGraph: false, activeDashboard: false, activePlanId: null, activePrTabId: null, activeInbox: false, activeSessions: false, traceTool: null });
+  setState({
+    ...state,
+    activePath: path,
+    activeAgentId: null,
+    activeTermId: null,
+    activeManagerId: null,
+    activeInspector: false,
+    activeReplay: false,
+    activePlanBuilder: false,
+    activeProve: false,
+    activeGraph: false,
+    activeDashboard: false,
+    activePlanId: null,
+    activePrTabId: null,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
+  });
 }
 
 function updateBuffer(path: string, text: string) {
@@ -3172,6 +3278,9 @@ function openAgent(
   // hosted entirely in JS, no PTY.
   const mode = tab.mode ?? "pty";
   const view = tab.view ?? (mode === "pty" ? "terminal" : "ui");
+  // Taken before anything else, whatever happens next, so a launch's origin
+  // can never steer some later, deliberate open of the same session.
+  const origin = takeSpawnOrigin(tab.sessionId);
   const existing = state.agentTabs.find((t) => t.sessionId === tab.sessionId);
   if (existing) {
     // Just focus — never overwrite the user's chosen view on a re-open.
@@ -3201,6 +3310,20 @@ function openAgent(
     resumeSessionId: tab.resumeSessionId,
     machineId: tab.machineId,
   };
+  // The launch started in another place and the user has since switched
+  // away: the tab goes back where it was asked for, not into whatever is on
+  // screen now. This is how a Claude started in the Aura repo ended up in
+  // Mixrank's strip.
+  const elsewhere = placeForArrivingTab({
+    origin,
+    live: livePlaceKey(),
+    tabRoot: next.repoRoot,
+    hereRoot: clubbedId ? null : localPlaceRoot(activeRoot ?? ""),
+  });
+  if (elsewhere && fileAgentTabElsewhere(elsewhere, next)) {
+    announceFiledAgent(elsewhere, next);
+    return;
+  }
   setState({
     ...state,
     agentTabs: [...state.agentTabs, next],
@@ -3227,10 +3350,12 @@ function stripTrailingSlash(p: string): string {
 /** Append an agent tab WITHOUT stealing focus when it belongs to a workspace
  *  other than the active one (Parity W8 launch manifest). A fleet launched
  *  into a fresh worktree must not yank the user out of what they're doing —
- *  tabs land passively and surface via the workspace-exclusive strip + fleet
- *  pips when the user switches over. Same-workspace launches delegate to
- *  `openAgent` so the normal focus behavior applies. Duplicate sessionIds are
- *  left untouched (passive means passive — no focus side effects). */
+ *  the tab is filed into its OWN folder's place, where it is waiting when the
+ *  user switches over. (It used to be appended to the place on screen, which
+ *  is how one project's strip came to hold another project's agents.)
+ *  Same-workspace launches delegate to `openAgent` so the normal focus
+ *  behavior applies. Duplicate sessionIds are left untouched (passive means
+ *  passive — no focus side effects). */
 export function appendAgentTabPassive(
   tab: Omit<AgentTab, "view" | "mode"> & {
     view?: "ui" | "terminal";
@@ -3242,28 +3367,31 @@ export function appendAgentTabPassive(
     openAgent(tab);
     return;
   }
+  // A background launch belongs to its own folder, wherever it started.
+  takeSpawnOrigin(tab.sessionId);
   if (state.agentTabs.some((t) => t.sessionId === tab.sessionId)) return;
   const mode = tab.mode ?? "pty";
   const view = tab.view ?? (mode === "pty" ? "terminal" : "ui");
-  setState({
-    ...state,
-    agentTabs: [
-      ...state.agentTabs,
-      {
-        sessionId: tab.sessionId,
-        agentId: tab.agentId,
-        agentLabel: tab.agentLabel,
-        agentMonogram: tab.agentMonogram,
-        repoRoot: tab.repoRoot,
-        view,
-        mode,
-        openaiCompatProfile: tab.openaiCompatProfile,
-        dormant: tab.dormant,
-        resumeSessionId: tab.resumeSessionId,
-        machineId: tab.machineId,
-      },
-    ],
-  });
+  const passive: AgentTab = {
+    sessionId: tab.sessionId,
+    agentId: tab.agentId,
+    agentLabel: tab.agentLabel,
+    agentMonogram: tab.agentMonogram,
+    repoRoot: tab.repoRoot,
+    view,
+    mode,
+    openaiCompatProfile: tab.openaiCompatProfile,
+    dormant: tab.dormant,
+    resumeSessionId: tab.resumeSessionId,
+    machineId: tab.machineId,
+  };
+  // A tab running on another machine belongs to a remote place this laptop
+  // can't name from a folder alone; it keeps the old placement (visibly
+  // marked as another project's) rather than guessing.
+  if (!passive.machineId && fileAgentTabElsewhere(ownPlaceOf(passive.repoRoot), passive)) {
+    return;
+  }
+  setState({ ...state, agentTabs: [...state.agentTabs, passive] });
 }
 
 function replaceAgent(
@@ -3274,10 +3402,24 @@ function replaceAgent(
   },
 ) {
   const idx = state.agentTabs.findIndex((t) => t.sessionId === oldSessionId);
-  // No matching tab → fall through to a normal open at the end. Keeps
-  // the call site tolerant of a stale id (e.g. user closed the tab
-  // while the PTY was spawning).
+  // Not on screen. A respawn that finished after the user switched away
+  // belongs to the place holding the tab it replaces (or, failing that, the
+  // place the spawn started in) — never to whatever is on screen now. Only
+  // when neither exists — the user closed the tab while the PTY was
+  // spawning — does it fall through to a normal open.
   if (idx < 0) {
+    const origin = takeSpawnOrigin(src.sessionId);
+    const holder = placeHoldingAgent(oldSessionId) ?? origin;
+    if (holder && holder !== livePlaceKey()) {
+      const mode = src.mode ?? "stream";
+      const respawned: AgentTab = {
+        ...src,
+        mode,
+        view: src.view ?? (mode === "stream" ? "ui" : "terminal"),
+        dormant: undefined,
+      };
+      if (fileAgentTabElsewhere(holder, respawned, oldSessionId)) return;
+    }
     openAgent(src);
     return;
   }
@@ -3320,6 +3462,155 @@ function replaceAgent(
   });
 }
 
+// ── Filing an agent tab where it belongs ───────────────────────────
+//
+// The rule lives in agentTabFiling.ts; this is the store's half of it —
+// which place holds what, and keeping the snapshot and the open-agents list
+// honest when a tab lands somewhere the user isn't looking.
+
+/** The club a place key names, or null for any other place. */
+function clubIdOfPlaceKey(place: string): string | null {
+  const prefix = clubPlaceKey("");
+  return place.startsWith(prefix) ? place.slice(prefix.length) : null;
+}
+
+/** The place a folder's own tabs belong in: the live place already spelled
+ *  that way if one is open, else the folder itself. */
+function ownPlaceOf(repoRoot: string): string {
+  const root = normalizeRoot(repoRoot);
+  return places.places().find((p) => normalizeRoot(p) === root) ?? root;
+}
+
+/** The live place (not the one on screen) holding `sessionId`'s tab. */
+function placeHoldingAgent(sessionId: string): string | null {
+  const live = livePlaceKey();
+  for (const place of places.places()) {
+    if (place === live) continue;
+    if (places.peek(place)?.agentTabs.some((t) => t.sessionId === sessionId)) {
+      return place;
+    }
+  }
+  return null;
+}
+
+/** Layout arithmetic for a place that isn't on screen. `seed` builds a first
+ *  tree from that place's own tabs when it has none; without one the tree is
+ *  left for the restore to seed, which is what a snapshot does on hydrate. */
+function filingLayout(seed: (() => WorkPaneRef[]) | null): FilingLayout {
+  return {
+    withRef(layout, ref) {
+      if (layout) return focusRefInLayout(layout, ref);
+      if (!seed) return null;
+      const tabs = seed();
+      const at = tabs.findIndex((r) => samePaneRef(r, ref));
+      if (at < 0) tabs.push(ref);
+      return {
+        kind: "leaf",
+        paneId: generatePaneId(),
+        tabs,
+        activeIndex: at >= 0 ? at : tabs.length - 1,
+      };
+    },
+    swap: updateSplitRef,
+  };
+}
+
+/** File `tab` into `place`, a place that is NOT on screen, and keep what
+ *  outlives this window honest: the place's snapshot (what a restart and a
+ *  first switch read) and the folder's open-agents list (what the Workspaces
+ *  board reads to say who is on a copy). False when the place can't take it
+ *  here and now — a club or remote place with no live state, or boot still
+ *  hydrating — and the caller opens the tab where it always did, so an agent
+ *  is never lost. */
+function fileAgentTabElsewhere(
+  place: string,
+  tab: AgentTab,
+  replacing?: string | null,
+): boolean {
+  if (!place || place === livePlaceKey()) return false;
+  const clubId = clubIdOfPlaceKey(place);
+  const parked = places.peek(place);
+  if (parked) {
+    const next = holderWithAgentTab(
+      parked,
+      tab,
+      filingLayout(() => tabRefsForState(parked)),
+      replacing,
+    );
+    if (next !== parked) {
+      places.replace(place, next);
+      if (snapshotsArmed) {
+        const snap = buildSnapshotFromState(next);
+        if (clubId !== null) saveClubSnapshot(clubId, snap);
+        else saveSnapshot(place, snap);
+      }
+    }
+  } else {
+    if (!snapshotsArmed || clubId !== null || !localPlaceRoot(place)) return false;
+    const snap = loadSnapshot(place) ?? buildSnapshotFromState(emptyState());
+    saveSnapshot(place, holderWithAgentTab(snap, tab, filingLayout(null), replacing));
+  }
+  const entry = groupAgentTabsByRoot([tab]).get(tab.repoRoot)?.[0];
+  if (entry) {
+    persistOpenAgents(
+      tab.repoRoot,
+      listWithSession(readPersistedAgents(tab.repoRoot), entry, replacing).slice(
+        -MAX_PERSISTED_AGENTS_PER_ROOT,
+      ),
+    );
+  }
+  emit();
+  return true;
+}
+
+/** Say where a new agent went when it didn't open in front of the user. */
+function announceFiledAgent(place: string, tab: AgentTab) {
+  const root = localPlaceRoot(place);
+  const where = root
+    ? root.slice(root.lastIndexOf("/") + 1) || root
+    : "the place you started it in";
+  toast.show({
+    tone: "info",
+    title: `${tab.agentLabel} is ready in ${where}`,
+    message:
+      "You switched projects while it was starting, so it stayed where you started it.",
+    actions: root
+      ? [
+          {
+            label: `Open ${where}`,
+            variant: "primary",
+            onClick: () => {
+              window.dispatchEvent(
+                new CustomEvent("aura:open-place", { detail: { root } }),
+              );
+            },
+          },
+        ]
+      : undefined,
+  });
+}
+
+/** Every agent tab open in any place this session — the one on screen first,
+ *  then each parked place — once per session. For "is anything working?"
+ *  signals that promise the whole fleet, not only the project in view. */
+export function agentTabsInEveryPlace(): AgentTab[] {
+  const seen = new Set<string>();
+  const out: AgentTab[] = [];
+  const add = (tabs: readonly AgentTab[]) => {
+    for (const t of tabs) {
+      if (seen.has(t.sessionId)) continue;
+      seen.add(t.sessionId);
+      out.push(t);
+    }
+  };
+  add(state.agentTabs);
+  const live = livePlaceKey();
+  for (const place of places.places()) {
+    if (place !== live) add(places.peek(place)?.agentTabs ?? []);
+  }
+  return out;
+}
+
 // Close an agent tab AND stop its underlying CLI — the default for the tab's
 // X button and Cmd-W. `closeAgent` alone only drops the tab, because detach()
 // leans on that to hand a *live* session to a popout window; so the kill can't
@@ -3338,7 +3629,10 @@ function stopAndCloseAgent(sessionId: string): void {
   // still checked. The backend confirms the child actually exited and errors
   // when it did not, and this used to swallow that — so an agent that ignored
   // the hangup kept running, kept writing, with nothing on screen to say so.
-  void api.agentPtyClose(sessionId).catch((e) => reportSurvivingAgent(sessionId, e));
+  void (tab?.mode === "stream"
+    ? api.agentStreamInterrupt(`${`${tab.agentId}@${tab.repoRoot}`.replace(/[^A-Za-z0-9_-]/g, "_")}_${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}`)
+    : api.agentPtyClose(sessionId))
+    .catch((e) => reportSurvivingAgent(sessionId, e));
 }
 
 /** An agent we asked to stop is still alive. Say it, and keep a way to try
@@ -3445,7 +3739,26 @@ function setActiveAgent(sessionId: string) {
   const agentTabs = state.agentTabs.map((t) =>
     t.sessionId === sessionId && t.attention ? { ...t, attention: false } : t,
   );
-  setState({ ...state, agentTabs, splitLayout: layoutWithRef({ kind: "agent", id: sessionId }), activeAgentId: sessionId, activePath: null, activeTermId: null, activeManagerId: null, activeInspector: false, activeReplay: false, activePlanBuilder: false, activeProve: false, activeGraph: false, activeDashboard: false, activePlanId: null, activePrTabId: null, activeInbox: false, activeSessions: false, traceTool: null });
+  setState({
+    ...state,
+    agentTabs,
+    splitLayout: layoutWithRef({ kind: "agent", id: sessionId }),
+    activeAgentId: sessionId,
+    activePath: null,
+    activeTermId: null,
+    activeManagerId: null,
+    activeInspector: false,
+    activeReplay: false,
+    activePlanBuilder: false,
+    activeProve: false,
+    activeGraph: false,
+    activeDashboard: false,
+    activePlanId: null,
+    activePrTabId: null,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
+  });
 }
 
 function markAgentAttention(sessionId: string, repoRoot?: string) {
@@ -3653,7 +3966,9 @@ function splitPanelTerminal(direction: WorkSplitDirection): string | null {
   const newRef: WorkPaneRef = { kind: "terminal", id: termId };
   const nextLayout = treeSplitAt(group.layout, activeRef, newRef, direction);
   const groups = state.terminalGroups.map((g) =>
-    g.groupId === groupId ? { ...g, layout: nextLayout, activeTermId: termId } : g,
+    g.groupId === groupId
+      ? { ...g, layout: nextLayout, activeTermId: termId }
+      : g,
   );
   setState({
     ...state,
@@ -3685,7 +4000,10 @@ function mergeTerminalIntoGroup(
   // Split beside the target's active pane — but fall back to its first
   // pane if the active id has somehow drifted out of the tree, so the
   // dragged terminal is always actually inserted (never orphaned).
-  let targetActiveRef: WorkPaneRef = { kind: "terminal", id: target.activeTermId };
+  let targetActiveRef: WorkPaneRef = {
+    kind: "terminal",
+    id: target.activeTermId,
+  };
   if (treeFindLeafByRef(target.layout, targetActiveRef) == null) {
     const first = treeLeafNodes(target.layout)
       .flatMap((l) => l.tabs)
@@ -3693,7 +4011,12 @@ function mergeTerminalIntoGroup(
     if (!first || first.kind !== "terminal") return;
     targetActiveRef = first;
   }
-  const nextTargetLayout = treeSplitAt(target.layout, targetActiveRef, ref, direction);
+  const nextTargetLayout = treeSplitAt(
+    target.layout,
+    targetActiveRef,
+    ref,
+    direction,
+  );
 
   const groups: TerminalGroup[] = [];
   for (const g of state.terminalGroups) {
@@ -3704,12 +4027,18 @@ function mergeTerminalIntoGroup(
       if (pruned == null) continue; // source group emptied → drop the row
       // Re-point the source group's focus if we removed its active pane.
       const stillThere =
-        treeFindLeafByRef(pruned, { kind: "terminal", id: g.activeTermId }) != null;
+        treeFindLeafByRef(pruned, { kind: "terminal", id: g.activeTermId }) !=
+        null;
       const firstRef = treeLeafNodes(pruned)
         .flatMap((l) => l.tabs)
         .find((r) => r.kind === "terminal");
-      const fallback = firstRef && firstRef.kind === "terminal" ? firstRef.id : g.activeTermId;
-      groups.push({ ...g, layout: pruned, activeTermId: stillThere ? g.activeTermId : fallback });
+      const fallback =
+        firstRef && firstRef.kind === "terminal" ? firstRef.id : g.activeTermId;
+      groups.push({
+        ...g,
+        layout: pruned,
+        activeTermId: stillThere ? g.activeTermId : fallback,
+      });
     } else {
       groups.push(g);
     }
@@ -3723,7 +4052,9 @@ function mergeTerminalIntoGroup(
     // strip it from the editor split tree / flat active slot too, so it
     // doesn't stay mounted there after tiling into the panel group. A no-op
     // when the source was a panel group (the ref isn't in the editor).
-    splitLayout: state.splitLayout ? treeRemove(state.splitLayout, ref) : state.splitLayout,
+    splitLayout: state.splitLayout
+      ? treeRemove(state.splitLayout, ref)
+      : state.splitLayout,
     activeTermId: state.activeTermId === termId ? null : state.activeTermId,
   });
 }
@@ -3765,12 +4096,18 @@ function detachTerminalFromPanel(
     const pruned = treeRemove(g.layout, closedRef);
     if (pruned == null) continue; // group emptied → drop the row
     const stillThere =
-      treeFindLeafByRef(pruned, { kind: "terminal", id: g.activeTermId }) != null;
+      treeFindLeafByRef(pruned, { kind: "terminal", id: g.activeTermId }) !=
+      null;
     const firstRef = treeLeafNodes(pruned)
       .flatMap((l) => l.tabs)
       .find((r) => r.kind === "terminal");
-    const fallback = firstRef && firstRef.kind === "terminal" ? firstRef.id : g.activeTermId;
-    next.push({ ...g, layout: pruned, activeTermId: stillThere ? g.activeTermId : fallback });
+    const fallback =
+      firstRef && firstRef.kind === "terminal" ? firstRef.id : g.activeTermId;
+    next.push({
+      ...g,
+      layout: pruned,
+      activeTermId: stillThere ? g.activeTermId : fallback,
+    });
   }
   let nextGroupId = panelActiveGroupId;
   let nextTermId = panelActiveTermId;
@@ -3778,12 +4115,18 @@ function detachTerminalFromPanel(
     nextGroupId != null && !next.some((g) => g.groupId === nextGroupId);
   if (activeGroupGone || nextTermId === termId) {
     const survivor = activeGroupGone
-      ? next[Math.max(0, next.length - 1)] ?? null
-      : next.find((g) => g.groupId === nextGroupId) ?? next[next.length - 1] ?? null;
+      ? (next[Math.max(0, next.length - 1)] ?? null)
+      : (next.find((g) => g.groupId === nextGroupId) ??
+        next[next.length - 1] ??
+        null);
     nextGroupId = survivor?.groupId ?? null;
     nextTermId = survivor?.activeTermId ?? null;
   }
-  return { terminalGroups: next, panelActiveGroupId: nextGroupId, panelActiveTermId: nextTermId };
+  return {
+    terminalGroups: next,
+    panelActiveGroupId: nextGroupId,
+    panelActiveTermId: nextTermId,
+  };
 }
 
 /** "Expand" a bottom-panel terminal into the center editor area as a
@@ -3869,7 +4212,11 @@ function demoteTerminalToPanel(termId: string): void {
   if (existing) {
     const groups = state.terminalGroups.map((g) =>
       g.groupId === existing.groupId
-        ? { ...g, layout: focusRefInLayout(g.layout, ref), activeTermId: termId }
+        ? {
+            ...g,
+            layout: focusRefInLayout(g.layout, ref),
+            activeTermId: termId,
+          }
         : g,
     );
     setState({
@@ -3969,7 +4316,25 @@ function setActiveTerminal(termId: string) {
     !state.activeGraph
   )
     return;
-  setState({ ...state, splitLayout: layoutWithRef({ kind: "terminal", id: termId }), activeTermId: termId, activePath: null, activeAgentId: null, activeManagerId: null, activeInspector: false, activeReplay: false, activePlanBuilder: false, activeProve: false, activeGraph: false, activeDashboard: false, activePlanId: null, activePrTabId: null, activeInbox: false, activeSessions: false, traceTool: null });
+  setState({
+    ...state,
+    splitLayout: layoutWithRef({ kind: "terminal", id: termId }),
+    activeTermId: termId,
+    activePath: null,
+    activeAgentId: null,
+    activeManagerId: null,
+    activeInspector: false,
+    activeReplay: false,
+    activePlanBuilder: false,
+    activeProve: false,
+    activeGraph: false,
+    activeDashboard: false,
+    activePlanId: null,
+    activePrTabId: null,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
+  });
 }
 
 /** Build a single-direction split tree from a flat panes list. */
@@ -4001,7 +4366,9 @@ function setSplitLayout(panes: WorkPaneRef[], direction: WorkSplitDirection) {
     activePlanBuilder: false,
     activeProve: false,
     activeGraph: false,
-    activeInbox: false, activeSessions: false, traceTool: null,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
     activeDashboard: false,
   });
 }
@@ -4050,7 +4417,9 @@ function addSplitPane(ref: WorkPaneRef) {
     activePlanBuilder: false,
     activeProve: false,
     activeGraph: false,
-    activeInbox: false, activeSessions: false, traceTool: null,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
     activeDashboard: false,
   });
 }
@@ -4267,7 +4636,10 @@ function reorderSplitPanes(srcIndex: number, dstIndex: number) {
   const src = leafNodeAtIndex(tree, srcIndex);
   const dst = leafNodeAtIndex(tree, dstIndex);
   if (!src || !dst) return;
-  setState({ ...state, splitLayout: treeReorder(tree, src.paneId, dst.paneId) });
+  setState({
+    ...state,
+    splitLayout: treeReorder(tree, src.paneId, dst.paneId),
+  });
 }
 
 function setSplitSizes(path: number[], weights: number[]) {
@@ -4289,7 +4661,10 @@ function addTabToPane(paneId: string, ref: WorkPaneRef): void {
     const owner = treeFindLeafByRef(tree, ref);
     if (owner) {
       const idx = owner.tabs.findIndex((r) => samePaneRef(r, ref));
-      setState({ ...state, splitLayout: treeSetActiveTab(tree, owner.paneId, idx) });
+      setState({
+        ...state,
+        splitLayout: treeSetActiveTab(tree, owner.paneId, idx),
+      });
     }
     return;
   }
@@ -4340,7 +4715,11 @@ function traceFieldsForRef(
     case "trace":
       return { ...base, traceTool: ref.tool, traceToolArg: ref.arg ?? null };
     case "sessions":
-      return { ...base, activeSessions: true, traceView: sessionsViewFromId(ref.id) };
+      return {
+        ...base,
+        activeSessions: true,
+        traceView: sessionsViewFromId(ref.id),
+      };
     case "inspector":
       return { ...base, activeInspector: true };
     case "replay":
@@ -4442,7 +4821,9 @@ function rememberClosedTab(ref: WorkPaneRef): WorkPaneRef[] {
   if (!REOPENABLE_TAB_KINDS.has(ref.kind)) return prev;
   const deduped = prev.filter((r) => !samePaneRef(r, ref));
   const next = [...deduped, ref];
-  return next.length > MAX_CLOSED_TABS ? next.slice(next.length - MAX_CLOSED_TABS) : next;
+  return next.length > MAX_CLOSED_TABS
+    ? next.slice(next.length - MAX_CLOSED_TABS)
+    : next;
 }
 
 /** Pop the most-recently-closed reopenable tab and re-open it. Files route
@@ -4484,18 +4865,26 @@ function closeTabInPane(paneId: string, index: number): void {
   } else if (ref.kind === "agent") {
     const agentTab = state.agentTabs.find((t) => t.sessionId === ref.id);
     if (agentTab) forgetAgentRecord(agentTab.agentId, agentTab.repoRoot);
-    void api.agentPtyClose(ref.id).catch((e) => reportSurvivingAgent(ref.id, e));
+    void api
+      .agentPtyClose(ref.id)
+      .catch((e) => reportSurvivingAgent(ref.id, e));
   }
   // Roster reconciliation: dropping a ref from the split tree must also
   // drop its underlying roster entry (mirroring closeAgent/closeTerminal/
   // closeManager) so closed tabs don't leak into agentTabs/terminalTabs/
   // managerTabs and ghost the project-level live-agent lane.
   const agentTabs =
-    ref.kind === "agent" ? state.agentTabs.filter((t) => t.sessionId !== ref.id) : state.agentTabs;
+    ref.kind === "agent"
+      ? state.agentTabs.filter((t) => t.sessionId !== ref.id)
+      : state.agentTabs;
   const terminalTabs =
-    ref.kind === "terminal" ? state.terminalTabs.filter((t) => t.termId !== ref.id) : state.terminalTabs;
+    ref.kind === "terminal"
+      ? state.terminalTabs.filter((t) => t.termId !== ref.id)
+      : state.terminalTabs;
   const managerTabs =
-    ref.kind === "manager" ? state.managerTabs.filter((t) => t.sessionId !== ref.id) : state.managerTabs;
+    ref.kind === "manager"
+      ? state.managerTabs.filter((t) => t.sessionId !== ref.id)
+      : state.managerTabs;
   // Files were the one roster this reconciliation skipped, and unlike the
   // other three they have a SECOND way of reaching the screen: the flat
   // file-tab path renders whatever `activePath` names, layout or no layout.
@@ -4503,7 +4892,8 @@ function closeTabInPane(paneId: string, index: number): void {
   // open and active — and the surface, having no layout left to draw, fell
   // straight through to that path and drew the file again, with no tab
   // above it and no way back to the empty state short of switching project.
-  const files = ref.kind === "file" ? state.files.filter((f) => f.path !== ref.path) : state.files;
+  const files =
+    ref.kind === "file" ? state.files.filter((f) => f.path !== ref.path) : state.files;
   const activePath =
     ref.kind === "file" && state.activePath === ref.path ? null : state.activePath;
   const next = treeRemove(tree, ref);
@@ -4765,7 +5155,12 @@ function openManager(sessionId: string, label: string) {
       activeReplay: false,
       activePlanBuilder: false,
       activeProve: false,
-      activeGraph: false, activeInbox: false, activeSessions: false, traceTool: null, activeDashboard: false, activePlanId: null,
+      activeGraph: false,
+      activeInbox: false,
+      activeSessions: false,
+      traceTool: null,
+      activeDashboard: false,
+      activePlanId: null,
     });
     return;
   }
@@ -4782,7 +5177,12 @@ function openManager(sessionId: string, label: string) {
     activeReplay: false,
     activePlanBuilder: false,
     activeProve: false,
-    activeGraph: false, activeInbox: false, activeSessions: false, traceTool: null, activeDashboard: false, activePlanId: null,
+    activeGraph: false,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
+    activeDashboard: false,
+    activePlanId: null,
   });
 }
 
@@ -4891,7 +5291,12 @@ function setActiveManager(sessionId: string) {
     activeReplay: false,
     activePlanBuilder: false,
     activeProve: false,
-    activeGraph: false, activeInbox: false, activeSessions: false, traceTool: null, activeDashboard: false, activePlanId: null,
+    activeGraph: false,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
+    activeDashboard: false,
+    activePlanId: null,
     activePrTabId: null,
   });
 }
@@ -4959,7 +5364,11 @@ function openPlan(
       activeReplay: false,
       activePlanBuilder: false,
       activeProve: false,
-      activeGraph: false, activeInbox: false, activeSessions: false, traceTool: null, activeDashboard: false,
+      activeGraph: false,
+      activeInbox: false,
+      activeSessions: false,
+      traceTool: null,
+      activeDashboard: false,
     });
     return;
   }
@@ -5002,7 +5411,11 @@ function openPlan(
     activeReplay: false,
     activePlanBuilder: false,
     activeProve: false,
-    activeGraph: false, activeInbox: false, activeSessions: false, traceTool: null, activeDashboard: false,
+    activeGraph: false,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
+    activeDashboard: false,
   });
 }
 
@@ -5057,7 +5470,8 @@ function closePlan(planId: string) {
       activePath = state.files[state.files.length - 1].path;
     } else if (state.managerTabs.length > 0) {
       activePlanId = null;
-      activeManagerId = state.managerTabs[state.managerTabs.length - 1].sessionId;
+      activeManagerId =
+        state.managerTabs[state.managerTabs.length - 1].sessionId;
     } else if (state.agentTabs.length > 0) {
       activePlanId = null;
       activeAgentId = state.agentTabs[state.agentTabs.length - 1].sessionId;
@@ -5105,7 +5519,11 @@ function setActivePlan(planId: string) {
     activeReplay: false,
     activePlanBuilder: false,
     activeProve: false,
-    activeGraph: false, activeInbox: false, activeSessions: false, traceTool: null, activeDashboard: false,
+    activeGraph: false,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
+    activeDashboard: false,
     activePrTabId: null,
   });
 }
@@ -5140,9 +5558,16 @@ function openInspector() {
     ...state,
     splitLayout: layoutWithRef(ref),
     inspectorOpen: false,
-    inboxOpen: false, activeInbox: false,
-    activePath: null, activeAgentId: null, activeTermId: null, activeManagerId: null,
-    activePlanBuilder: false, activeDashboard: false, activePlanId: null, activePrTabId: null,
+    inboxOpen: false,
+    activeInbox: false,
+    activePath: null,
+    activeAgentId: null,
+    activeTermId: null,
+    activeManagerId: null,
+    activePlanBuilder: false,
+    activeDashboard: false,
+    activePlanId: null,
+    activePrTabId: null,
     ...traceFieldsForRef(ref),
   });
 }
@@ -5150,7 +5575,12 @@ function openInspector() {
 function closeInspector() {
   const ref: WorkPaneRef = { kind: "inspector", id: "inspector" };
   const layout = state.splitLayout ? treeRemove(state.splitLayout, ref) : null;
-  setState({ ...state, splitLayout: layout, inspectorOpen: false, activeInspector: false });
+  setState({
+    ...state,
+    splitLayout: layout,
+    inspectorOpen: false,
+    activeInspector: false,
+  });
 }
 
 function setActiveInspector() {
@@ -5172,9 +5602,16 @@ function openReplay() {
     ...state,
     splitLayout: layoutWithRef(ref),
     replayOpen: false,
-    inboxOpen: false, activeInbox: false,
-    activePath: null, activeAgentId: null, activeTermId: null, activeManagerId: null,
-    activePlanBuilder: false, activeDashboard: false, activePlanId: null, activePrTabId: null,
+    inboxOpen: false,
+    activeInbox: false,
+    activePath: null,
+    activeAgentId: null,
+    activeTermId: null,
+    activeManagerId: null,
+    activePlanBuilder: false,
+    activeDashboard: false,
+    activePlanId: null,
+    activePrTabId: null,
     ...traceFieldsForRef(ref),
   });
 }
@@ -5182,7 +5619,12 @@ function openReplay() {
 function closeReplay() {
   const ref: WorkPaneRef = { kind: "replay", id: "replay" };
   const layout = state.splitLayout ? treeRemove(state.splitLayout, ref) : null;
-  setState({ ...state, splitLayout: layout, replayOpen: false, activeReplay: false });
+  setState({
+    ...state,
+    splitLayout: layout,
+    replayOpen: false,
+    activeReplay: false,
+  });
 }
 
 function setActiveReplay() {
@@ -5196,7 +5638,10 @@ function setActiveReplay() {
 // preview live inside the surface component (no per-instance state in
 // the store) — same shape as Inspector / Replay.
 
-const PLAN_BUILDER_REF: WorkPaneRef = { kind: "planBuilder", id: "planBuilder" };
+const PLAN_BUILDER_REF: WorkPaneRef = {
+  kind: "planBuilder",
+  id: "planBuilder",
+};
 
 function openPlanBuilder() {
   setState({
@@ -5211,7 +5656,12 @@ function openPlanBuilder() {
     activeInspector: false,
     activeReplay: false,
     activeProve: false,
-    activeGraph: false, activeInbox: false, activeSessions: false, traceTool: null, activeDashboard: false, activePlanId: null,
+    activeGraph: false,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
+    activeDashboard: false,
+    activePlanId: null,
   });
 }
 
@@ -5221,8 +5671,15 @@ function openPlanBuilder() {
 // leaf that loses its active tab focuses its neighbour.
 function closePlanBuilder() {
   if (!state.planBuilderOpen) return;
-  const layout = state.splitLayout ? treeRemove(state.splitLayout, PLAN_BUILDER_REF) : null;
-  setState({ ...state, splitLayout: layout, planBuilderOpen: false, activePlanBuilder: false });
+  const layout = state.splitLayout
+    ? treeRemove(state.splitLayout, PLAN_BUILDER_REF)
+    : null;
+  setState({
+    ...state,
+    splitLayout: layout,
+    planBuilderOpen: false,
+    activePlanBuilder: false,
+  });
 }
 
 function setActivePlanBuilder() {
@@ -5243,9 +5700,16 @@ function openProve() {
     ...state,
     splitLayout: layoutWithRef(ref),
     proveOpen: false,
-    inboxOpen: false, activeInbox: false,
-    activePath: null, activeAgentId: null, activeTermId: null, activeManagerId: null,
-    activePlanBuilder: false, activeDashboard: false, activePlanId: null, activePrTabId: null,
+    inboxOpen: false,
+    activeInbox: false,
+    activePath: null,
+    activeAgentId: null,
+    activeTermId: null,
+    activeManagerId: null,
+    activePlanBuilder: false,
+    activeDashboard: false,
+    activePlanId: null,
+    activePrTabId: null,
     ...traceFieldsForRef(ref),
   });
 }
@@ -5253,7 +5717,12 @@ function openProve() {
 function closeProve() {
   const ref: WorkPaneRef = { kind: "prove", id: "prove" };
   const layout = state.splitLayout ? treeRemove(state.splitLayout, ref) : null;
-  setState({ ...state, splitLayout: layout, proveOpen: false, activeProve: false });
+  setState({
+    ...state,
+    splitLayout: layout,
+    proveOpen: false,
+    activeProve: false,
+  });
 }
 
 function setActiveProve() {
@@ -5269,9 +5738,16 @@ function openGraph() {
     ...state,
     splitLayout: layoutWithRef(ref),
     graphOpen: false,
-    inboxOpen: false, activeInbox: false,
-    activePath: null, activeAgentId: null, activeTermId: null, activeManagerId: null,
-    activePlanBuilder: false, activeDashboard: false, activePlanId: null, activePrTabId: null,
+    inboxOpen: false,
+    activeInbox: false,
+    activePath: null,
+    activeAgentId: null,
+    activeTermId: null,
+    activeManagerId: null,
+    activePlanBuilder: false,
+    activeDashboard: false,
+    activePlanId: null,
+    activePrTabId: null,
     ...traceFieldsForRef(ref),
   });
 }
@@ -5279,7 +5755,12 @@ function openGraph() {
 function closeGraph() {
   const ref: WorkPaneRef = { kind: "graph", id: "graph" };
   const layout = state.splitLayout ? treeRemove(state.splitLayout, ref) : null;
-  setState({ ...state, splitLayout: layout, graphOpen: false, activeGraph: false });
+  setState({
+    ...state,
+    splitLayout: layout,
+    graphOpen: false,
+    activeGraph: false,
+  });
 }
 
 function setActiveGraph() {
@@ -5301,7 +5782,9 @@ function setActiveDashboard() {
     activeProve: false,
     activeGraph: false,
     activePrTabId: null,
-    activeInbox: false, activeSessions: false, traceTool: null,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
   });
 }
 
@@ -5466,7 +5949,10 @@ export function focusOrAppendRef(ref: WorkPaneRef): void {
     activePlanBuilder: false,
     activeProve: false,
     activeGraph: false,
-    activeInbox: false, activeSessions: false, traceTool: null, traceToolArg: null,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
+    traceToolArg: null,
     activeDashboard: false,
     activePrTabId: null,
     activePlanId: null,
@@ -5731,7 +6217,9 @@ function openPrDetail(
     pendingPrDetailTab = { tabId, tab: initialTab };
     if (typeof window !== "undefined") {
       window.dispatchEvent(
-        new CustomEvent("aura:pr-detail-tab", { detail: { tabId, tab: initialTab } }),
+        new CustomEvent("aura:pr-detail-tab", {
+          detail: { tabId, tab: initialTab },
+        }),
       );
     }
   }
@@ -5755,7 +6243,9 @@ function openPrDetail(
     activePlanBuilder: false,
     activeProve: false,
     activeGraph: false,
-    activeInbox: false, activeSessions: false, traceTool: null,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
     activeDashboard: false,
   });
   dispatchDetailTabOpened();
@@ -5843,7 +6333,9 @@ function setActivePrTab(tabId: string) {
     activePlanBuilder: false,
     activeProve: false,
     activeGraph: false,
-    activeInbox: false, activeSessions: false, traceTool: null,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
     activeDashboard: false,
   });
 }
@@ -5890,12 +6382,16 @@ function openInbox() {
 
 function closeInbox() {
   if (!state.inboxOpen) return;
-  const layout = state.splitLayout ? treeRemove(state.splitLayout, INBOX_REF) : null;
+  const layout = state.splitLayout
+    ? treeRemove(state.splitLayout, INBOX_REF)
+    : null;
   setState({
     ...state,
     splitLayout: layout,
     inboxOpen: false,
-    activeInbox: false, activeSessions: false, traceTool: null,
+    activeInbox: false,
+    activeSessions: false,
+    traceTool: null,
   });
 }
 
@@ -5986,7 +6482,11 @@ function closeTraceTool() {
   // leaf's active index, and its setState re-syncs traceTool via the
   // post-mutation path below; we clear the flat mirror here too so the
   // rail highlight drops immediately even if the layout is now empty.
-  const ref: WorkPaneRef = { kind: "trace", id: state.traceTool, tool: state.traceTool };
+  const ref: WorkPaneRef = {
+    kind: "trace",
+    id: state.traceTool,
+    tool: state.traceTool,
+  };
   const layout = state.splitLayout ? treeRemove(state.splitLayout, ref) : null;
   setState({
     ...state,

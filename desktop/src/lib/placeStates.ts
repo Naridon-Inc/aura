@@ -44,6 +44,11 @@ export type PlaceRegistry<S> = {
   focus(place: string): S | null;
   /** Read without touching recency. For assertions and diagnostics. */
   peek(place: string): S | null;
+  /** Give an already-held place a new state WITHOUT marking it used — a tab
+   *  filed into a place in the background is not a visit to it, and must not
+   *  reorder who gets evicted first. False (and nothing stored) when `place`
+   *  isn't held: a place nobody has open lives in its snapshot, not here. */
+  replace(place: string, state: S): boolean;
   /** Is this place already loaded? A true here is the difference between a
    *  focus and a reload. */
   has(place: string): boolean;
@@ -99,6 +104,12 @@ export function createPlaceRegistry<S>(
     },
     peek(place) {
       return held.has(place) ? (held.get(place) as S) : null;
+    },
+    replace(place, state) {
+      if (!held.has(place)) return false;
+      // Map.set on an existing key keeps its position, i.e. its recency.
+      held.set(place, state);
+      return true;
     },
     has(place) {
       return held.has(place);

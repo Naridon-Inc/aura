@@ -30,6 +30,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
+#[path = "chat_sse.rs"]
+mod chat_sse;
 
 /// A single saved endpoint. `name` is the unique key the user picks
 /// (e.g. "Llama 3 local"); the frontend uses it both as the row id and
@@ -124,33 +126,29 @@ fn save_profiles(profiles: &[OpenAiCompatProfile]) -> Result<(), String> {
 /// the only reader.
 #[derive(Default)]
 pub struct OpenAiCompatRegistry {
-    cancels: Mutex<HashMap<String, bool>>,
+    cancels: Mutex<HashMap<(String, String), tokio::sync::watch::Sender<bool>>>,
 }
 
 impl OpenAiCompatRegistry {
     pub fn new() -> Self {
         Self::default()
     }
-    fn key(profile: &str, turn: &str) -> String {
-        format!("{profile}::{turn}")
+    fn begin(&self, profile: &str, turn: &str) -> Result<tokio::sync::watch::Receiver<bool>, String> {
+        let mut entries = self.cancels.lock().map_err(|_| "Chat cancellation registry unavailable")?;
+        let key = (profile.to_string(), turn.to_string());
+        if entries.contains_key(&key) { return Err("This response is already running".into()); }
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        entries.insert(key, tx); Ok(rx)
     }
     fn mark_cancel(&self, profile: &str, turn: &str) {
-        if let Ok(mut g) = self.cancels.lock() {
-            g.insert(Self::key(profile, turn), true);
+        if let Ok(entries) = self.cancels.lock() {
+            if let Some(tx) = entries.get(&(profile.to_string(), turn.to_string())) { let _ = tx.send(true); }
         }
-    }
-    fn is_cancelled(&self, profile: &str, turn: &str) -> bool {
-        self.cancels
-            .lock()
-            .ok()
-            .and_then(|g| g.get(&Self::key(profile, turn)).copied())
-            .unwrap_or(false)
     }
     fn clear(&self, profile: &str, turn: &str) {
-        if let Ok(mut g) = self.cancels.lock() {
-            g.remove(&Self::key(profile, turn));
-        }
+        if let Ok(mut entries) = self.cancels.lock() { entries.remove(&(profile.to_string(), turn.to_string())); }
     }
+
 }
 
 // ── commands ───────────────────────────────────────────────────────────
@@ -305,13 +303,23 @@ pub async fn openai_compat_chat(
     turn_id: String,
     messages: Vec<ChatMessage>,
 ) -> Result<(), String> {
+    // Cancellation races the entire request, including DNS, connect, headers,
+    // error bodies and a stalled stream. Dropping reqwest's future closes I/O.
+    let mut cancel = state.begin(&profile_name, &turn_id)?;
+    let outcome = tokio::select! {
+        result = run_chat(&app, &profile_name, &turn_id, messages) => result,
+        _ = cancel.changed() => Ok(()),
+    };
+    state.clear(&profile_name, &turn_id);
+    outcome
+}
+
+async fn run_chat(app: &AppHandle, profile_name: &str, turn_id: &str, messages: Vec<ChatMessage>) -> Result<(), String> {
     let profile = load_profiles()
         .into_iter()
         .find(|p| p.name == profile_name)
         .ok_or_else(|| format!("profile {profile_name} not found"))?;
 
-    // Clear any stale cancel flag from a prior turn with the same id.
-    state.clear(&profile_name, &turn_id);
 
     let event_name = format!("openai-compat:chunk:{profile_name}");
     let base = trim_trailing_slash(&profile.base_url);
@@ -370,79 +378,48 @@ pub async fn openai_compat_chat(
         return Ok(());
     }
 
-    // Parse OpenAI-style SSE frames. Each `data:` line is a JSON object
-    // with `choices[0].delta.content` as the streamed text. The stream
-    // ends with `data: [DONE]`.
-    let mut stream = res.bytes_stream();
-    let mut buffer = String::new();
-
-    while let Some(chunk) = stream.next().await {
-        if state.is_cancelled(&profile_name, &turn_id) {
-            break;
+    if res.headers().get(reqwest::header::CONTENT_TYPE).and_then(|h| h.to_str().ok()).is_some_and(|h| h.contains("application/json")) {
+        match res.json::<Value>().await {
+            Ok(v) => {
+                if let Some(e) = v.get("error") { emit_error(app, &event_name, profile_name, turn_id, e.to_string()); }
+                else if v.get("choices").and_then(Value::as_array).is_some_and(|c| !c.is_empty()) {
+                    emit_completion(app, &event_name, profile_name, turn_id, &v);
+                    emit_done(app, &event_name, profile_name, turn_id);
+                } else { emit_error(app, &event_name, profile_name, turn_id, "Endpoint returned no completion choices".into()); }
+            }
+            Err(e) => emit_error(app, &event_name, profile_name, turn_id, format!("Invalid completion: {e}")),
         }
-        let chunk = match chunk {
-            Ok(c) => c,
-            Err(e) => {
-                emit_error(
-                    &app,
-                    &event_name,
-                    &profile_name,
-                    &turn_id,
-                    format!("stream error: {e}"),
-                );
-                state.clear(&profile_name, &turn_id);
-                return Ok(());
-            }
+        return Ok(());
+    }
+    let mut stream = res.bytes_stream();
+    let mut decoder = chat_sse::SseDecoder::default();
+    let mut finished = false;
+    loop {
+        let (frames, eof) = match stream.next().await {
+            Some(Ok(bytes)) => (decoder.push(&bytes), false),
+            Some(Err(e)) => { emit_error(app, &event_name, profile_name, turn_id, format!("Connection interrupted: {e}")); return Ok(()); }
+            None => (decoder.finish(), true),
         };
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        // Process every complete `\n\n`-terminated frame; tail stays in
-        // the buffer for the next iteration so we don't split a delta.
-        while let Some(end) = buffer.find("\n\n") {
-            let frame = buffer[..end].to_string();
-            buffer.drain(..end + 2);
-            let Some(data) = parse_sse_data(&frame) else {
-                continue;
-            };
-            if data.trim() == "[DONE]" {
-                emit_done(&app, &event_name, &profile_name, &turn_id);
-                state.clear(&profile_name, &turn_id);
-                return Ok(());
-            }
+        let frames = match frames { Ok(f) => f, Err(e) => { emit_error(app, &event_name, profile_name, turn_id, e); return Ok(()); } };
+        for data in frames {
+            if data.trim() == "[DONE]" { emit_done(app, &event_name, profile_name, turn_id); return Ok(()); }
             let v: Value = match serde_json::from_str(&data) {
                 Ok(v) => v,
-                Err(_) => continue, // tolerate keep-alive / comment lines
+                Err(e) => { emit_error(app, &event_name, profile_name, turn_id, format!("Invalid response event: {e}")); return Ok(()); }
             };
-            // OpenAI shape: choices[0].delta.content. Some servers (Ollama,
-            // older HF) send `message.content` on the final frame instead
-            // of incremental deltas — pick up either so we don't drop the
-            // last chunk.
-            let content = v
-                .pointer("/choices/0/delta/content")
-                .and_then(|s| s.as_str())
-                .or_else(|| {
-                    v.pointer("/choices/0/message/content")
-                        .and_then(|s| s.as_str())
-                })
-                .unwrap_or("");
-            if !content.is_empty() {
-                emit_delta(&app, &event_name, &profile_name, &turn_id, content);
-            }
-            // `finish_reason: "stop"` is also a clean end-of-turn signal
-            // some servers emit before [DONE]. We don't return here so a
-            // trailing [DONE] in the same connection still drains cleanly.
-            let _finish = v
-                .pointer("/choices/0/finish_reason")
-                .and_then(|s| s.as_str());
+            if let Some(e) = v.get("error") { emit_error(app, &event_name, profile_name, turn_id, e.to_string()); return Ok(()); }
+            finished |= v.pointer("/choices/0/finish_reason").is_some_and(|r| !r.is_null());
+            emit_completion(app, &event_name, profile_name, turn_id, &v);
         }
+        if eof { break; }
     }
-
-    // Stream ended without a [DONE] sentinel (some local-runner builds
-    // close the connection on EOF instead). Emit `done` so the frontend
-    // releases its "streaming" state.
-    emit_done(&app, &event_name, &profile_name, &turn_id);
-    state.clear(&profile_name, &turn_id);
+    if finished { emit_done(app, &event_name, profile_name, turn_id); }
+    else { emit_error(app, &event_name, profile_name, turn_id, "Connection closed before the response finished. Partial output is saved.".into()); }
     Ok(())
+}
+
+fn emit_completion(app: &AppHandle, event: &str, profile: &str, turn: &str, data: &Value) {
+    let _ = app.emit(event, json!({"profile":profile,"turn_id":turn,"kind":"event","data":data}));
 }
 
 #[tauri::command]

@@ -1165,50 +1165,19 @@ fn parse_jsonl_line(
                             is_error,
                             turn_id: current_turn.clone(),
                         });
-                    }
-                }
-            }
-        }
-        "assistant" => {
-            let arr = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_array);
-            if let Some(arr) = arr {
-                for b in arr {
-                    let bt = b.get("type").and_then(Value::as_str).unwrap_or("");
-                    if bt == "text" {
-                        if let Some(t) = b.get("text").and_then(Value::as_str) {
-                            let trimmed = t.trim();
-                            if trimmed.is_empty() {
-                                continue;
-                            }
-                            events.push(StreamEvent::AssistantText {
-                                text: trimmed.to_string(),
-                                turn_id: current_turn.clone(),
-                            });
-                        }
-                    } else if bt == "tool_use" {
-                        let id = b
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        let name = b
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        let input = b.get("input").cloned().unwrap_or(Value::Null);
-                        events.push(StreamEvent::ToolUse {
-                            id,
-                            name,
-                            input,
-                            turn_id: current_turn.clone(),
+                    } else {
+                        events.push(StreamEvent::ContentBlock {
+                            event_id: String::new(), role: "user".to_string(),
+                            payload: b.clone(), turn_id: current_turn.clone(),
                         });
                     }
                 }
             }
+        }
+        "assistant" | "system" | "result" => {
+            // Live streaming and on-disk replay must preserve the same content,
+            // reasoning, images, usage and stable message identities.
+            events.extend(crate::cmd_agent_stream::parse_claude_line(line, current_turn));
         }
         _ => {}
     }
@@ -1348,6 +1317,15 @@ pub async fn claude_session_watch(
                             "assistant",
                             text,
                         );
+                    }
+                    crate::cmd_agent_stream::StreamEvent::ContentBlock { role, payload, .. } => {
+                        if payload.get("type").and_then(Value::as_str) == Some("text") {
+                            if let Some(text) = payload.get("text").and_then(Value::as_str) {
+                                crate::cloud_session_sync::spawn_push_message(
+                                    session_id_for_task.clone(), if role == "user" { "user" } else { "assistant" }, text.to_string(),
+                                );
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -1660,7 +1638,7 @@ fn content_to_text(v: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Array(arr) => arr
             .iter()
-            .filter_map(|b| b.get("text").and_then(Value::as_str).map(str::to_string))
+            .map(|b| b.get("text").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| b.to_string()))
             .collect::<Vec<_>>()
             .join("\n"),
         other => other.to_string(),
@@ -1793,5 +1771,30 @@ mod incremental_scan_tests {
         assert_ne!(head_signature(&a), head_signature(&b));
         assert_eq!(head_signature(&a), head_signature(&a));
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod chat_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn replay_uses_the_same_assistant_parser_as_live_streaming() {
+        let line = r#"{"type":"assistant","uuid":"record-a","message":{"id":"msg-a","content":[{"type":"text","text":"Hello"},{"type":"thinking","thinking":"Review"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc"}}],"usage":{"input_tokens":1,"output_tokens":2}}}"#;
+        let mut replay = Vec::new();
+        parse_jsonl_line(line, "hist", &mut 0, &mut "turn".to_string(), &mut replay);
+        let live = crate::cmd_agent_stream::parse_claude_line(line, "turn");
+        assert_eq!(serde_json::to_value(replay).unwrap(), serde_json::to_value(live).unwrap());
+    }
+
+    #[test]
+    fn replay_retains_user_attachments_and_non_text_tool_results() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"image","source":{"data":"abc"}},{"type":"tool_result","tool_use_id":"t","content":[{"type":"resource_link","uri":"file:///example"}]}]}}"#;
+        let mut replay = Vec::new();
+        parse_jsonl_line(line, "hist", &mut 0, &mut "turn".to_string(), &mut replay);
+        assert_eq!(replay.len(), 2);
+        let rendered = serde_json::to_string(&replay).unwrap();
+        assert!(rendered.contains("content_block"));
+        assert!(rendered.contains("resource_link"));
     }
 }

@@ -41,6 +41,16 @@ export type ReleaseCta = "mobile-waitlist";
 // one shown after an update.
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: "0.19.52",
+    date: "September 2026",
+    title: "One chat for every agent",
+    highlights: [
+      "Aura and your coding agents now share one chat: the same message box, menus, questions and plans. Chat and Terminal sit in the session header, and switching keeps what you were typing.",
+      "An agent opens in the project you started it in. Switch projects while it's starting and it stays put, and a note offers to take you there.",
+      "A tab from another project names that project on the tab itself.",
+    ],
+  },
+  {
     version: "0.19.51",
     date: "September 2026",
     title: "Your phone's choices now reach this computer",

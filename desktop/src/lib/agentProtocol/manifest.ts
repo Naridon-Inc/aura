@@ -89,7 +89,7 @@ export const AGENT_MANIFESTS: Record<string, AgentManifest> = {
     // Claude Code is the reference protocol: thinking blocks, tool_use cards,
     // AskUserQuestion (sets + multiSelect), ExitPlanMode, can_use_tool
     // permission control, and TodoWrite all map cleanly.
-    interactions: FULL_INTERACTIONS,
+    interactions: { ...FULL_INTERACTIONS, permission: false },
   },
   codex: {
     id: "codex",
@@ -117,19 +117,23 @@ export const AGENT_MANIFESTS: Record<string, AgentManifest> = {
     id: "gemini",
     label: "Gemini CLI",
     ingress: "acp",
-    // Gemini speaks ACP (`--experimental-acp`) — thoughts, tool calls with
-    // confirmations, a plan — and every one of those would map. But no ACP
-    // normalizer is registered (`NORMALIZERS` has no "acp" entry), so
-    // `normalizeStream` returns null for this id and a Gemini session renders
-    // through the PTY block fallback. Nothing here can be surfaced until that
-    // adapter lands, so nothing here is claimed.
-    interactions: NO_INTERACTIONS,
+    interactions: {
+      ...NO_INTERACTIONS,
+      toolCalls: true,
+      permission: true,
+      plan: true,
+    },
   },
   cursor: {
     id: "cursor",
     label: "Cursor Agent",
-    ingress: "acp",
-    // Same as Gemini: ACP is declared, no ACP adapter is wired yet.
+    ingress: "json-events",
+    interactions: { ...NO_INTERACTIONS, toolCalls: true, reasoning: false },
+  },
+  "openai-compat": {
+    id: "openai-compat",
+    label: "Local & custom models",
+    ingress: "chat",
     interactions: NO_INTERACTIONS,
   },
   kimi: {

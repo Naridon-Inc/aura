@@ -397,7 +397,7 @@ impl SemanticParser {
             }
 
             // Behavioral Analysis: Is this a stub?
-            let is_stub = looks_half_finished(content, ext);
+            let is_stub = node_looks_half_finished(node, source_code, ext);
 
             // Extract line numbers
             let start_line = node.start_position().row as u32 + 1; // tree-sitter is 0-based
@@ -567,56 +567,78 @@ impl SemanticParser {
     }
 }
 
-/// The byte offset of the start of the line `offset` sits on.
-///
-/// Insertions anchor to a line boundary rather than to a node's own range,
-/// because a node's range is not always a whole statement: tree-sitter reports
-/// `let FAVORITES = []` as the *declarator* `FAVORITES = []`, so inserting at
-/// its start would land between `let` and the name and produce
-/// `let function loadFavorites() {…} FAVORITES = []`. A line boundary can never
-/// split a token. Scanning for `\n` bytes is UTF-8 safe — a newline byte cannot
-/// occur inside a multi-byte sequence.
-/// Does this block of source look like something nobody finished?
-///
-/// The markers below used to be matched as bare substrings anywhere in the
-/// body, which is why a component containing the sentence "'all' passes
-/// everything through untouched" was reported as a placeholder: `pass` is a
-/// substring of `passes`, and so of `password`, `passed` and `bypass`. The
-/// same held for `TODO` inside `TODOS` and for a `return None` that was a
-/// function's real answer rather than a hole in it.
-///
-/// So each marker is matched in the shape it actually takes:
-///
-/// * `todo!()`, `unimplemented!()`, `panic!()` — Rust macros. A substring is
-///   exactly right; the `!` makes them unambiguous.
-/// * `TODO` / `FIXME` — comment markers. Matched as whole words, so `TODOS`
-///   and `fixmeister` do not count, and case is respected: these are shouted
-///   by convention, and lowercase `todo` appears in ordinary prose.
-/// * `pass` — Python's do-nothing statement, and only that. It has to be a
-///   line of its own in a `.py` file; the English verb never is.
-/// * `return None` — likewise only a hole when it is the whole line, and only
-///   in the two languages that spell it that way.
-fn looks_half_finished(content: &str, ext: &str) -> bool {
-    const MACROS: [&str; 3] = ["todo!", "unimplemented!", "panic!"];
-    if MACROS.iter().any(|m| content.contains(m)) {
-        return true;
+/// Inspect syntax, not quoted examples or legitimate early returns. A missing
+/// implementation marker is different from an optional lookup returning no row
+/// or a test asserting that an unexpected result must fail.
+fn node_looks_half_finished(node: &Node, source: &str, ext: &str) -> bool {
+    let kind = node.kind();
+    if matches!(kind, "string" | "string_literal" | "raw_string_literal" | "char_literal") {
+        return false;
     }
-
-    if contains_word(content, "TODO") || contains_word(content, "FIXME") {
-        return true;
+    if matches!(kind, "comment" | "line_comment" | "block_comment") {
+        let text = &source[node.byte_range()];
+        return contains_word(text, "TODO") || contains_word(text, "FIXME");
     }
-
-    let bare_lines = || content.lines().map(str::trim);
-
-    if ext == "py" && bare_lines().any(|l| l == "pass") {
-        return true;
+    if ext == "rs" && kind == "macro_invocation" {
+        let text = &source[node.byte_range()];
+        let name = text.split('!').next().unwrap_or("").trim().rsplit("::").next().unwrap_or("");
+        if matches!(name, "todo" | "unimplemented") {
+            return true;
+        }
     }
-
-    if matches!(ext, "py" | "rs") && bare_lines().any(|l| l == "return None" || l == "return None;") {
-        return true;
+    // Rust parses macro arguments as token trees. Calls inside them still
+    // represent missing implementations even without a macro_invocation node.
+    if ext == "rs" && kind == "token_tree" {
+        let mut cursor = node.walk();
+        let tokens: Vec<_> = node.children(&mut cursor).collect();
+        if tokens.windows(2).any(|pair| {
+            pair[0].kind() == "identifier" && pair[1].kind() == "!"
+                && matches!(source[pair[0].byte_range()].trim(), "todo" | "unimplemented")
+        }) {
+            return true;
+        }
     }
+    // A bare no-op is evidence only when it is the entire implementation.
+    // An early absence result inside a real function is normal control flow.
+    if matches!((ext, kind), ("rs", "function_item" | "closure_expression") | ("py", "function_definition" | "class_definition")) {
+        if let Some(body) = node.child_by_field_name("body") {
+            let mut cursor = body.walk();
+            let statements: Vec<_> = body.named_children(&mut cursor)
+                .filter(|n| !matches!(n.kind(), "comment" | "line_comment" | "block_comment"))
+                .filter(|n| !(ext == "py" && n.kind() == "expression_statement" && n.named_child(0).is_some_and(|v| v.kind() == "string")))
+                .collect();
+            if let [statement] = statements.as_slice() {
+                let text = source[statement.byte_range()].trim();
+                if matches!(text, "pass" | "return None" | "return None;") {
+                    return true;
+                }
+                if ext == "rs" {
+                    let expression = if statement.kind() == "expression_statement" { statement.named_child(0) } else { Some(*statement) };
+                    if let Some(expression) = expression.filter(|n| n.kind() == "macro_invocation") {
+                        let macro_text = &source[expression.byte_range()];
+                        let name = macro_text.split('!').next().unwrap_or("").trim().rsplit("::").next().unwrap_or("");
+                        if name == "panic" { return true; }
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    let found = node.named_children(&mut cursor).any(|child| node_looks_half_finished(&child, source, ext));
+    found
+}
 
-    false
+#[cfg(test)]
+fn looks_half_finished(source: &str, ext: &str) -> bool {
+    let mut parser = Parser::new();
+    let language = match ext {
+        "rs" => tree_sitter_rust::LANGUAGE.into(),
+        "py" => tree_sitter_python::LANGUAGE.into(),
+        _ => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+    };
+    parser.set_language(&language).expect("test grammar");
+    let tree = parser.parse(source, None).expect("test syntax tree");
+    node_looks_half_finished(&tree.root_node(), source, ext)
 }
 
 /// `needle` appearing in `haystack` with a non-alphanumeric character (or
@@ -634,6 +656,15 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
         .any(|(i, _)| (i == 0 || boundary(i - 1)) && boundary(i + needle.len()))
 }
 
+/// The byte offset of the start of the line `offset` sits on.
+///
+/// Insertions anchor to a line boundary rather than to a node's own range,
+/// because a node's range is not always a whole statement: tree-sitter reports
+/// `let FAVORITES = []` as the *declarator* `FAVORITES = []`, so inserting at
+/// its start would land between `let` and the name and produce
+/// `let function loadFavorites() {…} FAVORITES = []`. A line boundary can never
+/// split a token. Scanning for `\n` bytes is UTF-8 safe — a newline byte cannot
+/// occur inside a multi-byte sequence.
 fn line_start(source: &str, offset: usize) -> usize {
     source[..offset].rfind('\n').map_or(0, |i| i + 1)
 }
@@ -823,6 +854,50 @@ export function Separator() {
         // `pass` is a statement in Python and a verb everywhere else.
         assert!(!looks_half_finished("const pass = true;\npass", "ts"));
         assert!(!looks_half_finished("let pass = 1;", "rs"));
+    }
+
+    #[test]
+    fn completed_optional_branches_and_failure_assertions_are_not_stubs() {
+        for source in [
+            "fn lookup(ok: bool) -> Option<u8> { if !ok { return None; } Some(1) }",
+            "fn unknown_price() -> Option<f64> { None }",
+            "fn verify(value: Option<u8>) { match value { Some(n) => assert_eq!(n, 1), None => panic!(\"missing result\") } }",
+            r#"fn fixture() -> &'static str { "TODO: example; todo!(); panic!()" }"#,
+            r##"fn fixture() -> &'static str { r#"unimplemented!()"# }"##,
+        ] {
+            assert!(!looks_half_finished(source, "rs"), "false placeholder: {source}");
+        }
+        assert!(!looks_half_finished("def lookup(rows):\n    if not rows:\n        return None\n    return rows[0]", "py"));
+        assert!(!looks_half_finished("function docs() { return `TODO: example`; }", "ts"));
+        assert!(!looks_half_finished(r#"fn fixture() { assert_eq!("todo!()", "todo!()"); }"#, "rs"));
+    }
+
+    #[test]
+    fn syntax_check_retains_actual_placeholder_detection() {
+        for source in [
+            "fn missing() { todo!() }",
+            "fn missing() { std::unimplemented!() }",
+            "fn missing() { assert!(todo!()); }",
+            "fn missing() { assert!(std::unimplemented!()); }",
+            "fn missing() { panic!(\"not implemented\") }",
+            "fn missing() -> Option<u8> { return None; }",
+            "fn missing(ready: bool) { if ready { todo!() } }",
+            "fn missing() { /* TODO: implement */ work(); }",
+        ] {
+            assert!(looks_half_finished(source, "rs"), "missed placeholder: {source}");
+        }
+        assert!(looks_half_finished("function missing() { return `${(() => { /* TODO: implement */ return 1; })()}`; }", "ts"));
+        assert!(looks_half_finished("class Missing:\n    pass", "py"));
+        assert!(looks_half_finished("def missing():\n    \"docstring\"\n    pass", "py"));
+        assert!(looks_half_finished("function missing() { /* FIXME: implement */ return 1; }", "ts"));
+    }
+
+    #[test]
+    fn semantic_nodes_use_the_syntax_based_stub_verdict() {
+        let mut parser = SemanticParser::new().expect("parser");
+        let nodes = parser.parse_file("fn lookup(ok: bool) -> Option<u8> { if !ok { return None; } Some(1) }\nfn missing() { todo!() }", "rs").expect("parse rust");
+        assert!(!nodes.iter().find(|n| n.identifier.as_deref() == Some("lookup")).unwrap().is_stub);
+        assert!(nodes.iter().find(|n| n.identifier.as_deref() == Some("missing")).unwrap().is_stub);
     }
 
     #[test]

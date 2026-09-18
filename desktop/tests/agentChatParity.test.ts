@@ -78,16 +78,17 @@ describe("the chat view a non-Claude agent gets", () => {
     // grows, and the next engine to keep a record would silently render an
     // empty pane if it had to be added here too.
     expect(transcript).toContain(
-      "normalized != null && (!record.supported || record.records.length > 0)",
+      "normalized != null && (!nativeRecord || record.records.length > 0)",
     );
     expect(transcript).not.toContain('agentId === "codex"');
-    expect(transcript).toMatch(/: !structured \? \(\s*<AgentBlockTranscript/);
-    expect(transcript).toContain("const hasContent = structured ? groups.length > 0 : blocks.length > 0;");
+    expect(transcript).toMatch(/!structured \? \(\s*<AgentBlockTranscript/);
+    expect(transcript).toContain("fallback={");
   });
 
   it("mounts the composer for both kinds of transcript, not just the rich one", () => {
     // The composer sits outside the structured/fallback branch entirely.
-    expect(transcript).toMatch(/<\/div>\s*<AgentChatComposer/);
+    expect(transcript).toContain("<AgentChatComposer");
+    expect(transcript).toContain("composer={");
   });
 });
 
@@ -252,7 +253,8 @@ describe("switching model inside the agent's own provider", () => {
   });
 
   it("asks the shared catalog rather than keeping a second model list", () => {
-    expect(composer).toContain("catalogFor(brain, live)");
+    expect(composer).toContain("<BrainSwitcherModal");
+    expect(composer).toContain("liveCatalog={live}");
     expect(composer).toContain('id: `cli_wrapper:${agentId}`');
   });
 });
@@ -385,7 +387,7 @@ describe("ending a session", () => {
     // `running` only ever goes true on the stream-json wire, which is Claude.
     // For the four engines that write a record instead, the composer's Stop
     // button did not exist at all — there was nothing to click.
-    expect(transcript).toContain("record.supported && record.streaming");
+    expect(transcript).toContain("nativeRecord && record.streaming");
     expect(transcript).toContain("running={busy}");
   });
 });

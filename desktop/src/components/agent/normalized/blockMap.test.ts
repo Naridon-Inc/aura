@@ -93,7 +93,7 @@ describe("which prompts still take input", () => {
     ]);
     const live = groups
       .filter((g) => g.kind === "question")
-      .map((g) => (g.kind === "question" ? [g.id, g.live] : null));
+      .map((g) => (g.kind === "question" ? [JSON.parse(g.id)[3], g.live] : null));
     expect(live).toEqual([
       ["tu_1", false],
       ["tu_2", true],
@@ -192,11 +192,12 @@ describe("runs, rows and token accounting", () => {
     });
   });
 
-  test("usage with nothing to attach to shows no row", () => {
+  test("usage without prose retains its accounting row", () => {
     const groups = toTranscriptGroups([
       { ...base, kind: "usage", id: "m1", contextTokens: 10, outputTokens: 1 },
     ]);
-    expect(groups).toEqual([]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({kind:"stream", blocks:[], usage:{context:10, output:1}});
   });
 
   test("a tool call still running carries no result yet", () => {

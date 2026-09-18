@@ -35,6 +35,8 @@ export type EventEnvelope = {
   /** Still streaming — the consumer should expect further same-id updates. */
   partial?: boolean;
   source: EventSource;
+  /** Correlates lifecycle boundaries without relying on display order. */
+  turnId?: string;
 };
 
 // ── Tool-call state machine ──────────────────────────────────────────────
@@ -67,7 +69,8 @@ export type ToolCallStatus =
   | "running"
   | "completed"
   | "error"
-  | "cancelled";
+  | "cancelled"
+  | "unknown";
 
 /** One piece of a tool call's output. Discriminated so the card can render a
  *  diff, a terminal well, or plain content without guessing. */
@@ -186,6 +189,7 @@ export type QuestionSetEvent = EventEnvelope & {
    *  blocked on. Absent means still open. An engine that never reports the
    *  answer leaves this absent and its sets settle by supersession instead. */
   answer?: string;
+  resolution?: { text: string; isError: boolean };
 };
 
 /** One line of a proposed/streaming plan. 3 statuses only (no `failed`) —
@@ -239,6 +243,8 @@ export type ResultEvent = EventEnvelope & {
   text?: string;
   errors?: string[];
   usage?: TokenUsageDetail;
+  /** Total reported without a trustworthy input/output split. */
+  totalTokens?: number;
   costUsd?: number;
   durationMs?: number;
   numTurns?: number;
@@ -282,7 +288,15 @@ export type StatusEvent = EventEnvelope & {
   message?: string;
 };
 
+/** Preserve unrecognized or non-text content without treating it as an error. */
+export type RawEvent = EventEnvelope & {
+  kind: "raw";
+  label: string;
+  payload: unknown;
+};
+
 export type NormalizedEvent =
+  | RawEvent
   | SessionInitEvent
   | TextEvent
   | ReasoningEvent

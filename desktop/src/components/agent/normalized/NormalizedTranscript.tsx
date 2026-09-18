@@ -1,3 +1,6 @@
+import { QuestionFlow } from "../../chat/QuestionFlow";
+import { ChatHeader } from "../../chat/ChatHeader";
+import { PlanPreview } from "../../chat/PlanPreview";
 //! The engine-agnostic agent transcript.
 //!
 //! ONE renderer for every coding agent. It reads the tab's raw stream from the
@@ -6,15 +9,8 @@
 //! draws the result with the SAME calm chat cards the native Aura brain uses —
 //! `StreamingBubble` for prose/thinking/tool runs, plus first-class cards for
 //! the structured moments (questions, plans, todo checklists, permission
-//! prompts, the result footer). Claude, Codex and Kimi feed it today;
-//! Gemini/Cursor light up the instant their adapter lands.
-//!
-//! What DOES vary per engine is where the structure comes from. Claude streams
-//! it over the PTY; Codex and Kimi write it to their own JSONL beside the
-//! session and only paint a TUI on the terminal. So this picks the raw source
-//! by agent (`useAgentRecord`) and hands it to the same `normalizeStream` —
-//! the one thing every engine has in common is that none of them should be
-//! read off the screen.
+//! prompts, the result footer). Claude feeds it today; Codex/Gemini/Cursor
+//! light up the instant their adapter lands — this file never changes.
 //!
 //! It is a faithful, read-only mirror of the agent's structured output: the
 //! agent runs as a live TUI in the Terminal view, and questions/permissions
@@ -26,16 +22,42 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { onExternalAnchorClick } from "../../../lib/openExternal";
+import {
+  ArrowUp,
+  ArrowDown,
+  Search,
+  Copy,
+  Check,
+  Square,
+  X,
+} from "lucide-react";
+import "../chatView.css";
+import {
+  ComposerFrame,
+  ComposerToolbar,
+  ChatModePicker,
+  promptForChatMode,
+  type ChatMode,
+} from "../../chat/ChatComposer";
+import {
+  TiptapComposer,
+  type TiptapComposerHandle,
+} from "../../manager/TiptapComposer";
+import { manifestFor } from "../../../lib/agentProtocol";
 
 import { api } from "../../../lib/api";
-import { toast } from "../../../lib/toast";
-import { useAgentStream } from "../../../lib/agentStreamStore";
 import { useAgentSession } from "../../../lib/agentSessionStore";
 import { useAgentRecord } from "../../../lib/agentRecordStore";
+import { AgentBlockTranscript } from "../chat/AgentBlockTranscript";
+import { AgentChatComposer } from "../chat/AgentChatComposer";
+import { buildTurnCost } from "../../../lib/turnCost";
+import { TurnCostTip } from "../../TurnCostTip";
+import { useAgentStream } from "../../../lib/agentStreamStore";
 import { normalizeStream } from "../../../lib/agentProtocol";
 import type {
   ErrorEvent,
   ImageEvent,
+  RawEvent,
   PermissionRequestEvent,
   PlanEvent,
   QuestionSetEvent,
@@ -45,16 +67,9 @@ import type {
 } from "../../../lib/agentProtocol";
 import { StreamingBubble } from "../../manager/chat/ToolCard";
 import { MarkdownBody } from "../../manager/chat/Markdown";
-import { AgentIcon } from "../AgentIcon";
-import { AgentBlockTranscript } from "../chat/AgentBlockTranscript";
-import { AgentChatComposer } from "../chat/AgentChatComposer";
+
 import { toTranscriptGroups, type GroupUsage } from "./blockMap";
 import { LinkifiedText } from "./TaskChip";
-import { compactNumber } from "../../../lib/compactNumber";
-import { formatCost } from "../../../lib/money";
-import { buildTurnCost } from "../../../lib/turnCost";
-import { TurnCostTip } from "../../TurnCostTip";
-import { labelForAgentId } from "../../../lib/useLiveAgentSessions";
 
 export function NormalizedTranscript({
   channel,
@@ -62,20 +77,29 @@ export function NormalizedTranscript({
   repoRoot,
   ptySessionId,
   onRespondInTerminal,
+  onSend,
+  onStop,
+  controls,
+  modelControl,
+  composerOptions,
+  composerDocked = false,
+  viewSwitcher,
 }: {
   channel: string;
   agentId: string;
   repoRoot: string;
-  /** The Tauri PTY handle this transcript mirrors. Typing in the composer
-   *  injects straight into THIS child via `agent_pty_send_prompt`, so the
-   *  Chat view answers the agent without flipping to the raw terminal. */
   ptySessionId: string;
-  /** Jump back to the live Terminal view (where the agent's prompts are
-   *  actually answered). Shown on question / permission / plan cards. */
   onRespondInTerminal?: () => void;
+  onSend?: (text: string, mode?: ChatMode) => Promise<void>;
+  onStop?: () => Promise<void>;
+  controls?: ReactNode;
+  modelControl?: ReactNode;
+  composerOptions?: ReactNode;
+  composerDocked?: boolean;
+  viewSwitcher?: ReactNode;
 }) {
   const { events, sessionId, running } = useAgentStream(channel);
-  const sid = sessionId ?? "";
+  const sid = sessionId ?? ptySessionId;
   // Every PTY session is framed into (prompt, output) blocks by the backend,
   // whether or not its protocol has an adapter. That is the content the
   // fallback transcript below draws.
@@ -87,9 +111,10 @@ export function NormalizedTranscript({
   // echoed prompt, the composer placeholder, the status footer) into the chat
   // as if the agent had said it. Every other engine still comes from the
   // stream, and the tail doesn't run for them at all.
-  const record = useAgentRecord(agentId, repoRoot);
-  const raw: unknown = record.supported ? record.records : events;
-  const rawSid = record.supported ? (record.sessionId ?? sid) : sid;
+  const record = useAgentRecord(agentId, onSend ? null : repoRoot);
+  const nativeRecord = !onSend && record.supported;
+  const raw: unknown = nativeRecord ? record.records : events;
+  const rawSid = nativeRecord ? (record.sessionId ?? sid) : sid;
 
   // "The agent is working" has two sources, because the two halves of the
   // chat have two data planes. A streamed engine says so on the wire
@@ -98,7 +123,7 @@ export function NormalizedTranscript({
   // only the first meant Codex, Kimi, OpenCode and Pi never showed a typing
   // cursor and, worse, never showed the Stop button: the control the user
   // reached for to interrupt those agents did not exist.
-  const busy = running || (record.supported && record.streaming);
+  const busy = running || (nativeRecord && record.streaming);
 
   // `normalizeStream` returns null — not [] — when this engine has no adapter,
   // which is the difference between "structured, nothing yet" and "we do not
@@ -112,212 +137,484 @@ export function NormalizedTranscript({
   // first record arrives there is nothing structured to draw, so the PTY
   // blocks hold the screen rather than an empty chat that looks broken.
   const structured =
-    normalized != null && (!record.supported || record.records.length > 0);
+    normalized != null && (!nativeRecord || record.records.length > 0);
 
   const groups = useMemo(
-    () => toTranscriptGroups(normalized ?? []),
-    [normalized],
+    () => toTranscriptGroups(normalized ?? [], rawSid),
+    [normalized, rawSid],
   );
 
-  // Running cost of THIS AI session, accreted from the same per-response usage
-  // the footers show. `context` is the conversation's current size (the latest
-  // response's context — it grows as the thread does, it doesn't sum); `tokens`
-  // is everything the model has written across the session. We can't show
-  // "remaining" — a CLI agent gives us no quota — but this is the honest "how
-  // much have I used on this one" the chat was missing.
-  const sessionUsage = useMemo(() => {
-    let context = 0;
-    let tokens = 0;
-    let any = false;
-    for (const g of groups) {
-      if (g.kind === "stream" && g.usage) {
-        any = true;
-        context = g.usage.context; // latest wins → current thread size
-        tokens += g.usage.output;
-      }
-    }
-    return any ? { context, tokens } : null;
-  }, [groups]);
-
-  // Which model is behind this stream. The engine announces it once, in the
-  // session handshake, so the per-turn footers below can name what ran without
-  // every adapter having to repeat it on every event. Null until it does.
-  const model = useMemo(() => {
-    for (const g of groups) {
-      if (g.kind === "init" && g.ev.model) return g.ev.model;
-    }
-    return null;
-  }, [groups]);
-
-  // Stick to the bottom as new content lands, like a live chat. Watching only
-  // `groups.length` misses the common case where the trailing group is one
-  // long streaming paragraph that grows in place (no new group) — the view
-  // would freeze while text appended below the fold. Fold in the tail group's
-  // prose length so each char-drip tick re-pins to the bottom.
-  const tailLen = useMemo(() => {
-    const last = groups[groups.length - 1];
-    if (!last || last.kind !== "stream") return 0;
-    return last.blocks.reduce(
-      (n, b) => n + (b.kind === "text" || b.kind === "reasoning" ? b.text.length : 0),
-      0,
-    );
-  }, [groups]);
-
-  // Auto-scroll, but NEVER fight the reader. A live (often background) agent
-  // drips characters every few ms; the old code re-pinned to the bottom on
-  // every tick via `scrollIntoView`, which (a) walks every scroll ancestor —
-  // visible flicker — and (b) yanks the viewport out from under any text the
-  // user is mid-select. Two guards fix both: only re-pin when the user is
-  // already parked at the bottom (scrolled up = they're reading history, leave
-  // them), and never while a text selection is live inside the transcript. We
-  // scroll the container's own `scrollTop` (not `scrollIntoView`) so only this
-  // pane moves, never an ancestor.
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const stuckToBottomRef = useRef(true);
-
-  function onScroll() {
-    const el = scrollRef.current;
-    if (!el) return;
-    stuckToBottomRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-  }
-
-  // Blocks drive the same latch when this engine has no adapter, so the
-  // fallback transcript sticks to the bottom exactly like the card view.
-  const blockTailLen = useMemo(
-    () => (structured ? 0 : (blocks[blocks.length - 1]?.text.length ?? 0)),
-    [structured, blocks],
-  );
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !stuckToBottomRef.current) return;
-    // A live, non-collapsed selection anchored inside this pane means the user
-    // is actively selecting — re-pinning would collapse it. Hands off.
-    const sel = window.getSelection();
-    if (sel && !sel.isCollapsed && sel.anchorNode && el.contains(sel.anchorNode)) {
-      return;
-    }
-    el.scrollTop = el.scrollHeight;
-  }, [groups.length, running, tailLen, blocks.length, blockTailLen]);
-
-  // What the scroller shows. An engine with an adapter renders the rich cards;
-  // one without renders its (prompt, output) blocks. "Nothing yet" is the same
-  // sentence either way, so the empty state is shared.
-  const hasContent = structured ? groups.length > 0 : blocks.length > 0;
+  const [deliveredAnswers, setDeliveredAnswers] = useState<Record<string, string>>({});
+  const pendingQuestion = !onSend ? groups.find(group => group.kind === "question" && group.live && !deliveredAnswers[group.id]) : undefined;
+  const questionDock = pendingQuestion?.kind === "question" ? <QuestionFlow key={pendingQuestion.id} docked questions={pendingQuestion.ev.questions.map(question => ({id:question.id, prompt:question.prompt, options: (question.options ?? []).map(option => ({id: option.optionId, label:option.label, description:option.description})), multiple:question.multiSelect, freeText:true}))} onSubmit={async answers => {
+    const text = answers.map((answer, index) => {
+      const question = pendingQuestion.ev.questions[index];
+      const response = answer.skipped ? "(skipped)" : answer.text.trim() || answer.selected.map(id => question.options?.find(option => option.optionId === id)?.label ?? id).join(", ");
+      return answers.length > 1 ? `${question.prompt}: ${response}` : response;
+    }).join("\n");
+    await api.agentPtySendPrompt(ptySessionId, text);
+    setDeliveredAnswers(previous => ({...previous, [pendingQuestion.id]:text}));
+  }} /> : null;
+  const visibleGroups = groups.filter(group => group.id !== pendingQuestion?.id).map(group => group.kind === "question" && deliveredAnswers[group.id] ? {...group, live:false, ev:{...group.ev, partial:false, resolution:{text:deliveredAnswers[group.id], isError:false}}} : group);
 
   return (
-    <div className="aura-chat h-full w-full flex flex-col min-h-0">
-      {sessionUsage && <SessionUsageStrip usage={sessionUsage} />}
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        // `overflow-x-hidden` is not decoration. Setting only `overflow-y`
-        // makes the other axis compute to `auto`, so one over-wide child —
-        // a code block, a table, an unbroken path — hands the whole chat a
-        // horizontal scrollbar and every line of prose starts drifting off
-        // the right edge. Content that is genuinely wider than the column
-        // scrolls inside its own box instead (`.agent-text pre`), which
-        // keeps the sideways gesture on the thing that needs it.
-        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden"
-        style={{ userSelect: "text" }}
-      >
-        {!hasContent ? (
-          <div className="h-full w-full flex items-center justify-center px-6">
-            <div className="text-center max-w-[340px]">
-              <div className="text-base font-medium text-text-2">
-                Ready when you are
-              </div>
-              <div className="mt-1 text-sm leading-relaxed text-text-3">
-                Type below to talk to the agent. Your message goes straight to
-                it. As it works, this fills in with a clean, readable view of
-                what it reads, edits, runs and decides. The live terminal is a
-                tab away.
-              </div>
-            </div>
-          </div>
-        ) : !structured ? (
+    <ChatTimeline
+      viewSwitcher={viewSwitcher}
+      groups={visibleGroups}
+      running={busy}
+      fallback={
+        !structured ? (
           <AgentBlockTranscript
             blocks={blocks}
             repoRoot={repoRoot}
             running={busy}
           />
+        ) : undefined
+      }
+      agentId={agentId}
+      repoRoot={repoRoot}
+      onRespondInTerminal={onRespondInTerminal}
+      controls={<>{controls}{questionDock}</>}
+      composer={
+        onSend ? (
+          <AgentComposer
+            ptySessionId={ptySessionId}
+            repoRoot={repoRoot}
+            running={busy}
+            onSend={onSend}
+            onStop={onStop}
+            modelControl={modelControl}
+            options={composerOptions}
+            docked={composerDocked}
+          />
         ) : (
-          <div className="mx-auto w-full max-w-[760px] px-5 py-4 flex flex-col gap-3">
-            {groups.map((g, i) => {
-              const isLast = i === groups.length - 1;
-              switch (g.kind) {
-                case "init":
-                  return <InitChip key={g.id} ev={g.ev} />;
-                case "user":
-                  return <UserRow key={g.id} text={g.text} repoRoot={repoRoot} />;
-                case "stream":
-                  return (
-                    <div key={g.id} className="flex flex-col gap-1">
-                      <StreamingBubble
-                        blocks={g.blocks}
-                        streaming={busy && isLast}
-                      />
-                      {g.usage && <UsageFooter usage={g.usage} />}
-                    </div>
-                  );
-                case "question":
-                  return (
-                    <QuestionSetCard
-                      key={g.id}
-                      ev={g.ev}
-                      live={g.live}
-                      ptySessionId={ptySessionId}
-                      onRespondInTerminal={onRespondInTerminal}
-                    />
-                  );
-                case "plan":
-                  return (
-                    <PlanCard
-                      key={g.id}
-                      ev={g.ev}
-                      live={g.live}
-                      onRespondInTerminal={onRespondInTerminal}
-                    />
-                  );
-                case "todo":
-                  return <TodoCard key={g.id} ev={g.ev} />;
-                case "permission":
-                  return (
-                    <PermissionCard
-                      key={g.id}
-                      ev={g.ev}
-                      live={g.live}
-                      onRespondInTerminal={onRespondInTerminal}
-                    />
-                  );
-                case "result":
-                  return (
-                    <ResultFooter
-                      key={g.id}
-                      ev={g.ev}
-                      model={model}
-                      agent={labelForAgentId(agentId)}
-                    />
-                  );
-                case "error":
-                  return <ErrorRow key={g.id} ev={g.ev} />;
-                case "image":
-                  return <ImageBubble key={g.id} ev={g.ev} />;
-                default:
-                  return null;
-              }
-            })}
+          <AgentChatComposer
+            agentId={agentId}
+            ptySessionId={ptySessionId}
+            repoRoot={repoRoot}
+            running={busy}
+            onSwitchToTerminal={onRespondInTerminal}
+          />
+        )
+      }
+    />
+  );
+}
+
+/** Shared reading surface: keeps long sessions navigable without mounting
+ * thousands of markdown and tool trees at once. Search spans all loaded rows. */
+export function ChatTimeline({
+  viewSwitcher,
+  fallback,
+  groups,
+  running,
+  agentId,
+  repoRoot,
+  onRespondInTerminal,
+  composer,
+  controls,
+}: {
+  fallback?: ReactNode;
+  viewSwitcher?: ReactNode;
+  groups: ReturnType<typeof toTranscriptGroups>;
+  running: boolean;
+  agentId: string;
+  repoRoot: string;
+  onRespondInTerminal?: () => void;
+  composer?: ReactNode;
+  controls?: ReactNode;
+}) {
+  const [query, setQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(100);
+  const [atBottom, setAtBottom] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const stuck = useRef(true);
+  const matches = useMemo(
+    () =>
+      query.trim()
+        ? groups.filter((g) =>
+            JSON.stringify(g)
+              .toLocaleLowerCase()
+              .includes(query.trim().toLocaleLowerCase()),
+          )
+        : groups,
+    [groups, query],
+  );
+  const visible = matches.slice(-visibleCount);
+  const agentLabel =
+    agentId === "aura-manager" ? "Aura" : manifestFor(agentId).label;
+  const usage = useMemo(() => {
+    let context = 0,
+      tokens = 0,
+      any = false;
+    for (const g of groups)
+      if (g.kind === "stream" && g.usage) {
+        context = g.usage.context;
+        tokens += g.usage.output;
+        any = true;
+      }
+    return any ? { context, tokens } : null;
+  }, [groups]);
+  useEffect(() => {
+    const el = scrollRef.current;
+    const sel = window.getSelection();
+    if (
+      el &&
+      stuck.current &&
+      !query &&
+      !(
+        sel &&
+        !sel.isCollapsed &&
+        sel.anchorNode &&
+        el.contains(sel.anchorNode)
+      )
+    )
+      el.scrollTop = el.scrollHeight;
+  }, [groups, running, query]);
+  useEffect(() => {
+    if (searchOpen) searchRef.current?.focus();
+  }, [searchOpen]);
+  function jumpLatest() {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    stuck.current = true;
+    setAtBottom(true);
+  }
+  async function copy() {
+    const text = groups
+      .map((g) => {
+        if (g.kind === "user") return `You: ${g.text}`;
+        if (g.kind === "stream")
+          return g.blocks
+            .map((b) =>
+              b.kind === "text" || b.kind === "reasoning"
+                ? b.text
+                : JSON.stringify(b),
+            )
+            .join("\n");
+        return JSON.stringify(g);
+      })
+      .join("\n\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setCopyError("");
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopyError("Could not copy. Select the text and copy it manually.");
+    }
+  }
+  return (
+    <section
+      className="aura-chat chat-workspace"
+      aria-label={`${agentId === "aura-manager" ? "Aura" : manifestFor(agentId).label} conversation`}
+      onKeyDown={(e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+          e.preventDefault();
+          setSearchOpen(true);
+        }
+        if (e.key === "Escape" && searchOpen) {
+          setSearchOpen(false);
+          setQuery("");
+        }
+      }}
+    >
+      <ChatHeader title={agentLabel} workspace={repoRoot} status={running ? "Working" : undefined} switcher={viewSwitcher} actions={<>
+          <button
+            className="chat-heading-search"
+            type="button"
+            aria-label="Search conversation"
+            aria-expanded={searchOpen}
+            title="Search conversation (⌘F / Ctrl+F)"
+            onClick={() => setSearchOpen((v) => !v)}
+          >
+            <Search size={15} />
+            <span className="chat-heading-action-label">Search</span>
+          </button>
+          <button
+            className="chat-icon-button"
+            type="button"
+            aria-label={copied ? "Copied conversation" : "Copy conversation"}
+            disabled={!groups.length}
+            onClick={() => void copy()}
+          >
+            {copied ? <Check size={16} /> : <Copy size={16} />}
+          </button>
+</>} />
+      {searchOpen && (
+        <div className="chat-search">
+          <Search size={15} />
+          <input
+            ref={searchRef}
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setVisibleCount(100);
+            }}
+            placeholder="Find messages, files or tools…"
+            aria-label="Search messages"
+          />
+          <span aria-live="polite">
+            {query ? `${matches.length} matches` : ""}
+          </span>
+          <button
+            type="button"
+            className="chat-icon-button"
+            aria-label="Close search"
+            onClick={() => {
+              setSearchOpen(false);
+              setQuery("");
+            }}
+          >
+            <X size={15} />
+          </button>
+        </div>
+      )}
+      {copyError && (
+        <p role="alert" className="chat-notice">
+          {copyError}
+        </p>
+      )}
+      <div
+        className="chat-scroll"
+        ref={scrollRef}
+        onScroll={() => {
+          const el = scrollRef.current;
+          if (el) {
+            stuck.current =
+              el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+            setAtBottom(stuck.current);
+          }
+        }}
+      >
+        {fallback ??
+          (groups.length === 0 ? (
+            <div className="chat-empty">
+              <h2>New conversation</h2>
+              <p>
+                Send a message to{" "}
+                {agentId === "aura-manager"
+                  ? "Aura"
+                  : manifestFor(agentId).label}
+                .
+              </p>
+            </div>
+          ) : (
+            <div className="chat-reading-column">
+              {matches.length > visibleCount && (
+                <button
+                  className="chat-history-button"
+                  type="button"
+                  onClick={() => {
+                    stuck.current = false;
+                    const el = scrollRef.current;
+                    const height = el?.scrollHeight ?? 0;
+                    const top = el?.scrollTop ?? 0;
+                    setVisibleCount((n) => n + 100);
+                    requestAnimationFrame(() => {
+                      if (el) el.scrollTop = top + el.scrollHeight - height;
+                    });
+                  }}
+                >
+                  Show earlier activity · {matches.length - visibleCount} more
+                </button>
+              )}
+              {matches.length === 0 && (
+                <p className="chat-no-results">
+                  No matches for “{query}”. Try a different word.
+                </p>
+              )}
+              <TranscriptRows
+                groups={
+                  query
+                    ? visible
+                    : visible.filter((group) => group.kind !== "init")
+                }
+                running={running && !query}
+                repoRoot={repoRoot}
+                onRespondInTerminal={onRespondInTerminal}
+              />
+            </div>
+          ))}
+      </div>
+      {!atBottom && !query && (
+        <button type="button" className="chat-jump" onClick={jumpLatest}>
+          <ArrowDown size={14} />
+          {running ? "Follow live response" : "Jump to latest"}
+        </button>
+      )}
+      {usage && <SessionUsageStrip usage={usage} />}
+      {controls}
+      {composer}
+    </section>
+  );
+}
+
+// ── Composer ────────────────────────────────────────────────────────────────
+
+/** The Chat view's own composer — same calm look as the Aura manager chat,
+ *  but it injects straight into the agent's live PTY child via
+ *  `agent_pty_send_prompt` (the bracketed-paste path the terminal uses).
+ *  So you can answer / steer the agent from the readable Chat view without
+ *  flipping to the raw terminal. Mid-run sends queue into the agent the same
+ *  way typing in the terminal would. */
+export function AgentComposer({
+  ptySessionId,
+  repoRoot = null,
+  running,
+  onSend,
+  onStop,
+  modelControl,
+  options,
+  docked = false,
+}: {
+  ptySessionId: string;
+  repoRoot?: string | null;
+  running: boolean;
+  onSend?: (text: string, mode?: ChatMode) => Promise<void>;
+  onStop?: () => Promise<void>;
+  modelControl?: ReactNode;
+  options?: ReactNode;
+  docked?: boolean;
+}) {
+  const draftKey = `aura.chat.draft.${ptySessionId}`;
+  const [text, setText] = useState(() => {
+    try {
+      return sessionStorage.getItem(draftKey) ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const [mode, setMode] = useState<ChatMode>(() => {
+    try {
+      const saved = sessionStorage.getItem(`${draftKey}.mode`);
+      return saved === "plan" || saved === "ask" ? saved : "build";
+    } catch {
+      return "build";
+    }
+  });
+  const [error, setError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const sendLock = useRef(false);
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(draftKey, text);
+    } catch {
+      /* storage unavailable */
+    }
+  }, [draftKey, text]);
+  const taRef = useRef<TiptapComposerHandle | null>(null);
+  const canSend = text.trim().length > 0 && !sending && !(onSend && running);
+
+  async function send() {
+    const t = text.trim();
+    if (!t || sendLock.current || (onSend && running)) return;
+    sendLock.current = true;
+    setSending(true);
+    setError(null);
+    try {
+      await (onSend
+        ? onSend(t, mode)
+        : api.agentPtySendPrompt(ptySessionId, promptForChatMode(t, mode)));
+      setText("");
+      try {
+        sessionStorage.removeItem(draftKey);
+      } catch {
+        /* storage unavailable */
+      }
+      taRef.current?.clear();
+    } catch (e) {
+      setError(`Message was not sent. Your draft is saved. ${String(e)}`);
+    } finally {
+      sendLock.current = false;
+      setSending(false);
+      taRef.current?.focus();
+    }
+  }
+
+  return (
+    <div className={`chat-composer ${docked ? "has-docked-control" : ""}`}>
+      <div className="mx-auto w-full max-w-[760px]">
+        <ComposerFrame className={docked ? "composer-docked" : ""}>
+          <TiptapComposer
+            key={ptySessionId}
+            ref={taRef}
+            repoRoot={repoRoot}
+            initialMarkdown={text}
+            busy={sending}
+            ariaLabel="Message the agent"
+            onChange={setText}
+            onSubmit={() => void send()}
+            onEscapeWhileBusy={() => {
+              if (onStop) void onStop().catch((e) => setError(String(e)));
+            }}
+            placeholder={
+              running
+                ? "Write a follow-up…"
+                : "Ask to make changes, @mention files, run /commands"
+            }
+          />
+          <ComposerToolbar
+            mode={
+              <ChatModePicker
+                value={mode}
+                modes={["build", "plan", "ask"]}
+                disabled={running}
+                onChange={(value) => {
+                  setMode(value);
+                  try {
+                    sessionStorage.setItem(`${draftKey}.mode`, value);
+                  } catch {}
+                }}
+              />
+            }
+            model={modelControl}
+            options={options}
+            actions={
+              <>
+                {running && onStop && (
+                  <button
+                    type="button"
+                    className="chat-stop"
+                    aria-label="Stop response"
+                    onClick={() =>
+                      void onStop().catch((e) => setError(String(e)))
+                    }
+                  >
+                    <Square size={14} /> Stop
+                  </button>
+                )}
+                <button
+                  aria-label="Send message"
+                  type="button"
+                  className="chat-send"
+                  disabled={!canSend}
+                  onClick={() => void send()}
+                  title="Send (↵)"
+                >
+                  <ArrowUp size={16} aria-hidden />
+                </button>
+              </>
+            }
+          />
+        </ComposerFrame>
+        {error && (
+          <div role="alert" className="mt-2 text-[12px] text-red-400">
+            {error}
           </div>
         )}
+        <div className="chat-compose-hint">
+          {running
+            ? onSend
+              ? "You can draft your next message while this runs."
+              : "Messages queue in this session."
+            : "Enter to send · Shift+Enter for a new line"}
+        </div>
       </div>
-      <AgentChatComposer
-        agentId={agentId}
-        ptySessionId={ptySessionId}
-        repoRoot={repoRoot}
-        running={busy}
-        onSwitchToTerminal={onRespondInTerminal}
-      />
     </div>
   );
 }
@@ -326,19 +623,8 @@ export function NormalizedTranscript({
 
 function UserRow({ text, repoRoot }: { text: string; repoRoot: string }) {
   return (
-    <div className="self-end max-w-[88%] min-w-0">
-      <div
-        // Without `break-words` a pasted path, URL or sha has no break
-        // opportunity inside it, `whitespace-pre-wrap` keeps it on one line, and
-        // the bubble pushes the transcript wider than its pane — which is where
-        // the chat's stray horizontal scrollbar was coming from.
-        className="rounded-lg px-3 py-2 text-base leading-relaxed whitespace-pre-wrap break-words"
-        style={{
-          background: "color-mix(in srgb, var(--color-accent) 12%, transparent)",
-          color: "var(--color-text-1)",
-          border: "1px solid color-mix(in srgb, var(--color-accent) 22%, transparent)",
-        }}
-      >
+    <div className="self-end min-w-0 max-w-[88%] break-words">
+      <div className="chat-user-message whitespace-pre-wrap break-words">
         <LinkifiedText text={text} repoRoot={repoRoot} />
       </div>
     </div>
@@ -350,12 +636,9 @@ function UserRow({ text, repoRoot }: { text: string; repoRoot: string }) {
 function InitChip({ ev }: { ev: SessionInitEvent }) {
   const tools = ev.tools?.length ?? 0;
   return (
-    <div className="flex items-center gap-2 text-xs text-text-3">
-      {/* Real brand mark for the model instead of a decorative accent dot —
-          the model id (e.g. "claude-opus-4-8") resolves to its vendor glyph. */}
-      <AgentIcon agentId={ev.model ?? "session"} size={14} />
+    <div className="flex items-center gap-2 text-[11px] text-text-3">
       <span className="font-medium">{ev.model ?? "session"}</span>
-      {tools > 0 && <span className="tabular-nums">· {tools} tools</span>}
+      {tools > 0 && <span>· {tools} tools</span>}
     </div>
   );
 }
@@ -368,49 +651,22 @@ function PromptCard({
   label,
   children,
   onRespondInTerminal,
-  live = true,
 }: {
   label: string;
   children: ReactNode;
   onRespondInTerminal?: () => void;
-  /** A settled prompt is history: it keeps its place in the transcript but
-   *  drops the accent edge that means "this one is waiting for you". */
-  live?: boolean;
 }) {
   return (
-    <div
-      className="rounded-lg overflow-hidden"
-      style={{
-        background: "var(--color-bg-1)",
-        border: live
-          ? "1px solid color-mix(in srgb, var(--color-accent) 30%, var(--color-line-soft))"
-          : "1px solid var(--color-line-soft)",
-      }}
-    >
-      <div
-        className="section-label flex items-center gap-2 px-3 py-1.5"
-        style={{
-          color: live ? "var(--color-accent)" : "var(--color-text-3)",
-          background: live
-            ? "color-mix(in srgb, var(--color-accent) 8%, transparent)"
-            : "transparent",
-        }}
-      >
-        {label}
-      </div>
-      <div className="px-3 py-2.5">{children}</div>
+    <div className="chat-record">
+      <div className="chat-record-label">{label}</div>
+      <div>{children}</div>
       {onRespondInTerminal && (
         <button
           type="button"
           onClick={onRespondInTerminal}
-          className="w-full px-3 py-1.5 text-sm font-medium text-left transition-colors hover:opacity-90"
-          style={{
-            color: "var(--color-text-2)",
-            borderTop: "1px solid var(--color-line-soft)",
-            background: "color-mix(in srgb, var(--color-bg-2) 60%, transparent)",
-          }}
+          className="chat-record-action"
         >
-          Answer in the terminal ↡
+          Answer in Terminal
         </button>
       )}
     </div>
@@ -419,140 +675,61 @@ function PromptCard({
 
 function QuestionSetCard({
   ev,
-  ptySessionId,
   onRespondInTerminal,
-  live,
 }: {
   ev: QuestionSetEvent;
-  ptySessionId: string;
   onRespondInTerminal?: () => void;
-  /** False once the agent has moved on. A settled question keeps its place in
-   *  the transcript as a record of what was asked, but its options stop being
-   *  buttons: clicking one used to fire that text into the LIVE agent, so
-   *  scrolling back through an hour-old conversation and brushing an option
-   *  injected a stray prompt into whatever the agent was doing now. */
-  live: boolean;
 }) {
-  // The option the user clicked, keyed by question id. Clicking sends the
-  // option's text straight into the live agent over the SAME PTY transport the
-  // composer uses (`agent_pty_send_prompt`) — so picking an answer here lands
-  // in the agent exactly as if the user had typed it, no flip to the terminal.
-  // We mark it optimistically so the card reads as answered the instant it's
-  // clicked.
-  const [picked, setPicked] = useState<Record<string, string>>({});
-
-  async function pick(questionId: string, optionId: string, answer: string) {
-    if (!live) return;
-    setPicked((p) => ({ ...p, [questionId]: optionId }));
-    try {
-      await api.agentPtySendPrompt(ptySessionId, answer);
-    } catch (e) {
-      // The optimistic tick said "Sent to the agent." — if the write never
-      // reached the child, leaving it there tells the user they answered a
-      // question the agent is still blocked on. Take the mark back and say so,
-      // the same way the composer reports a send that didn't land.
-      setPicked((p) => {
-        const next = { ...p };
-        delete next[questionId];
-        return next;
-      });
-      toast.danger("That answer didn't reach the agent", String(e));
-    }
-  }
-
-  // What the engine says was chosen, when it reports answers at all. Matched
-  // against the option labels so the settled card can mark the pick the same
-  // way a live one marks a click.
-  const reported = ev.answer ?? null;
-
+  const resolved = ev.partial === false || ev.answer != null;
   return (
     <PromptCard
-      live={live}
       label={
-        live
-          ? ev.questions.length > 1
+        resolved
+          ? "Question closed"
+          : ev.questions.length > 1
             ? `${ev.questions.length} questions`
             : "Question"
-          : reported
-            ? "Question · answered"
-            : "Question · closed"
       }
-      onRespondInTerminal={live ? onRespondInTerminal : undefined}
+      onRespondInTerminal={resolved ? undefined : onRespondInTerminal}
     >
       <div className="flex flex-col gap-3">
-        {ev.questions.map((q) => {
-          const answered = picked[q.id];
-          return (
-            <div key={q.id}>
-              <div className="text-base font-medium text-text-1">{q.prompt}</div>
-              {/* No options means the agent wants prose, not a pick. Without
-                  this the card drew the question and stopped — a prompt with
-                  no controls, no hint, and no sign that the composer below is
-                  where the answer goes. */}
-              {(!q.options || q.options.length === 0) && (
-                <div className="mt-1.5 text-sm text-text-3">
-                  {live
-                    ? "Type your answer in the box below — it goes straight to the agent."
-                    : "Answered."}
-                </div>
-              )}
-              {q.options && q.options.length > 0 && (
-                <div className="mt-1.5 flex flex-col gap-1">
-                  {q.options.map((o) => {
-                    // A settled card marks whatever the engine reported back,
-                    // which is also how an answer typed in the terminal shows
-                    // up here — the click state only ever knew about clicks.
-                    const isPicked =
-                      answered === o.optionId ||
-                      (!live && reported != null && reported.includes(o.label));
-                    return (
-                      <button
-                        key={o.optionId}
-                        type="button"
-                        disabled={!live}
-                        onClick={() => void pick(q.id, o.optionId, o.label)}
-                        className="flex items-start gap-2 px-2 py-1.5 rounded text-base text-left transition-colors"
-                        style={{
-                          background: isPicked
-                            ? "color-mix(in srgb, var(--color-accent) 16%, transparent)"
-                            : live
-                              ? "var(--color-bg-2)"
-                              : "transparent",
-                          color: "var(--color-text-2)",
-                          border: isPicked
-                            ? "1px solid color-mix(in srgb, var(--color-accent) 45%, transparent)"
-                            : "1px solid transparent",
-                          cursor: live ? "pointer" : "default",
-                          opacity: live || isPicked ? 1 : 0.6,
-                        }}
-                      >
-                        <span
-                          className="text-text-1"
-                          style={isPicked ? { color: "var(--color-accent)" } : undefined}
-                        >
-                          {isPicked ? "✓ " : ""}
-                          {o.label}
-                        </span>
-                        {o.description && (
-                          <span className="text-text-3">· {o.description}</span>
-                        )}
-                      </button>
-                    );
-                  })}
-                  <div className="text-xs text-text-3 mt-0.5">
-                    {!live
-                      ? "Answered. The agent has moved on."
-                      : answered
-                        ? "Sent to the agent."
-                        : q.multiSelect
-                          ? "Pick the closest. It goes straight to the agent."
-                          : "Click an answer. It goes straight to the agent."}
-                  </div>
-                </div>
-              )}
+        {ev.questions.map((q, index) => (
+          <div key={`${q.id}:${index}`}>
+            <div className="text-[13px] font-medium text-text-1">
+              {q.prompt}
             </div>
-          );
-        })}
+            {!resolved && q.multiSelect && (
+              <p className="text-[11px] text-text-3">
+                Multiple selections allowed
+              </p>
+            )}
+            <ul className="chat-question-options">
+              {q.options?.map((o, i) => (
+                <li key={`${o.optionId}:${i}`}>
+                  {o.label}
+                  {o.description && (
+                    <span className="text-text-3"> — {o.description}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+            {!resolved && q.freeText && (
+              <p className="text-[11px] text-text-3">
+                You can also write an answer.
+              </p>
+            )}
+          </div>
+        ))}
+        {(ev.resolution?.text || ev.answer) && (
+          <div className="whitespace-pre-wrap text-[12px] text-text-3">
+            {ev.resolution?.text ?? ev.answer}
+          </div>
+        )}
+        {!resolved && (
+          <p className="text-[11.5px] text-text-3">
+            Select your answers in Terminal.
+          </p>
+        )}
       </div>
     </PromptCard>
   );
@@ -561,61 +738,59 @@ function QuestionSetCard({
 function PlanCard({
   ev,
   onRespondInTerminal,
-  live,
 }: {
   ev: PlanEvent;
   onRespondInTerminal?: () => void;
-  /** False once the plan has been decided, here or in the terminal. */
-  live: boolean;
 }) {
-  const label = live
-    ? "Plan. Awaiting your go-ahead"
-    : ev.decision === "approved"
-      ? "Plan · approved"
-      : ev.decision === "rejected"
-        ? "Plan · not approved"
-        : "Plan";
+  const heading =
+    ev.markdown?.match(/^#{1,2}\s+(.+)$/m)?.[1] ?? "Implementation plan";
   return (
-    <PromptCard
-      live={live}
-      label={label}
-      onRespondInTerminal={live ? onRespondInTerminal : undefined}
+    <PlanPreview
+      title={heading}
+      status={ev.awaitingApproval ? "Ready for review" : ev.decision === "approved" ? "Approved" : ev.decision === "rejected" ? "Declined" : "Plan"}
+      meta={
+        ev.entries.length
+          ? `${ev.entries.length} task${ev.entries.length === 1 ? "" : "s"}`
+          : undefined
+      }
+      actions={
+        ev.awaitingApproval && onRespondInTerminal ? (
+          <button
+            type="button"
+            className="chat-plan-secondary"
+            onClick={onRespondInTerminal}
+          >
+            Review in Terminal
+          </button>
+        ) : undefined
+      }
     >
       {ev.markdown ? (
         <MarkdownBody source={ev.markdown} />
-      ) : ev.entries.length > 0 ? (
-        <ol className="list-decimal pl-4 flex flex-col gap-1 text-base text-text-1">
+      ) : (
+        <ol className="chat-plan-tasks">
           {ev.entries.map((e, i) => (
-            <li key={i}>{e.content}</li>
+            <li key={i}>
+              <TodoMark status={e.status ?? "pending"} />
+              <span>{e.content}</span>
+            </li>
           ))}
         </ol>
-      ) : (
-        // Resuming a session whose history starts mid-turn gives us the
-        // decision without the proposal that earned it. Say that, rather than
-        // draw a card with a heading and nothing under it.
-        <div className="text-sm text-text-3">
-          The plan itself isn't in this session's record — only what was decided.
-        </div>
       )}
-    </PromptCard>
+    </PlanPreview>
   );
 }
 
 function TodoCard({ ev }: { ev: TodoEvent }) {
   return (
-    <div
-      className="rounded-lg px-3 py-2.5"
-      style={{
-        background: "var(--color-bg-1)",
-        border: "1px solid var(--color-line-soft)",
-      }}
-    >
-      <div className="section-label mb-1.5">
-        Checklist
-      </div>
+    <div className="chat-record">
+      <div className="chat-record-label">Checklist</div>
       <div className="flex flex-col gap-1">
         {ev.todos.map((t, i) => (
-          <div key={t.id ?? i} className="flex items-center gap-2 text-base">
+          <div
+            key={t.id ?? i}
+            className="flex items-center gap-2 text-[12.5px]"
+          >
             <TodoMark status={t.status} />
             <span
               style={{
@@ -627,7 +802,9 @@ function TodoCard({ ev }: { ev: TodoEvent }) {
                   t.status === "completed" ? "line-through" : undefined,
               }}
             >
-              {t.status === "in_progress" && t.activeForm ? t.activeForm : t.content}
+              {t.status === "in_progress" && t.activeForm
+                ? t.activeForm
+                : t.content}
             </span>
           </div>
         ))}
@@ -636,61 +813,56 @@ function TodoCard({ ev }: { ev: TodoEvent }) {
   );
 }
 
-function TodoMark({ status }: { status: "pending" | "in_progress" | "completed" }) {
-  const color =
-    status === "completed"
-      ? "var(--color-accent-green)"
-      : status === "in_progress"
-        ? "var(--color-accent)"
-        : "var(--color-line)";
+function TodoMark({
+  status,
+}: {
+  status: "pending" | "in_progress" | "completed";
+}) {
   return (
     <span
-      className="inline-block w-3 h-3 rounded-full flex-shrink-0"
-      style={{
-        border: `1.5px solid ${color}`,
-        background:
-          status === "completed"
-            ? color
-            : status === "in_progress"
-              ? "color-mix(in srgb, var(--color-accent) 30%, transparent)"
-              : "transparent",
-      }}
-    />
+      className="chat-task-mark"
+      aria-label={
+        status === "completed"
+          ? "Completed"
+          : status === "in_progress"
+            ? "In progress"
+            : "Pending"
+      }
+    >
+      {status === "completed" ? (
+        <Check size={11} />
+      ) : status === "in_progress" ? (
+        "−"
+      ) : (
+        ""
+      )}
+    </span>
   );
 }
 
 function PermissionCard({
   ev,
   onRespondInTerminal,
-  live,
 }: {
   ev: PermissionRequestEvent;
   onRespondInTerminal?: () => void;
-  /** False once the tool call this gated has run or settled — the answer was
-   *  given, in the terminal or here, and the card is a record of it. */
-  live: boolean;
 }) {
   return (
     <PromptCard
-      live={live}
-      label={live ? "Asking permission" : "Permission · answered"}
-      onRespondInTerminal={live ? onRespondInTerminal : undefined}
+      label={
+        ev.partial === false ? "Permission request closed" : "Asking permission"
+      }
+      onRespondInTerminal={
+        ev.partial === false ? undefined : onRespondInTerminal
+      }
     >
-      <div className="text-base font-medium text-text-1">{ev.title}</div>
-      <div className="mt-1 text-sm text-text-3 font-mono break-all">
+      <div className="text-[13px] font-medium text-text-1">{ev.title}</div>
+      <div className="mt-1 text-[12px] text-text-3 font-mono break-all">
         {ev.toolName}
       </div>
-      {/* The agent only stops to ask because it's not on full autonomy. We
-          deliberately don't wire Allow/Deny buttons here: a wrong guess at a
-          permission gate could auto-approve something destructive, and the
-          exact keystroke differs per agent. The honest cure is the Approvals
-          control — set it to Full autonomy and the agent just runs, like a
-          normal Claude Code session. Until then, answer in the terminal. */}
-      {live && (
-        <div className="mt-2 text-sm leading-relaxed text-text-3">
-          It's pausing because it isn't running on full autonomy. Set{" "}
-          <span className="font-medium text-text-2">Approvals → Full autonomy</span>{" "}
-          in the composer to let it run without asking.
+      {ev.partial !== false && (
+        <div className="mt-2 text-[11.5px] leading-relaxed text-text-3">
+          Review and answer the permission request in Terminal.
         </div>
       )}
     </PromptCard>
@@ -699,17 +871,24 @@ function PermissionCard({
 
 // ── Per-response token footer ──────────────────────────────────────────────
 
+/** A short token count: 45230 → "45.2k", 980 → "980". */
+function compactTokens(n: number): string {
+  if (n < 1000) return String(n);
+  const k = n / 1000;
+  return `${k >= 100 ? Math.round(k) : k.toFixed(1)}k`;
+}
+
 /** A faint line under each response: how much context the model was working
  *  with, and how many tokens it wrote back. Honest per-call data lifted from
  *  Claude's `message.usage` — no estimate. Hidden when there's nothing to show. */
 function UsageFooter({ usage }: { usage: GroupUsage }) {
   const bits: string[] = [];
-  if (usage.context > 0) bits.push(`${compactNumber(usage.context)} context`);
-  if (usage.output > 0) bits.push(`${compactNumber(usage.output)} tokens`);
+  if (usage.context > 0) bits.push(`${compactTokens(usage.context)} context`);
+  if (usage.output > 0) bits.push(`${compactTokens(usage.output)} tokens`);
   if (bits.length === 0) return null;
   return (
     <div
-      className="self-start pl-0.5 text-xs text-text-4 select-text"
+      className="self-start pl-0.5 text-[10.5px] text-text-4 select-text"
       title="Context fed to the model for this response, and the tokens it wrote back."
     >
       {bits.join(" · ")}
@@ -721,84 +900,54 @@ function UsageFooter({ usage }: { usage: GroupUsage }) {
  *  "remaining" (a CLI agent exposes no quota) — the honest consumed total,
  *  in the chat where you're using the AI. The cross-AI breakdown lives on the
  *  Usage page. */
-function SessionUsageStrip({ usage }: { usage: { context: number; tokens: number } }) {
+function SessionUsageStrip({
+  usage,
+}: {
+  usage: { context: number; tokens: number };
+}) {
   return (
     <div
-      className="flex-shrink-0 flex items-center justify-end gap-1.5 px-4 py-1 text-xs text-text-4 border-b border-line-soft/60"
-      title="This conversation's current size and the tokens this AI has written so far. CLI agents don't report how much you have left, so this is what's been used, not what remains."
+      className="flex-shrink-0 flex items-center justify-end gap-1.5 px-4 py-1 text-[10.5px] text-text-4 border-b border-line-soft/60"
+      title="Current context and total output tokens for this conversation."
     >
-      <span className="font-medium text-text-3">This session</span>
+      <span>{compactTokens(usage.context)} context</span>
       <span>·</span>
-      <span className="tabular-nums">{compactNumber(usage.context)} context</span>
-      <span>·</span>
-      <span className="tabular-nums">{compactNumber(usage.tokens)} tokens used</span>
+      <span>{compactTokens(usage.tokens)} output tokens</span>
     </div>
   );
 }
 
-function ResultFooter({
-  ev,
-  model,
-  agent,
-}: {
-  ev: ResultEvent;
-  model: string | null;
-  agent: string | null;
-}) {
+function ResultFooter({ ev }: { ev: ResultEvent }) {
+  const cost = buildTurnCost({model: null, agent: null, startMs: ev.durationMs != null ? ev.ts - ev.durationMs : null, endMs: ev.ts, inputTokens: ev.usage?.inputTokens, outputTokens: ev.usage?.outputTokens, cacheRead: ev.usage?.cacheRead, cacheWrite: ev.usage?.cacheWrite, sessionCostUsd: ev.costUsd, sessionIsRunTotal: true});
   const ok = ev.subtype === "success";
-  // The elapsed time is its own element so it can carry the cost card; the
-  // rest of the line stays plain text.
-  const elapsed =
-    ev.durationMs != null ? `${(ev.durationMs / 1000).toFixed(1)}s` : null;
+  const cancelled = ev.subtype === "cancelled";
   const bits: string[] = [];
-  if (ev.usage?.outputTokens) bits.push(`${compactNumber(ev.usage.outputTokens)} tok`);
-  if (ev.costUsd != null) bits.push(formatCost(ev.costUsd));
-  const cost = buildTurnCost({
-    model,
-    agent,
-    // The result lands at the end of the turn, so the run started a duration
-    // ago — the only start time an engine that reports no clock gives us.
-    startMs: ev.durationMs != null ? ev.ts - ev.durationMs : null,
-    endMs: ev.ts,
-    inputTokens: ev.usage?.inputTokens,
-    outputTokens: ev.usage?.outputTokens,
-    cacheRead: ev.usage?.cacheRead,
-    cacheWrite: ev.usage?.cacheWrite,
-    // An agent CLI's result carries `total_cost_usd` — the RUN's cost so far,
-    // not this one reply's. It goes on the run line, where it is true. Claiming
-    // it as the message's price would over-bill every turn after the first, and
-    // the CLI gives us no per-message figure to correct it with.
-    sessionCostUsd: ev.costUsd,
-    sessionIsRunTotal: true,
-  });
-  // A turn that finished normally says so by being followed by the next one.
-  // Stamping "● Done" under every single reply is a status light for a state
-  // that is already obvious, repeated down the whole transcript. A turn that
-  // FAILED is the opposite — nothing else on screen says so — which is why the
-  // dot and the label survive for errors and only for errors.
+  if (ev.durationMs != null && ev.durationMs > 0)
+    bits.push(`${(ev.durationMs / 1000).toFixed(1)}s`);
+  if (ev.usage?.outputTokens != null)
+    bits.push(`${ev.usage.outputTokens.toLocaleString()} output tokens`);
+  if (ev.totalTokens != null)
+    bits.push(`${ev.totalTokens.toLocaleString()} total tokens`);
+  if (ev.costUsd != null) bits.push(`$${ev.costUsd.toFixed(3)}`);
   return (
-    <div className="flex items-center gap-2 text-xs text-text-3 pt-1">
-      {!ok && (
-        <>
-          <span
-            className="inline-block w-1.5 h-1.5 rounded-full"
-            style={{ background: "var(--color-red)" }}
-          />
-          <span className="font-medium">Ended with an error</span>
-        </>
-      )}
-      {elapsed && (
-        <TurnCostTip cost={cost}>
-          <span className="cursor-default tabular-nums">
-            {ok ? elapsed : `· ${elapsed}`}
-          </span>
-        </TurnCostTip>
-      )}
-      {bits.length > 0 && (
-        <span>
-          {ok && !elapsed ? bits.join(" · ") : `· ${bits.join(" · ")}`}
+    <div className="text-[11px] text-text-3 pt-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">
+          {ok ? "Done" : cancelled ? "Cancelled" : "Ended with an error"}
         </span>
+        {bits.length > 0 && <TurnCostTip cost={cost}><span>· {bits.join(" · ")}</span></TurnCostTip>}
+      </div>
+      {ev.text && (
+        <div className="mt-2">
+          <MarkdownBody source={ev.text} />
+        </div>
       )}
+      {ev.errors?.map((error, i) => (
+        <div key={i} role="alert" className="mt-1 whitespace-pre-wrap break-words">
+          {error}
+        </div>
+      ))}
+      {ev.stopReason && <div className="mt-1">{ev.stopReason}</div>}
     </div>
   );
 }
@@ -810,7 +959,20 @@ function ResultFooter({
  *  full-size image in a new tab. Aligned right for the user, left for the
  *  agent, matching the prose bubbles. */
 function ImageBubble({ ev }: { ev: ImageEvent }) {
-  const src = `data:${ev.mediaType || "image/png"};base64,${ev.data}`;
+  const [failed, setFailed] = useState(false);
+  if (failed || !/^image\/(png|jpeg|gif|webp|avif)$/i.test(ev.mediaType)) {
+    return (
+      <RawPayloadCard
+        ev={{
+          ...ev,
+          kind: "raw",
+          label: "Image unavailable",
+          payload: { mediaType: ev.mediaType, data: ev.data },
+        }}
+      />
+    );
+  }
+  const src = `data:${ev.mediaType};base64,${ev.data}`;
   const mine = ev.role === "user";
   return (
     <div className={mine ? "self-end max-w-[88%]" : "self-start max-w-[88%]"}>
@@ -825,6 +987,8 @@ function ImageBubble({ ev }: { ev: ImageEvent }) {
       >
         <img
           src={src}
+          loading="lazy"
+          onError={() => setFailed(true)}
           alt={mine ? "Attached image" : "Image from the agent"}
           className="block max-h-[360px] w-auto max-w-full object-contain bg-bg-2"
         />
@@ -836,14 +1000,135 @@ function ImageBubble({ ev }: { ev: ImageEvent }) {
 function ErrorRow({ ev }: { ev: ErrorEvent }) {
   return (
     <div
-      className="rounded-lg px-3 py-2 text-base"
+      className="rounded-lg px-3 py-2 text-[12.5px]"
       style={{
-        background: "color-mix(in srgb, var(--color-red) 8%, transparent)",
-        color: "var(--color-red)",
-        border: "1px solid color-mix(in srgb, var(--color-red) 28%, transparent)",
+        background:
+          "color-mix(in srgb, var(--color-negative, #dc2626) 8%, transparent)",
+        color: "var(--color-negative, #dc2626)",
+        border:
+          "1px solid color-mix(in srgb, var(--color-negative, #dc2626) 28%, transparent)",
       }}
     >
       {ev.message}
     </div>
+  );
+}
+
+/** Unknown content stays available as inert text; no payload is executed. */
+function RawPayloadCard({ ev }: { ev: RawEvent }) {
+  const [all, setAll] = useState(false);
+  let text: string;
+  try {
+    text =
+      typeof ev.payload === "string"
+        ? ev.payload
+        : (JSON.stringify(ev.payload, null, 2) ?? String(ev.payload));
+  } catch {
+    text = String(ev.payload);
+  }
+  const limit = 12_000;
+  return (
+    <details className="rounded-lg border border-line-soft px-3 py-2 text-[12px] text-text-3">
+      <summary className="cursor-pointer">
+        {ev.label} · additional content
+      </summary>
+      <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-all select-text">
+        {all ? text : text.slice(0, limit)}
+      </pre>
+      {!all && text.length > limit && (
+        <button
+          type="button"
+          className="mt-2 underline"
+          onClick={() => setAll(true)}
+        >
+          Show all {text.length.toLocaleString()} characters
+        </button>
+      )}
+    </details>
+  );
+}
+
+/** The provider-independent transcript body, also used by the coverage harness. */
+export function TranscriptRows({
+  groups,
+  running = false,
+  repoRoot,
+  onRespondInTerminal,
+}: {
+  groups: import("./blockMap").TranscriptGroup[];
+  running?: boolean;
+  repoRoot: string;
+  onRespondInTerminal?: () => void;
+}) {
+  return (
+    <>
+      {groups.map((g, i) => {
+        const isLast = i === groups.length - 1;
+        switch (g.kind) {
+          case "init":
+            return <InitChip key={g.id} ev={g.ev} />;
+          case "user":
+            return <UserRow key={g.id} text={g.text} repoRoot={repoRoot} />;
+          case "stream":
+            return (
+              <div key={g.id} className="flex flex-col gap-1">
+                <StreamingBubble
+                  blocks={g.blocks}
+                  streaming={running && isLast}
+                />
+                {g.usage && <UsageFooter usage={g.usage} />}
+              </div>
+            );
+          case "question":
+            return (
+              <QuestionSetCard
+                key={g.id}
+                ev={g.ev}
+                onRespondInTerminal={onRespondInTerminal}
+              />
+            );
+          case "plan":
+            return (
+              <PlanCard
+                key={g.id}
+                ev={g.ev}
+                onRespondInTerminal={onRespondInTerminal}
+              />
+            );
+          case "todo":
+            return <TodoCard key={g.id} ev={g.ev} />;
+          case "permission":
+            return (
+              <PermissionCard
+                key={g.id}
+                ev={g.ev}
+                onRespondInTerminal={onRespondInTerminal}
+              />
+            );
+          case "result":
+            return <ResultFooter key={g.id} ev={g.ev} />;
+          case "error":
+            return <ErrorRow key={g.id} ev={g.ev} />;
+          case "image":
+            return <ImageBubble key={g.id} ev={g.ev} />;
+          case "raw":
+            return <RawPayloadCard key={g.id} ev={g.ev} />;
+          case "status":
+            return (
+              <div key={g.id} role="status" className="text-[12px] text-text-3">
+                {g.ev.message ??
+                  (g.ev.state === "retry"
+                    ? "Retrying"
+                    : g.ev.state === "busy"
+                      ? "Working"
+                      : "Idle")}
+                {g.ev.attempt != null && ` · attempt ${g.ev.attempt}`}
+              </div>
+            );
+          default:
+            return null;
+        }
+      })}
+    </>
   );
 }

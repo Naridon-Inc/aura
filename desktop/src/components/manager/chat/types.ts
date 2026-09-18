@@ -7,10 +7,21 @@
 //! and the card that *consumes* it can evolve independently.
 
 /** Result of a server-side tool execution, keyed back to its `ToolUse`. */
-export type ToolResult = { is_error: boolean; content: string };
+export type ToolResult = {
+  is_error: boolean;
+  content: string;
+  /** Explicit lifecycle outcome for normalized agents; legacy results infer it. */
+  status?: "cancelled" | "unknown";
+};
 
 /** Card status derived from whether a result has landed and its error flag. */
-export type ToolStatus = "running" | "ok" | "error";
+export type ToolStatus = "running" | "ok" | "error" | "cancelled" | "unknown";
+
+export function toolStatus(result?: ToolResult): ToolStatus {
+  if (!result) return "running";
+  if (result.status) return result.status;
+  return result.is_error ? "error" : "ok";
+}
 
 /** Visual prominence of a tool call.
  *  - "thinking" — context-gathering only (read/grep/glob/ls/fetch); renders

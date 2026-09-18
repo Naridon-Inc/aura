@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { isToolMetadataPath } from "@shared/categorizeChange";
 import { roomAuthHeaders } from "./roomAuth";
 import { cloudOrigins } from "./cloudOrigin";
+import { placeAtSpawnStart, recordSpawnOrigin } from "./agentSpawnOrigin";
 // The place contract is spelled once, in lib/place, and mirrors
 // `manager::brain::place_contract`. Imported rather than restated here: a wire
 // type the UI keeps its own copy of is a type that can disagree with the seam.
@@ -1491,7 +1492,8 @@ export const api = {
   writeFile: (path: string, contents: string) =>
     invoke<void>("write_file", { path, contents }),
   fsCreateFile: (path: string) => invoke<string>("fs_create_file", { path }),
-  fsCreateFolder: (path: string) => invoke<string>("fs_create_folder", { path }),
+  fsCreateFolder: (path: string) =>
+    invoke<string>("fs_create_folder", { path }),
   fsRename: (from: string, to: string) =>
     invoke<string>("fs_rename", { from, to }),
   fsDelete: (path: string) => invoke<void>("fs_delete", { path }),
@@ -1502,11 +1504,8 @@ export const api = {
     invoke<void>("editor_open", { path, editorId }),
   fsFindFiles: (repoRoot: string) =>
     invoke<string[]>("fs_find_files", { repoRoot }),
-  fsGrepContent: (
-    repoRoot: string,
-    query: string,
-    opts?: GrepOpts,
-  ) => invoke<GrepResult>("fs_grep_content", { repoRoot, query, opts }),
+  fsGrepContent: (repoRoot: string, query: string, opts?: GrepOpts) =>
+    invoke<GrepResult>("fs_grep_content", { repoRoot, query, opts }),
   fsReplaceInFiles: (
     repoRoot: string,
     paths: string[],
@@ -1530,7 +1529,11 @@ export const api = {
    *  file's full change from the worktree's fork base → working tree (committed
    *  + uncommitted) instead of just vs HEAD; omitted/false keeps vs-HEAD. */
   gitDiff: (repoRoot: string, file: string, sinceBase?: boolean) =>
-    invoke<string>("git_diff", { repoRoot, file, sinceBase: sinceBase ?? null }),
+    invoke<string>("git_diff", {
+      repoRoot,
+      file,
+      sinceBase: sinceBase ?? null,
+    }),
   /** One-sentence, plain-language "what changed" for a single working-tree
    *  file — the human-readable half of the file-insight strip. Uses whichever
    *  model the user has reachable; falls back to a deterministic line when
@@ -1545,7 +1548,11 @@ export const api = {
    *  deterministic fallback, cached by (path, diff-hash, angle). Never throws
    *  on a missing model. */
   explainChange: (repoRoot: string, path: string, commit?: string) =>
-    invoke<ChangeExplanation>("explain_change", { repoRoot, path, commit: commit ?? null }),
+    invoke<ChangeExplanation>("explain_change", {
+      repoRoot,
+      path,
+      commit: commit ?? null,
+    }),
   /** Same before/what/why explanation for a diff the caller already holds — one
    *  file's raw unified diff across a PR's base..head range (from `gh pr diff`),
    *  which has no single commit to point at. Cached by the diff's content-hash. */
@@ -1587,8 +1594,7 @@ export const api = {
    *  `git show --numstat --name-status`. */
   gitCommitFileStats: (repoRoot: string, sha: string) =>
     invoke<GitCommitFileStat[]>("git_commit_file_stats", { repoRoot, sha }),
-  gitBranch: (repoRoot: string) =>
-    invoke<string>("git_branch", { repoRoot }),
+  gitBranch: (repoRoot: string) => invoke<string>("git_branch", { repoRoot }),
   /** Local + remote-tracking branches for the footer switcher, newest
    *  commit first. Current branch flagged; `origin/HEAD` pointer skipped. */
   gitBranches: (repoRoot: string) =>
@@ -1683,12 +1689,9 @@ export const api = {
     invoke<string>("git_discard", { repoRoot, paths }),
   gitPush: (repoRoot: string, setUpstream: boolean) =>
     invoke<string>("git_push", { repoRoot, setUpstream }),
-  gitPull: (repoRoot: string) =>
-    invoke<string>("git_pull", { repoRoot }),
-  gitFetch: (repoRoot: string) =>
-    invoke<string>("git_fetch", { repoRoot }),
-  gitSync: (repoRoot: string) =>
-    invoke<string>("git_sync", { repoRoot }),
+  gitPull: (repoRoot: string) => invoke<string>("git_pull", { repoRoot }),
+  gitFetch: (repoRoot: string) => invoke<string>("git_fetch", { repoRoot }),
+  gitSync: (repoRoot: string) => invoke<string>("git_sync", { repoRoot }),
   /** Every uncommitted change gone — tracked files back to the last commit,
    *  untracked files and folders removed. Resolves to how many files that
    *  touched. Destructive; the reset-chat flow asks in red before calling. */
@@ -1850,7 +1853,13 @@ export const api = {
     prompt: string,
     repoRoot: string,
     continueSession: boolean,
-  ) => invoke<string>("agent_send", { agentId, prompt, repoRoot, continueSession }),
+  ) =>
+    invoke<string>("agent_send", {
+      agentId,
+      prompt,
+      repoRoot,
+      continueSession,
+    }),
   agentSendStreaming: (
     agentId: string,
     prompt: string,
@@ -1898,8 +1907,11 @@ export const api = {
      *  the project the tab is filed under, and where the record of the work
      *  belongs, whichever machine holds the code. */
     machineId?: string | null,
-  ) =>
-    invoke<AgentSessionHandle>("agent_pty_open", {
+  ) => {
+    // The place on screen when the spawn STARTS — the tab belongs there even
+    // if the user has switched projects by the time the CLI answers.
+    const startedIn = placeAtSpawnStart();
+    return invoke<AgentSessionHandle>("agent_pty_open", {
       agentId,
       repoRoot,
       cols,
@@ -1909,7 +1921,11 @@ export const api = {
       profileName: profileName ?? null,
       permissionMode: permissionMode ?? null,
       machineId: machineId ?? null,
-    }),
+    }).then((handle) => {
+      recordSpawnOrigin(handle.id, startedIn);
+      return handle;
+    });
+  },
   /** Live coding-agent PTY sessions in `repoRoot`, most-recently-active
    *  first. Powers the "Start in agent → hand to a running session"
    *  submenu. */
@@ -1963,7 +1979,8 @@ export const api = {
   // ─ Terminal panel (VS Code parity) ──────────────────────────────────
   /** Live PLAIN-shell sessions (daemon-hosted) the panel can reconnect
    *  to after a restart. Empty when the daemon is off. */
-  ptyListAlivePlain: () => invoke<LivePlainPtySession[]>("pty_list_alive_plain"),
+  ptyListAlivePlain: () =>
+    invoke<LivePlainPtySession[]>("pty_list_alive_plain"),
   /** Raw scrollback bytes retained for a live plain session, so a
    *  remounting xterm backfills the screen instead of starting blank. */
   ptyReplayBytes: (id: string) => invoke<number[]>("pty_replay_bytes", { id }),
@@ -2024,17 +2041,18 @@ export const api = {
   openaiCompatCancel: (profileName: string, turnId: string) =>
     invoke<void>("openai_compat_cancel", { profileName, turnId }),
 
-  agentProfileList: () =>
-    invoke<AgentProfile[]>("agent_profile_list"),
+  agentProfileList: () => invoke<AgentProfile[]>("agent_profile_list"),
   agentProfileCreate: (name: string, label?: string) =>
-    invoke<AgentProfile>("agent_profile_create", { name, label: label ?? null }),
+    invoke<AgentProfile>("agent_profile_create", {
+      name,
+      label: label ?? null,
+    }),
   agentProfileDelete: (name: string) =>
     invoke<void>("agent_profile_delete", { name }),
   gitProfileList: () => invoke<GitProfile[]>("git_profile_list"),
   gitProfileUpsert: (profile: GitProfile) =>
     invoke<GitProfile>("git_profile_upsert", { profile }),
-  gitProfileDelete: (id: string) =>
-    invoke<void>("git_profile_delete", { id }),
+  gitProfileDelete: (id: string) => invoke<void>("git_profile_delete", { id }),
   workspaceProfileGet: (repoRoot: string) =>
     invoke<WorkspaceBinding>("workspace_profile_get", { repoRoot }),
   workspaceProfileSet: (
@@ -2157,7 +2175,11 @@ export const api = {
   // at end-of-file and losing whatever was appended in between. Omit it when
   // only previewing a transcript — a preview must not move a live tab's mark.
   claudeLoadSession: (filePath: string, limit = 500, sessionId?: string) =>
-    invoke<StreamEvent[]>("claude_load_session", { filePath, limit, sessionId }),
+    invoke<StreamEvent[]>("claude_load_session", {
+      filePath,
+      limit,
+      sessionId,
+    }),
 
   // Live-tail a Claude Code session JSONL file. Spawns a backend task
   // that polls the file every 500ms and emits parsed StreamEvents on
@@ -2193,8 +2215,12 @@ export const api = {
     permissionMode?: PermissionMode,
     effort?: ReasoningEffort | null,
     fast?: boolean,
+    chat?: { channel: string; clientTurnId: string; model?: string },
   ) =>
     invoke<TurnHandle>("agent_stream_send", {
+      channel: chat?.channel ?? null,
+      clientTurnId: chat?.clientTurnId ?? null,
+      model: chat?.model ?? null,
       agentId,
       repoRoot,
       prompt,
@@ -2606,8 +2632,11 @@ export const api = {
     invoke<KgFlowMap | null>("aura_kg_flows", { repoRoot }),
 
   // Wave C — AuraWatch background tap.
-  aurawatchStart: (repoRoot: string, mode: WatchMode, preferred?: string | null) =>
-    invoke<WatchStatus>("aurawatch_start", { repoRoot, mode, preferred }),
+  aurawatchStart: (
+    repoRoot: string,
+    mode: WatchMode,
+    preferred?: string | null,
+  ) => invoke<WatchStatus>("aurawatch_start", { repoRoot, mode, preferred }),
   aurawatchStop: (repoRoot: string) =>
     invoke<void>("aurawatch_stop", { repoRoot }),
   aurawatchStatus: (repoRoot: string) =>
@@ -2659,7 +2688,10 @@ export const api = {
    *  uncommitted — instead of just uncommitted-vs-HEAD. Omitted/false keeps the
    *  uncommitted-vs-HEAD behavior (the main checkout has no fork base). */
   gitDiffStats: (repoRoot: string, sinceBase?: boolean) =>
-    invoke<DiffStats>("git_diff_stats", { repoRoot, sinceBase: sinceBase ?? null }),
+    invoke<DiffStats>("git_diff_stats", {
+      repoRoot,
+      sinceBase: sinceBase ?? null,
+    }),
   /** The same totals for many worktrees in one round-trip, for the roster that
    *  shows a badge per row. Asked one at a time this was a quarter of all the
    *  IPC the idle app did; on macOS every `invoke` is a cross-process fetch
@@ -2710,7 +2742,11 @@ export const api = {
       agent: agent ?? null,
       sinceTs: sinceTs ?? null,
     }),
-  auraListSnapshotsV2: (repoRoot: string, limit: number, beforeMtime?: number) =>
+  auraListSnapshotsV2: (
+    repoRoot: string,
+    limit: number,
+    beforeMtime?: number,
+  ) =>
     invoke<SnapshotPage>("aura_list_snapshots_v2", {
       repoRoot,
       limit,
@@ -2748,8 +2784,7 @@ export const api = {
       agent: input.agent ?? null,
     }),
   promptsDelete: (id: string) => invoke<void>("prompts_delete", { id }),
-  promptsRecordUse: (id: string) =>
-    invoke<void>("prompts_record_use", { id }),
+  promptsRecordUse: (id: string) => invoke<void>("prompts_record_use", { id }),
   /** Run `aura usage <period> --json --project` against `repoRoot` and
    *  return a typed slice of the report — total cost + token splits +
    *  per-model breakdown. Used by ManagerSurface to surface live token
@@ -2852,7 +2887,8 @@ export const api = {
   /** Act as `slug` from now on, and keep acting as it after a restart.
    *  Returns the refreshed list so a menu redraws without a second round
    *  trip. Throws if the slug is not one of yours. */
-  cloudOrgSwitch: (slug: string) => invoke<CloudOrg[]>("cloud_org_switch", { slug }),
+  cloudOrgSwitch: (slug: string) =>
+    invoke<CloudOrg[]>("cloud_org_switch", { slug }),
   /** Every project this account can see, across every org, each tagged with
    *  the org that owns it. */
   cloudRepos: () => invoke<CloudRepo[]>("cloud_repos"),
@@ -2961,11 +2997,7 @@ export const api = {
    *  only once per person per machine. See `lib/fallbackAvatars.ts`. */
   fallbackAvatarFetch: (key: string) =>
     invoke<string>("fallback_avatar_fetch", { key }),
-  teamAliasAdd: (
-    repoRoot: string,
-    targetHandle: string,
-    aliasEmail: string,
-  ) =>
+  teamAliasAdd: (repoRoot: string, targetHandle: string, aliasEmail: string) =>
     invoke<TeamManifest>("team_alias_add", {
       repoRoot,
       targetHandle,
@@ -3066,7 +3098,11 @@ export const api = {
     invoke<TeamManifest>("team_channel_member_add", { repoRoot, slug, email }),
   /** Remove an email from a private channel's allow-list. Admin/channel-admin only. */
   teamChannelMemberRemove: (repoRoot: string, slug: string, email: string) =>
-    invoke<TeamManifest>("team_channel_member_remove", { repoRoot, slug, email }),
+    invoke<TeamManifest>("team_channel_member_remove", {
+      repoRoot,
+      slug,
+      email,
+    }),
   /** Promote/demote a channel-level admin. Promoting on a private channel
    *  also adds the member to the allow-list. Admin/channel-admin only. */
   teamChannelAdminSet: (
@@ -3083,8 +3119,18 @@ export const api = {
     }),
   /** Pin a custom URL tab onto a channel header. Any member (Slack-bookmark
    *  semantics); http(s) only, max 6 per channel. */
-  teamChannelTabAdd: (repoRoot: string, slug: string, label: string, url: string) =>
-    invoke<TeamManifest>("team_channel_tab_add", { repoRoot, slug, label, url }),
+  teamChannelTabAdd: (
+    repoRoot: string,
+    slug: string,
+    label: string,
+    url: string,
+  ) =>
+    invoke<TeamManifest>("team_channel_tab_add", {
+      repoRoot,
+      slug,
+      label,
+      url,
+    }),
   /** Remove a custom tab by id. Any member, mirroring add. */
   teamChannelTabRemove: (repoRoot: string, slug: string, tabId: string) =>
     invoke<TeamManifest>("team_channel_tab_remove", { repoRoot, slug, tabId }),
@@ -3121,8 +3167,16 @@ export const api = {
     invoke<OutboxEntry[]>("chat_outbox_status", { repoRoot, channel }),
   chatResend: (repoRoot: string, channel: string, msgId: string) =>
     invoke<void>("chat_resend", { repoRoot, channel, msgId }),
-  chatSubscribeSince: (repoRoot: string, channel: string, sinceSeq: number | null) =>
-    invoke<ChatMessage[]>("chat_subscribe_since", { repoRoot, channel, sinceSeq: sinceSeq ?? null }),
+  chatSubscribeSince: (
+    repoRoot: string,
+    channel: string,
+    sinceSeq: number | null,
+  ) =>
+    invoke<ChatMessage[]>("chat_subscribe_since", {
+      repoRoot,
+      channel,
+      sinceSeq: sinceSeq ?? null,
+    }),
   chatOutboxDrainKickoff: (repoRoot: string) =>
     invoke<void>("chat_outbox_drain_kickoff", { repoRoot }),
   chatDoctor: (repoRoot: string) =>
@@ -3211,8 +3265,7 @@ export const api = {
     invoke<void>("notes_feed_delete", { repoRoot, scope, noteId }),
 
   // Human-task tracker (per-repo `.aura/tasks/tasks.json`)
-  tasksList: (repoRoot: string) =>
-    invoke<Task[]>("tasks_list", { repoRoot }),
+  tasksList: (repoRoot: string) => invoke<Task[]>("tasks_list", { repoRoot }),
   tasksCreate: (repoRoot: string, input: CreateTaskInput) =>
     invoke<Task>("tasks_create", { repoRoot, input }),
   tasksUpdate: (repoRoot: string, input: UpdateTaskInput) =>
@@ -3393,11 +3446,7 @@ export const api = {
     invoke<void>("tasks_comments_delete", { repoRoot, id }),
 
   // ── OO.5 — Bulk operations ────────────────────────────────────────
-  tasksBulkStateChange: (
-    repoRoot: string,
-    ids: string[],
-    stateId: string,
-  ) =>
+  tasksBulkStateChange: (repoRoot: string, ids: string[], stateId: string) =>
     invoke<BulkOpResult>("tasks_bulk_state_change", {
       repoRoot,
       ids,
@@ -3425,12 +3474,7 @@ export const api = {
         bucket: input.bucket ?? null,
       },
     }),
-  notesRead: (
-    repoRoot: string,
-    scope: NoteScope,
-    bucket: string,
-    id: string,
-  ) =>
+  notesRead: (repoRoot: string, scope: NoteScope, bucket: string, id: string) =>
     invoke<Note>("notes_read", {
       input: { repo_root: repoRoot, scope, bucket, id },
     }),
@@ -3670,8 +3714,7 @@ export const api = {
   // (~/.aura/credentials.json + the `/v1/brain/quota` endpoint), and
   // the BrainSettings UI special-cases the `aura_pro` row to render
   // these instead of an API-key field.
-  auraProIsSignedIn: () =>
-    invoke<AuraProSignInState>("aura_pro_is_signed_in"),
+  auraProIsSignedIn: () => invoke<AuraProSignInState>("aura_pro_is_signed_in"),
   auraProQuota: () => invoke<AuraProQuota>("aura_pro_quota"),
 
   // Brain-trait chat surface (v0.2.31 LL.0). Sibling of `managerChat` —
@@ -3831,7 +3874,11 @@ export const api = {
       toSession,
       content,
     }),
-  sentinelMarkRead: (repoRoot: string, messageId: string, readerSession: string) =>
+  sentinelMarkRead: (
+    repoRoot: string,
+    messageId: string,
+    readerSession: string,
+  ) =>
     invoke<void>("sentinel_mark_read", { repoRoot, messageId, readerSession }),
 
   // ── cross-worktree control plane (the Workspaces page) ──────────────
@@ -3849,7 +3896,11 @@ export const api = {
   /** Send a line to one checkout by name (`main` for the main checkout),
    *  or to every agent holding a claim when `toWorktree` is omitted. */
   worktreeSay: (repoRoot: string, message: string, toWorktree?: string) =>
-    invoke<WorktreeSayResult>("worktree_say", { repoRoot, message, toWorktree }),
+    invoke<WorktreeSayResult>("worktree_say", {
+      repoRoot,
+      message,
+      toWorktree,
+    }),
 
   // ── publishing a plain folder (the no-repo gate) ────────────────────
   repoState: (dir: string) => invoke<RepoState>("repo_state", { dir }),
@@ -3876,8 +3927,7 @@ export const api = {
   // Zone rules — read straight off .aura/sentinel/zones; claim/release
   // shell out to the `aura zones …` CLI so the rules-engine + cloud-sync
   // side effects stay in one place.
-  zoneList: (repoRoot: string) =>
-    invoke<ZoneRule[]>("zone_list", { repoRoot }),
+  zoneList: (repoRoot: string) => invoke<ZoneRule[]>("zone_list", { repoRoot }),
   zoneClaim: (
     repoRoot: string,
     patterns: string[],
@@ -3891,10 +3941,8 @@ export const api = {
   // current project. Pairs with the `fs:changed` event on the React
   // side (subscribed in App.tsx) so external editor saves invalidate
   // the matching open buffer.
-  watchRepo: (repoRoot: string) =>
-    invoke<void>("watch_repo", { repoRoot }),
-  unwatchRepo: (repoRoot: string) =>
-    invoke<void>("unwatch_repo", { repoRoot }),
+  watchRepo: (repoRoot: string) => invoke<void>("watch_repo", { repoRoot }),
+  unwatchRepo: (repoRoot: string) => invoke<void>("unwatch_repo", { repoRoot }),
   /** Start describing this repo's commits the moment they land, instead of
    *  when someone opens them. Idempotent per root; pair with unwatchCommits on
    *  a project switch. */
@@ -4312,8 +4360,12 @@ export const api = {
     invoke<DirEntry[]>("place_fs_list", { machineId, root, path }),
   placeFsRead: (machineId: string, root: string, path: string) =>
     invoke<FileContent>("place_fs_read", { machineId, root, path }),
-  placeFsWrite: (machineId: string, root: string, path: string, contents: string) =>
-    invoke<void>("place_fs_write", { machineId, root, path, contents }),
+  placeFsWrite: (
+    machineId: string,
+    root: string,
+    path: string,
+    contents: string,
+  ) => invoke<void>("place_fs_write", { machineId, root, path, contents }),
   placeFsCreateFile: (machineId: string, root: string, path: string) =>
     invoke<string>("place_fs_create_file", { machineId, root, path }),
   placeFsCreateFolder: (machineId: string, root: string, path: string) =>
@@ -4326,18 +4378,36 @@ export const api = {
     invoke<string[]>("place_fs_find_files", { machineId, root }),
   placeGitStatusV2: (machineId: string, root: string) =>
     invoke<GitStatusEntry[]>("place_git_status_v2", { machineId, root }),
-  placeGitDiff: (machineId: string, root: string, file: string, sinceBase?: boolean) =>
+  placeGitDiff: (
+    machineId: string,
+    root: string,
+    file: string,
+    sinceBase?: boolean,
+  ) =>
     invoke<string>("place_git_diff", {
       machineId,
       root,
       file,
       sinceBase: sinceBase ?? null,
     }),
-  placeGitDiffAtCommit: (machineId: string, root: string, sha: string, file: string) =>
+  placeGitDiffAtCommit: (
+    machineId: string,
+    root: string,
+    sha: string,
+    file: string,
+  ) =>
     invoke<string>("place_git_diff_at_commit", { machineId, root, sha, file }),
-  placeGitDiffBase: (machineId: string, root: string, base: string, file: string) =>
-    invoke<string>("place_git_diff_base", { machineId, root, base, file }),
-  placeGitDiffStatsPerFile: (machineId: string, root: string, sinceBase?: boolean) =>
+  placeGitDiffBase: (
+    machineId: string,
+    root: string,
+    base: string,
+    file: string,
+  ) => invoke<string>("place_git_diff_base", { machineId, root, base, file }),
+  placeGitDiffStatsPerFile: (
+    machineId: string,
+    root: string,
+    sinceBase?: boolean,
+  ) =>
     invoke<FileDiffStat[]>("place_git_diff_stats_per_file", {
       machineId,
       root,
@@ -4380,7 +4450,11 @@ export const api = {
   // end AURA-1306
   // AURA-1307 — `runDetect`, asked of the checkout on the machine. Same
   // sniffer, same answer shape; the files are read over there.
-  placeRunDetect: (machineId: string, root: string, remoteRoot?: string | null) =>
+  placeRunDetect: (
+    machineId: string,
+    root: string,
+    remoteRoot?: string | null,
+  ) =>
     invoke<RunSuggestion>("place_run_detect", {
       machineId,
       root,
@@ -4533,7 +4607,10 @@ export const api = {
    *  again. What it does not do is leave a window open onto your key across a
    *  break in which nothing of yours is running there. Ending the last session
    *  on a box does this on its own. */
-  placeForwardRelease: (place: { root: string | null; machineId: string | null }) =>
+  placeForwardRelease: (place: {
+    root: string | null;
+    machineId: string | null;
+  }) =>
     invoke<Forwarding>("place_forward_release", {
       root: place.root,
       machineId: place.machineId,
@@ -4556,14 +4633,16 @@ export const api = {
    *  who knows they are finished. It ENDS THE SESSIONS on the box — the files
    *  survive, the running agents do not — so say that before offering it.
    *  Rejects, with a sentence, for a place Aura did not make. */
-  placeSleep: (machineId: string) => invoke<Sleeping>("place_sleep", { machineId }),
+  placeSleep: (machineId: string) =>
+    invoke<Sleeping>("place_sleep", { machineId }),
   /** Start a sleeping machine and wait until it has an address again.
    *
    *  The new address is written to the machine book before this resolves: a
    *  stopped box gives up its public address and comes back on a different one,
    *  and a place that is running, billed and dialling yesterday's host is worse
    *  than one that never slept. */
-  placeWake: (machineId: string) => invoke<Sleeping>("place_wake", { machineId }),
+  placeWake: (machineId: string) =>
+    invoke<Sleeping>("place_wake", { machineId }),
   /** Is this place starting, since when, and how long that usually takes?
    *
    *  The question to ask WHILE waiting. Reads the machine book and the wake in
@@ -4666,7 +4745,12 @@ export const api = {
     root: string,
     name: string,
     value: string,
-    opts?: { member?: string; gitHost?: string; gitUser?: string; gitForge?: string },
+    opts?: {
+      member?: string;
+      gitHost?: string;
+      gitUser?: string;
+      gitForge?: string;
+    },
   ) =>
     invoke<SecretRef[]>("place_secret_put", {
       root,
@@ -4918,11 +5002,8 @@ export const api = {
     invoke<string>("manager_preview_prompt", { sessionId, taskId }),
   /** Append a chat turn to a Manager session. Used by the chat surface
    *  to record both the user's prompt and the Manager's narration. */
-  managerAppendChat: (
-    sessionId: string,
-    role: ChatRole,
-    text: string,
-  ) => invoke<void>("manager_append_chat", { sessionId, role, text }),
+  managerAppendChat: (sessionId: string, role: ChatRole, text: string) =>
+    invoke<void>("manager_append_chat", { sessionId, role, text }),
   /** Send a user message to the Manager brain. Appends the turn server-
    *  side then fires the Anthropic-backed agentic loop. UI subscribes to
    *  `manager-stream:<sid>` for streaming text deltas and tool_use cards
@@ -4931,9 +5012,17 @@ export const api = {
   managerChat: (
     sessionId: string,
     message: string,
-    attachments?: Array<{ media_type: string; data_base64: string; name?: string | null }>,
+    attachments?: Array<{
+      media_type: string;
+      data_base64: string;
+      name?: string | null;
+    }>,
   ) =>
-    invoke<void>("manager_chat", { sessionId, message, attachments: attachments ?? null }),
+    invoke<void>("manager_chat", {
+      sessionId,
+      message,
+      attachments: attachments ?? null,
+    }),
   /** Edit a previously-sent user turn at `turnIndex` and resend from there.
    *  Drops every chat turn from `turnIndex` onwards, appends a fresh user
    *  turn with `message`, then re-runs the brain. When `restoreCode` is
@@ -4985,11 +5074,7 @@ export const api = {
    *  until the user (or a teammate) clicks Build. Returns the stamped
    *  pair so the PlanCard can render the row immediately without
    *  waiting for the next session snapshot. */
-  managerApprovePlan: (
-    sessionId: string,
-    planId: string,
-    approver: string,
-  ) =>
+  managerApprovePlan: (sessionId: string, planId: string, approver: string) =>
     invoke<PlanApproval>("manager_approve_plan", {
       sessionId,
       planId,
@@ -5017,7 +5102,8 @@ export const api = {
   projectsRegister: (root: string, label?: string) =>
     invoke<ProjectEntry>("projects_register", { root, label: label ?? null }),
   projectsList: () => invoke<ProjectEntry[]>("projects_list"),
-  projectsGet: (id: string) => invoke<ProjectEntry | null>("projects_get", { id }),
+  projectsGet: (id: string) =>
+    invoke<ProjectEntry | null>("projects_get", { id }),
 
   // Settings — backs SettingsDialog tabs. Keys/strict/telemetry round-
   // trip via `~/.aura/credentials.json`; agents tab edits `agents.toml`.
@@ -5059,15 +5145,12 @@ export const api = {
     invoke<AgentConfigSyncStatus>("settings_agent_configs_push"),
   settingsAgentConfigsPull: () =>
     invoke<AgentConfigApplyResult>("settings_agent_configs_pull"),
-  settingsTelemetryShow: () =>
-    invoke<TelemetryView>("settings_telemetry_show"),
-  settingsTelemetryClear: () =>
-    invoke<void>("settings_telemetry_clear"),
+  settingsTelemetryShow: () => invoke<TelemetryView>("settings_telemetry_show"),
+  settingsTelemetryClear: () => invoke<void>("settings_telemetry_clear"),
   /** Non-secret UI prefs at `~/.aura/settings.toml`. `null` when the file
    *  doesn't exist yet — caller migrates from legacy localStorage then
    *  writes the first TOML. Backed by `cmd_settings_prefs.rs`. */
-  settingsPrefsLoad: () =>
-    invoke<AppSettings | null>("settings_prefs_load"),
+  settingsPrefsLoad: () => invoke<AppSettings | null>("settings_prefs_load"),
   settingsPrefsSave: (settings: AppSettings) =>
     invoke<void>("settings_prefs_save", { settings }),
   /** Switch the floating HUD's shape live ("capsule" | "sidebar" | "minimal").
@@ -5093,11 +5176,13 @@ export const api = {
     invoke<ClipEntry>("clips_save_image", { name, dataB64 }),
   clipsSaveFile: (origPath: string) =>
     invoke<ClipEntry>("clips_save_file", { origPath }),
-  clipsReadDataUrl: (id: string) => invoke<string>("clips_read_dataurl", { id }),
+  clipsReadDataUrl: (id: string) =>
+    invoke<string>("clips_read_dataurl", { id }),
   // Push an image clip into the OS clipboard so a follow-up Ctrl+V to
   // a TUI agent attaches it as an image instead of just typing the
   // file path. Used by drag-onto-agent-terminal flow.
-  clipsCopyImageToOs: (id: string) => invoke<void>("clips_copy_image_to_os", { id }),
+  clipsCopyImageToOs: (id: string) =>
+    invoke<void>("clips_copy_image_to_os", { id }),
 
   // Mobile remote — LAN web server. Phone in the same network hits
   // the URL, types prompts that route into the active session.
@@ -5175,8 +5260,7 @@ export const api = {
   // Local crashlytics — panic hook writes JSON dumps to
   // ~/.aura/aura-shell-crashes/<ts>.json. Frontend lists them on launch
   // via CrashRecoveryToast.
-  auraCrashReportsList: () =>
-    invoke<CrashSummary[]>("aura_crash_reports_list"),
+  auraCrashReportsList: () => invoke<CrashSummary[]>("aura_crash_reports_list"),
   auraCrashReportRead: (path: string) =>
     invoke<string>("aura_crash_report_read", { path }),
   auraCrashReportsClear: (beforeTsMs: number) =>
@@ -5186,8 +5270,7 @@ export const api = {
   // key-gated in telemetry.rs: a no-op until the first-run prompt is answered,
   // and a no-op forever in builds with no PostHog key baked in. We never put
   // code, paths, prompts, repo names, email, or name on the wire.
-  telemetryConsentGet: () =>
-    invoke<TelemetryConsent>("telemetry_consent_get"),
+  telemetryConsentGet: () => invoke<TelemetryConsent>("telemetry_consent_get"),
   telemetrySetConsent: (product: boolean, crash: boolean) =>
     invoke<TelemetryConsent>("telemetry_set_consent", { product, crash }),
   /** Record a namespaced product event (e.g. `feature_used` with
@@ -5218,7 +5301,10 @@ export const api = {
   // GitHub repo (`owner/repo`, read off the box's `origin`) and the backend
   // passes it as `-R`. `null` means "the checkout is here — ask git in it".
   prList: (repoRoot: string, remoteRepo?: string | null) =>
-    invoke<PrSummary[]>("pr_list", { repoRoot, remoteRepo: remoteRepo ?? null }),
+    invoke<PrSummary[]>("pr_list", {
+      repoRoot,
+      remoteRepo: remoteRepo ?? null,
+    }),
   /** Open GitHub issues available as workspace launch context. */
   githubIssueList: (repoRoot: string, remoteRepo?: string | null) =>
     invoke<GithubIssue[]>("github_issue_list", {
@@ -5237,7 +5323,11 @@ export const api = {
     baseBranch?: string | null;
     draft: boolean;
     remoteRepo?: string | null;
-  }) => invoke<PrCreated>("pr_create", { ...input, remoteRepo: input.remoteRepo ?? null }),
+  }) =>
+    invoke<PrCreated>("pr_create", {
+      ...input,
+      remoteRepo: input.remoteRepo ?? null,
+    }),
   /** Edit title, description, target branch, and draft state natively. */
   prEdit: (input: {
     repoRoot: string;
@@ -5247,7 +5337,8 @@ export const api = {
     baseBranch?: string | null;
     draft: boolean;
     remoteRepo?: string | null;
-  }) => invoke<void>("pr_edit", { ...input, remoteRepo: input.remoteRepo ?? null }),
+  }) =>
+    invoke<void>("pr_edit", { ...input, remoteRepo: input.remoteRepo ?? null }),
   /** GitHub viewer login (`gh api user --jq .login`). Empty string if
    *  unauthenticated. Cached by caller — Inbox uses this to highlight
    *  PRs authored by the user vs awaiting their review. */
@@ -5256,7 +5347,10 @@ export const api = {
   /** All repo labels (`gh label list --json name,color,description --limit 200`).
    *  Used by the label picker to show the universe of choices. */
   prLabelsList: (repoRoot: string, remoteRepo?: string | null) =>
-    invoke<PrLabel[]>("pr_labels_list", { repoRoot, remoteRepo: remoteRepo ?? null }),
+    invoke<PrLabel[]>("pr_labels_list", {
+      repoRoot,
+      remoteRepo: remoteRepo ?? null,
+    }),
   /** Replace the labels on a PR with `names`. Backend diffs against
    *  current and shells `gh pr edit --add-label / --remove-label`. */
   prLabelsSet: (
@@ -5288,7 +5382,11 @@ export const api = {
       remoteRepo: remoteRepo ?? null,
     }),
   prDetail: (repoRoot: string, prNumber: number, remoteRepo?: string | null) =>
-    invoke<PrDetail>("pr_detail", { repoRoot, prNumber, remoteRepo: remoteRepo ?? null }),
+    invoke<PrDetail>("pr_detail", {
+      repoRoot,
+      prNumber,
+      remoteRepo: remoteRepo ?? null,
+    }),
   /** Flatten every status check on a PR (`gh pr view --json
    *  statusCheckRollup`) into one row per check — GitHub Actions runs,
    *  external CI status contexts, everything. Each row carries a plain
@@ -5296,19 +5394,31 @@ export const api = {
    *  plus a `url` to the run's logs. Same rollup `pr_list` already reads,
    *  surfaced per-check instead of only summarized to a chip. */
   prChecks: (repoRoot: string, number: number, remoteRepo?: string | null) =>
-    invoke<PrCheck[]>("pr_checks", { repoRoot, number, remoteRepo: remoteRepo ?? null }),
+    invoke<PrCheck[]>("pr_checks", {
+      repoRoot,
+      number,
+      remoteRepo: remoteRepo ?? null,
+    }),
   /** Vercel deploy status for a PR's head commit, or null when Vercel isn't
    *  configured (`[vercel]` in `~/.aura/integrations.toml`) or has no
    *  deployment for the commit yet. Drives the deploy chip above the checks
    *  list. Deliberately soft — never blocks the checks view. */
-  prVercelStatus: (repoRoot: string, prNumber: number, remoteRepo?: string | null) =>
+  prVercelStatus: (
+    repoRoot: string,
+    prNumber: number,
+    remoteRepo?: string | null,
+  ) =>
     invoke<VercelDeployment | null>("pr_vercel_status", {
       repoRoot,
       prNumber,
       remoteRepo: remoteRepo ?? null,
     }),
   // Stage 7B: comments
-  prCommentsList: (repoRoot: string, prNumber: number, remoteRepo?: string | null) =>
+  prCommentsList: (
+    repoRoot: string,
+    prNumber: number,
+    remoteRepo?: string | null,
+  ) =>
     invoke<PrComment[]>("pr_comments_list", {
       repoRoot,
       prNumber,
@@ -5447,7 +5557,11 @@ export const api = {
       remoteRepo: remoteRepo ?? null,
     }),
   prStack: (repoRoot: string, prNumber: number, remoteRepo?: string | null) =>
-    invoke<PrStackNode[]>("pr_stack", { repoRoot, prNumber, remoteRepo: remoteRepo ?? null }),
+    invoke<PrStackNode[]>("pr_stack", {
+      repoRoot,
+      prNumber,
+      remoteRepo: remoteRepo ?? null,
+    }),
   // Resource usage popover — CPU + memory totals + per-process breakdown
   // for the aura family (shell, pty daemon, mcp companion, agent CLIs).
   // AURA-1298 — `root` picks the volume the disk figures describe; without
@@ -5463,8 +5577,7 @@ export const api = {
     invoke<void>("plugin_enable", { kind, id }),
   pluginDisable: (kind: PluginKind, id: string) =>
     invoke<void>("plugin_disable", { kind, id }),
-  pluginContributes: () =>
-    invoke<PluginContributesRow[]>("plugin_contributes"),
+  pluginContributes: () => invoke<PluginContributesRow[]>("plugin_contributes"),
 
   // Commons builtin-app fetch proxy. First-party builtin apps (Reddit, …)
   // are trusted Aura code, but every network read still funnels through this
@@ -5782,8 +5895,7 @@ export const api = {
       },
     }),
   modesListInstalled: () => invoke<ModeDescriptor[]>("modes_list_installed"),
-  modesUninstall: (slug: string) =>
-    invoke<void>("modes_uninstall", { slug }),
+  modesUninstall: (slug: string) => invoke<void>("modes_uninstall", { slug }),
   modesEdit: (slug: string, yaml: string) =>
     invoke<ModeDescriptor>("modes_edit", { slug, yaml }),
   modesPublishToGist: (args: { slug: string; description?: string | null }) =>
@@ -10595,7 +10707,6 @@ export type ImageAttachment = {
 // cloud rows into the same shape, so the type lives where both apps reach.
 import type { StreamEvent } from "@shared/streamEvent";
 export type { StreamEvent };
-
 
 // Wave C — AuraWatch types. Mirror the Rust serde shapes in
 // cmd_aurawatch.rs + aurawatch_inference.rs. Keep these in sync.

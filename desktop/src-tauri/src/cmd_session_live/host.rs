@@ -110,7 +110,8 @@ fn entry_from_event(ctx: &Arc<ConnCtx>, ev: StreamEvent) -> Option<Entry> {
         StreamEvent::SystemInit { .. }
         | StreamEvent::Usage { .. }
         | StreamEvent::Result { .. }
-        | StreamEvent::Image { .. } => return None,
+        | StreamEvent::Image { .. }
+        | StreamEvent::ContentBlock { .. } => return None,
     };
 
     if text.trim().is_empty() {

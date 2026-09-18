@@ -42,10 +42,20 @@ export type Normalizer = (raw: unknown, sessionId: string) => NormalizedEvent[];
  *  the caller keeps the raw view. */
 const NORMALIZERS: Partial<Record<AgentIngress, Normalizer>> = {
   "stream-json": (raw, sessionId) =>
-    normalizeClaude(raw as StreamEvent[], sessionId),
-  // "acp":         pending — Gemini / Cursor / Goose adapter wave.
-  // "json-events": per-agent below — Codex, OpenCode and Pi share the ingress
-  //                but not the schema, so none of them can claim the family.
+    normalizeClaude(
+      (Array.isArray(raw) ? raw : [raw]) as StreamEvent[],
+      sessionId,
+    ),
+  acp: (raw, sessionId) =>
+    normalizeClaude(
+      (Array.isArray(raw) ? raw : [raw]) as StreamEvent[],
+      sessionId,
+    ),
+  "json-events": (raw, sessionId) =>
+    normalizeClaude(
+      (Array.isArray(raw) ? raw : [raw]) as StreamEvent[],
+      sessionId,
+    ),
   // "pty":         intentionally none — raw terminal only.
   // "chat":        pending — OpenAI-compatible endpoints.
 };
@@ -86,6 +96,12 @@ export function normalizeStream(
   raw: unknown,
   sessionId: string,
 ): NormalizedEvent[] | null {
+  // Stream transports (including ACP) are translated by the desktop into
+  // StreamEvent. Native PTY records keep their provider-specific adapters.
+  const records = Array.isArray(raw) ? raw : [raw];
+  if (records.length > 0 && records.every(record => record && typeof record === "object" && typeof record.kind === "string")) {
+    return normalizeClaude(records as StreamEvent[], sessionId);
+  }
   const fn = normalizerFor(agentId);
   return fn ? fn(raw, sessionId) : null;
 }

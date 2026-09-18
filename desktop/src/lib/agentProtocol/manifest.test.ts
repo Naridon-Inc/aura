@@ -9,8 +9,8 @@ import { canNormalize, normalizeStream } from "./index";
 // which is a control with nothing on the other end of it. These tests hold the
 // two halves together.
 
-const WIRED = ["claude", "codex", "kimi", "opencode", "pi"];
-const DECLARED_ONLY = ["gemini", "cursor"];
+const WIRED = ["claude", "codex", "kimi", "opencode", "pi", "gemini", "cursor"];
+const DECLARED_ONLY = ["aider", "custom-native-agent"];
 
 describe("every manifest matches the adapter behind it", () => {
   test("an agent with no adapter claims nothing", () => {
@@ -40,7 +40,7 @@ describe("every manifest matches the adapter behind it", () => {
     for (const id of DECLARED_ONLY) expect(canNormalize(id)).toBe(false);
   });
 
-  test("only Claude Code drives the interactive round-trips today", () => {
+  test("only connected interactive adapters claim round-trips", () => {
     // Questions, plans and permission gates are the three affordances that put
     // a control in front of the user. Anything added to this list must have an
     // adapter emitting that event — change the list in the SAME commit that
@@ -51,7 +51,7 @@ describe("every manifest matches the adapter behind it", () => {
           m.interactions.questions || m.interactions.plan || m.interactions.permission,
       )
       .map(([id]) => id);
-    expect(interactive).toEqual(["claude"]);
+    expect(interactive).toEqual(["claude", "gemini"]);
   });
 
   test("the checklist is claimed by exactly the engines that write one", () => {

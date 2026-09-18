@@ -15,9 +15,7 @@
 //! If your Kimi install lives somewhere we don't probe, override via
 //! `~/.aura/agents.toml` — that's exactly what the TOML loader is for.
 
-use crate::{
-    AgentProvider, Capabilities, CostPer1k, InvokeMode, InvokeRequest, Invocation,
-};
+use crate::{AgentProvider, Capabilities, CostPer1k, Invocation, InvokeMode, InvokeRequest};
 use std::sync::OnceLock;
 
 pub struct KimiCoder;
@@ -64,9 +62,9 @@ impl AgentProvider for KimiCoder {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            stream: false,
+            stream: true,
             pty: true,
-            resume: false,
+            resume: true,
         }
     }
 
@@ -84,28 +82,36 @@ impl AgentProvider for KimiCoder {
     fn build_invocation(&self, req: &InvokeRequest) -> Result<Invocation, String> {
         let bin = resolve_bin().unwrap_or("kimi").to_string();
         match req.mode {
-            InvokeMode::OneShot | InvokeMode::StreamJson => {
-                let mut args: Vec<String> = vec![];
-                // Per-turn model from the composer picker → `kimi -m <id>`
-                // (verified: `kimi --help` shows `-m/--model TEXT`). `None`
-                // leaves kimi on its configured `default_model`, so the
-                // invocation stays byte-identical to the pre-picker build.
-                if let Some(model) = req.model {
-                    args.push("-m".into());
-                    args.push(model.into());
-                }
-                args.push("-p".into());
-                args.push(req.plan_steered_prompt());
-                Ok(Invocation {
-                    bin,
-                    args,
-                    env: vec![],
-                    stdout_is_stream_json: false,
-                })
-            }
+            InvokeMode::OneShot | InvokeMode::StreamJson => Ok(Invocation {
+                bin,
+                args: {
+                    let mut args: Vec<String> = vec!["-p".into(), req.plan_steered_prompt()];
+                    if req.mode == InvokeMode::StreamJson {
+                        args.extend(["--output-format".into(), "stream-json".into()]);
+                    }
+                    if let Some(model) = req.model {
+                        args.extend(["--model".into(), model.into()]);
+                    }
+                    if let Some(sid) = req.resume_session_id {
+                        args.extend(["--session".into(), sid.into()]);
+                    }
+                    args
+                },
+                env: vec![],
+                stdout_is_stream_json: false,
+            }),
             InvokeMode::PtyRepl => Ok(Invocation {
                 bin,
-                args: vec![],
+                args: {
+                    let mut args = Vec::new();
+                    if let Some(sid) = req.resume_session_id {
+                        args.extend(["--session".into(), sid.into()]);
+                    }
+                    if let Some(model) = req.model {
+                        args.extend(["--model".into(), model.into()]);
+                    }
+                    args
+                },
                 env: vec![],
                 stdout_is_stream_json: false,
             }),

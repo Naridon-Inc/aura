@@ -36,9 +36,9 @@ impl AgentProvider for Cursor {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            stream: false,
+            stream: true,
             pty: true,
-            resume: false,
+            resume: true,
         }
     }
 
@@ -60,13 +60,24 @@ impl AgentProvider for Cursor {
         match req.mode {
             InvokeMode::OneShot | InvokeMode::StreamJson => Ok(Invocation {
                 bin: "cursor-agent".into(),
-                args: vec!["-p".into(), req.plan_steered_prompt()],
+                args: {
+                    let mut args: Vec<String> = vec!["-p".into(), req.plan_steered_prompt()];
+                    if req.mode == InvokeMode::StreamJson { args.extend(["--output-format".into(), "stream-json".into()]); }
+                    if let Some(model) = req.model { args.extend(["--model".into(), model.into()]); }
+                    if let Some(sid) = req.resume_session_id { args.extend(["--resume".into(), sid.into()]); }
+                    args
+                },
                 env: vec![],
                 stdout_is_stream_json: false,
             }),
             InvokeMode::PtyRepl => Ok(Invocation {
                 bin: "cursor-agent".into(),
-                args: vec![],
+                args: {
+                    let mut args = Vec::new();
+                    if let Some(sid) = req.resume_session_id { args.extend(["--resume".into(), sid.into()]); }
+                    if let Some(model) = req.model { args.extend(["--model".into(), model.into()]); }
+                    args
+                },
                 env: vec![],
                 stdout_is_stream_json: false,
             }),

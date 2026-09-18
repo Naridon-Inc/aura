@@ -934,6 +934,7 @@ pub async fn manager_load_transcript(
             ChatRole::Manager | ChatRole::System => {
                 if !turn.text.trim().is_empty() {
                     events.push(StreamEvent::AssistantText {
+                        event_id: None,
                         text: turn.text.clone(),
                         turn_id: turn_id.clone(),
                     });

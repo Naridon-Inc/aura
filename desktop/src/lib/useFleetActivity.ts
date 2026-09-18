@@ -19,7 +19,7 @@ import { useMemo } from "react";
 
 import { streamChannel, useAllStreamStates } from "./agentStreamStore";
 import { useAllAgentStatuses } from "./agentEventStore";
-import { useEditorStore } from "./editorStore";
+import { agentTabsInEveryPlace, useEditorStore } from "./editorStore";
 import {
   isManagerTurnInFlight,
   useManagerSummaries,
@@ -100,9 +100,10 @@ export function useFleetActivity(
     const inProject = (root: string) =>
       !!projectRoot && sameRoot(root, projectRoot);
 
-    // Every coding-agent tab, any workspace. Same mode→store mapping the HUD
-    // uses (stream reads the running flag; pty/chat read the OSC status).
-    for (const t of editor.agentTabs) {
+    // Every coding-agent tab, any workspace — the parked ones too, not just
+    // the strip on screen. Same mode→store mapping the HUD uses (stream reads
+    // the running flag; pty/chat read the OSC status).
+    for (const t of agentTabsInEveryPlace()) {
       const busy =
         t.mode === "stream"
           ? !!streamStates.get(streamChannel(t.agentId, t.repoRoot))?.running
@@ -126,7 +127,7 @@ export function useFleetActivity(
     }
 
     return { working: count > 0, count, inProjectCount };
-  }, [projectRoot, editor.agentTabs, streamStates, ptyStatuses, summaries, turnsTick]);
+  }, [projectRoot, editor, streamStates, ptyStatuses, summaries, turnsTick]);
 }
 
 /** The set of workspace / worktree roots that have at least one agent working
@@ -147,7 +148,7 @@ export function useWorkingRoots(): Set<string> {
   return useMemo(() => {
     const norm = (p: string) => (p.length > 1 ? p.replace(/\/+$/, "") : p);
     const roots = new Set<string>();
-    for (const t of editor.agentTabs) {
+    for (const t of agentTabsInEveryPlace()) {
       const busy =
         t.mode === "stream"
           ? !!streamStates.get(streamChannel(t.agentId, t.repoRoot))?.running
@@ -160,5 +161,5 @@ export function useWorkingRoots(): Set<string> {
       if (s.repo_root) roots.add(norm(s.repo_root));
     }
     return roots;
-  }, [editor.agentTabs, streamStates, ptyStatuses, summaries, turnsTick]);
+  }, [editor, streamStates, ptyStatuses, summaries, turnsTick]);
 }

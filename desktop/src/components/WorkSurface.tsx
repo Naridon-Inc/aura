@@ -2735,9 +2735,7 @@ function PerPaneTabStrip({
                   to ride under the name as a caption, which cost the whole
                   strip a second line of height on every pane — and most of the
                   time it printed the name a second time, because a tab opened
-                  on a project is usually named after it. The place now lives in
-                  the tab's tooltip (see `title` above), where it costs nothing
-                  and is one hover away. */}
+                  on a project is usually named after it. */}
               <span
                 className={`truncate max-w-[140px] min-w-0 ${
                   agentTab?.attention ? "font-semibold text-text-1" : ""
@@ -2745,6 +2743,17 @@ function PerPaneTabStrip({
               >
                 {data.label}
               </span>
+              {/* …but not ONLY in the tooltip. A tab from another project that
+                  names that project nowhere you can see reads as this
+                  project's: a Claude running in the Aura repo sat in Mixrank's
+                  strip looking like Mixrank's own. So the place rides on the
+                  same line, muted, whenever it says something the name
+                  doesn't. */}
+              {data.foreignName && data.foreignName !== data.label && (
+                <span className="truncate max-w-[96px] min-w-0 text-[11px] text-text-5">
+                  {data.foreignName}
+                </span>
+              )}
               {ref.kind === "manager" && (
                 <ManagerTabStatus sessionId={ref.id} />
               )}

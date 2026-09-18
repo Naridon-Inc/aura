@@ -16,6 +16,8 @@ import { reduceEvents } from "../../../lib/agentProtocol";
 import type {
   ErrorEvent,
   ImageEvent,
+  RawEvent,
+  StatusEvent,
   NormalizedEvent,
   PermissionRequestEvent,
   PlanEvent,
@@ -35,6 +37,8 @@ import type { StreamBlock, ToolResult } from "../../manager/chat/types";
 export type GroupUsage = { context: number; output: number };
 
 export type TranscriptGroup =
+  | { kind: "raw"; id: string; ev: RawEvent }
+  | { kind: "status"; id: string; ev: StatusEvent }
   | { kind: "user"; id: string; text: string }
   | { kind: "stream"; id: string; blocks: StreamBlock[]; usage?: GroupUsage }
   /** `live` = this prompt is still the one the agent is waiting on. A settled
@@ -44,7 +48,12 @@ export type TranscriptGroup =
   | { kind: "question"; id: string; ev: QuestionSetEvent; live: boolean }
   | { kind: "plan"; id: string; ev: PlanEvent; live: boolean }
   | { kind: "todo"; id: string; ev: TodoEvent }
-  | { kind: "permission"; id: string; ev: PermissionRequestEvent; live: boolean }
+  | {
+      kind: "permission";
+      id: string;
+      ev: PermissionRequestEvent;
+      live: boolean;
+    }
   | { kind: "result"; id: string; ev: ResultEvent }
   | { kind: "error"; id: string; ev: ErrorEvent }
   | { kind: "image"; id: string; ev: ImageEvent }
@@ -57,11 +66,32 @@ function toToolBlock(
   ev: Extract<NormalizedEvent, { kind: "tool_call" }>,
   blockIdx: number,
 ): Extract<StreamBlock, { kind: "tool" }> {
-  const settled = ev.status === "completed" || ev.status === "error";
-  const result: ToolResult | undefined =
-    settled && ev.output != null
-      ? { is_error: ev.isError ?? ev.status === "error", content: ev.output }
-      : undefined;
+  const settled = ev.status !== "pending" && ev.status !== "running";
+  const result: ToolResult | undefined = settled
+    ? {
+        is_error: ev.isError ?? ev.status === "error",
+        status:
+          ev.status === "cancelled" || ev.status === "unknown"
+            ? ev.status
+            : undefined,
+        content:
+          ev.output ??
+          ev.content
+            ?.map((c) =>
+              c.type === "content"
+                ? c.text
+                : c.type === "diff"
+                  ? `${c.path}\n${c.oldText ?? ""} → ${c.newText}`
+                  : `Terminal: ${c.terminalId}`,
+            )
+            .join("\n") ??
+          (ev.status === "cancelled"
+            ? "Cancelled"
+            : ev.status === "unknown"
+              ? "No result was reported before the turn ended."
+              : ""),
+      }
+    : undefined;
   return {
     kind: "tool",
     block_idx: blockIdx,
@@ -76,8 +106,11 @@ function toToolBlock(
  *  (merging same-id updates), then walks the settled timeline in order,
  *  accreting consecutive assistant blocks into one `stream` run and breaking
  *  the run wherever a user message or a structured event interrupts. */
-export function toTranscriptGroups(events: NormalizedEvent[]): TranscriptGroup[] {
-  const reduced = reduceEvents(events);
+export function toTranscriptGroups(
+  events: NormalizedEvent[],
+  sessionId?: string,
+): TranscriptGroup[] {
+  const reduced = reduceEvents(events, sessionId);
   const timeline = reduced.events;
   const groups: TranscriptGroup[] = [];
 
@@ -99,7 +132,7 @@ export function toTranscriptGroups(events: NormalizedEvent[]): TranscriptGroup[]
   let runHasUsage = false;
 
   const flush = () => {
-    if (runBlocks && runBlocks.length > 0) {
+    if (runBlocks && (runBlocks.length > 0 || runHasUsage)) {
       groups.push({
         kind: "stream",
         id: `stream:${runId}`,
@@ -122,7 +155,16 @@ export function toTranscriptGroups(events: NormalizedEvent[]): TranscriptGroup[]
     }
   };
 
-  for (const ev of timeline) {
+  for (const original of timeline) {
+    const ev = {
+      ...original,
+      id: JSON.stringify([
+        original.sessionId,
+        original.parentId ?? "",
+        original.kind,
+        original.id,
+      ]),
+    };
     switch (ev.kind) {
       case "session_init":
         flush();
@@ -134,12 +176,20 @@ export function toTranscriptGroups(events: NormalizedEvent[]): TranscriptGroup[]
           groups.push({ kind: "user", id: ev.id, text: ev.text });
         } else {
           ensureRun(ev.id);
-          runBlocks!.push({ kind: "text", block_idx: blockIdx++, text: ev.text });
+          runBlocks!.push({
+            kind: "text",
+            block_idx: blockIdx++,
+            text: ev.text,
+          });
         }
         break;
       case "reasoning":
         ensureRun(ev.id);
-        runBlocks!.push({ kind: "reasoning", block_idx: blockIdx++, text: ev.text });
+        runBlocks!.push({
+          kind: "reasoning",
+          block_idx: blockIdx++,
+          text: ev.text,
+        });
         break;
       case "tool_call": {
         ensureRun(ev.id);
@@ -149,6 +199,7 @@ export function toTranscriptGroups(events: NormalizedEvent[]): TranscriptGroup[]
       case "usage":
         // Token accounting for whichever response is open. Don't open a run for
         // it (usage with no prose is nothing to show); fold into the live one.
+        ensureRun(ev.id);
         if (runBlocks) {
           runHasUsage = true;
           runCtx = Math.max(runCtx, ev.contextTokens);
@@ -161,7 +212,7 @@ export function toTranscriptGroups(events: NormalizedEvent[]): TranscriptGroup[]
           kind: "question",
           id: ev.id,
           ev,
-          live: ev === reduced.pendingQuestions,
+          live: original === reduced.pendingQuestions,
         });
         break;
       case "plan":
@@ -170,11 +221,11 @@ export function toTranscriptGroups(events: NormalizedEvent[]): TranscriptGroup[]
           kind: "plan",
           id: ev.id,
           ev,
-          live: ev === reduced.pendingPlan,
+          live: original === reduced.pendingPlan,
         });
         break;
       case "todo":
-        if (ev !== liveTodo) break;
+        if (original !== liveTodo) break;
         flush();
         groups.push({ kind: "todo", id: ev.id, ev });
         break;
@@ -184,7 +235,7 @@ export function toTranscriptGroups(events: NormalizedEvent[]): TranscriptGroup[]
           kind: "permission",
           id: ev.id,
           ev,
-          live: ev === reduced.pendingPermission,
+          live: original === reduced.pendingPermission,
         });
         break;
       case "result":
@@ -201,8 +252,15 @@ export function toTranscriptGroups(events: NormalizedEvent[]): TranscriptGroup[]
         flush();
         groups.push({ kind: "image", id: ev.id, ev });
         break;
-      default:
+      case "raw":
+      case "status":
+        flush();
+        groups.push({ kind: ev.kind, id: ev.id, ev } as TranscriptGroup);
         break;
+      default: {
+        const exhaustive: never = ev;
+        void exhaustive;
+      }
     }
   }
   flush();

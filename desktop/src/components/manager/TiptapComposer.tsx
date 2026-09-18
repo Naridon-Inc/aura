@@ -105,6 +105,7 @@ type FileEntry = {
 type Props = {
   /** Working directory — the root the `@file` mention popup lists from. */
   repoRoot: string | null;
+  ariaLabel?: string;
   /** Restored once on mount; the editor is uncontrolled afterward. */
   initialMarkdown: string;
   busy: boolean;
@@ -158,7 +159,9 @@ type Props = {
  *  to pick up. Mirrors taskPrompt's isDoneStatus so the two stores agree. */
 function isClosedStatus(status: string): boolean {
   const s = (status || "").toLowerCase();
-  return s === "done" || s === "completed" || s === "closed" || s === "cancelled";
+  return (
+    s === "done" || s === "completed" || s === "closed" || s === "cancelled"
+  );
 }
 
 // Pull the markdown serialization tiptap-markdown bolts onto editor storage.
@@ -177,6 +180,7 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
     {
       repoRoot,
       initialMarkdown,
+      ariaLabel = "Message the agent",
       busy,
       placeholder,
       onChange,
@@ -215,8 +219,20 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
     // Submit / Escape handlers + the history-recall gate are read through a ref
     // for the same reason — so `handleKeyDown` (created once) always sees the
     // latest values without re-instantiating the editor.
-    const handlersRef = useRef({ onSubmit, onEscapeWhileBusy, busy, canRecallHistory, onImageFiles });
-    handlersRef.current = { onSubmit, onEscapeWhileBusy, busy, canRecallHistory, onImageFiles };
+    const handlersRef = useRef({
+      onSubmit,
+      onEscapeWhileBusy,
+      busy,
+      canRecallHistory,
+      onImageFiles,
+    });
+    handlersRef.current = {
+      onSubmit,
+      onEscapeWhileBusy,
+      busy,
+      canRecallHistory,
+      onImageFiles,
+    };
 
     // Menu rows = Aura's native verbs first, then Claude's custom commands
     // whose name isn't already an Aura verb (so a collision shows once, as the
@@ -281,20 +297,29 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
     const mentionMatches = useMemo(() => {
       if (mentionQuery === null) return [];
       const lastSlash = mentionQuery.lastIndexOf("/");
-      const frag = (lastSlash >= 0 ? mentionQuery.slice(lastSlash + 1) : mentionQuery).toLowerCase();
+      const frag = (
+        lastSlash >= 0 ? mentionQuery.slice(lastSlash + 1) : mentionQuery
+      ).toLowerCase();
       // Special rows lead the menu and are gated by their OWN keyword, not the
       // filename filter below — `@task`/`@terminal` are namespaces, so their
       // rows shouldn't be dropped for not containing the fragment in a name.
       const special: FileEntry[] = [];
       if (lastSlash < 0 && "terminal".includes(frag)) {
-        special.push({ name: "terminal", path: "terminal", isDir: false, kind: "terminal" });
+        special.push({
+          name: "terminal",
+          path: "terminal",
+          isDir: false,
+          kind: "terminal",
+        });
       }
       // `@task` (or a prefix of it, from `@ta` on) lists the open board tasks.
       // Requiring ≥2 chars keeps a bare `@t` from flooding with every task.
       if (lastSlash < 0 && frag.length >= 2 && "task".startsWith(frag)) {
         special.push(...taskEntries.slice(0, 7));
       }
-      const files = fileEntries.filter((e) => e.name.toLowerCase().includes(frag));
+      const files = fileEntries.filter((e) =>
+        e.name.toLowerCase().includes(frag),
+      );
       return [...special, ...files]
         .filter(
           (e, i, rows) =>
@@ -369,9 +394,18 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
       editorProps: {
         attributes: {
           class: "tiptap-composer-input no-scrollbar",
+          role: "textbox",
+          "aria-label": ariaLabel,
+          "aria-multiline": "true",
         },
         handleKeyDown: (_view, event) => {
-          const { slashQuery: sq, mentionQuery: mq, sel: curSel } = stateRef.current;
+          if (event.isComposing || event.keyCode === 229 || _view.composing)
+            return false;
+          const {
+            slashQuery: sq,
+            mentionQuery: mq,
+            sel: curSel,
+          } = stateRef.current;
           const open = sq !== null || mq !== null;
           // The popup owns navigation keys while it's open. We read the live
           // match count off the DOM-independent refs via a custom event below;
@@ -392,7 +426,9 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
             }
             if (event.key === "Escape") {
               event.preventDefault();
-              window.dispatchEvent(new CustomEvent("aura:composer:popup-close"));
+              window.dispatchEvent(
+                new CustomEvent("aura:composer:popup-close"),
+              );
               return true;
             }
             void curSel;
@@ -575,7 +611,12 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
       const toEntries = (entries: DirEntry[]): FileEntry[] =>
         entries
           // Hide VCS/dependency noise that would drown real files.
-          .filter((e) => e.name !== ".git" && e.name !== "node_modules" && e.name !== "target")
+          .filter(
+            (e) =>
+              e.name !== ".git" &&
+              e.name !== "node_modules" &&
+              e.name !== "target",
+          )
           .map((e) => ({
             name: e.name,
             // Re-root the path to be repo-relative for the chip / `@token`.
@@ -623,7 +664,8 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
       let alive = true;
       void fetchTasks(repoRoot)
         .then((rows) => {
-          if (alive) setOpenTasks(rows.filter((t) => !isClosedStatus(t.status)));
+          if (alive)
+            setOpenTasks(rows.filter((t) => !isClosedStatus(t.status)));
         })
         .catch(() => {
           /* a read blip leaves the last list in place — @task just won't grow */
@@ -727,9 +769,17 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
       }
       function onPick() {
         if (slashOpen) {
-          insertSlash(slashMatches[Math.min(stateRef.current.sel, slashMatches.length - 1)]);
+          insertSlash(
+            slashMatches[
+              Math.min(stateRef.current.sel, slashMatches.length - 1)
+            ],
+          );
         } else if (mentionOpen) {
-          insertMention(mentionMatches[Math.min(stateRef.current.sel, mentionMatches.length - 1)]);
+          insertMention(
+            mentionMatches[
+              Math.min(stateRef.current.sel, mentionMatches.length - 1)
+            ],
+          );
         }
       }
       function onClose() {
@@ -744,12 +794,23 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
         window.removeEventListener("aura:composer:popup-pick", onPick);
         window.removeEventListener("aura:composer:popup-close", onClose);
       };
-    }, [popupCount, slashOpen, mentionOpen, slashMatches, mentionMatches, insertSlash, insertMention]);
+    }, [
+      popupCount,
+      slashOpen,
+      mentionOpen,
+      slashMatches,
+      mentionMatches,
+      insertSlash,
+      insertMention,
+    ]);
 
     return (
       <div className="relative">
         {slashOpen && (
-          <PopupShell heading="Commands" footer="↑↓ to move · ⏎ to pick · esc to dismiss">
+          <PopupShell
+            heading="Commands"
+            footer="↑↓ to move · ⏎ to pick · esc to dismiss"
+          >
             {slashMatches.map((cmd, i) => (
               <button
                 key={`${cmd.source}:${cmd.name}`}
@@ -765,13 +826,15 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
               >
                 <span className="font-mono text-sm text-text-1 whitespace-nowrap">
                   /{cmd.name}
-                  {cmd.args ? <span className="text-text-4"> {cmd.args}</span> : null}
+                  {cmd.args ? (
+                    <span className="text-text-4"> {cmd.args}</span>
+                  ) : null}
                 </span>
-                <span className="flex-1 truncate text-xs text-text-3">{cmd.summary}</span>
+                <span className="flex-1 truncate text-xs text-text-3">
+                  {cmd.summary}
+                </span>
                 {cmd.source === "claude" ? (
-                  <span className="meta-tag">
-                    Claude
-                  </span>
+                  <span className="meta-tag">Claude</span>
                 ) : cmd.source === "agent" && cmd.badge ? (
                   <span className="meta-tag">{cmd.badge}</span>
                 ) : null}
@@ -781,7 +844,10 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
         )}
 
         {mentionOpen && (
-          <PopupShell heading="Context" footer="↑↓ to move · ⏎ to pick · esc to dismiss">
+          <PopupShell
+            heading="Context"
+            footer="↑↓ to move · ⏎ to pick · esc to dismiss"
+          >
             {mentionMatches.map((entry, i) =>
               entry.kind === "task" && entry.task ? (
                 <button
@@ -827,7 +893,9 @@ export const TiptapComposer = forwardRef<TiptapComposerHandle, Props>(
                     {entry.isDir ? "/" : ""}
                   </span>
                   <span className="flex-1 truncate text-xs text-text-4 text-right">
-                    {entry.kind === "terminal" ? "recent terminal output" : entry.path}
+                    {entry.kind === "terminal"
+                      ? "recent terminal output"
+                      : entry.path}
                   </span>
                 </button>
               ),

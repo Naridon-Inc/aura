@@ -27,6 +27,7 @@ import { ReasoningBlock } from "./ReasoningBlock";
 import { ExploringGroup, isReadOnlyTool } from "./ExploringGroup";
 import { LiveToolStatus } from "./LiveToolStatus";
 import { FileDiffTool, isFileDiffTool } from "./FileDiffTool";
+import { toolStatus } from "./types";
 import type {
   AskView,
   StreamBlock,
@@ -219,6 +220,9 @@ const VERB_PAST: Record<string, string> = {
  *  present-tense verb; a settled one (ok/error) reads in the past tense. */
 function settledVerb(verb: string, status: ToolStatus): string {
   if (status === "running") return verb;
+  if (status === "cancelled") return "Cancelled";
+  if (status === "unknown") return "No result";
+  if (status === "error") return "Failed";
   const sp = verb.indexOf(" ");
   const first = sp === -1 ? verb : verb.slice(0, sp);
   const past = VERB_PAST[first];
@@ -304,11 +308,7 @@ export const ToolCard = React.memo(function ToolCard({
 }) {
   const [open, setOpen] = React.useState(false);
   const view = describeTool(name, input, result);
-  const status: ToolStatus = !result
-    ? "running"
-    : result.is_error
-      ? "error"
-      : "ok";
+  const status = toolStatus(result);
 
   // An image the brain read renders the picture itself, inline — always
   // visible, no expand needed. The user asked: "when it says a png and all,
@@ -443,7 +443,13 @@ export const ToolCard = React.memo(function ToolCard({
       {hasDetail && (
         // Terminal wells break out of the verb indent — a command's output
         // reads as a full-bleed shell pane, not a card tucked under the icon.
-        <div className={isTerminal ? "aura-tool-detail aura-tool-detail-flush" : "aura-tool-detail"}>
+        <div
+          className={
+            isTerminal
+              ? "aura-tool-detail aura-tool-detail-flush"
+              : "aura-tool-detail"
+          }
+        >
           {isTerminal ? (
             <TerminalBlock command={view.command || ""} result={result} />
           ) : (
@@ -635,7 +641,9 @@ function ToolChip({
           )}
         </span>
       ) : (
-        view.metric && <span className="aura-tool-chip-metric">{view.metric}</span>
+        view.metric && (
+          <span className="aura-tool-chip-metric">{view.metric}</span>
+        )
       )}
     </button>
   );
@@ -698,7 +706,13 @@ const DIFF_MAX_LINES = 14;
 /** Render a unified-diff string as tinted hunks: `+` lines on a faint green
  *  wash, `-` lines on a faint red wash, hunk headers dimmed, everything else
  *  plain. A 1ch gutter carries the sign. Mono and small. Tokens only. */
-export function DiffView({ diff, clamped }: { diff: string; clamped?: boolean }) {
+export function DiffView({
+  diff,
+  clamped,
+}: {
+  diff: string;
+  clamped?: boolean;
+}) {
   const [showAll, setShowAll] = React.useState(false);
   const lines = React.useMemo(
     () => diff.replace(/\n$/, "").split("\n"),
@@ -792,14 +806,19 @@ function DiffLine({ line }: { line: string }) {
   );
 }
 
-
 // ── Multi-step loader ───────────────────────────────────────────────────
 
 /** Multi-step status list (e.g. a todo plan). Each step carries a status
  *  circle: ○ pending (outline) / ● in-progress (filled, pulsing) / ✓ done.
  *  When `max` is set the list clips, anchored on the active step so the
  *  user always sees what's running now plus a slice of upcoming work. */
-export function StepLoader({ steps, max }: { steps: ToolStep[]; max?: number }) {
+export function StepLoader({
+  steps,
+  max,
+}: {
+  steps: ToolStep[];
+  max?: number;
+}) {
   let visible = steps;
   let hiddenAfter = 0;
   if (max && steps.length > max) {
@@ -849,8 +868,9 @@ export function StepRow({ step }: { step: ToolStep }) {
         style={{
           width: 12,
           height: 12,
-          borderRadius: "50%",
-          border: isDone || isActive ? "none" : "1.25px solid var(--color-line)",
+          borderRadius: 2,
+          border:
+            isDone || isActive ? "none" : "1.25px solid var(--color-line)",
           background: isDone
             ? "var(--color-accent-green)"
             : isActive
@@ -863,10 +883,7 @@ export function StepRow({ step }: { step: ToolStep }) {
       >
         {isDone ? "✓" : ""}
       </span>
-      <span
-        className="text-sm leading-snug"
-        style={{ color: labelColor }}
-      >
+      <span className="text-sm leading-snug" style={{ color: labelColor }}>
         {step.label}
       </span>
     </div>
@@ -938,7 +955,9 @@ export function ToolResultBlock({
               onClick={() => setShowAll((v) => !v)}
               className="aura-block-link"
             >
-              {showAll ? `SHOW FIRST 10 / ${lines.length}` : `SHOW ALL ${lines.length}`}
+              {showAll
+                ? `SHOW FIRST 10 / ${lines.length}`
+                : `SHOW ALL ${lines.length}`}
             </button>
           )}
         </div>
@@ -988,7 +1007,11 @@ function MonoOutput({
     >
       <pre
         className="text-xs leading-[1.55] overflow-x-auto"
-        style={{ fontFamily: "var(--font-mono)", margin: 0, padding: "6px 8px" }}
+        style={{
+          fontFamily: "var(--font-mono)",
+          margin: 0,
+          padding: "6px 8px",
+        }}
       >
         {lines.map((line, i) => (
           <div key={i} className="flex items-start whitespace-pre">
@@ -1009,9 +1032,7 @@ function MonoOutput({
             </span>
           </div>
         ))}
-        {more && (
-          <div style={{ color: "var(--color-text-3)" }}>…</div>
-        )}
+        {more && <div style={{ color: "var(--color-text-3)" }}>…</div>}
       </pre>
     </div>
   );
@@ -1060,7 +1081,11 @@ function TerminalBlock({
         {hasOutput ? (
           shown.map((line, i) => (
             <div key={i}>
-              <span style={{ color: isError ? "var(--color-red)" : "var(--color-text-3)" }}>
+              <span
+                style={{
+                  color: isError ? "var(--color-red)" : "var(--color-text-3)",
+                }}
+              >
                 {line || " "}
               </span>
             </div>
@@ -1076,7 +1101,9 @@ function TerminalBlock({
           onClick={() => setShowAll((v) => !v)}
           className="aura-term-more"
         >
-          {showAll ? `Show first 10 of ${lines.length}` : `Show all ${lines.length} lines`}
+          {showAll
+            ? `Show first 10 of ${lines.length}`
+            : `Show all ${lines.length} lines`}
         </button>
       )}
     </div>
@@ -1090,18 +1117,16 @@ function TerminalBlock({
  *  presence says it ran), only an error keeps a hue (red). No green — a status
  *  pip is ambient, never a brand accent. */
 export function ToolStatusDot({ status }: { status: ToolStatus }) {
-  const bg =
-    status === "error"
-      ? "var(--color-red)"
-      : status === "ok"
-        ? "var(--color-text-4)"
-        : "var(--color-text-3)";
   return (
     <span
-      className={`inline-block rounded-full shrink-0 ${status === "running" ? "animate-pulse" : ""}`}
-      style={{ width: 6, height: 6, background: bg }}
+      className="inline-flex w-3 shrink-0 justify-center text-[11px]"
+      style={{
+        color: status === "error" ? "var(--color-red)" : "var(--color-text-3)",
+      }}
       aria-hidden
-    />
+    >
+      {status === "error" ? "×" : status === "ok" ? "✓" : "−"}
+    </span>
   );
 }
 
@@ -1121,8 +1146,12 @@ export function ExitBadge({
   inline?: boolean;
 }) {
   if (status === "running") return null;
-  const ok = status !== "error";
-  const c = ok ? "var(--color-accent-green)" : "var(--color-red)";
+  const ok = status === "ok";
+  const c = ok
+    ? "var(--color-accent-green)"
+    : status === "error"
+      ? "var(--color-red)"
+      : "var(--color-text-3)";
   return (
     <span
       className="aura-tool-exit"
@@ -1133,8 +1162,14 @@ export function ExitBadge({
         ...(inline ? { marginLeft: 0 } : null),
       }}
     >
-      {ok ? <CheckMini /> : <CrossMini />}
-      {ok ? "exit 0" : "failed"}
+      {ok ? <CheckMini /> : status === "error" ? <CrossMini /> : null}
+      {ok
+        ? "done"
+        : status === "cancelled"
+          ? "cancelled"
+          : status === "unknown"
+            ? "no result"
+            : "failed"}
     </span>
   );
 }
@@ -1175,6 +1210,8 @@ const STATUS_BADGE: Record<ToolStatus, { tone: ChipTone; label: string }> = {
   running: { tone: "green", label: "Running" },
   ok: { tone: "green", label: "Done" },
   error: { tone: "red", label: "Error" },
+  cancelled: { tone: "neutral", label: "Cancelled" },
+  unknown: { tone: "neutral", label: "No result" },
 };
 
 /** Header status badge for action cards. A `StatusChip` with a leading dot;
@@ -1184,7 +1221,6 @@ export function ToolStatusBadge({ status }: { status: ToolStatus }) {
   return (
     <StatusChip
       tone={spec.tone}
-      dot
       dense
       className={`shrink-0 ${status === "running" ? "animate-pulse" : ""}`}
     >

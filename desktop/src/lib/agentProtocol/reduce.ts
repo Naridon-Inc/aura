@@ -47,7 +47,12 @@ export type ReducedTimeline = {
 /** Key an event collapses on. Tool calls collapse by `callId` (request +
  *  result share it); everything else by its own `id`. */
 function mergeKey(ev: NormalizedEvent): string {
-  return ev.kind === "tool_call" ? `tool:${ev.callId}` : `${ev.kind}:${ev.id}`;
+  return JSON.stringify([
+    ev.sessionId,
+    ev.parentId ?? "",
+    ev.kind,
+    ev.kind === "tool_call" ? ev.callId : ev.id,
+  ]);
 }
 
 /** Overlay a later same-key event onto the prior settled one. Tool calls and
@@ -57,6 +62,19 @@ function merge(prev: NormalizedEvent, next: NormalizedEvent): NormalizedEvent {
     return {
       ...prev,
       ...next,
+      // A replayed start cannot turn a settled invocation back into a spinner.
+      status:
+        prev.status !== "running" &&
+        prev.status !== "pending" &&
+        (next.status === "running" || next.status === "pending")
+          ? prev.status
+          : next.status,
+      partial:
+        (prev.status !== "running" && prev.status !== "pending") ||
+        (next.status !== "running" && next.status !== "pending")
+          ? false
+          : next.partial,
+      toolName: next.toolName === "tool" ? prev.toolName : next.toolName,
       // A pending/running update may omit settled output; never clobber a real
       // result back to undefined. Keep the richer side per field.
       title: next.title || prev.title,
@@ -88,7 +106,10 @@ function merge(prev: NormalizedEvent, next: NormalizedEvent): NormalizedEvent {
       decision: next.decision ?? prev.decision,
     };
   }
-  if (prev.kind === "text" && next.kind === "text") {
+  if (
+    (prev.kind === "text" && next.kind === "text") ||
+    (prev.kind === "reasoning" && next.kind === "reasoning")
+  ) {
     // `delta` accretes; a full `text` (no delta) is a replacement.
     if (next.delta != null) {
       return { ...next, text: prev.text + next.delta, delta: undefined };
@@ -102,22 +123,94 @@ function merge(prev: NormalizedEvent, next: NormalizedEvent): NormalizedEvent {
 
 /** Fold the raw list into the settled, ordered timeline plus the live handles
  *  the renderer needs. O(n); first-appearance order is preserved. */
-export function reduceEvents(events: NormalizedEvent[]): ReducedTimeline {
+export function reduceEvents(
+  events: NormalizedEvent[],
+  sessionId?: string,
+): ReducedTimeline {
   const byKey = new Map<string, NormalizedEvent>();
   const order: string[] = [];
+  const legacyBoundary = new Map<
+    string,
+    { at: number; subtype: "success" | "error" | "cancelled" }
+  >();
+  const positions = new Map<string, number>();
+  let ordinal = 0;
+  const terminalTurns = new Map<string, "success" | "error" | "cancelled">();
+  const turnKey = (ev: NormalizedEvent) =>
+    JSON.stringify([ev.sessionId, ev.parentId ?? "", ev.turnId]);
 
-  for (const ev of events) {
+  for (const event of events) {
+    ordinal += 1;
+    let ev = event;
+    const ended =
+      ev.turnId != null ? terminalTurns.get(turnKey(ev)) : undefined;
+    if (ended) {
+      if (
+        ev.kind === "tool_call" &&
+        (ev.status === "pending" || ev.status === "running")
+      )
+        ev = {
+          ...ev,
+          status: ended === "cancelled" ? "cancelled" : "unknown",
+          partial: false,
+        };
+      else if (ev.kind === "question_set" || ev.kind === "permission_request")
+        ev = { ...ev, partial: false };
+      else if (ev.kind === "plan") ev = { ...ev, awaitingApproval: false };
+    }
+    if (sessionId != null && ev.sessionId !== sessionId) continue;
     const key = mergeKey(ev);
     const prev = byKey.get(key);
     if (prev) {
       byKey.set(key, merge(prev, ev));
     } else {
-      byKey.set(key, ev);
+      byKey.set(
+        key,
+        (ev.kind === "text" || ev.kind === "reasoning") && ev.delta != null
+          ? { ...ev, text: ev.delta, delta: undefined }
+          : ev,
+      );
       order.push(key);
+      positions.set(key, ordinal);
+    }
+    // Settle only this turn's pending UI at a terminal boundary. A successful
+    // turn alone is not proof that an orphaned tool succeeded.
+    if (ev.kind === "result") {
+      if (ev.turnId != null) terminalTurns.set(turnKey(ev), ev.subtype);
+      if (ev.turnId == null)
+        legacyBoundary.set(JSON.stringify([ev.sessionId, ev.parentId ?? ""]), {
+          at: ordinal,
+          subtype: ev.subtype,
+        });
     }
   }
 
-  const merged = order.map((k) => byKey.get(k)!);
+  const merged = order.map((k) => {
+    const item = byKey.get(k)!;
+    const ended =
+      item.turnId != null ? terminalTurns.get(turnKey(item)) : undefined;
+    const legacyEnd = legacyBoundary.get(
+      JSON.stringify([item.sessionId, item.parentId ?? ""]),
+    );
+    if (!ended && !(legacyEnd && (positions.get(k) ?? 0) <= legacyEnd.at))
+      return item;
+    if (
+      item.kind === "tool_call" &&
+      (item.status === "running" || item.status === "pending")
+    )
+      return {
+        ...item,
+        partial: false,
+        status:
+          (ended ?? legacyEnd?.subtype) === "cancelled"
+            ? ("cancelled" as const)
+            : ("unknown" as const),
+      };
+    if (item.kind === "question_set" || item.kind === "permission_request")
+      return { ...item, partial: false };
+    if (item.kind === "plan") return { ...item, awaitingApproval: false };
+    return item;
+  });
 
   let todos: TodoEvent | null = null;
   let pendingQuestions: QuestionSetEvent | null = null;
@@ -139,11 +232,7 @@ export function reduceEvents(events: NormalizedEvent[]): ReducedTimeline {
         todos = ev;
         break;
       case "question_set":
-        // Latest wins, and an ANSWERED set clears the handle rather than
-        // leaving the newest question looking open for the rest of the
-        // session. An engine that never reports answers leaves `answer`
-        // absent, and its newest set stays pending until the next one.
-        pendingQuestions = ev.answer == null ? ev : null;
+        pendingQuestions = ev.answer != null || ev.resolution != null || ev.partial === false ? null : ev;
         break;
       case "plan":
         pendingPlan = ev.awaitingApproval ? ev : null;
@@ -151,7 +240,7 @@ export function reduceEvents(events: NormalizedEvent[]): ReducedTimeline {
       case "permission_request": {
         const st = ev.callId ? callStatus.get(ev.callId) : undefined;
         const settled = st != null && st !== "pending";
-        pendingPermission = settled ? null : ev;
+        pendingPermission = settled || ev.partial === false ? null : ev;
         break;
       }
       case "tool_call":

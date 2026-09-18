@@ -355,7 +355,8 @@ impl CheckpointStore {
     /// for the same bytes. Bump this whenever the grammar set, the node shape or
     /// the hashing changes, and every cached entry stops matching, so the next
     /// capture re-parses from source instead of trusting a stale AST.
-    pub const AST_CACHE_VERSION: u32 = 1;
+    // Version 3 refreshes is_stub, including markers nested in executable expressions.
+    pub const AST_CACHE_VERSION: u32 = 3;
 
     /// Build a `file_oids` value from a git blob OID.
     ///
@@ -1068,6 +1069,13 @@ fn walk_notes_tree(repo: &Repository, tree: &git2::Tree, checkpoints: &mut Vec<C
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn old_placeholder_verdicts_are_not_reused_for_unchanged_source() {
+        let blob = "unchanged-blob";
+        assert_ne!(super::CheckpointStore::content_key(blob), format!("v1:{blob}"));
+        assert_ne!(super::CheckpointStore::content_key(blob), format!("v2:{blob}"));
+    }
+
     use super::*;
     use git2::{Oid, Time};
 

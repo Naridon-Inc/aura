@@ -23,6 +23,7 @@ import type {
   NormalizedEvent,
   NormalizedQuestion,
   ToolContent,
+  ToolKind,
   TodoItem,
 } from "../events";
 
@@ -45,7 +46,9 @@ function parseQuestions(input: unknown): NormalizedQuestion[] {
             ? {
                 optionId: String(oo.optionId ?? `${i}:${j}`),
                 label,
-                description: oo.description ? String(oo.description) : undefined,
+                description: oo.description
+                  ? String(oo.description)
+                  : undefined,
               }
             : null;
         })
@@ -114,9 +117,66 @@ function toolContent(
     ];
   }
   if ((n === "write" || n === "writefile") && path) {
-    return [{ type: "diff", path, newText: String(obj.content ?? obj.contents ?? "") }];
+    return [
+      {
+        type: "diff",
+        path,
+        newText: String(obj.content ?? obj.contents ?? ""),
+      },
+    ];
   }
   return result.content ? [{ type: "content", text: result.content }] : [];
+}
+
+/** Validate the wire boundary; a malformed known event is still inspectable. */
+function isReadableEvent(value: unknown): value is StreamEvent {
+  const e = asObj(value);
+  if (typeof e.kind !== "string" || typeof e.turn_id !== "string") return false;
+  switch (e.kind) {
+    case "assistant_text":
+    case "user_prompt":
+      return typeof e.text === "string";
+    case "system_init":
+      return (
+        typeof e.session_id === "string" &&
+        Array.isArray(e.tools) &&
+        e.tools.every((t) => typeof t === "string")
+      );
+    case "tool_use":
+      return typeof e.id === "string" && typeof e.name === "string";
+    case "tool_result":
+      return (
+        typeof e.tool_use_id === "string" &&
+        typeof e.content === "string" &&
+        typeof e.is_error === "boolean"
+      );
+    case "image":
+      return (
+        typeof e.data === "string" &&
+        typeof e.media_type === "string" &&
+        (e.role === "user" || e.role === "assistant")
+      );
+    case "usage":
+      return [e.context_tokens, e.output_tokens].every(
+        (n) => typeof n === "number" && Number.isFinite(n) && n >= 0,
+      );
+    case "result":
+      return (
+        typeof e.success === "boolean" && typeof e.duration_ms === "number"
+      );
+    case "content_block":
+      return (
+        (e.role === "user" || e.role === "assistant") &&
+        typeof e.event_id === "string"
+      );
+    case "raw_error":
+    case "aura_warning":
+      return typeof e.message === "string";
+    case "aura_snapshot":
+      return typeof e.file_path === "string";
+    default:
+      return false;
+  }
 }
 
 /** Stable per-turn block counter so distinct text/reasoning blocks within one
@@ -142,23 +202,204 @@ export function normalizeClaude(
   // Index tool_use inputs by id so a later tool_result can recover the input
   // (for diff content + humanized title) it doesn't itself carry.
   const toolInputs = new Map<string, { name: string; input: unknown }>();
-  // `assistant_text` carries NO stable id — its block id is minted from a
-  // per-turn counter below. But the source event array is append-only and the
-  // backend / JSONL tailer can re-emit the SAME assistant line (reconnect, or a
-  // resumed-session history overlapping the live tail). Two identical lines
-  // would then get DIFFERENT generated ids and render the paragraph twice. So
-  // we dedup assistant prose by exact text, scoped to its own turn_id: same
-  // line + same turn = re-emit, skip it. A different turn genuinely repeating
-  // the same words is real agent output, not a bug, so we never dedup across
-  // turns. Exact-string equality only — no substring/prefix — to stay
-  // conservative; this Map is local to one call, so normalizeClaude stays pure
-  // and deterministic over the input array.
-  const seenAssistantText = new Map<string, Set<string>>();
+  // Only provider ids establish replay identity. Repeated words can be real
+  // output; content equality must never erase a legitimate block.
   let ts = 0;
 
   for (const ev of events) {
     ts += 1; // monotonic ordinal; the wire has no per-event ms.
+    if (!isReadableEvent(ev)) {
+      out.push({
+        kind: "raw",
+        id: `raw:${ts}`,
+        sessionId,
+        ts,
+        source: "environment",
+        label: "Unrecognized event",
+        payload: ev,
+      });
+      continue;
+    }
+    const start = out.length;
     switch (ev.kind) {
+      case "content_block": {
+        const b = asObj(ev.payload);
+        const id = ev.event_id || nextId(counters, ev.turn_id, "content");
+        const base = {
+          id,
+          sessionId,
+          ts,
+          source: ev.role === "user" ? ("user" as const) : ("agent" as const),
+        };
+        if (b.type === "turn_cancelled") {
+          out.push({
+            ...base,
+            id: `${ev.turn_id}:result`,
+            kind: "result",
+            subtype: "cancelled",
+          });
+        } else if (b.type === "acp_update") {
+          const u = asObj(b.update),
+            content = asObj(u.content),
+            type = String(u.sessionUpdate ?? "");
+          if (
+            (type === "agent_message_chunk" || type === "user_message_chunk") &&
+            content.type === "text"
+          ) {
+            out.push({
+              ...base,
+              kind: "text",
+              role: type === "user_message_chunk" ? "user" : "assistant",
+              text: String(content.text ?? ""),
+            });
+          } else if (
+            type === "agent_thought_chunk" &&
+            content.type === "text"
+          ) {
+            out.push({
+              ...base,
+              kind: "reasoning",
+              text: String(content.text ?? ""),
+            });
+          } else if (type === "tool_call" || type === "tool_call_update") {
+            const callId = `${ev.turn_id}:acp-tool:${u.toolCallId}`;
+            const name = String(u.title ?? "tool"),
+              input = asObj(u.rawInput);
+            const status =
+              u.status === "completed"
+                ? "completed"
+                : u.status === "failed"
+                  ? "error"
+                  : u.status === "pending"
+                    ? "pending"
+                    : "running";
+            const kinds = new Set([
+              "read",
+              "edit",
+              "delete",
+              "move",
+              "search",
+              "execute",
+              "think",
+              "fetch",
+              "switch_mode",
+              "other",
+            ]);
+            const parts: ToolContent[] = Array.isArray(u.content)
+              ? u.content.map((p) => {
+                  const c = asObj(p);
+                  if (c.type === "diff")
+                    return {
+                      type: "diff",
+                      path: String(c.path ?? ""),
+                      oldText:
+                        typeof c.oldText === "string" ? c.oldText : undefined,
+                      newText: String(c.newText ?? ""),
+                    } as ToolContent;
+                  const inner = asObj(c.content);
+                  return {
+                    type: "content",
+                    text:
+                      inner.type === "text"
+                        ? String(inner.text ?? "")
+                        : JSON.stringify(p),
+                  } as ToolContent;
+                })
+              : [];
+            out.push({
+              ...base,
+              id: callId,
+              kind: "tool_call",
+              callId,
+              toolName: name,
+              title: u.title ? String(u.title) : "",
+              toolKind: kinds.has(String(u.kind))
+                ? (u.kind as ToolKind)
+                : "other",
+              input,
+              status,
+              partial: status === "pending" || status === "running",
+              content: parts.length ? parts : undefined,
+              output:
+                u.rawOutput != null
+                  ? typeof u.rawOutput === "string"
+                    ? u.rawOutput
+                    : JSON.stringify(u.rawOutput)
+                  : undefined,
+              locations: Array.isArray(u.locations)
+                ? u.locations.map((l) => ({
+                    path: String(asObj(l).path ?? ""),
+                    line:
+                      typeof asObj(l).line === "number"
+                        ? (asObj(l).line as number)
+                        : undefined,
+                  }))
+                : undefined,
+            });
+          } else if (type === "plan") {
+            out.push({
+              ...base,
+              id: `${ev.turn_id}:plan`,
+              kind: "plan",
+              awaitingApproval: false,
+              entries: Array.isArray(u.entries)
+                ? u.entries.map((p) => ({
+                    content: String(asObj(p).content ?? ""),
+                    status:
+                      asObj(p).status === "completed"
+                        ? "completed"
+                        : asObj(p).status === "in_progress"
+                          ? "in_progress"
+                          : "pending",
+                  }))
+                : [],
+            });
+          } else if (
+            content.type === "image" &&
+            typeof content.data === "string"
+          ) {
+            out.push({
+              ...base,
+              kind: "image",
+              role: "assistant",
+              data: content.data,
+              mediaType: String(content.mimeType ?? "image/png"),
+            });
+          } else {
+            out.push({
+              ...base,
+              kind: "raw",
+              label: type.replace(/_/g, " ") || "Agent update",
+              payload: u,
+            });
+          }
+        } else if (b.type === "text" && typeof b.text === "string") {
+          out.push({ ...base, kind: "text", role: ev.role, text: b.text });
+        } else if (b.type === "thinking" && typeof b.thinking === "string") {
+          out.push({ ...base, kind: "reasoning", text: b.thinking });
+        } else if (
+          b.type === "image" &&
+          asObj(b.source).type === "base64" &&
+          typeof asObj(b.source).data === "string"
+        ) {
+          const src = asObj(b.source);
+          out.push({
+            ...base,
+            kind: "image",
+            role: ev.role,
+            mediaType: String(src.media_type ?? "image/png"),
+            data: String(src.data),
+          });
+        } else {
+          out.push({
+            ...base,
+            kind: "raw",
+            label: String(b.type ?? "Content"),
+            payload: ev.payload,
+          });
+        }
+        break;
+      }
       case "user_prompt":
         out.push({
           kind: "text",
@@ -182,24 +423,9 @@ export function normalizeClaude(
         });
         break;
       case "assistant_text": {
-        // Skip a re-emitted identical line within the same turn (see
-        // `seenAssistantText` above). Empty/whitespace-only text never poisons
-        // the dedup set — behavior for it is unchanged; only non-empty prose is
-        // tracked, and a repeat of non-empty prose is dropped (no push, and the
-        // assistant counter is NOT advanced for the skipped line).
-        const trimmed = ev.text.trim();
-        if (trimmed) {
-          let seen = seenAssistantText.get(ev.turn_id);
-          if (!seen) {
-            seen = new Set<string>();
-            seenAssistantText.set(ev.turn_id, seen);
-          }
-          if (seen.has(ev.text)) break;
-          seen.add(ev.text);
-        }
         out.push({
           kind: "text",
-          id: nextId(counters, ev.turn_id, "assistant"),
+          id: ev.event_id || nextId(counters, ev.turn_id, "assistant"),
           sessionId,
           ts,
           source: "agent",
@@ -215,7 +441,9 @@ export function normalizeClaude(
         // id (older backend) falls back to an ordinal so it still renders.
         out.push({
           kind: "usage",
-          id: ev.message_id ? `usage:${ev.message_id}` : nextId(counters, ev.turn_id, "usage"),
+          id: ev.message_id
+            ? `usage:${ev.message_id}`
+            : nextId(counters, ev.turn_id, "usage"),
           sessionId,
           ts,
           source: "agent",
@@ -301,6 +529,9 @@ export function normalizeClaude(
         // it was approved. Re-emit the SAME id so the reducer settles the
         // original in place rather than appending a second card.
         const n = norm(name);
+        if (ev.is_error && ["askuserquestion", "askuser", "ask", "exitplanmode", "exitplan", "todowrite", "todos"].includes(n)) {
+          out.push({kind:"error", id:`${ev.tool_use_id}:error`, sessionId, ts, source:"environment", message:ev.content || `${name} failed`});
+        }
         if (n === "askuserquestion" || n === "askuser" || n === "ask") {
           out.push({
             kind: "question_set",
@@ -313,6 +544,8 @@ export function normalizeClaude(
             // update carries only what it learned.
             questions: [],
             answer: ev.content,
+            partial: false,
+            resolution: { text: ev.content, isError: ev.is_error },
           });
           break;
         }
@@ -362,9 +595,7 @@ export function normalizeClaude(
           source: "agent",
           subtype: ev.success ? "success" : "error",
           text: ev.message ?? undefined,
-          usage: ev.total_tokens
-            ? { inputTokens: 0, outputTokens: ev.total_tokens }
-            : undefined,
+          totalTokens: ev.total_tokens ?? undefined,
           costUsd: ev.cost_usd ?? undefined,
           durationMs: ev.duration_ms,
         });
@@ -380,12 +611,11 @@ export function normalizeClaude(
         });
         break;
       case "image":
-        // A screenshot the user attached, or one the agent read back / made.
-        // Keyed by role + size + a content prefix so a re-emit (reconnect /
-        // resumed history overlap) merges instead of duplicating the picture.
+        // Legacy images carry no identity. Preserve every attachment rather
+        // than merging different pictures that happen to share a PNG header.
         out.push({
           kind: "image",
-          id: `image:${ev.role}:${ev.data.length}:${ev.data.slice(0, 24)}`,
+          id: nextId(counters, ev.turn_id, `image:${ev.role}`),
           sessionId,
           ts,
           source: ev.role === "user" ? "user" : "agent",
@@ -397,9 +627,32 @@ export function normalizeClaude(
       // `aura_snapshot` / `aura_warning` are frontend-injected hook side
       // effects, not wire events — they stay in the raw stream and out of the
       // normalized model, which is faithful, not a gap.
+      case "aura_snapshot":
+        break;
+      case "aura_warning":
+        out.push({
+          kind: "status",
+          id: `warning:${ts}`,
+          sessionId,
+          ts,
+          source: "hook",
+          state: "idle",
+          message: ev.message,
+        });
+        break;
       default:
+        out.push({
+          kind: "raw",
+          id: `raw:${ts}`,
+          sessionId,
+          ts,
+          source: "environment",
+          label: "Unrecognized event",
+          payload: ev,
+        });
         break;
     }
+    for (let i = start; i < out.length; i++) out[i].turnId = ev.turn_id;
   }
   return out;
 }

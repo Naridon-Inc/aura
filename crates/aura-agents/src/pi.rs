@@ -54,9 +54,7 @@
 //! header and message entries the same adapter parses. `cmd_pi_sessions.rs`
 //! tails it.
 
-use crate::{
-    AgentProvider, Capabilities, CostPer1k, InvokeMode, InvokeRequest, Invocation,
-};
+use crate::{AgentProvider, Capabilities, CostPer1k, Invocation, InvokeMode, InvokeRequest};
 
 pub struct Pi;
 
@@ -103,9 +101,7 @@ impl AgentProvider for Pi {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // Not Anthropic stream-json — see the module note. Pi's own event
-            // stream is wired at the adapter layer, not here.
-            stream: false,
+            stream: true,
             pty: true,
             // `--session-id <id>` on both shapes, so a restored tab rejoins
             // the conversation it left.
@@ -139,6 +135,7 @@ impl AgentProvider for Pi {
                 // say the same thing twice, inside the user's own prompt,
                 // where the model reads it as something they wrote.
                 args.push("-p".into());
+                if req.mode == InvokeMode::StreamJson { args.extend(["--mode".into(), "json".into()]); }
                 // The prompt goes last. Pi treats every non-flag argument as
                 // part of the message, so anything after it is swallowed.
                 args.push(req.prompt.to_string());

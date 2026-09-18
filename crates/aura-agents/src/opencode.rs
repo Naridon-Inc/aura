@@ -41,20 +41,10 @@
 //! its stderr, so log lines there would be painted straight through the
 //! interface — and the TUI already shows its own errors on screen.
 //!
-//! ONE flag is deliberately not set yet: `--format json`. OpenCode's run wire
-//! is its own NDJSON of `{ type, timestamp, sessionID, part }` records — the
-//! frontend adapter for it exists (`agentProtocol/adapters/opencode.ts`) — but
-//! the spawn site keys structured parsing off `stdout_is_stream_json`, which
-//! means ANTHROPIC stream-json and routes to Claude's line parser. Setting it
-//! here would hand OpenCode's records to a parser that understands none of
-//! them; setting `--format json` WITHOUT it would replace today's readable
-//! answer with a wall of raw JSON. So the format switch lands with the reader
-//! that consumes it, not before, and until then a one-shot run returns the
-//! same plain text it always has.
+//! StreamJson uses OpenCode NDJSON; the desktop provider parser handles it
+//! separately from Anthropic stream-json. Interactive Chat uses ACP.
 
-use crate::{
-    AgentProvider, Capabilities, CostPer1k, InvokeMode, InvokeRequest, Invocation,
-};
+use crate::{AgentProvider, Capabilities, CostPer1k, Invocation, InvokeMode, InvokeRequest};
 
 pub struct OpenCode;
 
@@ -103,12 +93,8 @@ impl AgentProvider for OpenCode {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // Not Anthropic stream-json — see the module note. OpenCode's own
-            // event stream is wired at the adapter layer, not here.
-            stream: false,
+            stream: true,
             pty: true,
-            // `-s <id>` on both `run` and the TUI, so a restored tab rejoins
-            // the session it left instead of starting a new one.
             resume: true,
         }
     }
@@ -137,6 +123,7 @@ impl AgentProvider for OpenCode {
                     "ERROR".into(),
                 ];
                 args.extend(common_args(req));
+                if req.mode == InvokeMode::StreamJson { args.extend(["--format".into(), "json".into()]); }
                 if let Some(sid) = req.resume_session_id {
                     args.extend(["-s".into(), sid.into()]);
                 }
@@ -192,10 +179,18 @@ mod tests {
 
     #[test]
     fn a_plain_run_is_the_prompt_plus_the_flags_that_make_failures_legible() {
-        let inv = OpenCode.build_invocation(&req(InvokeMode::OneShot)).unwrap();
+        let inv = OpenCode
+            .build_invocation(&req(InvokeMode::OneShot))
+            .unwrap();
         assert_eq!(
             inv.args,
-            vec!["run", "--print-logs", "--log-level", "ERROR", "fix the retry loop"]
+            vec![
+                "run",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
+                "fix the retry loop"
+            ]
         );
         // Not Anthropic stream-json — flipping this feeds OpenCode's records
         // to Claude's line parser.
@@ -207,7 +202,9 @@ mod tests {
         // Without these, a failed run's stderr is `UnknownError / "Unexpected
         // server error"` and the actual cause never leaves OpenCode's log —
         // which is how a wrong model id turns into "service failure".
-        let inv = OpenCode.build_invocation(&req(InvokeMode::OneShot)).unwrap();
+        let inv = OpenCode
+            .build_invocation(&req(InvokeMode::OneShot))
+            .unwrap();
         assert!(inv.args.iter().any(|a| a == "--print-logs"));
         assert!(inv.args.windows(2).any(|w| w == ["--log-level", "ERROR"]));
     }
@@ -216,7 +213,9 @@ mod tests {
     fn the_tui_gets_no_log_flags_because_they_would_paint_over_its_screen() {
         // The TUI and its stderr share one PTY, so a log line lands in the
         // middle of the interface. It shows its own errors on screen anyway.
-        let inv = OpenCode.build_invocation(&req(InvokeMode::PtyRepl)).unwrap();
+        let inv = OpenCode
+            .build_invocation(&req(InvokeMode::PtyRepl))
+            .unwrap();
         assert!(!inv.args.iter().any(|a| a == "--print-logs"));
         assert!(!inv.args.iter().any(|a| a == "--log-level"));
     }
@@ -248,7 +247,9 @@ mod tests {
     fn no_effort_picked_means_no_variant_flag_at_all() {
         // `--variant` speaks the provider's vocabulary, not OpenCode's. A
         // default guess would reject models that have no variants.
-        let inv = OpenCode.build_invocation(&req(InvokeMode::OneShot)).unwrap();
+        let inv = OpenCode
+            .build_invocation(&req(InvokeMode::OneShot))
+            .unwrap();
         assert!(!inv.args.iter().any(|a| a == "--variant"));
     }
 
@@ -279,7 +280,13 @@ mod tests {
         let inv = OpenCode.build_invocation(&r).unwrap();
         assert_eq!(
             inv.args,
-            vec!["run", "--print-logs", "--log-level", "ERROR", "fix the retry loop"]
+            vec![
+                "run",
+                "--print-logs",
+                "--log-level",
+                "ERROR",
+                "fix the retry loop"
+            ]
         );
     }
 
@@ -303,7 +310,9 @@ mod tests {
 
     #[test]
     fn a_bare_repl_takes_no_flags_and_no_prompt() {
-        let inv = OpenCode.build_invocation(&req(InvokeMode::PtyRepl)).unwrap();
+        let inv = OpenCode
+            .build_invocation(&req(InvokeMode::PtyRepl))
+            .unwrap();
         assert!(inv.args.is_empty());
     }
 }

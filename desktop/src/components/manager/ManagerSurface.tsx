@@ -45,6 +45,7 @@ import { fetchManagerList } from "../../lib/managerCache";
 import { listen } from "@tauri-apps/api/event";
 import { DagView } from "./DagView";
 import { ManagerChatView } from "./ManagerChatView";
+import "../agent/chatView.css";
 import { LoopPanel } from "./LoopPanel";
 import { MemoryBadge } from "./MemoryBadge";
 import { ChatIconsSprite } from "./ChatIconsSprite";
@@ -466,12 +467,7 @@ export function ManagerSurface({
   const inFlight = session.tasks.filter((t) => t.status === "running").length;
   const isTerminal = status === "completed" || status === "cancelled";
   const tabLabel = stripSteeringDirective(session.objective ?? "").trim() || "Aura";
-  const dotKind: "streaming" | "green" | "faint" =
-    status === "running" || inFlight > 0
-      ? "streaming"
-      : status === "completed"
-        ? "green"
-        : "faint";
+  const activityLabel = status === "running" || inFlight > 0 ? "Working" : status === "completed" ? "Completed" : status === "cancelled" ? "Cancelled" : "";
 
   // "Take them out" fast path: when this chat ran on exactly ONE resumable CLI
   // (Claude / Gemini / Codex, installed), offer a first-class header button to
@@ -491,14 +487,14 @@ export function ManagerSurface({
     <div className="aura-chat panel h-full w-full">
       <ChatIconsSprite />
       {tabChrome && (
-      <div className="p-tabs">
-        <div className="p-tab active" title={tabLabel}>
-          <span className={`dot ${dotKind}`} />
+      <div className="chat-heading manager-chat-heading">
+        <div className="chat-identity" title={tabLabel}>
+          <AgentIcon agentId="aura-manager" size={17} />
           <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
             {tabLabel}
           </span>
         </div>
-        <div className="spacer" />
+        <span className="chat-state" role="status">{activityLabel}</span>
         <MemoryBadge repoRoot={session.projects[0]?.root ?? null} />
         <UsageChip session={session} />
         <SessionHistoryButton
