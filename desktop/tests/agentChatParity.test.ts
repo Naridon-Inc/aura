@@ -39,6 +39,7 @@ import { readSrc } from "./support/code";
 const surface = await readSrc("components/agent/AgentSurface.tsx");
 const transcript = await readSrc("components/agent/normalized/NormalizedTranscript.tsx");
 const composer = await readSrc("components/agent/chat/AgentChatComposer.tsx");
+const pickerShell = await readSrc("components/chat/ModelCatalogPopover.tsx");
 const blocks = await readSrc("components/agent/chat/AgentBlockTranscript.tsx");
 const tiptap = await readSrc("components/manager/TiptapComposer.tsx");
 const manager = await readSrc("components/manager/ManagerComposer.tsx");
@@ -255,7 +256,10 @@ describe("switching model inside the agent's own provider", () => {
   it("asks the shared catalog rather than keeping a second model list", () => {
     expect(composer).toContain("<BrainSwitcherModal");
     expect(composer).toContain("liveCatalog={live}");
-    expect(composer).toContain('id: `cli_wrapper:${agentId}`');
+    // The agent's catalog brain is built by the shared picker module, which
+    // every chat's model chip uses.
+    expect(composer).toContain("agentCatalogBrain(agentId)");
+    expect(pickerShell).toContain('id: `cli_wrapper:${agentId}`');
   });
 });
 

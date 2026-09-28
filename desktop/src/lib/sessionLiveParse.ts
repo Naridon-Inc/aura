@@ -19,6 +19,8 @@ import {
   type AgentKind,
   type Entry,
   type Participant,
+  type RemoteEntry,
+  type RemoteListing,
   type SessionJoinPreview,
   type SessionLiveInfo,
   type SessionLiveRef,
@@ -146,6 +148,27 @@ export function parseTunnel(raw: unknown, nowSecs: number): SessionTunnel | null
     opened_at: num(raw.opened_at, nowSecs),
     display: str(raw.display) || `aura://localhost:${port}`,
     session_id: str(raw.session_id) || undefined,
+  };
+}
+
+/** A directory listing from the host's desktop. Rows that make no sense are
+ *  dropped rather than rendered as blanks — a file browser with a nameless row
+ *  in it reads as a bug in the app, not as a bad frame. */
+export function parseRemoteListing(raw: unknown, path: string): RemoteListing {
+  const entries: RemoteEntry[] = [];
+  if (isObj(raw) && Array.isArray(raw.entries)) {
+    for (const row of raw.entries) {
+      if (!isObj(row)) continue;
+      const name = str(row.name);
+      if (!name) continue;
+      const size = typeof row.size === "number" ? num(row.size) : undefined;
+      entries.push({ name, dir: bool(row.dir), size });
+    }
+  }
+  return {
+    path: isObj(raw) ? str(raw.path, path) : path,
+    entries,
+    truncated: isObj(raw) ? bool(raw.truncated) : false,
   };
 }
 

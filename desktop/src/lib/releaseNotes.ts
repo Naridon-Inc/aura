@@ -41,6 +41,16 @@ export type ReleaseCta = "mobile-waitlist";
 // one shown after an update.
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: "0.19.53",
+    date: "September 2026",
+    title: "Chat that stays in step",
+    highlights: [
+      "The message box in an agent chat lines up with the conversation instead of stretching across the window, and the darker strip behind it is gone.",
+      "Every chat opens the same model menu, and a model you star is starred everywhere.",
+      "Switch conversations inside Claude's terminal with /resume or /clear, and the Chat view switches with it.",
+    ],
+  },
+  {
     version: "0.19.52",
     date: "September 2026",
     title: "One chat for every agent",

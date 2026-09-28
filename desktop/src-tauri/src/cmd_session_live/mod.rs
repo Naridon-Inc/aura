@@ -21,6 +21,7 @@
 //!   • `target.rs`   — reading a pasted id / code / link, and access levels.
 //!   • `session.rs`  — share / join / leave / access commands.
 //!   • `frames.rs`   — msg / impact / state / typing / cursor commands.
+//!   • `files.rs`    — serving this repo to a guest, and reading the host's.
 //!   • `host.rs`     — transcript publisher + impact watcher (host only).
 //!   • `tunnel.rs`   — serving `tunnel_req` from loopback (host only).
 //!
@@ -59,6 +60,7 @@
 
 pub mod conn;
 pub mod ctx;
+pub mod files;
 pub mod frames;
 pub mod host;
 pub mod http;

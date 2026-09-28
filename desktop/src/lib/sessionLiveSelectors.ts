@@ -35,6 +35,23 @@ export function canDrive(state: SessionLiveState): boolean {
   return myAccess(state) === "drive";
 }
 
+/**
+ * Whether this level may open the host's project.
+ *
+ * Takes the level rather than a snapshot, because the file pane is handed one
+ * directly and a share panel asks the question about a level nobody holds yet.
+ *
+ * Same standing as `canDrive`: the server is the enforcement — `session_live`
+ * refuses to route a `file_list` or `file_req` from a watcher — and this only
+ * keeps the app from offering a browser that would answer every click with a
+ * refusal. It exists as a function so the rule is written once: an inline
+ * `access === "drive"` in each place that needs it is how the pane and the
+ * share default end up disagreeing about what a share hands out.
+ */
+export function canReadHostFiles(access: AccessLevel): boolean {
+  return access === "drive";
+}
+
 export function splitParticipants(list: readonly Participant[]): {
   humans: Participant[];
   agents: Participant[];

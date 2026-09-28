@@ -29,7 +29,7 @@ import {
 import { AgentIcon } from "../agent/AgentIcon";
 import { BrainSwitcherModal } from "./BrainSwitcherModal";
 import { ChevronDown } from "lucide-react";
-import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { ModelCatalogPopover, useModelFavorites } from "../chat/ModelCatalogPopover";
 
 type Props = {
   /** Session whose next turn the chosen model runs through. */
@@ -54,21 +54,6 @@ type Props = {
   modalFooter?: ReactNode;
   turnControls?: ReactNode;
 };
-
-const FAVORITES_KEY = "aura.manager.modelFavorites";
-
-function loadFavorites(): string[] {
-  try {
-    const raw = localStorage.getItem(FAVORITES_KEY);
-    if (!raw) return [];
-    const arr = JSON.parse(raw) as unknown;
-    return Array.isArray(arr)
-      ? arr.filter((x): x is string => typeof x === "string")
-      : [];
-  } catch {
-    return [];
-  }
-}
 
 /** A brain can't run if it needs an API key the keychain doesn't hold —
  *  every model under it is unselectable until the key is added. */
@@ -105,7 +90,7 @@ export function BrainPicker({
   const [liveCatalog, setLiveCatalog] = useState<ModelCatalog | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [favorites, setFavorites] = useState<string[]>(() => loadFavorites());
+  const { favorites, toggleFavorite } = useModelFavorites();
   const pickLock = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -204,25 +189,6 @@ export function BrainPicker({
     return out;
   }, [favorites, flatRows]);
 
-  function persistFavorites(next: string[]) {
-    setFavorites(next);
-    try {
-      if (next.length === 0) localStorage.removeItem(FAVORITES_KEY);
-      else localStorage.setItem(FAVORITES_KEY, JSON.stringify(next));
-    } catch {
-      /* storage full / disabled — favorites are a convenience, not critical */
-    }
-  }
-
-  function toggleFavorite(brainId: string, model: CatalogModel) {
-    const key = rowKey(brainId, model);
-    persistFavorites(
-      favorites.includes(key)
-        ? favorites.filter((k) => k !== key)
-        : [...favorites, key],
-    );
-  }
-
   async function pick(brain: BrainChoice | null, model: CatalogModel | null) {
     // Never lift a brain that can't run — its rows are disabled, but guard
     // the path (hotkeys, favorites) so a stray call can't steer into a 401.
@@ -282,44 +248,29 @@ export function BrainPicker({
   if (variant === "popover")
     return (
       <div className="relative" ref={rootRef} data-tour="brain">
-        <Popover open={open} onOpenChange={setOpen}>
-          <PopoverTrigger asChild>
-            <button
-              type="button"
-              className="composer-selector composer-model-selector"
-              disabled={disabled}
-              aria-label={`Model: ${chipLabel}`}
-              title={`Model: ${chipLabel}`}
-            >
-              <span>{chipLabel}</span>
-              <ChevronDown size={12} />
-            </button>
-          </PopoverTrigger>
-          <PopoverContent
-            className="chat-menu-surface chat-catalog-popover"
-            side="top"
-            align="start"
-            sideOffset={8}
-            collisionPadding={12}
-          >
-            <BrainSwitcherModal
-              embedded
-              brains={brains}
-              liveCatalog={liveCatalog}
-              value={value}
-              favorites={favorites}
-              activeChoice={activeChoice}
-              loading={loading}
-              loadError={loadError}
-              onPick={(brain, model) => void pick(brain, model)}
-              onPickAuto={() => void pick(null, null)}
-              onToggleFav={toggleFavorite}
-              onClose={() => setOpen(false)}
-              footer={modalFooter}
-          turnControls={turnControls}
-            />
-          </PopoverContent>
-        </Popover>
+        <ModelCatalogPopover
+          label={chipLabel}
+          open={open}
+          onOpenChange={setOpen}
+          disabled={disabled}
+        >
+          <BrainSwitcherModal
+            embedded
+            brains={brains}
+            liveCatalog={liveCatalog}
+            value={value}
+            favorites={favorites}
+            activeChoice={activeChoice}
+            loading={loading}
+            loadError={loadError}
+            onPick={(brain, model) => void pick(brain, model)}
+            onPickAuto={() => void pick(null, null)}
+            onToggleFav={toggleFavorite}
+            onClose={() => setOpen(false)}
+            footer={modalFooter}
+            turnControls={turnControls}
+          />
+        </ModelCatalogPopover>
       </div>
     );
 

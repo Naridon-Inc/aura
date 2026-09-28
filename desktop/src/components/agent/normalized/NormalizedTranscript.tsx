@@ -53,6 +53,7 @@ import { AgentChatComposer } from "../chat/AgentChatComposer";
 import { buildTurnCost } from "../../../lib/turnCost";
 import { TurnCostTip } from "../../TurnCostTip";
 import { useAgentStream } from "../../../lib/agentStreamStore";
+import { useAgentEvent } from "../../../lib/agentEventStore";
 import { normalizeStream } from "../../../lib/agentProtocol";
 import type {
   ErrorEvent,
@@ -66,6 +67,7 @@ import type {
   TodoEvent,
 } from "../../../lib/agentProtocol";
 import { StreamingBubble } from "../../manager/chat/ToolCard";
+import { ThinkingLine } from "../../manager/chat/StatusLine";
 import { MarkdownBody } from "../../manager/chat/Markdown";
 
 import { toTranscriptGroups, type GroupUsage } from "./blockMap";
@@ -116,14 +118,22 @@ export function NormalizedTranscript({
   const raw: unknown = nativeRecord ? record.records : events;
   const rawSid = nativeRecord ? (record.sessionId ?? sid) : sid;
 
-  // "The agent is working" has two sources, because the two halves of the
-  // chat have two data planes. A streamed engine says so on the wire
-  // (`running`, flipped off by its `result`). A file-backed engine says
-  // nothing at all — its record growing is the only evidence there is. Using
-  // only the first meant Codex, Kimi, OpenCode and Pi never showed a typing
-  // cursor and, worse, never showed the Stop button: the control the user
-  // reached for to interrupt those agents did not exist.
-  const busy = running || (nativeRecord && record.streaming);
+  // A terminal agent reports its turns through its hooks — the same signal
+  // the tab's mark breathes on. A streamed tab has no hooks, so it asks
+  // nothing here.
+  const turn = useAgentEvent(onSend ? null : ptySessionId);
+  const cliWorking = turn.status.kind === "in_progress";
+
+  // "The agent is working" has three sources, because the chat has three data
+  // planes. A streamed engine says so on the wire (`running`, flipped off by
+  // its `result`). A file-backed engine says nothing at all — its record
+  // growing is the only evidence there is. And a terminal agent writes a
+  // transcript that records finished messages only: no turn start, no turn
+  // end. Reading only that, a Claude tab driven from its terminal sat in the
+  // Chat view looking finished while the CLI beside it said "Hatching… (22s)",
+  // and each reply appeared from nowhere once it was done. Its hooks say what
+  // the transcript cannot.
+  const busy = running || (nativeRecord && record.streaming) || cliWorking;
 
   // `normalizeStream` returns null — not [] — when this engine has no adapter,
   // which is the difference between "structured, nothing yet" and "we do not
@@ -162,6 +172,7 @@ export function NormalizedTranscript({
       viewSwitcher={viewSwitcher}
       groups={visibleGroups}
       running={busy}
+      runningSince={cliWorking ? turn.startedAt : null}
       fallback={
         !structured ? (
           <AgentBlockTranscript
@@ -194,6 +205,7 @@ export function NormalizedTranscript({
             repoRoot={repoRoot}
             running={busy}
             onSwitchToTerminal={onRespondInTerminal}
+            docked={questionDock != null}
           />
         )
       }
@@ -208,6 +220,7 @@ export function ChatTimeline({
   fallback,
   groups,
   running,
+  runningSince = null,
   agentId,
   repoRoot,
   onRespondInTerminal,
@@ -218,6 +231,9 @@ export function ChatTimeline({
   viewSwitcher?: ReactNode;
   groups: ReturnType<typeof toTranscriptGroups>;
   running: boolean;
+  /** When the running turn began, if the source knows. The working line counts
+   *  from here so opening the chat mid-turn shows the turn's real age. */
+  runningSince?: number | null;
   agentId: string;
   repoRoot: string;
   onRespondInTerminal?: () => void;
@@ -392,7 +408,7 @@ export function ChatTimeline({
         }}
       >
         {fallback ??
-          (groups.length === 0 ? (
+          (groups.length === 0 && !running ? (
             <div className="chat-empty">
               <h2>New conversation</h2>
               <p>
@@ -423,7 +439,7 @@ export function ChatTimeline({
                   Show earlier activity · {matches.length - visibleCount} more
                 </button>
               )}
-              {matches.length === 0 && (
+              {matches.length === 0 && query && (
                 <p className="chat-no-results">
                   No matches for “{query}”. Try a different word.
                 </p>
@@ -438,6 +454,18 @@ export function ChatTimeline({
                 repoRoot={repoRoot}
                 onRespondInTerminal={onRespondInTerminal}
               />
+              {/* The CLI keeps "Hatching… (22s)" under the conversation for
+                  the whole turn — between replies, through a long command,
+                  before the first word lands. This is that line. Keyed on the
+                  start so a turn that opens while the line is up restarts its
+                  count instead of carrying the last one's. */}
+              {running && !query && (
+                <ThinkingLine
+                  key={runningSince ?? "live"}
+                  label="Working…"
+                  startedAt={runningSince}
+                />
+              )}
             </div>
           ))}
       </div>
@@ -447,9 +475,13 @@ export function ChatTimeline({
           {running ? "Follow live response" : "Jump to latest"}
         </button>
       )}
-      {usage && <SessionUsageStrip usage={usage} />}
-      {controls}
-      {composer}
+      {/* The dock shares the transcript's reading column and its ground — no
+          band of its own. Usage, docked cards and the composer all sit in it. */}
+      <div className="chat-dock">
+        {usage && <SessionUsageStrip usage={usage} />}
+        {controls}
+        {composer}
+      </div>
     </section>
   );
 }
@@ -537,8 +569,8 @@ export function AgentComposer({
   }
 
   return (
-    <div className={`chat-composer ${docked ? "has-docked-control" : ""}`}>
-      <div className="mx-auto w-full max-w-[760px]">
+    <div className="chat-composer">
+      <div>
         <ComposerFrame className={docked ? "composer-docked" : ""}>
           <TiptapComposer
             key={ptySessionId}
@@ -907,7 +939,7 @@ function SessionUsageStrip({
 }) {
   return (
     <div
-      className="flex-shrink-0 flex items-center justify-end gap-1.5 px-4 py-1 text-[10.5px] text-text-4 border-b border-line-soft/60"
+      className="chat-usage"
       title="Current context and total output tokens for this conversation."
     >
       <span>{compactTokens(usage.context)} context</span>

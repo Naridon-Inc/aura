@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -33,11 +34,45 @@ use tokio::time::{sleep, Duration};
 
 use crate::cmd_agent_stream::StreamEvent;
 
-/// Live-tail watcher state: one canceller per active session id. The
-/// frontend opens the watcher on PTY-tab mount and drops it on close.
-fn watchers() -> &'static Mutex<HashMap<String, oneshot::Sender<()>>> {
-    static W: OnceLock<Mutex<HashMap<String, oneshot::Sender<()>>>> = OnceLock::new();
+/// Live-tail watcher state: one canceller per active session id, tagged with
+/// the generation that registered it. The frontend opens the watcher on PTY-tab
+/// mount, moves it to another file when the CLI changes conversation, and drops
+/// it on close.
+fn watchers() -> &'static Mutex<HashMap<String, (u64, oneshot::Sender<()>)>> {
+    static W: OnceLock<Mutex<HashMap<String, (u64, oneshot::Sender<()>)>>> = OnceLock::new();
     W.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register a watcher for `session_id`, replacing any before it. The replaced
+/// watcher's canceller is dropped, which is what stops it.
+fn register_watcher(session_id: &str) -> (u64, oneshot::Receiver<()>) {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let generation = NEXT.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = oneshot::channel();
+    watchers()
+        .lock()
+        .unwrap()
+        .insert(session_id.to_string(), (generation, tx));
+    (generation, rx)
+}
+
+/// A stopping watcher removes its own registration and nobody else's. It only
+/// ever stops because it was cancelled or replaced, and when it was replaced
+/// the entry under its id already belongs to the watcher that took over —
+/// removing that dropped the new watcher's canceller and stopped it too, so a
+/// tab moving its tail to another transcript ended up tailing nothing.
+fn deregister_watcher(session_id: &str, generation: u64) {
+    let mut map = watchers().lock().unwrap();
+    if map.get(session_id).is_some_and(|(g, _)| *g == generation) {
+        map.remove(session_id);
+    }
+}
+
+/// Stop the watcher for `session_id`, if there is one.
+fn cancel_watcher(session_id: &str) {
+    if let Some((_, tx)) = watchers().lock().unwrap().remove(session_id) {
+        let _ = tx.send(());
+    }
 }
 
 /// How far into each session's transcript we have already read, so a watcher
@@ -1203,13 +1238,9 @@ pub async fn claude_session_watch(
     // watcher on this same tab, or by the replay that just ran.
     let mut start_offset = resume_offset(&session_id, &file_path, file_len);
 
-    let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
-    {
-        let mut map = watchers().lock().unwrap();
-        // Replacing an existing watcher: drop the old canceller. Sender
-        // dropped without send → receiver gets RecvError on next poll.
-        map.insert(session_id.clone(), cancel_tx);
-    }
+    // Replacing an existing watcher drops the old canceller: sender dropped
+    // without send → that receiver reads Closed on its next poll.
+    let (generation, mut cancel_rx) = register_watcher(&session_id);
 
     let event_name = format!("claude-session:{session_id}");
     let session_id_for_task = session_id.clone();
@@ -1221,13 +1252,15 @@ pub async fn claude_session_watch(
         let mut carry = String::new();
 
         loop {
-            // Cancel check first — exit on close before doing any I/O.
+            sleep(Duration::from_millis(500)).await;
+
+            // Cancel check after the wait and before any I/O, so a watcher
+            // stopped or replaced mid-sleep never emits one more batch from
+            // the transcript it was moved off.
             match cancel_rx.try_recv() {
                 Err(oneshot::error::TryRecvError::Empty) => {}
                 _ => break,
             }
-
-            sleep(Duration::from_millis(500)).await;
 
             let len = match fs::metadata(&file_path_for_task) {
                 Ok(m) => m.len(),
@@ -1332,9 +1365,7 @@ pub async fn claude_session_watch(
             }
         }
 
-        // Self-deregister on exit so a future watcher can take this id.
-        let mut map = watchers().lock().unwrap();
-        map.remove(&session_id_for_task);
+        deregister_watcher(&session_id_for_task, generation);
     });
 
     Ok(())
@@ -1342,10 +1373,7 @@ pub async fn claude_session_watch(
 
 #[tauri::command]
 pub async fn claude_session_unwatch(session_id: String) -> Result<(), String> {
-    let mut map = watchers().lock().unwrap();
-    if let Some(tx) = map.remove(&session_id) {
-        let _ = tx.send(());
-    }
+    cancel_watcher(&session_id);
     Ok(())
 }
 
@@ -1382,6 +1410,33 @@ fn is_synthetic_prompt(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tab moving its tail to another transcript replaces its watcher. The
+    /// replaced watcher then winds down — and must not take its replacement's
+    /// registration with it, or the tab ends up tailing nothing at all.
+    #[test]
+    fn a_replaced_watcher_leaving_does_not_stop_its_replacement() {
+        let id = "tab-replaced-watcher";
+        let (old_gen, mut old_rx) = register_watcher(id);
+        let (new_gen, mut new_rx) = register_watcher(id);
+        assert_ne!(old_gen, new_gen);
+        // The old watcher sees it was replaced...
+        assert!(matches!(
+            old_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        // ...and leaves.
+        deregister_watcher(id, old_gen);
+        assert!(matches!(
+            new_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(watchers().lock().unwrap().get(id).map(|(g, _)| *g), Some(new_gen));
+        // Cancelling still reaches the watcher that is actually running.
+        cancel_watcher(id);
+        assert!(new_rx.try_recv().is_ok());
+        assert!(watchers().lock().unwrap().get(id).is_none());
+    }
 
     /// A whole-file scan, which is what these tests are asking about. The
     /// reader itself became incremental — it resumes from a byte offset with

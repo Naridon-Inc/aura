@@ -40,6 +40,7 @@ import {
 } from "../../lib/sessionLiveStore";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { fromMsgFrame, mergeSessionStream } from "./collabTypes";
+import { HostFilesPane } from "./HostFilesPane";
 import { ParticipantsStrip } from "./ParticipantsStrip";
 import { SessionComposer, type SessionDraft } from "./SessionComposer";
 import { SessionStream } from "./SessionStream";
@@ -61,6 +62,9 @@ export function LiveSessionPane({
 }: LiveSessionPaneProps): JSX.Element {
   const live = useSessionLive(sessionId);
   const [addressed, setAddressed] = useState<Participant | null>(null);
+  // Off by default. Reading someone else's disk is a thing you ask for, and
+  // the room — who is here, what is being said — is what a guest came for.
+  const [showFiles, setShowFiles] = useState(false);
 
   const youId = live.you?.id ?? null;
   const host = live.participants.find((p) => p.role === "host") ?? null;
@@ -159,6 +163,23 @@ export function LiveSessionPane({
           </span>
         )}
 
+        {/* A host already has these files open in the editor next door; the
+            toggle would only offer them a slower copy of their own disk. */}
+        {!isHost && (
+          <button
+            type="button"
+            onClick={() => setShowFiles((on) => !on)}
+            className={`px-2 h-5 rounded text-2xs transition-colors ${
+              showFiles
+                ? "text-accent bg-accent/10"
+                : "text-text-3 hover:text-text-1 hover:bg-bg-2"
+            }`}
+            title={`Browse ${host?.name ?? "the host"}'s project. Nothing is cloned — each file is read off their machine as you open it.`}
+          >
+            Files
+          </button>
+        )}
+
         <button
           type="button"
           onClick={onLeave}
@@ -207,15 +228,30 @@ export function LiveSessionPane({
       )}
 
       {/* The stream owns no scroller of its own (it scrolls its last row into
-          view), so the scroll box is here. */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2">
-        <SessionStream
-          items={items}
-          participants={live.participants}
-          youId={youId}
-          loading={connecting}
-          error={failed}
-        />
+          view), so the scroll box is here. The file browser sits beside it
+          rather than over it: reading the code and reading the room are the
+          same task, and a guest who has to close one to see the other ends up
+          doing neither. */}
+      <div className="flex-1 min-h-0 flex">
+        {showFiles && !isHost && (
+          <div className="w-64 shrink-0 min-h-0 border-r border-line">
+            <HostFilesPane
+              sessionId={sessionId}
+              access={access}
+              hostName={host?.name ?? "the host"}
+              hostOnline={live.hostOnline}
+            />
+          </div>
+        )}
+        <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2">
+          <SessionStream
+            items={items}
+            participants={live.participants}
+            youId={youId}
+            loading={connecting}
+            error={failed}
+          />
+        </div>
       </div>
 
       <div className="shrink-0 px-3 pb-2">

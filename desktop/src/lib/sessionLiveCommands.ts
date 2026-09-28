@@ -16,12 +16,15 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   isObj,
   parseJoinPreview,
+  parseRemoteListing,
   parseSessionLiveInfo,
   parseSessionShare,
   parseTunnel,
 } from "./sessionLiveParse";
 import type {
   AccessLevel,
+  RemoteFile,
+  RemoteListing,
   SessionJoinPreview,
   SessionLiveInfo,
   SessionShare,
@@ -57,6 +60,12 @@ export const SESSION_LIVE_COMMANDS = {
   shareStatus: "session_live_share_status",
   joinPreview: "session_live_join_preview",
   setAccess: "session_live_set_access",
+  // Reading the host's project without a clone. Both round-trip over the
+  // session socket to the host's desktop and back, so they are slower than a
+  // local read and can fail for reasons a local read cannot — the host went
+  // offline, or would not serve that path.
+  listFiles: "session_live_list_files",
+  readFile: "session_live_read_file",
 } as const;
 export function errText(e: unknown): string {
   if (typeof e === "string") return e;
@@ -119,7 +128,13 @@ function reportFailure(sink: SessionLiveErrorSink | undefined, e: unknown): void
 }
 
 /** Open this session up to teammates. `defaultAccess` is what an arriving
- *  teammate gets before the host changes it. */
+ *  teammate gets before the host changes it.
+ *
+ *  The fallback here is `watch` while the share panel lands on `drive`, and
+ *  that difference is deliberate: the panel's default is a choice a host is
+ *  looking straight at and can change in one tap, whereas this one is what a
+ *  caller gets for not having said. Those should not be the same value — the
+ *  quiet path is the one that should grant less. */
 export async function createSessionShare(
   sessionId: string,
   defaultAccess: AccessLevel = "watch",
@@ -257,3 +272,45 @@ export async function fetchSessionTunnels(
   }
 }
 
+
+// ── The host's project ───────────────────────────────────────────────────
+//
+// Both of these leave this machine: the desktop puts the request on the
+// session socket, the host's desktop reads its own disk and answers. So they
+// are the two commands in this file that can fail for a reason the user can
+// act on — the host stepped away, or you are watching rather than driving —
+// and both hand that sentence back rather than swallowing it. Unlike the rest
+// of the file they reject, because a file browser needs to tell an empty
+// folder from a folder it could not read.
+
+/** List one folder of the host's project. `path` is repo-relative; omit it or
+ *  pass `""` for the project root. */
+export async function listHostFiles(
+  sessionId: string,
+  path: string,
+): Promise<RemoteListing> {
+  const res = await invoke<unknown>(
+    SESSION_LIVE_COMMANDS.listFiles,
+    bothCases({ sessionId, path }),
+  );
+  return parseRemoteListing(res, path);
+}
+
+/** Read one file of the host's project. Rejects with the host's own reason —
+ *  "no such file", "that file is binary", "the host did not answer in time" —
+ *  which is the sentence worth showing. */
+export async function readHostFile(
+  sessionId: string,
+  path: string,
+): Promise<RemoteFile> {
+  const res = await invoke<unknown>(
+    SESSION_LIVE_COMMANDS.readFile,
+    bothCases({ sessionId, path }),
+  );
+  if (!isObj(res)) throw new Error("The host sent an answer this app could not read");
+  return {
+    path: typeof res.path === "string" ? res.path : path,
+    text: typeof res.text === "string" ? res.text : "",
+    size: typeof res.size === "number" ? res.size : 0,
+  };
+}

@@ -1,6 +1,6 @@
 import { ComposerFrame, ComposerToolbar, ChatModePicker, promptForChatMode, type ChatMode } from "../../chat/ChatComposer";
 import { BrainSwitcherModal } from "../../manager/BrainSwitcherModal";
-import * as Popover from "@radix-ui/react-popover";
+import { ModelCatalogPopover, agentCatalogBrain, useLiveModelCatalog, useModelFavorites } from "../../chat/ModelCatalogPopover";
 import { ChevronDown } from "lucide-react";
 //! The CLI agent's composer, built to the same spec as the Aura brain's.
 //!
@@ -42,9 +42,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp } from "lucide-react";
 
 import { api } from "../../../lib/api";
-import type { BrainChoice, ModelCatalog } from "../../../lib/api";
+import { settleAgentTurn } from "../../../lib/agentEventStore";
 import { toast } from "../../../lib/toast";
-import { familyOf, rowKey, type CatalogModel } from "../../../lib/modelCatalog";
+import { familyOf, type CatalogModel } from "../../../lib/modelCatalog";
 import {
   TiptapComposer,
   type SlashItem,
@@ -99,12 +99,21 @@ const INTERRUPT_ATTEMPTS = 2;
 const INTERRUPT_SETTLE_MS = 4500;
 const INTERRUPT_POLL_MS = 150;
 
+/** After an Escape, how long the terminal must draw nothing before the turn
+ *  counts as stopped. Measured on Claude Code 2.1 in a PTY: mid-turn — through
+ *  a 14s shell command, with the terminal unfocused — it never went more than
+ *  2.1s without drawing, and after an Escape it stopped drawing within 0.3s.
+ *  So this much silence is a stop, not a pause, and still well inside the
+ *  4.5s the button waits. */
+const INTERRUPT_QUIET_MS = 2500;
+
 export function AgentChatComposer({
   agentId,
   ptySessionId,
   repoRoot,
   running,
   onSwitchToTerminal,
+  docked = false,
 }: {
   agentId: string;
   /** The live PTY child every control here writes into. */
@@ -116,6 +125,8 @@ export function AgentChatComposer({
    *  CLI's own interactive chooser, since that chooser is drawn in the
    *  terminal and pretending otherwise would strand the user. */
   onSwitchToTerminal?: () => void;
+  /** A question card sits directly above: fuse onto it as one panel. */
+  docked?: boolean;
 }) {
   const commands = commandsForAgent(agentId);
   const composerRef = useRef<TiptapComposerHandle | null>(null);
@@ -257,13 +268,25 @@ export function AgentChatComposer({
   function wentQuiet(): Promise<boolean> {
     const deadline = Date.now() + INTERRUPT_SETTLE_MS;
     return new Promise((resolve) => {
-      const tick = () => {
+      const tick = async () => {
         if (!mountedRef.current) return resolve(true);
         if (!runningRef.current) return resolve(true);
+        // A terminal agent's busy flag comes from its hooks, and no hook
+        // reports an interrupt — Claude runs no Stop hook for one. So ask the
+        // terminal: a TUI that has stopped drawing has stopped working, and
+        // the turn it left open is closed here rather than by the slower
+        // background watch.
+        const pty = await api
+          .agentPtyIdleStatus(ptySessionId)
+          .catch(() => null);
+        if (pty && (!pty.alive || pty.idle_ms >= INTERRUPT_QUIET_MS)) {
+          settleAgentTurn(ptySessionId);
+          return resolve(true);
+        }
         if (Date.now() >= deadline) return resolve(false);
-        setTimeout(tick, INTERRUPT_POLL_MS);
+        setTimeout(() => void tick(), INTERRUPT_POLL_MS);
       };
-      tick();
+      void tick();
     });
   }
 
@@ -316,7 +339,7 @@ export function AgentChatComposer({
   return (
     <div className="chat-composer">
       <ComposerFrame
-        className="composer"
+        className={docked ? "composer composer-docked" : "composer"}
         onKeyDownCapture={(e) => {
           // Esc is Stop while the agent is working. Captured at the root
           // because the editor stays editable mid-turn (you can queue into a
@@ -450,42 +473,76 @@ function AgentModelChip({
   // can also change it by typing in the terminal, and this pane would have no
   // way to know. It is a record of what we sent, and the label says so.
   const [sent, setSent] = useState<CatalogModel | null>(null);
-  const [live, setLive] = useState<ModelCatalog | null>(null);
-
-  // The same catalog the native picker reads, so a model that appears for the
-  // Aura brain appears here too. Only fetched for the inline case, which is
-  // the only one with a list to draw.
-  useEffect(() => {
-    if (model?.kind !== "inline") return;
-    let cancelled = false;
-    api
-      .agentModelsList()
-      .then((cat) => {
-        if (!cancelled) setLive(cat);
-      })
-      .catch(() => {
-        // Offline or the provider is down — `catalogFor` falls back to the
-        // curated static rows, which is why this is safe to swallow.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [model?.kind]);
-
   const [open, setOpen] = useState(false);
+  // The same catalog the native picker reads, so a model that appears for the
+  // Aura brain appears here too. Only the inline case has a list to draw.
+  const live = useLiveModelCatalog(model?.kind === "inline");
   const [error, setError] = useState<string | null>(null);
   const [switching, setSwitching] = useState(false);
-  const brain = useMemo<BrainChoice>(() => ({ id: `cli_wrapper:${agentId}`, label: agentId, kind: "cli_wrapper", active: true, requires_api_key: false, has_api_key: true }), [agentId]);
-  const [favorites, setFavorites] = useState<string[]>([]);
+  const brain = useMemo(() => agentCatalogBrain(agentId), [agentId]);
+  const { favorites, toggleFavorite } = useModelFavorites();
   if (!model) return null;
-  if (model.kind === "picker") return <button type="button" className="composer-selector composer-model-selector" onClick={() => { void onSend(model.line).then(ok => { if (ok) onSwitchToTerminal?.(); }); }} title={`Open ${agentId}’s model chooser in CLI`}>{model.label}<ChevronDown size={12} /></button>;
-  return <Popover.Root open={open} onOpenChange={setOpen}><Popover.Trigger asChild><button type="button" className="composer-selector composer-model-selector" aria-label={`Model: ${sent?.label ?? "Agent default"}`}><span>{sent?.label ?? "Agent default"}</span><ChevronDown size={12} /></button></Popover.Trigger><Popover.Portal><Popover.Content className="chat-menu-surface composer-catalog-popover" align="start" side="top" sideOffset={8} collisionPadding={12} style={{zIndex:60}}>
-    <BrainSwitcherModal embedded allowDefault={false} brains={[brain]} liveCatalog={live} value={sent ? {brainId:brain.id, family:familyOf(brain), modelId:sent.id, label:sent.label, longContext:!!sent.longContext} : null} favorites={favorites} activeChoice={brain} loading={switching} loadError={error} onPick={async (_brain, row) => {
-      if (!row.id || switching) return;
-      setSwitching(true); setError(null);
-      try { if (await onSend(model.line(row.id))) { setSent(row); setOpen(false); } else setError("The model did not change. Try again."); } finally { setSwitching(false); }
-    }} onPickAuto={() => {}} onToggleFav={(id, row) => { const key = rowKey(id, row); setFavorites(items => items.includes(key) ? items.filter(item => item !== key) : [...items, key]); }} onClose={() => setOpen(false)} />
-  </Popover.Content></Popover.Portal></Popover.Root>;
+  if (model.kind === "picker")
+    return (
+      <button
+        type="button"
+        className="composer-selector composer-model-selector"
+        onClick={() => {
+          void onSend(model.line).then((ok) => {
+            if (ok) onSwitchToTerminal?.();
+          });
+        }}
+        title={`Open ${brain.label}’s model chooser in the terminal`}
+      >
+        <span>{model.label}</span>
+        <ChevronDown size={12} />
+      </button>
+    );
+  return (
+    <ModelCatalogPopover
+      label={sent?.label ?? "Agent default"}
+      open={open}
+      onOpenChange={setOpen}
+    >
+      <BrainSwitcherModal
+        embedded
+        allowDefault={false}
+        brains={[brain]}
+        liveCatalog={live}
+        value={
+          sent
+            ? {
+                brainId: brain.id,
+                family: familyOf(brain),
+                modelId: sent.id,
+                label: sent.label,
+                longContext: !!sent.longContext,
+              }
+            : null
+        }
+        favorites={favorites}
+        activeChoice={brain}
+        loading={switching}
+        loadError={error}
+        onPick={async (_brain, row) => {
+          if (!row.id || switching) return;
+          setSwitching(true);
+          setError(null);
+          try {
+            if (await onSend(model.line(row.id))) {
+              setSent(row);
+              setOpen(false);
+            } else setError("The model did not change. Try again.");
+          } finally {
+            setSwitching(false);
+          }
+        }}
+        onPickAuto={() => {}}
+        onToggleFav={toggleFavorite}
+        onClose={() => setOpen(false)}
+      />
+    </ModelCatalogPopover>
+  );
 }
 
 /** Every command this CLI ships, as a menu.

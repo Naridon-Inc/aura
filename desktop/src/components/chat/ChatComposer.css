@@ -1,8 +1,9 @@
 /* Conversation surfaces share a 4px rhythm, one reading column, and three
    layers: transcript, interactive panel, inset control. Accent is reserved
    for the active Plan mode and the action that advances a decision. */
+/* `--chat-col` (the reading column) is owned by styles.css's `.aura-chat`
+   block, which the bundle loads after this file. Keep one source for it. */
 .aura-chat {
-  --chat-col: 100%;
   --chat-gutter: 16px;
   --chat-panel: color-mix(in srgb, var(--color-bg-content) 97%, var(--color-text-1));
   --chat-rule: color-mix(in srgb, var(--color-text-1) 13%, var(--color-bg-content));
@@ -14,7 +15,6 @@
   --chat-choice-on-fill: #0c1f1a;
 }
 .aura-chat .p-scroll { padding: 14px var(--chat-gutter); gap: 12px; }
-.aura-chat .p-dock { padding: 8px; gap: 6px; border-top: 1px solid var(--color-line); background: var(--color-bg-1); }
 .aura-chat .unified-composer {
   width: 100%; min-width: 0; padding: 8px;
   border: 1px solid var(--chat-rule); border-radius: var(--chat-radius);
@@ -190,6 +190,13 @@
 .chat-catalog-error, .chat-menu-empty { padding: 10px 16px; font-size: 12px; color: var(--color-text-3); }
 .chat-catalog-error { color: var(--color-red); }
 .chat-catalog-footer { border-top: 1px solid var(--color-line-soft); padding: 4px; }
+.chat-catalog-custom { display: flex; align-items: center; gap: 6px; padding: 4px 6px; color: var(--color-text-3); }
+.chat-catalog-custom label { display: grid; place-items: center; flex-shrink: 0; }
+.chat-catalog-custom input { flex: 1; min-width: 0; padding: 5px 7px; border: 1px solid var(--color-line); border-radius: 4px; background: transparent; color: var(--color-text-1); font-size: 12px; outline: none; }
+.chat-catalog-custom input:focus-visible { border-color: var(--color-text-4); }
+.chat-catalog-custom button { padding: 4px 8px; border-radius: 4px; font-size: 12px; color: var(--color-text-2); }
+.chat-catalog-custom button:hover:not(:disabled) { background: var(--color-bg-2); color: var(--color-text-1); }
+.chat-catalog-custom button:disabled { opacity: .4; cursor: default; }
 .chat-catalog-backdrop { position: fixed; inset: 0; z-index: 60; display: flex; justify-content: center; align-items: flex-start; padding: 14vh 12px 24px; background: rgb(0 0 0 / .25); }
 .chat-catalog-backdrop > div { width: 420px; max-width: 100%; }
 

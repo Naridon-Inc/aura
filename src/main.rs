@@ -14,6 +14,7 @@ mod server;
 mod mcp;
 mod arbitrator;
 mod task;
+mod manager_chat;
 mod aura_loop_run;
 mod loop_accept;
 mod crew_push;
@@ -7073,18 +7074,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // record the carryover assembles.
             if let Some(sid) = &manager_session {
                 if let Some(home) = std::env::var_os("HOME") {
-                    let mut path = std::path::PathBuf::from(home);
-                    path.push(".aura");
-                    path.push("manager-sessions");
-                    path.push(format!("{sid}.json"));
+                    let mut dir = std::path::PathBuf::from(home);
+                    dir.push(".aura");
+                    dir.push("manager-sessions");
+                    let path = dir.join(format!("{sid}.json"));
                     match std::fs::read_to_string(&path) {
                         Ok(raw) => {
                             match serde_json::from_str::<serde_json::Value>(&raw) {
                                 Ok(session) => {
-                                    let chat = session.get("chat")
-                                        .and_then(|c| c.as_array())
-                                        .cloned()
-                                        .unwrap_or_default();
+                                    // Most of the conversation is in the
+                                    // session's own `.chat.jsonl`; the file
+                                    // above carries only its live tail.
+                                    let chat = manager_chat::transcript(&dir, sid, &session);
                                     // The continuum is bounded by default —
                                     // a long-lived manager session can hold
                                     // hundreds of anchored turns and pasted

@@ -6,6 +6,7 @@
 
 import type { Terminal as XTerm } from "@xterm/xterm";
 import { openFileImperative } from "./editorStore";
+import { normalizePath } from "./paths";
 
 // Known dev file extensions matched as clickable links. Conservative on
 // purpose — adding ad-hoc 2–3 char suffixes would match version strings
@@ -38,10 +39,12 @@ function resolveClickedPath(matched: string, cwd: string | undefined): string {
   if (p.startsWith("file://")) {
     p = decodeURIComponent(p.slice("file://".length));
   }
-  if (p.startsWith("/")) return p;
+  if (p.startsWith("/")) return normalizePath(p);
   if (!cwd) return p;
-  const stripped = p.replace(/^\.\//, "");
-  return cwd.endsWith("/") ? `${cwd}${stripped}` : `${cwd}/${stripped}`;
+  // Agent CLIs print paths relative to where they run, so a file outside the
+  // repo reads "../../../.claude/…". Walk the dots here: the editor tab and
+  // the scroll-to-line event below must both name the file one way.
+  return normalizePath(`${cwd}/${p}`);
 }
 
 function activate(matched: string, lineNo: number | undefined, cwd: string | undefined): void {

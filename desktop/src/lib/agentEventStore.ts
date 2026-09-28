@@ -20,9 +20,23 @@ import type {
   CliAgentEventEnvelope,
   CliAgentStatus,
 } from "./api";
+import {
+  initialTurn,
+  reduceTurn,
+  settleTurn,
+  turnWentQuiet,
+  type TurnState,
+} from "./agentTurnState";
+
+/** How often a turn that reads `in_progress` checks whether its terminal has
+ *  gone quiet. Only runs while a turn is open and something is subscribed. */
+const QUIET_CHECK_MS = 2000;
 
 type Entry = {
-  status: CliAgentStatus;
+  sessionId: string;
+  /** Status, when the turn opened, and when the last hook landed — see
+   *  `agentTurnState` for the rules. `status` is read from here. */
+  turn: TurnState;
   /** Last raw event we saw — kept so the chip popover can render
    *  details (tool name, query preview, plugin version) without us
    *  baking every field into `status`. */
@@ -41,6 +55,9 @@ type Entry = {
    *  remount, two subscribers in one tick) both pass the `unlisten`
    *  null-check and double-subscribe, leaking the first listener. */
   pendingAttach: boolean;
+  /** Interval that watches an open turn for the silence of an interrupt the
+   *  CLI never reported. Null whenever the agent is not mid-turn. */
+  quietWatch: ReturnType<typeof setInterval> | null;
 };
 
 type AgentTitleEvent = { session_id: string; title: string };
@@ -51,13 +68,15 @@ function ensureEntry(sessionId: string): Entry {
   let e = entries.get(sessionId);
   if (e) return e;
   e = {
-    status: { kind: "idle" },
+    sessionId,
+    turn: initialTurn(),
     last: null,
     title: null,
     subs: new Set(),
     unlisten: null,
     unlistenTitle: null,
     pendingAttach: false,
+    quietWatch: null,
   };
   entries.set(sessionId, e);
   return e;
@@ -75,50 +94,53 @@ function emit(entry: Entry) {
 
 function reduce(entry: Entry, ev: CliAgentEvent) {
   entry.last = ev;
-  // The state machine mirrors Warp's `apply_event` (clean-room
-  // rewrite — concept is uncopyrightable). New event names land in
-  // the default arm so unknown plugin versions don't wedge the chip.
-  switch (ev.event) {
-    case "session_start":
-      // Don't downgrade an in-flight status to idle on resume.
-      if (entry.status.kind === "idle") {
-        entry.status = { kind: "idle" };
-      }
-      break;
-    case "prompt_submit":
-      entry.status = { kind: "in_progress" };
-      break;
-    case "permission_request":
-      entry.status = {
-        kind: "blocked",
-        summary: ev.summary ?? `Wants to run ${ev.tool_name ?? "tool"}`,
-      };
-      break;
-    case "idle_prompt":
-      entry.status = {
-        kind: "blocked",
-        summary: ev.summary ?? "Input needed",
-      };
-      break;
-    case "tool_complete":
-      // Only flip back to in_progress if we were blocked — otherwise
-      // a tool completing during normal flow shouldn't change status.
-      if (entry.status.kind === "blocked") {
-        entry.status = { kind: "in_progress" };
-      }
-      break;
-    case "stop":
-      entry.status = {
-        kind: "success",
-        query: ev.query,
-        response: ev.response,
-      };
-      break;
-    default:
-      // Unknown event — don't touch status.
-      break;
-  }
+  entry.turn = reduceTurn(entry.turn, ev, Date.now());
+  watchQuiet(entry);
   emit(entry);
+}
+
+/** Keep the silence watch running exactly while a subscribed turn is open.
+ *  Claude runs no Stop hook when it is interrupted, so without this the tab
+ *  mark and the Chat view both kept saying "working" over an agent that had
+ *  stopped, until the next prompt happened to close the turn. */
+function watchQuiet(entry: Entry) {
+  const want = entry.turn.status.kind === "in_progress" && entry.subs.size > 0;
+  if (!want) {
+    if (entry.quietWatch) {
+      clearInterval(entry.quietWatch);
+      entry.quietWatch = null;
+    }
+    return;
+  }
+  if (entry.quietWatch) return;
+  entry.quietWatch = setInterval(() => {
+    const opened = entry.turn;
+    api
+      .agentPtyIdleStatus(entry.sessionId)
+      .then((pty) => {
+        // A hook that landed while the check was in flight is newer news
+        // than the silence it measured.
+        if (entry.turn !== opened) return;
+        if (turnWentQuiet(opened, pty, Date.now())) settle(entry);
+      })
+      .catch(() => {});
+  }, QUIET_CHECK_MS);
+}
+
+function settle(entry: Entry) {
+  const next = settleTurn(entry.turn);
+  if (next === entry.turn) return;
+  entry.turn = next;
+  watchQuiet(entry);
+  emit(entry);
+}
+
+/** Close a session's open turn now. The Chat view's Stop calls this once the
+ *  terminal has gone quiet after its Escape — the CLI will not say so itself,
+ *  and the button should not wait out the background watch to let go. */
+export function settleAgentTurn(sessionId: string) {
+  const e = entries.get(sessionId);
+  if (e) settle(e);
 }
 
 function setTitle(entry: Entry, title: string | null) {
@@ -166,6 +188,7 @@ async function attach(sessionId: string, entry: Entry) {
 
 function detach(entry: Entry) {
   if (entry.subs.size === 0) {
+    watchQuiet(entry);
     if (entry.unlisten) {
       entry.unlisten();
       entry.unlisten = null;
@@ -182,6 +205,8 @@ export function useAgentEvent(sessionId: string | null): {
   last: CliAgentEvent | null;
   /** Native window title the agent set (OSC 0/2), or null. */
   title: string | null;
+  /** Epoch ms the agent's current turn opened, or null between turns. */
+  startedAt: number | null;
 } {
   const [, force] = useState(0);
   useEffect(() => {
@@ -189,6 +214,7 @@ export function useAgentEvent(sessionId: string | null): {
     const entry = ensureEntry(sessionId);
     const fn = () => force((n) => n + 1);
     entry.subs.add(fn);
+    watchQuiet(entry);
     attach(sessionId, entry).catch(() => {});
     return () => {
       entry.subs.delete(fn);
@@ -196,12 +222,14 @@ export function useAgentEvent(sessionId: string | null): {
     };
   }, [sessionId]);
 
-  if (!sessionId) return { status: { kind: "idle" }, last: null, title: null };
+  if (!sessionId)
+    return { status: { kind: "idle" }, last: null, title: null, startedAt: null };
   const entry = entries.get(sessionId);
   return {
-    status: entry?.status ?? { kind: "idle" },
+    status: entry?.turn.status ?? { kind: "idle" },
     last: entry?.last ?? null,
     title: entry?.title ?? null,
+    startedAt: entry?.turn.startedAt ?? null,
   };
 }
 
@@ -212,7 +240,7 @@ export function useAgentEvent(sessionId: string | null): {
  *  treat as idle. */
 export function getAllAgentStatuses(): Map<string, CliAgentStatus> {
   const out = new Map<string, CliAgentStatus>();
-  for (const [sid, e] of entries) out.set(sid, e.status);
+  for (const [sid, e] of entries) out.set(sid, e.turn.status);
   return out;
 }
 
@@ -237,5 +265,6 @@ export function forgetAgentEvent(sessionId: string) {
   const e = entries.get(sessionId);
   if (e?.unlisten) e.unlisten();
   if (e?.unlistenTitle) e.unlistenTitle();
+  if (e?.quietWatch) clearInterval(e.quietWatch);
   entries.delete(sessionId);
 }

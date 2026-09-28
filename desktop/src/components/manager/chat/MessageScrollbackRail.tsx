@@ -19,15 +19,19 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
  *  parent stamps as a `data-rail-id` on the message wrapper). */
 export type RailAnchor = {
   id: string;
-  /** Short preview shown on hover — the first line of the message / a tool name. */
-  preview: string;
+  /** The turn's raw text, carried by reference and never touched until a
+   *  tick for it is actually drawn. It used to arrive here already flattened
+   *  to a 120-character preview, which meant the parent ran a markdown strip
+   *  over every message in the conversation — tens of thousands of them —
+   *  to label the sixty the rail can show. See `describe`. */
+  source: string;
   /** Author tint for the tick — "user" | "agent" | "system". */
   role: "user" | "agent" | "system";
 };
 
 type Tick = {
   id: string;
-  preview: string;
+  source: string;
   role: RailAnchor["role"];
   /** 0..1 position down the track. */
   frac: number;
@@ -41,12 +45,31 @@ type Tick = {
 export function MessageScrollbackRail({
   scrollRef,
   anchors,
+  describe,
 }: {
   scrollRef: React.RefObject<HTMLDivElement | null>;
   anchors: RailAnchor[];
+  /** Turn a raw turn body into the short label a tick shows. Called only for
+   *  ticks that are drawn, and each answer is kept, so a scroll frame does
+   *  not re-flatten the same sixty messages. */
+  describe: (source: string) => string;
 }) {
   const [ticks, setTicks] = useState<Tick[]>([]);
   const [thumb, setThumb] = useState<{ top: number; height: number } | null>(null);
+  // Labels, by the exact body they came from. Bounded because a session that
+  // runs for weeks would otherwise accumulate one entry per turn ever shown.
+  const labels = useRef(new Map<string, string>());
+  const label = useCallback(
+    (source: string): string => {
+      const seen = labels.current.get(source);
+      if (seen !== undefined) return seen;
+      const made = describe(source);
+      if (labels.current.size > 500) labels.current.clear();
+      labels.current.set(source, made);
+      return made;
+    },
+    [describe],
+  );
   const [hover, setHover] = useState<{ id: string; y: number; preview: string } | null>(null);
   const rafRef = useRef<number | null>(null);
 
@@ -62,14 +85,29 @@ export function MessageScrollbackRail({
       setThumb(null);
       return;
     }
+    // Collect the bubbles that are actually on screen in one sweep, rather
+    // than asking the DOM for each anchor by id. `anchors` holds a tick per
+    // turn in the whole transcript — tens of thousands of them in a session
+    // that has run for weeks — while the chat only ever mounts its ~60
+    // message window. Querying id by id therefore spent eighteen thousand
+    // unindexed subtree scans to come back with sixty nodes, and `measure`
+    // runs from a layout effect on mount, on every scroll frame, and on
+    // every ResizeObserver tick — which includes the composer growing by a
+    // line as somebody types. Walk `anchors` afterwards so ticks keep
+    // transcript order.
+    const mounted = new Map<string, HTMLElement>();
+    el.querySelectorAll<HTMLElement>("[data-rail-id]").forEach((node) => {
+      const id = node.dataset.railId;
+      if (id) mounted.set(id, node);
+    });
     const next: Tick[] = [];
     for (const a of anchors) {
-      const node = el.querySelector<HTMLElement>(`[data-rail-id="${cssEscape(a.id)}"]`);
+      const node = mounted.get(a.id);
       if (!node) continue;
       const offsetTop = node.offsetTop;
       next.push({
         id: a.id,
-        preview: a.preview,
+        source: a.source,
         role: a.role,
         frac: Math.max(0, Math.min(1, offsetTop / total)),
         top: offsetTop,
@@ -183,10 +221,10 @@ export function MessageScrollbackRail({
               setHover({
                 id: t.id,
                 y: e.currentTarget.offsetTop,
-                preview: t.preview,
+                preview: label(t.source),
               })
             }
-            aria-label={`Jump to: ${t.preview}`}
+            aria-label={`Jump to: ${label(t.source)}`}
           />
         ))}
       </div>
@@ -220,13 +258,4 @@ function tickColor(role: RailAnchor["role"]): string {
     default:
       return "color-mix(in srgb, var(--color-text-4) 80%, transparent)";
   }
-}
-
-/** Minimal CSS.escape shim — only the chars our rail ids can contain (the
- *  parent uses `t-<index>` / persisted turn ids), but be safe for quotes. */
-function cssEscape(s: string): string {
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
-    return CSS.escape(s);
-  }
-  return s.replace(/["\\]/g, "\\$&");
 }

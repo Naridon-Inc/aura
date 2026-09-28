@@ -35,10 +35,23 @@ pub fn install_panic_hook() {
     let prev = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         if let Err(e) = write_crash_report(info) {
-            eprintln!("[crash.rs] failed to write crash report: {e}");
+            crate::last_resort::note("the crash report", &e, &panic_message(info));
         }
         prev(info);
     }));
+}
+
+/// The panic's own words. Pulled out of the report writer because the hook
+/// needs them again when that writer is the thing that failed — a report we
+/// could not file is only useful if the fallback still says what panicked.
+fn panic_message(info: &panic::PanicHookInfo<'_>) -> String {
+    if let Some(s) = info.payload().downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = info.payload().downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "(non-string panic payload)".to_string()
+    }
 }
 
 fn write_crash_report(info: &panic::PanicHookInfo<'_>) -> std::io::Result<()> {
@@ -47,13 +60,7 @@ fn write_crash_report(info: &panic::PanicHookInfo<'_>) -> std::io::Result<()> {
         .unwrap_or_default()
         .as_millis() as u64;
 
-    let panic_message = if let Some(s) = info.payload().downcast_ref::<&'static str>() {
-        (*s).to_string()
-    } else if let Some(s) = info.payload().downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "(non-string panic payload)".to_string()
-    };
+    let panic_message = panic_message(info);
 
     let location = info
         .location()
@@ -82,8 +89,9 @@ pub fn write_report(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
+    let verdict = message.clone();
     if let Err(e) = write_report_inner(timestamp_ms, message, location, thread, backtrace) {
-        eprintln!("[crash.rs] failed to write report: {e}");
+        crate::last_resort::note("the recovery report", &e, &verdict);
     }
 }
 

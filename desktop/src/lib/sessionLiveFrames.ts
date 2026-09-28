@@ -274,6 +274,34 @@ export type SessionTunnel = {
   session_id?: string;
 };
 
+/** One row of the host's project, as a guest's file browser sees it.
+ *
+ *  Thinner than the local `DirEntry` on purpose: no absolute path, because a
+ *  guest has no business knowing where on the host's disk the repo sits. */
+export type RemoteEntry = {
+  name: string;
+  dir: boolean;
+  /** Bytes. Absent for a folder. */
+  size?: number;
+};
+
+/** One folder of the host's project. */
+export type RemoteListing = {
+  /** Repo-relative, `""` for the project root. */
+  path: string;
+  entries: RemoteEntry[];
+  /** The folder held more than the host would send. Said out loud rather than
+   *  quietly implying the project is smaller than it is. */
+  truncated: boolean;
+};
+
+/** One file of the host's project, already decoded. */
+export type RemoteFile = {
+  path: string;
+  text: string;
+  size: number;
+};
+
 /** The answer to `POST /api/v2/sessions/{id}/share` — what a person actually
  *  hands to a teammate, plus what that teammate arrives as. */
 export type SessionShare = {

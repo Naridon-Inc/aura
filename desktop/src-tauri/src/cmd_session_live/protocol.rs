@@ -212,7 +212,84 @@ pub enum ClientFrame {
         port: u16,
     },
 
+    /// Guest-only: "list this directory of the host's repo". An empty `path`
+    /// means the repo root. Answered with a `file_res` carrying `entries`.
+    ///
+    /// This and `FileReq` are what let this desktop work on someone else's
+    /// project without cloning it — one copy of the code, on their disk.
+    FileList {
+        id: String,
+        path: String,
+    },
+
+    /// Guest-only: "give me this file of the host's repo". Answered with a
+    /// `file_res` carrying `content_b64`. There is deliberately no counterpart
+    /// that writes: a guest changes code by instructing the host's agent, which
+    /// keeps one writer on the one copy and so leaves nothing to merge.
+    FileReq {
+        id: String,
+        path: String,
+    },
+
+    /// Host-only: the answer to a `file_list` or `file_req`. `error` set means
+    /// we would not or could not read it, and carries no other field — a guest
+    /// must not be able to map our disk by telling refusals from misses.
+    FileRes {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        entries: Option<Vec<RemoteEntry>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content_b64: Option<String>,
+        truncated: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<i64>,
+    },
+
     Bye {},
+}
+
+/// One row of a remote directory listing. Deliberately thinner than the local
+/// [`crate::cmd_files::DirEntry`]: no absolute path, because a guest has no
+/// business knowing where on the host's disk the repo sits, and no git status,
+/// because that is a second round trip the browser does not need to open a file.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RemoteEntry {
+    pub name: String,
+    pub dir: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<i64>,
+}
+
+/// `{"type":"file_list"|"file_req", "id":…, "from":…, "path":…}` — a guest's
+/// request, as the server hands it to the host. `from` is stamped by the server
+/// so this desktop can render *who* is reading its disk.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct FileReqFrame {
+    pub id: String,
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub path: String,
+}
+
+/// `{"type":"file_res", …}` — the host's answer, as it reaches the guest that
+/// asked. Same fields as the `FileRes` we send when we are the host.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct FileResFrame {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub entries: Option<Vec<RemoteEntry>>,
+    #[serde(default)]
+    pub content_b64: Option<String>,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub size: Option<i64>,
 }
 
 /// `{"type":"ready", …}` — first frame the server sends after `hello`.

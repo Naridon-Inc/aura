@@ -1264,16 +1264,25 @@ export function ManagerChatView({ session }: Props) {
     timeline.forEach((entry, idx) => {
       if (entry.kind !== "turn") return;
       const role = entry.turn.role === "user" ? "user" : "agent";
-      // Flattened before the slice: an agent opens a turn with a heading
-      // more often than not, and 120 characters of `## Fixed the retry`
-      // spends the label on syntax.
-      const preview = plainLine(
-        stripModeDirective(entry.turn.text ?? ""),
-      ).slice(0, 120);
-      anchors.push({ id: `t-${idx}`, preview: preview || "(empty)", role });
+      // The body goes across by reference. Flattening it here meant running
+      // a markdown strip over every turn in the conversation on every mount,
+      // to label the sixty ticks the rail can draw — a month-long session
+      // has tens of thousands of turns and the other 99% of that work was
+      // sliced to 120 characters and thrown away. `describe` below does it
+      // for the ticks that survive the measure.
+      anchors.push({ id: `t-${idx}`, source: entry.turn.text ?? "", role });
     });
     return anchors;
   }, [timeline]);
+
+  // How a tick labels itself. Flattened before the slice: an agent opens a
+  // turn with a heading more often than not, and 120 characters of
+  // `## Fixed the retry` spends the label on syntax.
+  const describeTurn = useCallback(
+    (source: string) =>
+      plainLine(stripModeDirective(source)).slice(0, 120) || "(empty)",
+    [],
+  );
 
   // Re-seed the working indicator from the durable in-flight marker whenever
   // the bound session changes. ManagerSurface reuses ONE ManagerChatView
@@ -2674,6 +2683,7 @@ export function ManagerChatView({ session }: Props) {
             <MessageScrollbackRail
               scrollRef={scrollRef}
               anchors={railAnchors}
+              describe={describeTurn}
             />
           </div>
           {/* The fixed footer has a shared separator and compact inset composer. */}

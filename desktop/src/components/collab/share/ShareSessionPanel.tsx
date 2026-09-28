@@ -30,6 +30,7 @@ import { AccessGlyph } from "./AccessLevelMenu";
 import {
   ACCESS_LEVELS,
   ACCESS_META,
+  SHARE_DEFAULT_ACCESS,
   type AccessLevel,
   type SharedSession,
 } from "./shareTypes";
@@ -70,7 +71,11 @@ export function ShareSessionPanel({
   youId,
   savingIds,
 }: ShareSessionPanelProps): JSX.Element {
-  const [pendingAccess, setPendingAccess] = useState<AccessLevel>("watch");
+  // What one click hands out. See `SHARE_DEFAULT_ACCESS` for why it is `drive`
+  // — the summary under the control says so in plain words before the host
+  // commits, and any one person can be dropped to `watch` once they are in.
+  const [pendingAccess, setPendingAccess] =
+    useState<AccessLevel>(SHARE_DEFAULT_ACCESS);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 

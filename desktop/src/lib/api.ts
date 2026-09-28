@@ -2190,6 +2190,11 @@ export const api = {
     invoke<void>("claude_session_watch", { sessionId, filePath }),
   claudeSessionUnwatch: (sessionId: string) =>
     invoke<void>("claude_session_unwatch", { sessionId }),
+  // Which conversation the Claude CLI in PTY `sessionId` is in right now —
+  // read from Claude's own per-process registry, so it follows `/resume` and
+  // `/clear` typed into the terminal. Null when there is no way to tell.
+  agentPtyClaudeSession: (sessionId: string) =>
+    invoke<LiveClaudeSession | null>("agent_pty_claude_session", { sessionId }),
 
   // Prior conversation for a resumed agent tab. The CLIs load context on
   // --resume but don't replay turns visually, so we read their own
@@ -10632,6 +10637,13 @@ export type AgentRecordChunk = {
   lines: string[];
   /** What you accumulated is stale — start over from `lines`. */
   reset: boolean;
+};
+
+/** The conversation a PTY's Claude CLI is in. `file_path` is null while
+ *  Claude has not written its transcript yet (right after `/clear`). */
+export type LiveClaudeSession = {
+  session_id: string;
+  file_path: string | null;
 };
 
 export type ClaudeSession = {

@@ -26,6 +26,7 @@
 // no snapshot (the user's tabs come back empty rather than corrupt).
 
 import { setDurable } from "./localStore";
+import { normalizePath } from "./paths";
 import type {
   AgentTab,
   ManagerTab,
@@ -153,10 +154,33 @@ export function loadSnapshotAt(key: string): WorkspaceSnapshot | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as WorkspaceSnapshot;
     if (parsed?.v !== SCHEMA_VERSION) return null;
-    return parsed;
+    return withNormalizedFilePaths(parsed);
   } catch {
     return null;
   }
+}
+
+/** A snapshot with every file it names spelled the one way `openFile` spells
+ *  it. Slots saved before that could hold "/repo/../../.claude/…": the files
+ *  reopen through `openFile` and come back clean, so the focus marker and the
+ *  split panes still pointing at the old spelling would name a tab that no
+ *  longer exists. */
+export function withNormalizedFilePaths(snap: WorkspaceSnapshot): WorkspaceSnapshot {
+  const fixTree = (t: WorkSplitTree): WorkSplitTree =>
+    t.kind === "leaf"
+      ? {
+          ...t,
+          tabs: t.tabs.map((r) =>
+            r.kind === "file" ? { kind: "file", path: normalizePath(r.path) } : r,
+          ),
+        }
+      : { ...t, children: t.children.map(fixTree) };
+  return {
+    ...snap,
+    filePaths: [...new Set((snap.filePaths ?? []).map(normalizePath))],
+    activePath: snap.activePath ? normalizePath(snap.activePath) : snap.activePath,
+    splitLayout: snap.splitLayout ? fixTree(snap.splitLayout) : snap.splitLayout,
+  };
 }
 
 /** Write a slot back by its raw key. */

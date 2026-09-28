@@ -112,13 +112,34 @@
   line-height: 1.6;
   margin-top: 5px;
 }
-.chat-composer {
-  padding: 8px;
+/* The dock under the transcript: usage line, docked question/permission cards
+   and the composer. Same reading column and same ground as the messages above,
+   so the input lines up with what it answers and there is no separate band. */
+.chat-dock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
   flex-shrink: 0;
-  border-top: 1px solid var(--color-line);
-  background: var(--color-bg-1);
+  padding: 4px var(--chat-gutter, 16px) 12px;
 }
-.chat-composer > div { max-width: none; }
+.chat-dock > * {
+  width: 100%;
+  max-width: var(--chat-col, 760px);
+  min-width: 0;
+}
+/* A docked card and the composer meet on one hairline as a single panel. */
+.chat-dock:has(.composer-docked) { gap: 0; }
+.chat-dock .chat-notice { margin: 0 0 6px; }
+.chat-usage {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 0 2px 4px;
+  font-size: 10.5px;
+  color: var(--color-text-4);
+  font-variant-numeric: tabular-nums;
+}
 .chat-compose-box {
   display: flex;
   align-items: flex-end;
@@ -294,8 +315,8 @@
     padding: 12px;
     gap: 10px;
   }
-  .chat-composer {
-    padding: 8px;
+  .chat-dock {
+    padding-inline: 12px;
   }
   .chat-compose-box {
     padding: 11px;
@@ -315,11 +336,12 @@
   }
 }
 
-.chat-controls { width: 100%; margin: 0; padding: 0; flex-shrink: 0; background: var(--color-bg-1); }
-.chat-controls:not(:empty) { border-top: 1px solid var(--color-line); }
-.chat-controls .question-flow.is-docked { border: 0; border-radius: 0; background: transparent; }
-.chat-composer.has-docked-control { padding-top: 8px; }
-.chat-composer.has-docked-control .unified-composer.composer-docked { border: 1px solid var(--chat-rule); border-radius: var(--chat-radius); }
+.chat-controls { display: flex; flex-direction: column; }
+.chat-controls:empty { display: none; }
+/* A permission's "Requested action" is the top of the same panel as its
+   question, not a loose line above it. */
+.chat-controls > details { border: 1px solid var(--chat-rule); border-bottom: 0; border-radius: var(--chat-radius) var(--chat-radius) 0 0; background: var(--chat-panel); }
+.chat-controls > details + .question-flow { border-top-left-radius: 0; border-top-right-radius: 0; }
 
 @media (max-width: 540px) { .chat-heading { min-height: 36px; padding: 3px 8px; gap: 8px; } .chat-heading-action-label { display: none; } .chat-heading-search { padding: 0 6px; } }
 

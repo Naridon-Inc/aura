@@ -35,17 +35,21 @@ export type { Participant, SessionTunnel };
  * What a person in a shared session is allowed to do.
  *
  * - `watch` — they read the transcript as it streams. Their composer is off.
- *   No message of theirs reaches the room, and no agent is ever instructed by
- *   them.
+ *   No message of theirs reaches the room, no agent is ever instructed by
+ *   them, and the host's project does not open for them.
  * - `drive` — they may send messages and instruct agents, exactly as the host
- *   can. In protocol terms: their `msg` frames are accepted and delivered by
- *   the ordinary rule.
+ *   can, and they may open the host's project files. In protocol terms: their
+ *   `msg`, `file_list` and `file_req` frames are accepted by the ordinary rule.
  *
- * ⚠ THIS IS NOT YET ENFORCED ON THE WIRE. The protocol as written accepts
- * `msg` from any authenticated guest. Until the server drops `msg` frames from
- * a `watch` participant, this level is an honest UI contract and a dishonest
- * security boundary — so it is presented to people as "what you can do here",
- * never as "nobody can make you do otherwise".
+ * Both halves are enforced on the wire, not just in this UI: `session_live`
+ * drops a `msg` from a watcher (the one exception is `intent: "ask"`, which is
+ * how "let me drive" is said), and `session_live::files` refuses to route a
+ * file request from one. So this is a boundary the app may describe as a
+ * boundary — which is exactly why `drive` has to be handed out knowingly. It
+ * is one level, and it carries both powers: telling someone's agent what to do
+ * and reading the working copy on their disk. The wording below says the second
+ * part out loud, because a host who thinks they granted a chat seat and
+ * actually granted a file browser was misled by us, not by the guest.
  */
 export type AccessLevel = "watch" | "drive";
 
@@ -70,21 +74,38 @@ export const ACCESS_META: Record<
     label: "Can watch",
     short: "Watching",
     hostBlurb:
-      "Follows along as the work happens. Can't type here, and can't tell your agents to do anything.",
+      "Follows along as the work happens. Can't type here, can't tell your agents to do anything, and can't open your files.",
     guestBlurb:
-      "You can follow everything happening here. Sending messages is switched off until the host hands you the wheel.",
+      "You can follow everything happening here. Sending messages and opening the project are switched off until the host hands you the wheel.",
   },
   drive: {
     label: "Can drive",
     short: "Driving",
     hostBlurb:
-      "Can send messages and give your agents instructions. The same as you can.",
+      "Can send messages, give your agents instructions, and read your project's files. The same as you can.",
     guestBlurb:
-      "You can send messages and give the agents instructions, the same as the person whose machine this is.",
+      "You can send messages, give the agents instructions and read the project, the same as the person whose machine this is. Nothing is copied to your machine and you can't change files directly — ask the agents to.",
   },
 };
 
 export const ACCESS_LEVELS: AccessLevel[] = ["watch", "drive"];
+
+/**
+ * Where the share panel's control starts, before the host touches it.
+ *
+ * Named rather than written into the component, because it is the answer to
+ * "what does clicking Share once actually give someone" — a product decision
+ * worth stating in one place and worth a test. `drive`: sharing a session is
+ * how a teammate gets a seat at the work, and a first click that produced a
+ * seat they could only watch from made the host go hunting for a second
+ * control to finish the thing they thought they had done.
+ *
+ * Safe to land here because joining is already gated on membership of this
+ * repo in this org — a link that leaks opens for nobody — so everyone who can
+ * reach the session can already clone what they are now reading. The host
+ * still sees the level before they click, and can drop any one person after.
+ */
+export const SHARE_DEFAULT_ACCESS: AccessLevel = "drive";
 
 /**
  * A session that has been opened up to teammates.

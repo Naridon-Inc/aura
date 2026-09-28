@@ -15,7 +15,11 @@
 // very thing that's broken — so it can't lean on `--color-*` / Tailwind classes.
 
 import { Component, type ErrorInfo, type ReactNode } from "react";
-import { isBenignRuntimeNoise, isCancellation } from "../lib/runtimeNoise";
+import {
+  isBenignRuntimeNoise,
+  isCancellation,
+  isEditorWorkerFailure,
+} from "../lib/runtimeNoise";
 import { errorKind, trackError } from "../lib/track";
 
 type Props = {
@@ -111,8 +115,18 @@ export class AppErrorBoundary extends Component<Props, State> {
     if (this.state.error) return;
     const msg = e.message || "";
     if (isBenignRuntimeNoise(msg) || isCancellation(e.error)) return;
+    if (this.editorWorkerFailed(e.error)) return;
     if (e.error instanceof Error) this.setState({ error: e.error });
   };
+
+  /** A language worker that could not answer a hover or a completion broke
+   *  that one feature; the editor and everything around it still work. Keep it
+   *  in the console for devtools, and leave the app up. */
+  private editorWorkerFailed(reason: unknown): boolean {
+    if (!isEditorWorkerFailure(reason)) return false;
+    console.warn("[AppErrorBoundary] an editor language worker failed:", reason);
+    return true;
+  }
 
   private onRejection = (e: PromiseRejectionEvent) => {
     if (this.state.error) return;
@@ -124,6 +138,7 @@ export class AppErrorBoundary extends Component<Props, State> {
     // CancellationError, so without these guards a harmless double-unlisten or
     // a file closed mid-highlight trips the snag screen.
     if (isBenignRuntimeNoise(msg) || isCancellation(reason)) return;
+    if (this.editorWorkerFailed(reason)) return;
     if (reason instanceof Error) this.setState({ error: reason });
   };
 

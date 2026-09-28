@@ -667,7 +667,10 @@ function persistKey(channel: string): string {
   return `aura.lastSession.${channel}`;
 }
 
-export function persistLastSession(channel: string, session: ClaudeSession) {
+export function persistLastSession(
+  channel: string,
+  session: Pick<ClaudeSession, "session_id" | "file_path">,
+) {
   try {
     localStorage.setItem(
       persistKey(channel),

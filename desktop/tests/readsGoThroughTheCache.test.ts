@@ -67,7 +67,7 @@ const ALLOWED: Array<{ file: string; fn: string; reason: string }> = [
       "passes `sinceBase`, which asks a different question about the same repo. The cache keys on the repo alone and would answer the wrong one",
   },
   {
-    file: "src/components/agent/AgentSurface.tsx",
+    file: "src/components/agent/useClaudeTranscript.ts",
     fn: "claudeLoadSession",
     reason:
       "replays a transcript that is still being written; a remembered read would be missing everything since",

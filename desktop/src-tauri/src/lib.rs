@@ -60,6 +60,7 @@ mod cmd_kg;
 mod cmd_kg_features;
 mod cmd_kg_flows;
 mod cmd_chat_export;
+mod claude_live_session;
 mod cmd_claude_sessions;
 mod cmd_claude_usage;
 mod cmd_codex_sessions;
@@ -177,6 +178,7 @@ mod crash;
 mod deep_link;
 mod hud;
 mod ide_bridge;
+mod last_resort;
 mod manager;
 mod menu;
 mod model_discovery;
@@ -785,6 +787,7 @@ pub fn run() {
             cmd_claude_sessions::claude_load_session,
             cmd_claude_sessions::claude_session_watch,
             cmd_claude_sessions::claude_session_unwatch,
+            claude_live_session::agent_pty_claude_session,
             cmd_claude_usage::claude_usage_snapshot,
             cmd_agent_history::agent_history_preroll,
             cmd_pty::pty_open,
@@ -1378,6 +1381,8 @@ pub fn run() {
             cmd_session_live::tunnel::session_live_tunnel_open,
             cmd_session_live::tunnel::session_live_tunnel_close,
             cmd_session_live::tunnel::session_live_tunnels,
+            cmd_session_live::files::session_live_list_files,
+            cmd_session_live::files::session_live_read_file,
             cmd_memory::aura_memory_view,
             cmd_memory::aura_memory_write_entry,
             cmd_memory::aura_memory_update_entry,

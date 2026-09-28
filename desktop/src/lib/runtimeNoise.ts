@@ -54,6 +54,19 @@ export function isCancellation(reason: unknown): boolean {
   return name === "Canceled" || name === "Cancelled" || name === "CancellationError";
 }
 
+/** True when this thrown value came back from one of Monaco's language
+ *  workers (TypeScript, JSON, CSS, HTML, or the base editor worker): a hover,
+ *  completion or quick-info request the service could not answer. It is a
+ *  real failure — telemetry still counts it — but of one editor feature, not
+ *  of the app. Monaco rejects it with nobody listening, and the snag screen
+ *  used to take the whole window down because a hover tooltip failed. The
+ *  worker's own frames ride along in the stack, named after its bundle
+ *  (`ts.worker-<hash>.js` built, `ts.worker.js?worker_file` in dev). */
+export function isEditorWorkerFailure(reason: unknown): boolean {
+  const stack = reason instanceof Error ? (reason.stack ?? "") : "";
+  return /\b(?:ts|json|css|html|editor)\.worker\b/.test(stack);
+}
+
 /** True when this thrown value is teardown noise rather than a real failure. */
 export function isIgnorableThrow(reason: unknown): boolean {
   const message = reason instanceof Error ? reason.message : String(reason ?? "");

@@ -40,6 +40,7 @@ import {
   type FilingLayout,
 } from "./agentTabFiling";
 import { normalizeRoot } from "./remotePlaces";
+import { normalizePath } from "./paths";
 import {
   releaseTerminalSession,
   releaseNativeTerminalSession,
@@ -2479,6 +2480,10 @@ export function clearAgentDiffBase(path: string): void {
 }
 
 async function openFile(path: string, opts?: OpenFileOpts) {
+  // One spelling per file. The tab's Monaco model is keyed on this path, and
+  // a "../" left in it names a file the TypeScript worker cannot find — every
+  // hover in that tab threw and blanked the app. See `normalizePath`.
+  path = normalizePath(path);
   const existing = state.files.find((f) => f.path === path);
   const fileRef: WorkPaneRef = { kind: "file", path };
 
@@ -4482,6 +4487,8 @@ function splitWithEmpty(
  *  sibling leaf into the existing split tree or creates a fresh split
  *  that wraps the previous full pane alongside the new file. */
 async function openFileSplit(path: string, direction: WorkSplitDirection): Promise<void> {
+  // Same single spelling as `openFile`, so a split and a tab share one model.
+  path = normalizePath(path);
   if (!state.files.find((f) => f.path === path)) {
     const content = await readFileWherever(path);
     const name = path.split("/").pop() ?? path;

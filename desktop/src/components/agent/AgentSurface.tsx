@@ -1,9 +1,7 @@
 import { ChatHeader, ChatViewSwitcher } from "../chat/ChatHeader";
 // A live session has two presentations: its native CLI and the shared chat UI.
 import { useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { api } from "../../lib/api";
-import { refreshSessions } from "../../lib/sessionsCache";
 import { openPopout } from "../../lib/popout";
 import type { TabMenuItem } from "../TabMenu";
 import type { AgentTab, WorkSplitDirection } from "../../lib/editorStore";
@@ -17,7 +15,6 @@ import { forgetAgentEvent } from "../../lib/agentEventStore";
 import { forgetAgentRecord } from "../../lib/agentRecordStore";
 import { toast } from "../../lib/toast";
 import {
-  isOwnWorktreeSession,
   releaseResume,
   resolveResumeTarget,
   tryClaimResume,
@@ -25,13 +22,11 @@ import {
 import {
   bindChannelMeta,
   forgetAgentStream,
-  getChannelEvents,
-  persistLastSession,
-  pushEvent,
   readPersistedSession,
-  setResumedHistory,
   streamChannel,
 } from "../../lib/agentStreamStore";
+import { forgetTranscriptSession } from "../../lib/claudeSessionFollow";
+import { useClaudeTranscript } from "./useClaudeTranscript";
 import { StreamChatView } from "./StreamChatView";
 import { AgentTerminalView } from "./AgentTerminalView";
 import { AgentBlocksView } from "./AgentBlocksView";
@@ -494,143 +489,9 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Live-tail Claude's own session log so the UI view stays in sync
-  // with what the user types into the terminal. We discover the
-  // session JSONL by picking the most recently modified file under
-  // ~/.claude/projects/<encoded-repo>/ — the PTY child has just
-  // appended to it, so the newest one is ours. Then back-end watcher
-  // emits StreamEvents on `claude-session:<sid>`; we forward them
-  // into the agent stream channel so AgentStreamView sees them.
-  useEffect(() => {
-    if (tab.agentId !== "claude") return;
-    let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    // Holds the in-flight watch-registration promise so cleanup can
-    // sequence the unwatch *after* it settles. A bare boolean would miss
-    // the window where the tab unmounts mid-`await` (flag still false →
-    // unwatch skipped → backend polling task leaks).
-    let watchStarted: Promise<unknown> | null = null;
-
-    (async () => {
-      // Tiny grace period — gives claude a moment to write its first
-      // line so claudeListSessions surfaces the right file.
-      await new Promise((r) => setTimeout(r, 500));
-      if (cancelled) return;
-      try {
-        const list = await refreshSessions(tab.repoRoot);
-        if (cancelled) return;
-        // Follow/bind ONLY a session launched from THIS worktree. The list
-        // unions sibling worktrees + the main checkout, and binding to a
-        // sibling's newest file is exactly what made a `granada` tab silently
-        // reopen `zagreb`'s conversation. If this tab resumed a known own
-        // session, that file is ours by id. Otherwise (a fresh tab) take this
-        // worktree's newest own session that no sibling tab already claims, so
-        // two fresh tabs launched together don't both grab the one newest file.
-        const takenBySiblings = new Set(
-          store.agentTabs
-            .filter(
-              (x) =>
-                x.sessionId !== tab.sessionId && x.repoRoot === tab.repoRoot,
-            )
-            .map((x) => x.resumeSessionId)
-            .filter((v): v is string => !!v),
-        );
-        const boundOwn = tab.resumeSessionId
-          ? list.find(
-              (s) =>
-                s.session_id === tab.resumeSessionId &&
-                isOwnWorktreeSession(s, tab.repoRoot),
-            )
-          : undefined;
-        const mine =
-          boundOwn ??
-          list.find(
-            (s) =>
-              isOwnWorktreeSession(s, tab.repoRoot) &&
-              !takenBySiblings.has(s.session_id),
-          ) ??
-          list.find((s) => isOwnWorktreeSession(s, tab.repoRoot));
-        // Nothing authored in this worktree yet (e.g. claude is still writing
-        // its first line, or the tab is on a sibling's convo we won't adopt) —
-        // leave the tab unbound rather than stamp a foreign session onto it.
-        if (!mine) return;
-        // Pin this tab's live session so a later shell restart resumes exactly
-        // it (the mount-resume effect reads this first).
-        persistLastSession(channel, mine);
-        // Also stamp the DURABLE per-tab binding. Unlike the channel pin
-        // (shared by every same-repo Claude tab), this rides on the tab
-        // itself and is persisted with it — so "Start all" reopens each tab's
-        // own conversation. This is the load-bearing write for the fix.
-        store.bindAgentResumeSession(tab.sessionId, mine.session_id);
-        unlisten = await listen<import("../../lib/api").StreamEvent>(
-          `claude-session:${tab.sessionId}`,
-          (e) => {
-            pushEvent(channel, e.payload);
-            pushEvent(transcriptChannel, e.payload, { passive: true });
-          },
-        );
-        if (cancelled) {
-          unlisten?.();
-          return;
-        }
-        // Seed the bubble view with this session's EXISTING transcript before
-        // the live watcher attaches. `claudeSessionWatch` seeks straight to
-        // end-of-file and only emits *newly appended* lines — it assumes the
-        // history was already read (via claudeLoadSession). Without this seed,
-        // returning to a workspace (which drops the in-memory stream channel on
-        // unmount — 5-min idle-drop, or immediately on respawn) leaves the chat
-        // blank, replaying only what the agent writes AFTER the remount: the
-        // "starting from zero" loss. The on-disk JSONL is intact, so we replay
-        // it. Only seed when the channel is empty so we never clobber events
-        // that survived a brief detach or a live in-flight turn — and re-check
-        // after the await, since the watcher/live wire may have populated it
-        // while we were reading.
-        //
-        // When the channel ISN'T empty we skip the replay, and the watcher below
-        // is then the only thing standing between the user and a hole in the
-        // transcript: it resumes from where this tab was last read to, which is
-        // why `tab.sessionId` goes to both calls.
-        if (getChannelEvents(transcriptChannel).length === 0) {
-          try {
-            const history = await api.claudeLoadSession(
-              mine.file_path,
-              undefined,
-              tab.sessionId,
-            );
-            if (cancelled) return;
-            if (getChannelEvents(transcriptChannel).length === 0) {
-              setResumedHistory(transcriptChannel, history);
-            }
-            if (getChannelEvents(channel).length === 0)
-              setResumedHistory(channel, history);
-          } catch {
-            /* best-effort — a missing/locked file just means no pre-roll */
-          }
-        }
-        watchStarted = api.claudeSessionWatch(tab.sessionId, mine.file_path);
-        await watchStarted;
-      } catch {
-        /* best-effort */
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      unlisten?.();
-      // Sequence the unwatch *after* the registration settles. If the tab
-      // unmounts while `claudeSessionWatch` is still in flight, firing
-      // unwatch now would either no-op (watcher not yet in the map) or be
-      // skipped entirely — both leak the 500ms polling task, which keeps
-      // tailing the JSONL and pushing to cloud for the app's lifetime.
-      // Chaining off the promise guarantees watch-then-unwatch ordering.
-      if (watchStarted) {
-        watchStarted
-          .catch(() => {})
-          .then(() => api.claudeSessionUnwatch(tab.sessionId))
-          .catch(() => {});
-      }
-    };
-  }, [tab.sessionId, tab.repoRoot, tab.agentId, channel, transcriptChannel]);
+  // Keep the Chat view on the transcript the CLI is writing — including after
+  // a `/resume` or `/clear` typed into the terminal.
+  useClaudeTranscript(tab, channel, transcriptChannel);
 
   // Clear the in-flight Restart flag whenever the tab's sessionId changes —
   // a successful restart() swaps in a fresh child id, and that transition is
@@ -687,6 +548,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
     forgetAgentSession(tab.sessionId);
     forgetAgentEvent(tab.sessionId);
     forgetAgentStream(channel);
+    forgetTranscriptSession(transcriptChannel);
     // The file-backed engines keep their conversation in a record beside the
     // session, and that tail is keyed by (agent, repo) rather than session id.
     // Left in place, the next Codex/Kimi/OpenCode/Pi tab opened on this repo
@@ -708,6 +570,7 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
       forgetAgentSession(tab.sessionId);
       forgetAgentEvent(tab.sessionId);
       forgetAgentStream(channel);
+      forgetTranscriptSession(transcriptChannel);
       forgetAgentRecord(tab.agentId, tab.repoRoot);
       const handle = await api.agentPtyOpen(
         tab.agentId,

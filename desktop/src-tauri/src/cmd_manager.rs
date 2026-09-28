@@ -119,6 +119,34 @@ impl From<&ManagerSession> for ManagerSummary {
     }
 }
 
+/// The same row, built from a session that was never fully read.
+///
+/// Kept beside the `&ManagerSession` impl above deliberately: the two must
+/// agree field for field, and the compiler will not say so if they drift —
+/// a list built from heads would simply start disagreeing with a list built
+/// from the live runtime, in the same dropdown, for sessions that differ
+/// only in whether they happen to be open.
+impl From<&persist::SessionHead> for ManagerSummary {
+    fn from(s: &persist::SessionHead) -> Self {
+        let done = s
+            .tasks
+            .iter()
+            .filter(|t| matches!(t.status, ManagerTaskStatus::Done | ManagerTaskStatus::Skipped))
+            .count();
+        ManagerSummary {
+            id: s.id.clone(),
+            objective: s.objective.clone(),
+            status: s.status,
+            created_at: s.created_at,
+            updated_at: s.updated_at,
+            task_count: s.tasks.len(),
+            done_count: done,
+            repo_root: s.projects.first().map(|p| p.root.clone()),
+            machine_id: s.machine_id.clone(),
+        }
+    }
+}
+
 /// True when two filesystem paths name the same directory. Canonicalizes
 /// both (resolving symlinks / `..`) when they exist on disk, falling back
 /// to a trailing-slash-trimmed string compare so the check still works for
@@ -752,15 +780,17 @@ pub async fn manager_list(
         }
     }
     crate::blocking::run(move || {
-        let belongs = |s: &ManagerSession| -> bool {
+        // One rule, asked of two shapes: a live session holds its projects in
+        // memory, and so does the head we read off disk for the rest.
+        let belongs = |projects: &[ProjectRef]| -> bool {
             match &repo_root {
                 None => true,
-                Some(root) => s.projects.iter().any(|p| same_root(&p.root, root)),
+                Some(root) => projects.iter().any(|p| same_root(&p.root, root)),
             }
         };
         let mut summaries = Vec::new();
         for session in live_sessions {
-            if belongs(&session) {
+            if belongs(&session.projects) {
                 summaries.push(ManagerSummary::from(&session));
             }
         }
@@ -769,9 +799,13 @@ pub async fn manager_list(
             if in_runtime.contains(&id) {
                 continue;
             }
-            if let Ok(session) = persist::load(&id) {
-                if belongs(&session) {
-                    summaries.push(ManagerSummary::from(&session));
+            // `load_head`, not `load`: a row here shows an objective, a
+            // project and a task count, and reading the transcript to find
+            // them is what made opening a workspace stall once a few of
+            // these conversations had run long.
+            if let Ok(head) = persist::load_head(&id) {
+                if belongs(&head.projects) {
+                    summaries.push(ManagerSummary::from(&head));
                 }
             }
         }

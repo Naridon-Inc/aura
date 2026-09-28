@@ -348,11 +348,17 @@ fn recover(
             sample_file,
         ) {
             tracing::warn!(error = %e, "could not write the stall diagnostic bundle");
+            crate::last_resort::note("the stall bundle", &e, &detail);
         }
     }
     if plan.persist_transcripts {
         if let Err(e) = persist_transcripts(stamp_ms, &transcripts) {
             tracing::warn!(error = %e, "could not persist agent transcripts");
+            crate::last_resort::note(
+                "the agent transcripts",
+                &e,
+                &format!("{} in-process session(s) lost", transcripts.len()),
+            );
         }
     }
 

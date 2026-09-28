@@ -42,7 +42,7 @@ describe("who reads the session list", () => {
 
 describe("the callers who cannot accept a cached answer", () => {
   const forced = [
-    ["components/agent/AgentSurface.tsx", "binds the session the CLI just wrote"],
+    ["components/agent/useClaudeTranscript.ts", "binds the session the CLI just wrote"],
     ["components/agent/ResumeDialog.tsx", "lists sessions to resume, on open"],
     ["lib/agentSessionScope.ts", "decides resume-or-start-fresh"],
     ["lib/chatSlashHandler.ts", "resolves the session a slash command acts on"],

@@ -471,6 +471,13 @@ impl AgentPtyRegistry {
         self.sessions.lock().unwrap().get(session_id).cloned()
     }
 
+    /// The pid of an in-process session's child — the process the PTY
+    /// spawned, which leads its own process session. None for an unknown id,
+    /// and for a daemon-backed session, whose child this process never sees.
+    pub(crate) fn child_pid(&self, session_id: &str) -> Option<u32> {
+        self.session(session_id)?.child.lock().unwrap().process_id()
+    }
+
     /// Watchdog-side snapshot for the wedge diagnostic bundle and the
     /// pre-relaunch transcript dump. Returns the in-process session
     /// transcripts plus the daemon-backed session count. `try_lock`

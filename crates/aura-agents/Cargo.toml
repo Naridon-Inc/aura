@@ -1,6 +1,6 @@
 [package]
 name = "aura-agents"
-version = "0.19.52"
+version = "0.19.54"
 edition = "2024"
 
 [lib]

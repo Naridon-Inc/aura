@@ -13,6 +13,7 @@
 
 pub mod brain;
 pub mod chat;
+pub mod chat_log;
 pub mod dispatcher;
 pub mod distill;
 pub mod modes;

@@ -10,6 +10,9 @@
 export { LiveSessionPane } from "./LiveSessionPane";
 export type { LiveSessionPaneProps } from "./LiveSessionPane";
 
+export { HostFilesPane } from "./HostFilesPane";
+export type { HostFilesPaneProps } from "./HostFilesPane";
+
 export { ParticipantsStrip, ParticipantFace } from "./ParticipantsStrip";
 export type { ParticipantsStripProps } from "./ParticipantsStrip";
 

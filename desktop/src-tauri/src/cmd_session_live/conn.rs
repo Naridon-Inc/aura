@@ -29,8 +29,8 @@ use tracing::warn;
 
 use super::ctx::{ConnCtx, Role};
 use super::protocol::{
-    now_secs, Author, ClientFrame, ErrorFrame, MsgFrame, Participant, PresenceFrame, ReadyFrame,
-    TranscriptFrame, TunnelClosedFrame, TunnelReqFrame,
+    now_secs, Author, ClientFrame, ErrorFrame, FileReqFrame, FileResFrame, MsgFrame, Participant,
+    PresenceFrame, ReadyFrame, TranscriptFrame, TunnelClosedFrame, TunnelReqFrame,
 };
 
 pub type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -428,6 +428,28 @@ fn handle_inbound_value(ctx: &Arc<ConnCtx>, v: Value) {
                 super::EV_TUNNEL_CLOSED,
                 json!({ "code": frame.code, "port": port }),
             );
+        }
+        // A guest reading this desktop's project. Served off the connection
+        // task so a slow disk cannot stall the frame pump, and answered even
+        // when it is refused — see `files::spawn_serve`.
+        "file_list" | "file_req" => {
+            let kind = if ty == "file_list" {
+                super::files::Kind::List
+            } else {
+                super::files::Kind::Read
+            };
+            let frame: FileReqFrame = match serde_json::from_value(v) {
+                Ok(f) => f,
+                Err(e) => {
+                    warn!(target: "session_live", "bad {ty}: {e}");
+                    return;
+                }
+            };
+            super::files::spawn_serve(ctx.clone(), kind, frame);
+        }
+        "file_res" => {
+            let frame: FileResFrame = serde_json::from_value(v).unwrap_or_default();
+            super::files::deliver(ctx, frame);
         }
         // Unknown frame types are ignored on purpose — old clients must
         // survive new frames.

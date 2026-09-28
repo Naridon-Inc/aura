@@ -1,5 +1,5 @@
-import { useId, useState, type ComponentPropsWithoutRef, type HTMLAttributes, type ReactNode } from "react";
-import { Check, ChevronDown, ListTodo, MessageSquare, SlidersHorizontal, Terminal, Route, Cpu, RotateCcw } from "lucide-react";
+import { type ComponentPropsWithoutRef, type HTMLAttributes, type ReactNode } from "react";
+import { Check, ChevronDown, ListTodo, MessageSquare, SlidersHorizontal, Terminal, Route } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../ui/dropdown-menu";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 import "./ChatComposer.css";
@@ -48,23 +48,6 @@ export function ChatModePicker({ value, onChange, disabled, modes = ["build", "p
 
 /** Native CLI names are not a fixed allowlist. An override is submitted only
  * after Apply; closing this popover leaves the current model untouched. */
-export function ChatModelPicker({ value, onChange, disabled, label = "Agent default" }: { value: string; onChange: (model: string) => void; disabled?: boolean; label?: string }) {
-  const inputId = useId();
-  const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState(value);
-  return <Popover open={open} onOpenChange={next => { setOpen(next); if (next) setDraft(value); }}><PopoverTrigger asChild>
-    <button type="button" className="composer-selector composer-model-selector" disabled={disabled} aria-label={`Model: ${value || label}`} title={value || label}><span>{value || label}</span><ChevronDown size={12} /></button>
-  </PopoverTrigger><PopoverContent side="top" align="start" className="chat-menu-surface composer-model-menu" sideOffset={8} collisionPadding={12}>
-    <div className="chat-menu-title">Model</div>
-    <button type="button" className="composer-model-default" onClick={() => { onChange(""); setOpen(false); }}><RotateCcw size={15} /><span>{label}<small>Use this agent’s configured model</small></span>{!value && <Check size={14} />}</button>
-    <form onSubmit={e => { e.preventDefault(); onChange(draft.trim()); setOpen(false); }}>
-      <label htmlFor={inputId}><Cpu size={14} /> Custom model</label>
-      <input id={inputId} aria-label="Model name" placeholder="Enter a model supported by this agent" value={draft} onChange={e => setDraft(e.target.value)} />
-      <div className="chat-menu-form-footer"><button type="button" className="chat-menu-cancel" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="chat-primary-action">Apply</button></div>
-    </form>
-  </PopoverContent></Popover>;
-}
-
 /** Modes steer the next request; permissions continue to be enforced by the
  * selected transport. No mode silently grants broader execution rights. */
 export function promptForChatMode(text: string, mode: ChatMode): string {

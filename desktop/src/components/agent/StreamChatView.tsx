@@ -1,6 +1,7 @@
 import { ChatViewSwitcher } from "../chat/ChatHeader";
 import { useEffect, useRef, useState } from "react";
-import { ChatModelPicker, promptForChatMode, type ChatMode } from "../chat/ChatComposer";
+import { promptForChatMode, type ChatMode } from "../chat/ChatComposer";
+import { AgentTurnModelPicker } from "../chat/ModelCatalogPopover";
 import { QuestionFlow } from "../chat/QuestionFlow";
 import { Terminal } from "lucide-react";
 import { api, type PermissionPrompt } from "../../lib/api";
@@ -195,7 +196,7 @@ export function StreamChatView({ tab }: { tab: AgentTab }) {
       }}
       controls={controls}
       composerDocked={prompts.length > 0}
-      modelControl={<ChatModelPicker value={model} disabled={running} onChange={value => { setModel(value); try { localStorage.setItem(`${key}.model`, value); } catch {} }} />}
+      modelControl={<AgentTurnModelPicker agentId={tab.agentId} value={model} disabled={running} onChange={value => { setModel(value); try { localStorage.setItem(`${key}.model`, value); } catch {} }} />}
       composerOptions={<>
         {!running && lastPrompt?.kind === "user_prompt" && (
           <button

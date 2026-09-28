@@ -2108,13 +2108,13 @@ textarea:focus-visible,
 }
 
 /* dock — holds inline cards + composer. Flush with the main surface: no
-   separate fill, no heavy frame, just a hairline above it. The composer
-   inside reads as part of the conversation surface, not a docked panel.
-   Horizontal padding matches `.p-scroll` so the composer's left edge lines
-   up exactly with the messages above it. */
+   separate fill, no frame and no rule above it — the composer card's own
+   border is the only edge, so the input reads as part of the conversation
+   rather than a band docked under it. Horizontal padding matches `.p-scroll`
+   so the composer's left edge lines up with the messages above it. */
 .aura-chat .p-dock {
   flex: none;
-  border-top: 1px solid var(--color-line-soft);
+  border-top: 0;
   background: transparent;
   padding: 8px 30px 12px;
   display: flex;

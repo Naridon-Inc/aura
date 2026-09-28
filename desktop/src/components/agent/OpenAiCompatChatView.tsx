@@ -545,7 +545,7 @@ export function OpenAiCompatChatView({ tab }: Props) {
       }
       composer={
         <div className="chat-composer">
-          <div className="mx-auto max-w-[760px]">
+          <div>
             <ComposerFrame>
               <textarea
                 ref={composerRef}
