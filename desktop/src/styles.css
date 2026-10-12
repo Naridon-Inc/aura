@@ -523,6 +523,75 @@ input::-webkit-search-results-decoration {
   --letter-spacing-tight:  -0.01em;
   --letter-spacing-normal:  0;
   --letter-spacing-wide:    0.02em;
+
+}
+
+/* The terminal tokens sit in a plain `:root`, deliberately, and NOT in the
+ * `@theme` block above with everything else.
+ *
+ * They are not Tailwind theme tokens. Nobody writes `text-term-fg` — these
+ * exist to be read back at runtime with getComputedStyle and handed to a
+ * renderer. Tailwind v4 emits a theme variable only when something references
+ * it, so declaring them up there got all twenty of them tree-shaken out of the
+ * compiled stylesheet: every token resolved to "", both renderers silently kept
+ * their compiled-in fallbacks, and the feature was dead while looking correct
+ * in source. Measured, not guessed — `@tailwindcss/node` emitted 0 of 16 ANSI
+ * slots. `terminalTokens.test.ts` compiles the sheet and fails if that returns.
+ *
+ * A plain `:root` is never pruned, and it says the true thing about what these
+ * are. They still reference the `@theme` colors by var(), which is what makes a
+ * theme-pack class recolor the terminal for free.
+ */
+:root {
+  /* ── terminal ───────────────────────────────────────────────────────────
+   * The one surface that had no tokens at all. Both terminal paths read
+   * these — the GPU renderer gets them over `native_term_set_appearance`,
+   * xterm.js gets them as its theme object — so a theme switch recolors the
+   * terminal along with everything else instead of leaving it behind.
+   *
+   * The chrome slots alias the UI tokens, because the background a terminal
+   * sits on and the cursor it blinks ARE Aura's to choose:
+   */
+  --term-bg:         var(--color-bg-0);
+  --term-fg:         var(--color-text-1);
+  --term-cursor:     var(--color-accent-green);
+  /* Opaque on purpose. This wants to be a 30%-alpha wash, but writing it as
+   * `color-mix(in oklab, var(--color-accent-green) 30%, transparent)` gets
+   * constant-folded at build time — the compiled sheet came out holding
+   * `color-mix(in srgb, #4dc1a4 30%, transparent)`, with the green frozen, so
+   * this one token would have stopped following theme packs while the other
+   * three kept working. A bare var() is passed through untouched, so the
+   * color stays live here and the alpha is applied once it has been resolved
+   * (see `selectionWash` in lib/terminalAppearance.ts). */
+  --term-selection:  var(--color-accent-green);
+
+  /* The sixteen ANSI slots are deliberately NOT aliased to the UI accents,
+   * and that is the whole judgement in this block. An ANSI color's meaning is
+   * assigned by the program printing it, not by us: a compiler emitting
+   * yellow means "warning" and `ls` emitting blue means "directory". Aliasing
+   * slot 3 to `--color-amber` would be the tidy-looking choice and would paint
+   * every compiler warning slate-cyan, because this palette's amber is a
+   * cool dirty-state marker rather than a yellow.
+   *
+   * So these are real ANSI hues, pulled cool to sit in Aura's temperature
+   * rather than borrowed from tokens that answer a different question. A
+   * theme pack that wants its own terminal can still override any of them. */
+  --term-ansi-0:   #1a1a1d;  /* black — lifted off pure, so bg-on-bg still reads */
+  --term-ansi-1:   #d05a76;  /* red */
+  --term-ansi-2:   #5fb38a;  /* green */
+  --term-ansi-3:   #d4a964;  /* yellow — a real yellow, not the dirty-state marker */
+  --term-ansi-4:   #78a6df;  /* blue */
+  --term-ansi-5:   #b98ae0;  /* magenta */
+  --term-ansi-6:   #68b5c4;  /* cyan */
+  --term-ansi-7:   #c8c8cc;  /* white — not pure, so bright white stays distinct */
+  --term-ansi-8:   #5a5a62;  /* bright black (grey) — must clear bg for dim text */
+  --term-ansi-9:   #e8738c;
+  --term-ansi-10:  #7ed3a6;
+  --term-ansi-11:  #e8c47e;
+  --term-ansi-12:  #9ac0ee;
+  --term-ansi-13:  #cfa6f0;
+  --term-ansi-14:  #86cfdc;
+  --term-ansi-15:  #f2f2f5;  /* bright white */
 }
 
 /* Light theme stub — Phase 3 fills these in with proper oklch values.
@@ -2729,6 +2798,20 @@ textarea:focus-visible,
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* A line the agent said *while* working ("pushing it now, then I'll re-check")
+   rather than its conclusion. Only an agent's flat stream produces these; a
+   manager turn keeps its prose out of the step-run entirely. Muted and
+   slightly inset so an expanded run reads as notes beside the steps, never as
+   a second answer competing with the one above it. */
+.aura-chat .aura-turn-activity-note {
+  padding: 1px 0 1px 8px;
+  border-left: 1px solid var(--color-line-soft);
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 /* ── Crew telemetry strip (docked above the composer) ──────────────────────
@@ -6840,8 +6923,49 @@ textarea:focus-visible,
    bg-2 wash, 16px leading glyphs. */
 .ade-roster-menu {
   position: fixed;
-  z-index: 60;
+  /* The shared menu layer, for the same reason the Radix portals below need it
+     (see `--z-menu-portal`): this sheet is a menu, and nothing the app draws
+     should ever cover one.
+
+     It used to name `60`, which is not a layer above the app so much as a seat
+     in the middle of it. Measured with the menu open: `position` resolves to
+     `fixed` and no ancestor carries a transform, filter or stacking z-index,
+     so the sheet is NOT clipped by the sidebar — its box reaches 193px past
+     the rail's right edge exactly as intended. `elementFromPoint` at that
+     overhang still answered with the work surface, because the surface is
+     `inset-0 z-[60]` too, and equal z-index is settled by DOM order. The
+     sidebar is painted first, so the menu lost a tie it could never win, and
+     every item past the rail's edge was unreadable and unclickable.
+
+     A bigger number here would only move the tie: the app also draws at 70,
+     75, 80, 100, 200 and 10000. The menu layer is an order of magnitude above
+     all of them, so this is settled once rather than re-checked whenever
+     somebody writes `z-[…]`. Menus still stack among themselves by DOM
+     order, which is open order. */
+  z-index: var(--z-menu-portal);
   min-width: 208px;
+  /* A sheet taller than the window scrolls rather than hiding its tail.
+     `useAnchoredTop` keeps the sheet's last row on screen by lifting it, but
+     lifting has a limit: once the sheet is taller than the window there is no
+     placement that shows both ends, and the hook pins it to the top so the
+     first rows stay reachable. That leaves the bottom items reachable by
+     nothing at all, which is a worse outcome than a menu that scrolls.
+
+     The 16px is the hook's two 8px edge gaps, so the cap and the placement
+     agree on where the window ends instead of each keeping its own margin.
+     The cap is on the sheet ITSELF, not an inner wrapper, so `offsetHeight`
+     in the hook reports the clamped height — measuring the natural height and
+     then clamping against a box that is no longer that tall would place the
+     sheet by a number nothing on screen has.
+
+     Inert at ordinary window heights: the project menu is the tallest sheet
+     here at 392px and the cap only binds below ~408px of window, so nothing
+     moves and no scrollbar appears until it genuinely cannot fit.
+     `overscroll-behavior` keeps a scroll that reaches the end of the sheet
+     from continuing into the rail underneath it. */
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 4px;
   display: flex;
   flex-direction: column;

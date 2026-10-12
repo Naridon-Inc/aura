@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Check, Search, Star, RotateCcw, X } from "lucide-react";
+import { Check, Plus, Search, Star, RotateCcw, X } from "lucide-react";
 import type { BrainChoice, ModelCatalog } from "../../lib/api";
 import {
   catalogFor,
@@ -19,6 +19,8 @@ import {
   type CatalogModel,
   type SelectedModel,
 } from "../../lib/modelCatalog";
+import { resolveLoadout, type LoadoutRow } from "../../lib/modelLoadout";
+import { ModelLoadoutGroup } from "../chat/ModelLoadoutGroup";
 import "../chat/ChatComposer.css";
 
 type Props = {
@@ -32,9 +34,16 @@ type Props = {
   onPick: (brain: BrainChoice, model: CatalogModel) => void;
   onPickAuto: () => void;
   onToggleFav: (brainId: string, model: CatalogModel) => void;
+  /** Reorder the loadout. Without it the loadout rows still draw and still
+   *  carry their chords; they just cannot be rearranged from here. */
+  onReorderFav?: (fromKey: string, toKey: string) => void;
   onClose: () => void;
   footer?: ReactNode;
   turnControls?: ReactNode;
+  /** True while `turnControls` has a list of its own open over itself. The
+   *  models stand down for it — two scrolling lists in one popover, one of
+   *  them below the other, is not a submenu, it is a longer menu. */
+  turnControlsExpanded?: boolean;
   embedded?: boolean;
   allowDefault?: boolean;
 };
@@ -68,14 +77,22 @@ export function BrainSwitcherModal({
   onPick,
   onPickAuto,
   onToggleFav,
+  onReorderFav,
   onClose,
   footer,
   turnControls,
+  turnControlsExpanded = false,
   embedded = false,
   allowDefault = true,
 }: Props) {
   const [query, setQuery] = useState("");
   const [idx, setIdx] = useState(0);
+  // The catalog is every model every installed agent can run. Once there is a
+  // loadout, that tail is what you open the picker to get PAST, so it folds
+  // behind one row — the same shape as the design this follows, where the full
+  // catalog sits behind "Add models". Typing in the search field opens it
+  // regardless: search is the fast path to a model you have not loaded.
+  const [browsing, setBrowsing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();
@@ -84,8 +101,45 @@ export function BrainSwitcherModal({
     return () => cancelAnimationFrame(frame);
   }, []);
   const q = query.trim().toLowerCase();
+
+  // Every pickable pair, in catalog order — what the loadout's stored keys are
+  // resolved against.
+  const allRows = useMemo<LoadoutRow[]>(() => {
+    const out: LoadoutRow[] = [];
+    for (const brain of brains) {
+      for (const model of catalogFor(brain, liveCatalog)) {
+        if (model.id) out.push({ brain, model });
+      }
+    }
+    return out;
+  }, [brains, liveCatalog]);
+  const loadout = useMemo(
+    () => resolveLoadout(favorites, allRows),
+    [favorites, allRows],
+  );
+  // While searching, the loadout gives way: the query is about the catalog,
+  // and keeping a filtered-out shortlist on screen would answer a question
+  // nobody asked. It also means arrow keys and Enter behave exactly as they
+  // did before this group existed, because the group is not on screen then.
+  // …and the whole model side gives way while the turn controls have a list
+  // open over them, for the same reason one level down: that list is a choice
+  // about the model you already picked, not more models to pick from.
+  const showModels = !turnControlsExpanded;
+  const showLoadout = showModels && !q && loadout.length > 0;
+  const showCatalog = showModels && (!showLoadout || browsing);
+  // Which loadout row, if any, is the current selection. Compared the same way
+  // the catalog rows are (`isRowSelected`), so the check never lands on two
+  // rows when one id has both a standard and a long-context variant.
+  const selectedLoadoutKey = useMemo(() => {
+    const hit = loadout.find((r) =>
+      isRowSelected(value, r.brain.id, r.model),
+    );
+    return hit ? rowKey(hit.brain.id, hit.model) : null;
+  }, [loadout, value]);
+
   const entries = useMemo<Entry[]>(() => {
     const out: Entry[] = [];
+    if (!showCatalog) return out;
     if (allowDefault && (!q || "auto default".includes(q))) out.push({ kind: "auto" });
     for (const brain of brains) {
       let first = true;
@@ -103,7 +157,7 @@ export function BrainSwitcherModal({
       }
     }
     return out;
-  }, [brains, liveCatalog, q, allowDefault]);
+  }, [brains, liveCatalog, q, allowDefault, showCatalog]);
   useEffect(
     () =>
       setIdx((i) => Math.min(Math.max(0, i), Math.max(0, entries.length - 1))),
@@ -159,7 +213,9 @@ export function BrainSwitcherModal({
           <X size={14} />
         </button>
       </div>
-      <div className="chat-catalog-search">
+      {/* The search box goes too. Left up there it would be a field you can
+          type into that filters a list you cannot see. */}
+      <div className="chat-catalog-search" hidden={!showModels}>
         <Search size={15} aria-hidden />
         <input
           ref={inputRef}
@@ -178,17 +234,36 @@ export function BrainSwitcherModal({
           placeholder="Search models or providers…"
         />
       </div>
-      {turnControls}
-        {loadError && (
+      {loadError && (
         <p role="alert" className="chat-catalog-error">
           {loadError}
         </p>
+      )}
+      {showLoadout && (
+        <ModelLoadoutGroup
+          rows={loadout}
+          selectedKey={selectedLoadoutKey}
+          onPick={(row) => onPick(row.brain, row.model)}
+          onRemove={(row) => onToggleFav(row.brain.id, row.model)}
+          onReorder={(fromKey, toKey) => onReorderFav?.(fromKey, toKey)}
+        />
+      )}
+      {showLoadout && !browsing && (
+        <button
+          type="button"
+          className="chat-catalog-browse"
+          onClick={() => setBrowsing(true)}
+        >
+          <Plus size={13} aria-hidden />
+          <span>Add models</span>
+        </button>
       )}
       <div
         id={listId}
         ref={listRef}
         role="listbox"
         aria-label="Available models"
+        hidden={!showCatalog}
         className="chat-catalog-list"
       >
         {loading && brains.length === 0 ? (
@@ -224,12 +299,25 @@ export function BrainSwitcherModal({
                 unusable={isUnusable(entry.brain)}
                 onHover={() => setIdx(i)}
                 onPick={() => pickEntry(entry)}
-                onToggleFav={() => onToggleFav(entry.brain.id, entry.model)}
+                onToggleFav={() => {
+                  // Keep the catalog up. Starring your FIRST model turns the
+                  // loadout on, which is what hides the catalog — so without
+                  // this, the list you are starring from vanishes under your
+                  // cursor the moment you use it, and a second star costs a
+                  // trip back through "Add models".
+                  setBrowsing(true);
+                  onToggleFav(entry.brain.id, entry.model);
+                }}
               />
             ),
           )
         )}
       </div>
+      {/* Below the models, not above them. These are the knobs that apply to
+          whatever you just picked, so they read in that order: what runs the
+          turn, then how hard it runs. Sitting above the list they were the
+          first thing in a panel you opened to choose a model. */}
+      {turnControls}
       {footer && <div className="chat-catalog-footer">{footer}</div>}
     </div>
   );
@@ -347,7 +435,12 @@ function BrainModelRow({
           type="button"
           className="chat-catalog-favorite"
           data-favorite={favorited}
-          aria-label={`${favorited ? "Unfavorite" : "Favorite"} ${model.label}`}
+          // The star is what puts a model in the loadout, so it is named for
+          // what it does now rather than for the set it used to maintain.
+          aria-label={`${favorited ? "Remove" : "Add"} ${model.label} ${
+            favorited ? "from" : "to"
+          } your models`}
+          title={favorited ? "In your models" : "Add to your models"}
           aria-pressed={favorited}
           onClick={onToggleFav}
         >

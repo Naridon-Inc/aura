@@ -33,6 +33,7 @@ import { AgentBlocksView } from "./AgentBlocksView";
 import { OpenAiCompatChatView } from "./OpenAiCompatChatView";
 import { NormalizedTranscript } from "./normalized/NormalizedTranscript";
 import { SharedSessionBand } from "../collab/SharedSessionBand";
+import { StaleInstallBand } from "./StaleInstallBand";
 import { ShareSurfaceMount } from "../collab/share/ShareSurfaceMount";
 
 // Pane-action bridge. The agent-pane controls used to live in a header
@@ -809,7 +810,10 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           }
           break;
         case "leave-split":
-          store.clearSplitLayout();
+          // Name this tab, so the one pane that is left is focused on the
+          // session whose menu was just used — and so the other pane's tabs
+          // come along as tabs instead of vanishing with the tree.
+          store.collapseSplitLayout({ kind: "agent", id: tab.sessionId });
           break;
         case "open-story":
           openStory();
@@ -865,6 +869,12 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           this pane IS. It renders nothing when nobody is sharing, which is
           almost always. */}
       <SharedSessionBand agentSessionId={tab.sessionId} />
+
+      {/* ...and one more, on the same terms: when this agent's own update
+          prompt can never clear because PATH runs a copy its updater doesn't
+          write to, the reason belongs beside the terminal printing it. Also
+          renders nothing almost always. */}
+      <StaleInstallBand agentId={tab.agentId} />
 
       {/* Terminal is the canonical surface — agent CLIs are full TUIs.
           Product context lives in the right-rail Story tab; the optional

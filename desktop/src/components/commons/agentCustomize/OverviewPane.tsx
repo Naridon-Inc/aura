@@ -146,9 +146,8 @@ function cardMeta(
     case "mcp":
       return <CountPill>{stores.mcp.length}</CountPill>;
     case "addons": {
-      // The Add-ons card now stands for both tracks; the live count we hold is
-      // the ADE-native plugins (Extensions are fetched lazily inside the pane),
-      // so show installed plugins as the at-a-glance signal.
+      // Add-ons are the ADE-native plugins, so installed plugins are the
+      // at-a-glance signal.
       const n = stores.plugins.filter((p) => p.kind === "plugin").length;
       return <CountPill>{n === 1 ? "1 plugin" : `${n} plugins`}</CountPill>;
     }

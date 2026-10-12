@@ -193,14 +193,6 @@ type Props = {
    *  via editor.setEditable so locking doesn't remount + lose collab state.
    *  Defaults to true. */
   editable?: boolean;
-  /** Restricted mode for the Scribble surface: a freeform markdown editor
-   *  limited to inline emphasis (bold/italic), checkboxes, plain lists and
-   *  @mentions. Headings, quotes, code blocks, dividers, callouts, tables,
-   *  columns and images are dropped from the schema — so `# `, `> `, ```` ``` ````,
-   *  `---` no longer transform — and the bubble/slash menus only offer the
-   *  allowed blocks, with no drag-handle "turn into". Defaults to false, so
-   *  every other surface (Pages) is unaffected. */
-  restricted?: boolean;
   /** Pages @-mention catalog. When provided, typing `@` opens a compact
    *  popover of people / tasks / pages; picking one inserts a stable
    *  markdown token (people → `@handle`, tasks → `aura://task` link, pages
@@ -213,9 +205,9 @@ type Props = {
    *  reference. Optional. */
   onResolveMention?: (item: MentionItem) => void;
   /** Intercept a plain Enter (no Shift) key. When provided and it returns true,
-   *  the editor suppresses its own newline — used by the Scribble block list to
-   *  turn Enter into "start a new block" instead of a paragraph break. Shift+
-   *  Enter still inserts a soft break. */
+   *  the editor suppresses its own newline — for a host that reads Enter as
+   *  "commit this and start the next one" rather than a paragraph break.
+   *  Shift+Enter still inserts a soft break. */
   onEnterKey?: () => boolean;
 };
 
@@ -465,7 +457,6 @@ export function TiptapEditor({
   documentPadding = false,
   collab,
   editable = true,
-  restricted = false,
   mentionSources,
   onResolveMention,
   onEnterKey,
@@ -515,10 +506,9 @@ export function TiptapEditor({
     left: number;
   } | null>(null);
   const [turnIntoOpen, setTurnIntoOpen] = useState(false);
-  // No hover block handle in dense, seamless-bare, or restricted surfaces —
-  // those are meant to read as plain text you click into, not a chrome-laden
-  // document editor (and restricted has no "turn into" targets to offer).
-  const showHandle = !dense && !bare && !restricted;
+  // No hover block handle in dense or seamless-bare surfaces — those are meant
+  // to read as plain text you click into, not a chrome-laden document editor.
+  const showHandle = !dense && !bare;
   // Freeze the handle's target block while its menu is open so moving the
   // mouse toward the menu doesn't re-point it at a different block.
   const blockMenuOpenRef = useRef(false);
@@ -539,62 +529,43 @@ export function TiptapEditor({
       // the Y.Doc op stack so the two histories don't fight.
       const starterOpts: Record<string, unknown> = { codeBlock: false };
       if (collab) starterOpts.undoRedo = false;
-      if (restricted) {
-        // Freeform but limited to a single paragraph of inline markdown: drop
-        // headings / quotes / dividers / lists so their input rules (`# `,
-        // `> `, `---`, `- `) don't transform. Each Scribble *block* is one such
-        // paragraph; the checkbox + task state live on the block itself, not in
-        // the editor — so bold / italic / gifs / @mentions are all that's left.
-        starterOpts.heading = false;
-        starterOpts.blockquote = false;
-        starterOpts.horizontalRule = false;
-        starterOpts.bulletList = false;
-        starterOpts.orderedList = false;
-      }
       const base: AnyExtension[] = [
         StarterKit.configure(starterOpts),
         // Code blocks: NodeView owns the shell (see MermaidCodeBlock), and
         // CodeHighlight paints Prism syntax tokens as inline decorations.
-        // Omitted in restricted mode — Scribble has no code blocks.
-        ...(restricted ? [] : [MermaidAwareCodeBlock, CodeHighlight]),
+        MermaidAwareCodeBlock,
+        CodeHighlight,
         Placeholder.configure({
           placeholder,
           emptyEditorClass:
             "before:content-[attr(data-placeholder)] before:text-text-5 before:float-left before:h-0 before:pointer-events-none",
         }),
-        // Checkbox lists — full editor only. In restricted Scribble the checkbox
-        // is a block-level control, so the editor stays single-paragraph.
-        ...(restricted ? [] : [TaskList, TaskItem.configure({ nested: true })]),
+        TaskList,
+        TaskItem.configure({ nested: true }),
         // Underline mark — serializes to `<u>…</u>` via tiptap-markdown's
         // HTMLMark fallback (html:true below), so it round-trips losslessly.
         Underline,
         // Images (incl. GIFs) — `![alt](src)` round-trips through
         // tiptap-markdown's native image serializer; paste/drag of a remote or
-        // data-URI gif embeds it. Kept in restricted mode — Scribble supports
-        // gifs.
+        // data-URI gif embeds it.
         Image.configure({
           inline: false,
           allowBase64: true,
           HTMLAttributes: { class: "tiptap-image" },
         }),
-        // Per-block text alignment for headings + paragraphs — full editor
-        // only (no markdown syntax, degrades to left on reload).
-        ...(restricted
-          ? []
-          : [
-              TextAlign.configure({
-                types: ["heading", "paragraph"],
-                alignments: ["left", "center", "right"],
-              }),
-            ]),
+        // Per-block text alignment for headings + paragraphs. No markdown
+        // syntax carries it, so it degrades to left on reload.
+        TextAlign.configure({
+          types: ["heading", "paragraph"],
+          alignments: ["left", "center", "right"],
+        }),
         Link.configure({
           openOnClick: false,
           HTMLAttributes: { class: "text-accent underline hover:text-text-1" },
         }),
         // Notion-style blocks: callout, toggle, columns, highlight, table.
         // Each round-trips through markdown (see tiptap/extensions.ts).
-        // Omitted in restricted mode.
-        ...(restricted ? [] : blockExtensions()),
+        ...blockExtensions(),
         Markdown.configure({
           // html:true lets the structural island blocks (toggle, columns)
           // round-trip — markdown-it passes their <div>/<details> through and
@@ -620,7 +591,7 @@ export function TiptapEditor({
       }
       return base;
     },
-    [placeholder, collab, restricted],
+    [placeholder, collab],
   );
 
   const editor = useEditor({
@@ -645,8 +616,9 @@ export function TiptapEditor({
         ),
       },
       handleKeyDown(_view, event) {
-        // Scribble block list: a plain Enter starts a new block instead of a
-        // paragraph break. Shift+Enter falls through to a soft break.
+        // A host that owns Enter gets it first — "commit this one and start the
+        // next" instead of a paragraph break. Shift+Enter falls through to a
+        // soft break.
         if (
           event.key === "Enter" &&
           !event.shiftKey &&
@@ -820,7 +792,7 @@ export function TiptapEditor({
   // to the cursor's bounding rect. Subsequent chars filter; arrow
   // keys move; Enter picks; Esc dismisses.
   useEffect(() => {
-    if (!editor || restricted) return; // no slash menu in restricted Scribble
+    if (!editor) return;
     function onSelectionUpdate() {
       if (!editor) return;
       const { $from } = editor.state.selection;
@@ -847,17 +819,12 @@ export function TiptapEditor({
       editor.off("selectionUpdate", onSelectionUpdate);
       editor.off("transaction", onSelectionUpdate);
     };
-  }, [editor, slashOpen, restricted]);
+  }, [editor, slashOpen]);
 
   const filteredItems = useMemo(() => {
-    // Restricted Scribble offers only the blocks it allows: plain text, a
-    // bullet list, and a checkbox todo. No headings / quote / code / table.
-    const pool = restricted
-      ? SLASH_ITEMS.filter((i) => i.id === "p" || i.id === "ul" || i.id === "todo")
-      : SLASH_ITEMS;
-    if (!slashQuery) return pool;
-    return pool.filter((i) => i.label.toLowerCase().includes(slashQuery));
-  }, [slashQuery, restricted]);
+    if (!slashQuery) return SLASH_ITEMS;
+    return SLASH_ITEMS.filter((i) => i.label.toLowerCase().includes(slashQuery));
+  }, [slashQuery]);
 
   const pickSlash = useCallback(
     (item: SlashItem) => {
@@ -1145,9 +1112,6 @@ export function TiptapEditor({
             onRun={() => editor.chain().focus().toggleItalic().run()}
             icon={<Italic className="w-3.5 h-3.5" strokeWidth={2} />}
           />
-          {/* Restricted Scribble stops here: bold to highlight + italic only. */}
-          {!restricted && (
-          <>
           <ToolButton
             label="Underline"
             active={editor.isActive("underline")}
@@ -1253,8 +1217,6 @@ export function TiptapEditor({
             }
             icon={<RemoveFormatting className="w-3.5 h-3.5" strokeWidth={1.75} />}
           />
-          </>
-          )}
         </BubbleMenu>
       )}
       {documentPadding ? (

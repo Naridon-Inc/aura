@@ -13,10 +13,22 @@
  *  20k-node / 78k-edge graph (`cmd_kg.rs::view_tests`) — selection, search,
  *  focus, path and explain all stay well inside the budget.
  *
- *  Flip to `false` to hide the sidebar row, the menu item, and the `/graph`
- *  command, and short-circuit every store opener + the WorkSurface render so
- *  a stale persisted "graph was open" snapshot can't re-mount it on launch. */
-export const CODE_MAP_ENABLED = true;
+ *  Disabled anyway: it is not a question anyone came to Trace to ask. A map of
+ *  what-touches-what is a thing you go looking for on a particular day, and it
+ *  sat on the strip next to the two surfaces people read constantly.
+ *
+ *  Hidden rather than deleted, because the machinery under it is substantial
+ *  and shared: `SemanticGraphPane`, the feature map, and the Rust knowledge-
+ *  graph commands with their own `view_tests` — none of which is dead weight,
+ *  and all of which would have to be unpicked to remove a cell from a strip.
+ *
+ *  Off, this hides the Trace cell, and short-circuits every store opener + the
+ *  WorkSurface render so a stale persisted "graph was open" snapshot can't
+ *  re-mount it on launch. `{ kind: "graph" }` stays addressable, so a saved
+ *  link still resolves.
+ *
+ *  Flip to `true` to put Code Map back on the strip. */
+export const CODE_MAP_ENABLED = false;
 
 /** Trace v2 — the calm, entire.io-style Trace surface.
  *
@@ -50,36 +62,6 @@ export const TRACE_V2 = true;
  *  Gates: the "Team activity" rail row + its Trace pane, and the Overview live
  *  ticker. (Flip to `false` only to fully remove the surface again.) */
 export const TEAM_ACTIVITY_ENABLED = true;
-
-/** Memory surface (`MemoryDialog` — Aura's project-memory store).
- *
- *  Enabled (AUDIT-CTX-05). The defects that kept it dark are fixed:
- *  - adds/edits/forgets reflect immediately — every mutation shells the
- *    CLI's reconciled write path and the backend emits `memory:changed`,
- *    which the dialog, badge, and Customize panes all listen for (no
- *    restart, no stale surface);
- *  - the add composer renders on an empty store (the old "Add the first
- *    fact" button opened nothing);
- *  - writes can no longer corrupt the store (the composer offers only
- *    entry-shaped sections; `decisions`/`architecture` are rejected with a
- *    plain-language explanation);
- *  - worktree projects read/write the same memory file the CLI uses;
- *  - entries are Ed25519-signed at mint and verified at view time, carry a
- *    scope manifest and a confidence weight, sharing is explicit
- *    (memory-cloud push of a signed envelope), and forget is soft by
- *    default with a separate hard "Erase" privacy path.
- *
- *  Performance validation (the flip gate): `aura-cli
- *  src/memory/mod.rs::stress_tests::stress_large_memory_stays_bounded_and_fast`
- *  drives a large-repository store — 4 sections × 300 entries with
- *  256-dim embeddings, 100 architecture components, 200 timeline rows —
- *  through ranked search, candidate scans, full serde and prune inside a
- *  5s ceiling, with live facts surviving prune. Keep that test green
- *  before touching memory internals; flip this back off only to remove
- *  the surface entirely.
- *
- *  Gates: the "Memory" rail row (v2 + legacy) and the TopBar overflow item. */
-export const MEMORY_SURFACE_ENABLED = true;
 
 /** Aura Manager — the native in-app orchestrator chat ("Aura" agent).
  *
@@ -184,22 +166,23 @@ export const TRACE_IA_V3 = true;
  *  Flip to `false` to fall back to the legacy input-first Goals surface. */
 export const GOALS_V2 = true;
 
-/** Project Timeline — the full-screen "relive how this project came to be"
- *  wizard.
+/** Project health (`DoctorDialog` — the plain-language `aura doctor` reading).
  *
- *  Folds the real intent log (the same feed Sessions reads) into a time-ordered
- *  narrative and plays it back: a churn-sparkline scrubber along the bottom you
- *  drag like a film reel, a left rail of chapters (sessions/runs), and a center
- *  detail of the moment the playhead is parked on — its reason ("why"), the
- *  code it touched, and how far the build had come by that point. Summoned from
- *  the Trace rail's "Project timeline" row (and anywhere via
- *  `aura:open-timeline`); it owns the whole window, no inline/squeezed view.
+ *  Disabled: it is a diagnostic, and a diagnostic belongs where you go when
+ *  something is wrong, not on the strip of a surface you read to see what
+ *  happened. It was one of three utilities crowding out the two views that
+ *  earn the space.
  *
- *  Gating this flag hides the Trace rail row + the `aura:open-timeline` mount,
- *  so the surface is fully dormant when off.
+ *  Hidden rather than deleted. The reading itself is real work — `DoctorDialog`
+ *  over `lib/doctorHealth`, which turns the engine's report into sentences a
+ *  non-engineer can act on, with its own test suite — and the same report is
+ *  still one keystroke away as `/doctor`, which runs the CLI and prints it.
  *
- *  Flip to `false` to hide the Project Timeline. */
-export const TIMELINE_V2 = true;
+ *  Off, this hides the Trace cell; `{ kind: "tool", tool: "doctor" }` stays
+ *  addressable, so a saved link still resolves.
+ *
+ *  Flip to `true` to put Project health back on the strip. */
+export const PROJECT_HEALTH_ENABLED = false;
 
 /** Team Radar — the awareness-plane panel in the right rail.
  *
@@ -221,3 +204,27 @@ export const TIMELINE_V2 = true;
  *  so in plain words — an idle radar shouldn't read as a broken one — and the
  *  file list keeps the rest of the panel. */
 export const AURA_RADAR_ENABLED = true;
+
+/** The Tasks strip's Graph lens — the crew dependency map (`CrewSurface`).
+ *
+ *  Disabled: Tasks is List and Board. Those are the two drawings people
+ *  actually read, and the third cell asked every visitor to decide between a
+ *  backlog and a dependency map before they had looked at either.
+ *
+ *  Hidden rather than deleted, because the map is not a leaf. `CrewSurface`
+ *  only answers to this lens, but the tree under and around it does not:
+ *  `crewControl` drives the rail's pause/resume, `crewShared` + `crewProof`
+ *  draw a task's crew activity, `crewActivity` + `CrewLiveTranscript` feed the
+ *  manager chat's composer, and the machine wizards and runner panel are
+ *  reached from Workspaces and Settings. Ripping the map out would mean
+ *  picking those apart for no gain the user asked for.
+ *
+ *  Gating this flag drops the Graph cell from `WORK_LENSES` — which shrinks
+ *  `WORK_LENS_VALUES`, so `readWorkLens` migrates anyone whose last lens was
+ *  the map back to the list — makes `isCrewLens` answer no, which is the one
+ *  predicate both the host and the two surfaces branch on, and hides the
+ *  second door in the Tasks rail's Goals group. The lens value stays in the
+ *  `WorkLens` union so the surface still typechecks.
+ *
+ *  Flip to `true` to put the map back on the strip. */
+export const CREW_GRAPH_LENS_ENABLED = false;

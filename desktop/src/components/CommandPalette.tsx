@@ -18,7 +18,6 @@ import { fetchIntentRows } from "../lib/intentCache";
 import { fsFindFiles } from "../lib/place/workApi";
 import { relativeAge } from "../lib/relativeTime";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
-import { useExtCommands } from "../lib/vscodeExt/extCommandStore";
 import { groupHits } from "./palette/paletteGroups";
 import { PaletteResultRow } from "./palette/PaletteRows";
 import { AsciiSpinner } from "./ui/ascii-spinner";
@@ -27,14 +26,6 @@ export type PaletteEntry =
   | { kind: "action"; id: AppActionId; label: string; hint?: string }
   | { kind: "slash"; id: string; label: string; hint?: string }
   | { kind: "file"; id: string; label: string; hint?: string }
-  | {
-      kind: "extCommand";
-      id: string;
-      label: string;
-      hint?: string;
-      /** The VS Code command id to run in the web-extension host. */
-      command: string;
-    }
   | { kind: "agent"; id: string; label: string; hint?: string; prompt: string }
   | {
       kind: "match";
@@ -129,10 +120,8 @@ const APP_ACTIONS: PaletteEntry[] = [
   { kind: "action", id: "close_tab", label: "Close Tab", hint: "⌘W" },
   { kind: "action", id: "settings", label: "Open Settings", hint: "⌘," },
   { kind: "action", id: "shortcuts", label: "Keyboard Shortcuts", hint: "⌘/" },
-  { kind: "action", id: "extensions", label: "Extensions: Add Themes & Languages…" },
   { kind: "action", id: "mobile_waitlist", label: "Aura on your phone: Join the waitlist…" },
   { kind: "action", id: "time_machine", label: "Time machine: Travel back & recover…", hint: "⌘⌥T" },
-  { kind: "action", id: "project_timeline", label: "Project timeline: Relive how it was built…" },
   { kind: "action", id: "workspaces", label: "Workspaces: See every parallel copy…", hint: "⌘⇧W" },
   { kind: "action", id: "tasks_board", label: "Open Tasks Board", hint: "⌘T" },
   { kind: "action", id: "orchestrate", label: "Orchestrate Multi-Step Session…" },
@@ -140,7 +129,6 @@ const APP_ACTIONS: PaletteEntry[] = [
   { kind: "action", id: "open_prs", label: "Open Pull Requests" },
   { kind: "action", id: "aura_ask", label: "Ask Aura about your project…" },
   { kind: "action", id: "aura_status", label: "Aura: Project Status" },
-  { kind: "action", id: "aura_doctor", label: "Aura: Project Health Check" },
   { kind: "action", id: "aura_impacts", label: "Aura: Changes That Touch Your Work" },
   { kind: "action", id: "aura_snapshot", label: "Aura: Save a Point…" },
   { kind: "action", id: "aura_rewind", label: "Aura: Time Machine…" },
@@ -456,26 +444,10 @@ export function CommandPalette({
       });
   }, [workspaceFiles, repoRoot, recentPathSet]);
 
-  // Commands contributed by enabled VS Code web extensions — runnable straight
-  // from the palette, just like a built-in action.
-  const extCommands = useExtCommands();
-  const extEntries: PaletteEntry[] = useMemo(
-    () =>
-      extCommands.map((c) => ({
-        kind: "extCommand",
-        id: `ext:${c.command}`,
-        label: c.title,
-        hint: c.extName,
-        command: c.command,
-      })),
-    [extCommands],
-  );
-
   const all: PaletteEntry[] = useMemo(
     () => [
       ...APP_ACTIONS,
       ...SLASH_ENTRIES,
-      ...extEntries,
       ...recentFiles.map<PaletteEntry>((f) => ({
         kind: "file",
         id: f.path,
@@ -484,7 +456,7 @@ export function CommandPalette({
       })),
       ...fileEntries,
     ],
-    [recentFiles, fileEntries, extEntries],
+    [recentFiles, fileEntries],
   );
 
   const { scope, rest } = useMemo(() => scopeForQuery(query), [query]);

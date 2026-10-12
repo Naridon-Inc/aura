@@ -43,6 +43,15 @@ export function PaneAddPopover({
   return (
     <div
       ref={ref}
+      // This is a menu in every way except its markup, so say so: a pane
+      // below it may be a native terminal, which is a SIBLING of the webview
+      // and paints above every z-index in it. Measured before this attribute
+      // existed: 87% of this panel's area landed on an agent pane's terminal
+      // hole and was simply not drawn, leaving the 40px search strip sitting
+      // on the pane's header row looking like a misplaced control. The
+      // attribute is what `openOverlayRects` reads to take the surface away
+      // while the panel is up.
+      data-over-native-surface=""
       // No `overflow-hidden`: the launcher's footer menus open upward, out of
       // this box on purpose, and a clipped flyout is a menu you can't read.
       // The list inside does its own scrolling.

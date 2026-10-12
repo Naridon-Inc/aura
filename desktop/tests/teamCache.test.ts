@@ -261,7 +261,6 @@ describe("wiring", () => {
     // the permissions you had before your own action.
     const regaters = [
       "components/settings/TeamTab.tsx",
-      "components/team/application/useTeamChat.ts",
     ];
     for (const rel of regaters) {
       const body = stripComments(await readSrc(rel));

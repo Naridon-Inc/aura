@@ -27,6 +27,7 @@ import { intentTypeChip } from "@shared/intentTypeLabels";
 import * as Icons from "../Icons";
 import { AgentBadge } from "../agent/AgentBadge";
 import { Button } from "../ui/button";
+import { GLYPH_USAGE } from "../trace/traceDestinations";
 import { EmptyState, ErrorState, LoadingState } from "../ui/state";
 import {
   collapseAutoStubSessions,
@@ -458,9 +459,15 @@ const sessionsCache = new Map<string, SessionsSnapshot>();
 export function SessionsPane({
   repoRoot,
   onOpenSession,
+  onOpenCostUsage,
 }: {
   repoRoot: string;
   onOpenSession: (row: IntentRow) => void;
+  /** Open the spend reading of these runs. Cost & usage used to be its own
+   *  cell on the Trace strip, which asked the reader to choose between the
+   *  runs and what they cost before they had looked at either; it is a door
+   *  out of the list now. Absent where there is nothing to open it with. */
+  onOpenCostUsage?: () => void;
 }) {
   // Seed every list from the per-workspace snapshot cache so a remount paints
   // the previous result on the first frame instead of an empty flash; `load`
@@ -669,6 +676,29 @@ export function SessionsPane({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          {onOpenCostUsage ? (
+            <Button
+              variant="ghost"
+              size="xs"
+              type="button"
+              onClick={onOpenCostUsage}
+              className="gap-1.5 text-text-3 hover:text-text-1 [&_svg]:size-3"
+              title="Token spend and per-developer cost for these runs"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                {GLYPH_USAGE}
+              </svg>
+              Cost &amp; usage
+            </Button>
+          ) : null}
           {/* Only worth showing once there's more than one branch to choose
               between — on a single-branch repo it's pure noise. */}
           {branches.length > 1 ? (

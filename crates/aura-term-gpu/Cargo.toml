@@ -18,3 +18,7 @@ tracing        = "0.1"
 # Drives wgpu's async adapter/device requests to completion in the offscreen
 # render test (no async runtime otherwise).
 pollster = "0.4"
+# Writes the scrollback proof frames out as images a person can look at. A
+# pixel assertion can say two frames differ; only a picture shows that the
+# earlier line is the one on screen.
+png = "0.17"

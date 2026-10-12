@@ -19,9 +19,7 @@ export type AppActionId =
   | "close_tab"
   | "settings"
   | "shortcuts"
-  | "extensions"
   | "time_machine"
-  | "project_timeline"
   | "open_aura"
   | "workspaces"
   | "open_file"
@@ -29,7 +27,6 @@ export type AppActionId =
   | "zoom_out"
   | "zoom_reset"
   | "aura_status"
-  | "aura_doctor"
   | "aura_impacts"
   | "aura_snapshot"
   | "aura_rewind"
@@ -54,7 +51,16 @@ export type AppActionId =
   | "next_attention"
   | "fork_chat"
   | "toggle_changes"
-  | "cycle_effort";
+  | "cycle_effort"
+  // The composer's model loadout and its latency switch. ⌘1…⌘5 pick the Nth
+  // model you put in the loadout; ⌘⇧E flips Fast. Both were a click into a
+  // popover and a hunt down a list of every model every installed agent runs.
+  | "pick_model_1"
+  | "pick_model_2"
+  | "pick_model_3"
+  | "pick_model_4"
+  | "pick_model_5"
+  | "toggle_fast";
 
 export type Dispatch = (id: AppActionId) => void;
 
@@ -80,7 +86,6 @@ const MENU_ACTION_IDS: AppActionId[] = [
   "zoom_out",
   "zoom_reset",
   "aura_status",
-  "aura_doctor",
   "aura_impacts",
   "aura_snapshot",
   "aura_rewind",
@@ -95,9 +100,7 @@ const MENU_ACTION_IDS: AppActionId[] = [
   "tasks_board",
   "notes",
   "open_prs",
-  "extensions",
   "time_machine",
-  "project_timeline",
   "open_aura",
 ];
 
@@ -267,6 +270,24 @@ export function resolveShortcut(c: Chord): AppActionId | null {
       return "zoom_out";
     case "0":
       return "zoom_reset";
+    // ⌘1…⌘5 pick the Nth model in the composer's loadout. Plain ⌘-digit on
+    // purpose: nothing in Aura claimed the digit row, it is what "the Nth of
+    // these" means in every browser and editor, and it is one modifier
+    // shorter than the ^⌘N the design this follows uses — a chord that was
+    // chosen around a different app's conflicts, not ours. No `editable`
+    // guard: switching model while typing the prompt is exactly when you
+    // want it, and a digit with ⌘ held is not text.
+    case "1":
+    case "2":
+    case "3":
+    case "4":
+    case "5":
+      if (c.shift || c.alt) return null;
+      return `pick_model_${c.key}` as AppActionId;
+    // ⌘⇧E — Fast. Shift required: ⌘E is "use selection for find" in the text
+    // surfaces and the one chord people expect to keep.
+    case "e":
+      return c.shift && !c.alt ? "toggle_fast" : null;
     // ⌘⇧A — Ask Aura. Shift required so we don't conflict with
     // ⌘A "Select All" inside text fields.
     case "a":

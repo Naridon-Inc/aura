@@ -23,10 +23,12 @@
 import {
   Fragment,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type RefObject,
 } from "react";
 import * as Icons from "./Icons";
 import { useMinuteTick } from "../lib/useMinuteTick";
@@ -557,6 +559,55 @@ function sortWorkspaces(list: Workspace[], sort: RosterSort): Workspace[] {
   return next;
 }
 
+/** How close a cursor-anchored sheet may come to the window's edge. */
+const SHEET_EDGE_GAP = 8;
+
+/** The top edge for a sheet opened at the cursor, so its last row stays on
+ *  screen.
+ *
+ *  This used to be `Math.min(y, innerHeight - 256)`, where 256 was a guess at
+ *  how tall the sheet would be. The project menu has since grown to eleven
+ *  items and measures ~392, so the guess under-reserved by half a sheet and
+ *  the bottom rows — hide and remove among them — sat below the window with
+ *  no way to scroll to them. The sort popover had no vertical clamp at all.
+ *
+ *  Replacing 256 with a bigger number only moves the day it goes stale, so
+ *  nothing is guessed: the sheet is the one thing that knows its own height,
+ *  and it knows it as soon as it has rendered. The first render places it at
+ *  the cursor, this measures the real element, and the correction lands in a
+ *  layout effect — before paint, so the sheet is never seen in the wrong
+ *  place. It re-measures whenever the anchor moves, which is every time the
+ *  menu is opened on a different row or with different items.
+ *
+ *  The floor matters as much as the ceiling. On a window shorter than the
+ *  sheet, `innerHeight - height` goes negative, and honouring it would push
+ *  the FIRST row off the top to save the last — trading one unreachable end
+ *  for the other. Pinned to the top edge instead: the sheet runs off the
+ *  bottom, but it runs off from a known place, and the rows a person reaches
+ *  for first are the ones they can see.
+ *
+ *  No resize listener: both sheets close on `resize` (see their `useDismiss`
+ *  calls), so there is no open sheet left for a resize to strand. */
+function useAnchoredTop(
+  ref: RefObject<HTMLDivElement | null>,
+  y: number | null,
+): number | undefined {
+  const [top, setTop] = useState<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (y == null) return;
+    const el = ref.current;
+    if (!el) {
+      setTop(y);
+      return;
+    }
+    const lift = window.innerHeight - el.offsetHeight - SHEET_EDGE_GAP;
+    setTop(Math.max(SHEET_EDGE_GAP, Math.min(y, lift)));
+  }, [ref, y]);
+  // Before the first measurement there is nothing better than the cursor, and
+  // the effect above corrects it in the same frame.
+  return y == null ? undefined : (top ?? y);
+}
+
 // The live-agent face pile (LiveAgentLane / AgentChip / AgentChipCard) was
 // removed from the roster: showing which agent is driving each worktree
 // cluttered the sidebar. Worktree rows now read as plain git checkouts
@@ -769,6 +820,8 @@ export function WorkspaceRoster({
   useDismiss(!!sortMenu, () => setSortMenu(null), [], {
     closeOnWindow: ["resize"],
   });
+  const sortMenuRef = useRef<HTMLDivElement | null>(null);
+  const sortMenuTop = useAnchoredTop(sortMenuRef, sortMenu?.y ?? null);
 
   // Which PTY sessions are still running, across every project — the only
   // evidence that an agent in a workspace you aren't looking at is real.
@@ -820,6 +873,8 @@ export function WorkspaceRoster({
   // clicking an item doesn't trip the outside-close before its onClick.
   const [menu, setMenu] = useState<RosterMenu | null>(null);
   const closeMenu = () => setMenu(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const menuTop = useAnchoredTop(menuRef, menu?.y ?? null);
 
   // "Change icon" hands off to the operating system's own emoji picker rather
   // than a curated in-app grid. `emojiTargetRef` remembers which project the
@@ -1999,14 +2054,24 @@ export function WorkspaceRoster({
         </div>
       )}
 
+      {/* `role="menu"` is not only for assistive tech here: it is what
+          registers this sheet with the native-surface overlay policy
+          (`OVERLAY_SELECTOR` in `nativeSurfacePlacement.ts`). The GPU terminal
+          is a sibling of the webview and paints above every z-index the page
+          can produce, so a pane that does not know about this menu will paint
+          straight over it — which is exactly what used to slice the labels off
+          mid-word. The `{sortMenu && …}` guard is the other half of the
+          contract: the policy reads presence as openness, so a menu must be
+          unmounted when closed rather than hidden. */}
       {sortMenu && (
         <div
+          ref={sortMenuRef}
           className="ade-roster-menu"
           role="menu"
           onMouseDown={(e) => e.stopPropagation()}
           style={{
             left: Math.min(sortMenu.x, window.innerWidth - 176),
-            top: sortMenu.y,
+            top: sortMenuTop,
           }}
         >
           <div className="rm-head">Sort projects</div>
@@ -2029,14 +2094,18 @@ export function WorkspaceRoster({
         </div>
       )}
 
+      {/* Mounted only while open, and carrying `role="menu"`, for the reason
+          spelled out at the sort menu above: that is how the native terminal
+          surface learns to clip around it. */}
       {menu && (
         <div
+          ref={menuRef}
           className="ade-roster-menu"
           role="menu"
           onMouseDown={(e) => e.stopPropagation()}
           style={{
             left: Math.min(menu.x, window.innerWidth - 224),
-            top: Math.min(menu.y, window.innerHeight - 256),
+            top: menuTop,
           }}
         >
           {menu.kind === "project" ? (

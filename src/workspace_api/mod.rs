@@ -9,6 +9,9 @@
 //!     caller maps to an exit code.
 //!   * [`cmd`]    — the clap verbs, and the one polling loop (`messages --wait`).
 //!   * [`output`] — the human rendering. `--json` prints the raw response.
+//!   * [`paging`] — the `--limit`/`--offset` rules, shared with
+//!     `crate::cloud_project` so the two paging commands cannot answer the
+//!     same bad window differently.
 //!
 //! The MCP tools in `crate::mcp_workspace` call the same [`client`], so the
 //! CLI and the MCP surface cannot drift apart.
@@ -16,6 +19,7 @@
 pub mod client;
 pub mod cmd;
 pub mod output;
+pub mod paging;
 
 #[cfg(test)]
 mod tests;

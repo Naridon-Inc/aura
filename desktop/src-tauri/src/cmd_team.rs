@@ -1568,9 +1568,9 @@ fn author_walk_cache() -> &'static std::sync::Mutex<BTreeMap<String, (u64, Vec<G
 
 /// Run `walk` unless the same walk answered within [`AUTHOR_WALK_TTL_SECS`].
 ///
-/// Worth having because the roster is not read by one screen. Team, Commons
-/// and the Scribble panel each load it on their own, two of them re-poll it
-/// every 15 seconds, and `team_identity` re-runs the whole thing a second time
+/// Worth having because the roster is not read by one screen. Team and Commons
+/// each load it on their own, one of them re-polls it every 15 seconds, and
+/// `team_identity` re-runs the whole thing a second time
 /// on top of whatever `team_load` just did — so opening the app used to walk
 /// all of history several times over within a second or two of itself.
 /// Per-repo "when did we last ask GitHub for collaborators" marks, for the

@@ -13,6 +13,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Field as FormField } from "../ui/field";
 import { FullscreenOverlay } from "../FullscreenOverlay";
+import { installNudge, tildePath } from "../../lib/agentInstallHealth";
 import {
   api,
   type AgentConfigSyncStatus,
@@ -363,14 +364,6 @@ export function AgentsTab() {
   );
 }
 
-/** Shortens a home-directory path to `~/…` so it stays readable in a narrow
- *  row. The webview has no HOME, so this reads the shape out of the path
- *  itself and leaves anything else untouched. Cosmetic only — the row's
- *  title attribute always carries the real path. */
-function tildePath(p: string): string {
-  return p.replace(/^\/(?:Users|home)\/[^/]+\//, "~/");
-}
-
 /** The endless-update-nag explainer. Shown only when a newer copy of the
  *  agent exists but nothing can reach it — the case where the CLI's own
  *  "please update" prompt can never clear, because the update lands in a
@@ -551,7 +544,13 @@ function AgentRow({
         )}
       </div>
     </div>
-    {install?.stale && <ShadowedInstallNotice health={install} />}
+    {/* Not `install.stale`: that flag is false whenever nothing is on PATH,
+        because nothing runs to be out of date. Gating on it kept the notice's
+        "installed where your shell can't see it" branch from ever rendering —
+        exactly the case where the row above says "not found" while a copy sits
+        on disk. `installNudge` is the predicate the agent pane's band reads
+        too, so the two surfaces cannot disagree about the same machine. */}
+    {install && installNudge(install) && <ShadowedInstallNotice health={install} />}
     </div>
   );
 }

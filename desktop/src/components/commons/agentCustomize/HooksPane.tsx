@@ -74,21 +74,32 @@ export function HooksPane({
                 background: capture.enabled
                   ? "color-mix(in srgb, var(--color-accent) 16%, transparent)"
                   : "var(--color-bg-2)",
-                color: capture.enabled
-                  ? "var(--color-accent)"
-                  : "var(--color-text-4)",
+                color: capture.unreadable
+                  ? "var(--color-caret-orange)"
+                  : capture.enabled
+                    ? "var(--color-accent)"
+                    : "var(--color-text-4)",
               }}
             >
               <ShieldCheck size={18} />
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-base font-medium text-text-1">
-                {capture.enabled ? "Safety net is on" : "Safety net is off"}
+                {/* Off and can't-tell are different answers. Telling someone
+                    their safety net is off when it is very likely on is the
+                    worse of the two mistakes to make. */}
+                {capture.unreadable
+                  ? "Aura can't check this project"
+                  : capture.enabled
+                    ? "Safety net is on"
+                    : "Safety net is off"}
               </div>
               <div className="text-sm text-text-4">
-                {capture.enabled
-                  ? "Every commit is recorded with its reason, and can be undone."
-                  : "Commits aren't being recorded. Turn this on and Aura starts at your next one."}
+                {capture.unreadable
+                  ? capture.unreadable
+                  : capture.enabled
+                    ? "Every commit is recorded with its reason, and can be undone."
+                    : "Commits aren't being recorded. Turn this on and Aura starts at your next one."}
               </div>
             </div>
             {busy ? (
@@ -96,6 +107,7 @@ export function HooksPane({
             ) : (
               <Switch
                 checked={capture.enabled}
+                disabled={capture.unreadable !== null}
                 onCheckedChange={toggle}
                 aria-label={
                   capture.enabled ? "Turn the safety net off" : "Turn the safety net on"

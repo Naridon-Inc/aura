@@ -17,6 +17,7 @@
 
 import * as React from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { ImageLightbox } from "../../media/ImageLightbox";
 
 import { StatusChip, type ChipTone } from "../../ui/statusChip";
 import { AgentIcon } from "../../agent/AgentIcon";
@@ -265,9 +266,13 @@ function ImageReadCard({
         )}
       </div>
       {src && !failed && (
-        <img
+        // Clickable on purpose: this is usually a screenshot the agent just
+        // took, and a 420px-wide thumbnail of a 1512px window is unreadable.
+        // The lightbox opens it in place and carries Copy / Save with it.
+        <ImageLightbox
           src={src}
           alt={view.subject || "image"}
+          name={view.imagePath?.split("/").pop() || view.subject}
           loading="lazy"
           onError={() => setFailed(true)}
           style={{

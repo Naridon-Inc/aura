@@ -17,7 +17,6 @@ export type BuiltinRightRailTab =
   | "checks"
   | "prs"
   | "commons"
-  | "scribble"
   | "aura"
   | "chat"
   | "story"
@@ -58,10 +57,6 @@ type Props = {
    *  in the rail next to Checks. Rendered only when supplied, so the legacy
    *  rail is unaffected. */
   commonsView?: ReactNode;
-  /** Scribble — a common markdown place to write: a shared team canvas + a
-   *  private personal one, with a pinned strip on top. A lightweight markdown
-   *  task manager. Rendered only when supplied. */
-  scribbleView?: ReactNode;
   /** Changed-file count badge for the Changes tab. */
   changesCount?: number;
   /** In-flight cloud A2A task count (Tasks tab badge). */
@@ -74,22 +69,6 @@ type Props = {
 
 // Segment icons — small stroked glyphs matching the old pill tabs.
 const ICON = {
-  scribble: (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M3 3.5A1.5 1.5 0 0 1 4.5 2h5L13 5.5v7A1.5 1.5 0 0 1 11.5 14h-7A1.5 1.5 0 0 1 3 12.5v-9z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M5.5 7.5h5M5.5 10h3"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinecap="round"
-      />
-    </svg>
-  ),
   // A folder — the Files tab is this workspace's tree.
   files: (
     <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
@@ -181,7 +160,6 @@ export function RightRail({
   changesView,
   checksView,
   commonsView,
-  scribbleView,
   browserView,
   changesCount = 0,
   pluginPanels = [],
@@ -192,8 +170,6 @@ export function RightRail({
   // view prop is supplied; ADE mode drops the legacy Aura/Chat/Story/Tasks
   // cluster (re-homed elsewhere in the IA).
   const tabOptions: RailTab[] = [];
-  if (scribbleView != null)
-    tabOptions.push({ value: "scribble", label: "Scribble", icon: ICON.scribble });
   if (filesView != null)
     tabOptions.push({ value: "files", label: "Files", icon: ICON.files });
   if (changesView != null)
@@ -237,7 +213,7 @@ export function RightRail({
   // had clicked anything.
   //
   // Unmounting on every switch would be the other extreme: it throws away
-  // scroll position and whatever you had typed in Scribble. So the rule is
+  // scroll position and whatever you had half-typed. So the rule is
   // once-seen-stays: the first time a section becomes active it mounts, and
   // from then on it keeps its `hidden` behaviour and all its state.
   const seen = useRef<Set<RightRailTab>>(new Set());
@@ -256,8 +232,9 @@ export function RightRail({
           track's own `overflow: hidden` would clip.
 
           Only the tab you are on spells its name. This rail is ~310px wide and
-          carries four sections; every
-          cell wearing its glyph AND its word ran the strip off the end, so the
+          carries a section per view prop plus whatever the installed plugins
+          add; every cell wearing its glyph AND its word ran the strip off the
+          end, so the
           last section was sliced in half by the window edge with nothing to say
           it was there. Scrolling chrome hides destinations — a section you
           cannot see is a section you do not know exists. So the others keep
@@ -308,9 +285,6 @@ export function RightRail({
       )}
       {commonsView != null && opened("commons") && (
         <RailBody active={activeTab === "commons"}>{commonsView}</RailBody>
-      )}
-      {scribbleView != null && opened("scribble") && (
-        <RailBody active={activeTab === "scribble"}>{scribbleView}</RailBody>
       )}
       {pluginPanels
         .filter((p) => opened(p.id))

@@ -21,14 +21,20 @@
 //    Exhaustive over `WORK_LENS_VALUES`, so adding a fifth lens fails here
 //    until every fold has an answer for it.
 //
-// 3. THE STRIP WAS ICONS ON ONE SURFACE AND LABELS ON THE OTHER. Two of the
-//    four lenses are drawn by `TasksBoard` and two by `CrewSurface`; each
+// 3. THE STRIP WAS ICONS ON ONE SURFACE AND LABELS ON THE OTHER. The board
+//    lenses are drawn by `TasksBoard` and the map by `CrewSurface`; each
 //    rendered its own switch, and the crew's was the icon-only variant. So the
-//    one control that says which of four drawings you are reading lost its
-//    words halfway across its own strip. Both render the same element now.
+//    one control that says which drawing you are reading lost its words
+//    halfway across its own strip. Both render the same element now.
+//
+// The strip is two cells today. The map sits behind `CREW_GRAPH_LENS_ENABLED`,
+// so everything below is asserted against that flag rather than against a
+// hard-coded list: a cell offered without its flag, and a flag that turns
+// nothing on, both fail here.
 
 import { describe, expect, test } from "bun:test";
 
+import { CREW_GRAPH_LENS_ENABLED } from "../src/lib/featureFlags";
 import {
   WORK_LENSES,
   WORK_LENS_VALUES,
@@ -47,11 +53,13 @@ describe("the lens strip", () => {
     }
   });
 
-  test("offers exactly the three drawings, in strip order", () => {
+  test("opens with the board's own drawings, in strip order", () => {
     // Plan was a fourth cell until it turned out to be List with a different
-    // name — see the Tasks collapse. The strip is the three drawings that
-    // actually differ.
-    expect([...WORK_LENS_VALUES]).toEqual(["list", "board", "graph"]);
+    // name — see the Tasks collapse. What is left is the drawings that
+    // actually differ, and the map only among them when it is switched on.
+    expect([...WORK_LENS_VALUES].slice(0, 2)).toEqual(["list", "board"]);
+    expect(WORK_LENS_VALUES.includes("graph")).toBe(CREW_GRAPH_LENS_ENABLED);
+    expect(WORK_LENS_VALUES).toHaveLength(CREW_GRAPH_LENS_ENABLED ? 3 : 2);
   });
 
   test("every cell carries a word and a reason, not just a glyph", () => {
@@ -67,12 +75,15 @@ describe("the lens strip", () => {
 });
 
 describe("every lens is answered by every fold", () => {
-  test("isCrewLens splits the strip in two, and neither half is empty", () => {
+  test("isCrewLens answers every cell the strip offers", () => {
     const crew = WORK_LENS_VALUES.filter(isCrewLens);
     const board = WORK_LENS_VALUES.filter((l) => !isCrewLens(l));
-    expect(crew.length).toBeGreaterThan(0);
     expect(board.length).toBeGreaterThan(0);
     expect(crew.length + board.length).toBe(WORK_LENS_VALUES.length);
+    // The crew half is the map, offered exactly when its flag says so. A cell
+    // on the strip that neither half claims is a lens you can click into and
+    // not come back from.
+    expect(crew).toEqual(CREW_GRAPH_LENS_ENABLED ? ["graph"] : []);
   });
 
   test("taskViewFor answers every lens with a view the board draws", () => {
@@ -81,13 +92,17 @@ describe("every lens is answered by every fold", () => {
     }
   });
 
-  test("the crew half is exactly Graph", () => {
+  test("the map is reachable exactly when its flag says so", () => {
     // There used to be a `crewViewFor` fold here, mapping two crew lenses onto
     // two crew drawings. Plan was the other one, and it went when the Tasks
-    // surface collapsed to one list — so the crew owns a single lens now and a
-    // mapping with one entry is just the entry. This is the assertion that has
-    // to hold either way: whatever `isCrewLens` claims, the crew surface draws.
-    expect(WORK_LENS_VALUES.filter(isCrewLens)).toEqual(["graph"]);
+    // surface collapsed to one list — so the crew owns a single lens, and
+    // `isCrewLens` is the one predicate the host and both surfaces branch on.
+    // Off, it has to answer no to everything: a predicate that still claims
+    // `graph` while the strip has no Graph cell is a surface the app can route
+    // to and the user cannot route back from.
+    expect(isCrewLens("graph")).toBe(CREW_GRAPH_LENS_ENABLED);
+    expect(isCrewLens("list")).toBe(false);
+    expect(isCrewLens("board")).toBe(false);
   });
 
   test("the two board lenses map to their own names", () => {

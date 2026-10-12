@@ -2,7 +2,7 @@
 // chat has to turn that string back into the page it names — a card you can
 // read and a button that opens it.
 //
-// It didn't. Someone wrote a team Scribble, @-mentioned a colleague in it, and
+// It didn't. Someone wrote a team page, @-mentioned a colleague in it, and
 // the colleague got a line of dead text they could not click, could not open,
 // and could only retype into a search box. The reason is a shape nobody
 // designed and everybody had to agree on anyway: a team page has no bucket, so

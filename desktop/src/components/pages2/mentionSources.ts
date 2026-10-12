@@ -1,4 +1,4 @@
-// mentionSources — unified @-mention catalog for the Pages + Scribble editors.
+// mentionSources — the @-mention catalog for the Pages editor.
 // Loads the four things a doc can reference (people from the team roster, pull
 // requests, tasks from the board, and other pages) once, then offers a single
 // fuzzy search over the merged set. The editor's @ popover passes a query (and

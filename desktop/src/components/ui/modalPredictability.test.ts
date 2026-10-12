@@ -101,7 +101,10 @@ describe("no modal hides its own buttons", () => {
   const cards = withFooter.filter((f) => !isShell(f.text));
 
   test("there are footered modals of both shapes to check", () => {
-    expect(cards.length).toBeGreaterThan(3);
+    // A floor, not a census: the point is that the rules below are checked
+    // against a real population rather than an empty list. It was four cards
+    // until the Team dialogs left with the messaging surface.
+    expect(cards.length).toBeGreaterThanOrEqual(3);
     expect(shells.length).toBeGreaterThan(0);
   });
 

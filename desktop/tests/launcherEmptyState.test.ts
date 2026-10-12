@@ -243,7 +243,6 @@ describe("one segmented control, and it is a track", () => {
     // …and every other hand-written strip stays on the track.
     for (const rel of [
       "components/workspaces/WorkspacesSurface.tsx",
-      "components/team/TeamSurface.tsx",
       "components/board/BoardLayoutSwitch.tsx",
       "components/ui/segment.tsx",
     ]) {

@@ -166,9 +166,20 @@ export function TurnActivity({
                 />
               );
             }
-            // A "text" block here would be answer prose; the caller renders
-            // the turn's answer itself, so we never reach it from
-            // persistedTurnBlocks() (which carries reasoning + tools only).
+            if (b.kind === "text") {
+              // Mid-turn narration — "pushing it now, then I'll re-check".
+              // A manager turn never has this (persistedTurnBlocks carries
+              // reasoning + tools only), but an agent streams one flat run
+              // where prose sits between the steps, and the caller has kept
+              // only the turn's closing prose as the answer. Rendered quiet:
+              // it is a note about the work, not the conclusion, and it must
+              // not read as loudly as the answer below.
+              return (
+                <div key={i} className="aura-turn-activity-note">
+                  {b.text}
+                </div>
+              );
+            }
             return null;
           })}
         </div>

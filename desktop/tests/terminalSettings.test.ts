@@ -30,7 +30,7 @@ import { readSrc } from "./support/code";
 
 const DIALOG = "components/dialogs/SettingsDialog.tsx";
 const SHELL_TERM = "components/Terminal.tsx";
-const AGENT_TERM = "components/agent/AgentTerminalView.tsx";
+const AGENT_TERM = "components/agent/AgentXtermCanvas.tsx";
 const STORE = "lib/settingsStore.ts";
 const API = "lib/api.ts";
 
@@ -83,14 +83,19 @@ describe("terminal settings — text size", () => {
     expect(tab).toContain("defaultTerminalFontSize()");
   });
 
-  test("never-set means the platform default, not an invented number", async () => {
+  test("never-set means the renderer's own default, not an invented number", async () => {
     const store = await readSrc(STORE);
     expect(store).toContain("font_size: null");
     expect(store).toContain("export function defaultTerminalFontSize()");
-    // 12 on macOS, 14 elsewhere — the VS Code defaults the xterm
-    // construction already matched by hand.
+    // It used to answer `isMac ? 12 : 14` — the VS Code defaults the xterm
+    // construction matched by hand. But the engine on screen by default is
+    // the wgpu renderer, which draws `DEFAULT_FONT_PX`, so a platform split
+    // here could only ever disagree with what the user was looking at. One
+    // number now, restated from Rust; `terminalFontDefault.test.ts` is the
+    // check that the restatement still matches.
     const fn = store.slice(store.indexOf("export function defaultTerminalFontSize()"));
-    expect(fn.slice(0, 300)).toContain("isMac ? 12 : 14");
+    expect(fn.slice(0, 300)).toContain("DEFAULT_TERMINAL_FONT_PX");
+    expect(fn.slice(0, 300)).not.toContain("isMac");
   });
 
   test("the wire type admits the unset state", async () => {
@@ -100,11 +105,13 @@ describe("terminal settings — text size", () => {
   });
 
   test("both terminals read it — the agent one included", async () => {
+    // And both fall back to the same number. Each used to carry its own
+    // (an inlined copy of the platform split here, 12.5 there), which showed
+    // up as the text changing size when a pane fell back from wgpu to xterm.
     const shell = await readSrc(SHELL_TERM);
-    expect(shell).toContain("tprefs.font_size ?? (isMac ? 12 : 14)");
+    expect(shell).toContain("tprefs.font_size ?? defaultTerminalFontSize()");
     const agent = await readSrc(AGENT_TERM);
-    // The agent view's own tuning stays the default; a chosen size wins.
-    expect(agent).toContain("tprefs.font_size ?? 12.5");
+    expect(agent).toContain("tprefs.font_size ?? defaultTerminalFontSize()");
   });
 
   test("Appearance stops pointing at a size that had no control", async () => {

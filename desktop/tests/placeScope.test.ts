@@ -2,9 +2,13 @@
 //
 //   bun test
 //
-// Every place rail — Pages, Team, Tasks — carries a project picker, because the
-// things a rail lists (documents, conversations, tasks, sprints, goals) belong
-// to a project. It writes ONE shared scope (`lib/projectRoots`). The bodies are
+// A place rail carries a project picker, because the things a rail lists
+// (tasks, sprints, goals) belong to a project. Tasks is the only such rail
+// left — Pages and Team have since been removed — so the pins below are its
+// and Trace's, and the two numbered failures that belonged to those surfaces
+// are kept as history rather than as assertions.
+//
+// The picker writes ONE shared scope (`lib/projectRoots`). The bodies are
 // supposed to read that scope, and the invariant is the one in that file's own
 // header: a rail counting one set over a body drawing another is worse than a
 // rail with no picker at all.
@@ -135,22 +139,6 @@ describe("what to call it", () => {
 });
 
 describe("every body is wired to that answer", () => {
-  test("Team's chat model is built for the place root, not the open folder", async () => {
-    const app = await readSrc("App.tsx");
-    expect(app).toContain("<TeamChatProvider repoRoot={placeRoot}");
-    // The exact shape that threw.
-    expect(app).not.toContain("<TeamChatProvider repoRoot={project.root}");
-    // …and the surface it feeds is handed the same root.
-    expect(app).toContain("<TeamSurface repoRoot={placeRoot}");
-  });
-
-  test("Team opened as a pane names the same root as the provider", async () => {
-    const ws = await readSrc("components/WorkSurface.tsx");
-    expect(ws).toContain("usePlaceRoot");
-    expect(ws).toContain("<TeamSurface repoRoot={placeRoot}");
-    expect(ws).not.toContain("<TeamSurface repoRoot={pane.repoRoot}");
-  });
-
   test("the crew lenses take the rail's project, not the open one", async () => {
     const place = await readSrc("components/tasks/TasksPlace.tsx");
     expect(place).toContain("usePlaceRoot");
@@ -167,9 +155,13 @@ describe("every body is wired to that answer", () => {
     // looks exactly as authoritative as another's. So the strip carries the
     // switcher, and the page under it has to be reading the same answer.
     const app = await readSrc("App.tsx");
-    const mount = app.slice(app.indexOf("<TracePage"));
+    // Bounded to the element's own props rather than a byte count: the Pages
+    // and Team branches that used to follow this one are gone, so a fixed
+    // window now reaches into the next mount and reads its root as Trace's.
+    const at = app.indexOf("<TracePage");
+    const mount = app.slice(at, app.indexOf("/>", at));
     expect(mount).toContain("repoRoot={placeRoot || project.root}");
-    expect(mount.slice(0, 400)).not.toContain("repoRoot={project.root}");
+    expect(mount).not.toContain("repoRoot={project.root}");
 
     const page = await readSrc("components/trace/TracePage.tsx");
     expect(page).toContain("switchProject");
@@ -182,15 +174,6 @@ describe("every body is wired to that answer", () => {
     const strip = ws.slice(ws.indexOf("<TraceTabs"));
     expect(strip.slice(0, 500)).toContain("repoRoot={repoRoot}");
     expect(strip.slice(0, 500)).not.toContain("switchProject");
-  });
-
-  test("Pages clears the editor when the new project has no page open", async () => {
-    const pages = await readSrc("components/pages2/PagesSurface.tsx");
-    // The restore-on-repo-switch effect must CLEAR, not bail. Bailing is what
-    // stranded the previous project's document over the new project's tree.
-    expect(pages).toMatch(
-      /const key = lastOpenPageKey\(repoRoot\);[\s\S]{0,200}?if \(!key \|\| !parsed\) \{[\s\S]{0,400}?setActiveKey\(null\);[\s\S]{0,200}?setBody\(""\);/,
-    );
   });
 });
 

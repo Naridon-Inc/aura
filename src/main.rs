@@ -35,7 +35,14 @@ mod goals;
 mod activity;
 mod stub;
 pub mod config;
+pub mod cloud_auth;
+pub mod cloud_contract;
 pub mod cloud_endpoint;
+pub mod cloud_message;
+pub mod cloud_model;
+pub mod cloud_project;
+pub mod cloud_routine;
+pub mod cloud_section;
 mod ecosystem;
 mod lsp;
 mod gsd;
@@ -1623,6 +1630,50 @@ enum Commands {
         sub: workspace_api::cmd::WorkspaceCmd,
     },
     // end AURA-1295
+    // AURA-1437 — Conductor parity: the two cloud nouns an agent looks for at
+    // the top level. Both delegate to what Aura already had rather than
+    // reimplementing it; see each module's doc for why the older spellings
+    // (`aura connect` / `disconnect` / `whoami`, `aura workspace models`) stay.
+    /// Credentials for Aura Cloud: sign in, sign out, ask who this machine is.
+    /// `auth status` answers offline when there is no credential to send.
+    Auth {
+        #[command(subcommand)]
+        sub: cloud_auth::AuthCmd,
+    },
+    /// Models this cloud can route to — ask before creating a workspace that
+    /// has to name one. Same answer as `aura workspace models`.
+    Model {
+        #[command(subcommand)]
+        sub: cloud_model::ModelCmd,
+    },
+    /// Sidebar sections for your cloud workspaces — an agent files the work it
+    /// opened instead of leaving a sidebar only you can tidy.
+    /// `aura workspace move` puts one workspace in a section.
+    Section {
+        #[command(subcommand)]
+        sub: cloud_section::SectionCmd,
+    },
+    /// The projects your key can reach — the thing a workspace belongs to.
+    /// Read-only: a project comes into being when a workspace is opened in it.
+    Project {
+        #[command(subcommand)]
+        sub: cloud_project::ProjectCmd,
+    },
+    /// Send one message to a workspace, exactly once. `--message-id` is your
+    /// own key: send the same one twice and the first message comes back
+    /// instead of a second being created, so a retry after a timeout is safe.
+    /// `aura workspace prompt` is the same send for a person.
+    Message {
+        #[command(subcommand)]
+        sub: cloud_message::MessageCmd,
+    },
+    /// Runs that start without you — a saved prompt plus the schedule or the
+    /// webhook that fires it. `aura routine run` fires one by hand.
+    Routine {
+        #[command(subcommand)]
+        sub: cloud_routine::RoutineCmd,
+    },
+    // end AURA-1437
     /// Show the repo-local Ed25519 identity (`did:aura:key/...`) that signs your
     /// awareness events so they can't be spoofed by another actor.
     Identity {
@@ -5122,6 +5173,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Outbox { .. } => "outbox",
         Commands::Join { .. } => "join",
         Commands::Connect { .. } => "connect",
+        // Named explicitly rather than falling through to "internal_command",
+        // so usage reporting can tell whether agents reach for `auth`/`model`
+        // or the older spellings — which is the question that decides whether
+        // these aliases earned their place.
+        Commands::Auth { .. } => "auth",
+        Commands::Model { .. } => "model",
+        Commands::Section { .. } => "section",
+        Commands::Message { .. } => "message",
+        Commands::Project { .. } => "project",
+        Commands::Routine { .. } => "routine",
         Commands::JoinTeam { .. } => "join-team",
         Commands::Crdt { .. } => "crdt",
         Commands::Keys { .. } => "keys",
@@ -9439,6 +9500,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         // end AURA-1295
+        // AURA-1437 — same shape as `workspace` above: the verb returns a
+        // contract exit code and only `main` turns it into a process exit, so
+        // the command bodies stay testable.
+        Commands::Auth { sub } => {
+            let code = cloud_auth::run(sub);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::Model { sub } => {
+            let code = cloud_model::run(sub);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::Section { sub } => {
+            let code = cloud_section::run(sub);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::Project { sub } => {
+            let code = cloud_project::run(sub);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::Message { sub } => {
+            let code = cloud_message::run(sub);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::Routine { sub } => {
+            let code = cloud_routine::run(sub);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        // end AURA-1437
         Commands::Identity { json } => {
             awareness::identity::run_show(*json);
         }

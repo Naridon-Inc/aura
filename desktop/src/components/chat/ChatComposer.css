@@ -35,6 +35,10 @@
 .composer-selector:disabled { cursor: default; }
 .composer-model-selector { max-width: 240px; }
 .composer-model-selector > span { overflow: hidden; text-overflow: ellipsis; }
+/* How hard the next turn thinks, after the model name. `flex-shrink: 0` so a
+   long model name ellipsizes and this doesn't — it is the shorter word and the
+   one that would otherwise vanish entirely rather than truncate. */
+.composer-model-detail { flex-shrink: 0; color: var(--color-text-4); }
 .composer-control-icon, .unified-composer-actions .icon-btn-sm { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 5px; color: var(--color-text-3); flex-shrink: 0; }
 .unified-composer :is(button, input):focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 .aura-chat .unified-composer .chip { background: transparent; border: 0; border-radius: 5px; padding: 5px 8px; color: var(--color-text-2); box-shadow: none; font-size: 12px; }
@@ -168,6 +172,10 @@
 .chat-model-catalog { width: 100%; min-width: 0; overflow: hidden; }
 .chat-catalog-top { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 6px; }
 .chat-catalog-top strong { font-weight: 500; font-size: 12px; }
+/* `hidden` is how this panel stands a region down, and a `display` rule on the
+   region silently beats the attribute — so say it once, here, rather than
+   discovering it per region. */
+.chat-model-catalog [hidden] { display: none; }
 .chat-catalog-search { display: flex; align-items: center; gap: 8px; margin: 0 12px 10px; padding: 7px 9px; border: 1px solid var(--color-line); border-radius: 5px; color: var(--color-text-3); }
 .chat-catalog-search input { background: transparent; outline: none; width: 100%; min-width: 0; color: var(--color-text-1); font-size: 12px; }
 .chat-menu-surface .chat-catalog-search input:focus-visible { outline: none; }
@@ -187,6 +195,31 @@
 .chat-catalog-favorite { display: grid; place-items: center; height: 28px; width: 28px; margin-right: 4px; color: var(--color-text-4); border-radius: 4px; opacity: 0; }
 .chat-catalog-row:hover .chat-catalog-favorite, .chat-catalog-favorite:focus-visible, .chat-catalog-favorite[data-favorite=true] { opacity: 1; }
 .chat-catalog-favorite[data-favorite=true] { color: var(--chat-plan-ink); }
+/* The loadout — the models this user switches between, above the catalog.
+   Rows carry a drag handle, a chord badge and a remove, so they are wider
+   than a catalog row and get their own grid rather than inheriting one. */
+.chat-loadout { padding: 0 6px 2px; }
+.chat-loadout-head { border-top: 0; margin-top: 0; padding-top: 2px; }
+.chat-loadout-row { padding-left: 2px; }
+.chat-loadout-row[data-dragging=true] { opacity: .45; }
+.chat-loadout-row[data-drop-target=true] { box-shadow: inset 0 2px 0 0 var(--color-accent-green); }
+.chat-loadout-handle { display: grid; place-items: center; width: 16px; flex-shrink: 0; color: var(--color-text-4); cursor: grab; }
+.chat-loadout-row:hover .chat-loadout-handle { color: var(--color-text-3); }
+.chat-loadout-pick { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 7px 8px; text-align: left; font-size: 12px; color: var(--color-text-2); }
+.chat-loadout-row:hover .chat-loadout-pick { color: var(--color-text-1); }
+.chat-loadout-pick[aria-current=true] { color: var(--color-text-1); font-weight: 500; }
+.chat-loadout-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-loadout-where { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 400; color: var(--color-text-4); }
+/* The cap itself is `components/ui/kbd.tsx` — border, radius, mono face and the
+   themed kbd colours all come from there, so this only has to stop the row's
+   flexbox from squeezing it. Repainting it here is what put a tenth hand-rolled
+   <kbd> in the app the last time. */
+.chat-loadout-chord { flex-shrink: 0; }
+.chat-loadout-drop { display: grid; place-items: center; width: 22px; height: 26px; margin-right: 4px; border-radius: 4px; color: var(--color-text-4); opacity: 0; flex-shrink: 0; }
+.chat-loadout-row:hover .chat-loadout-drop, .chat-loadout-drop:focus-visible { opacity: 1; }
+.chat-loadout-drop:hover { background: var(--color-bg-2); color: var(--color-text-2); }
+.chat-catalog-browse { display: flex; align-items: center; gap: 8px; width: calc(100% - 12px); margin: 0 6px 6px; padding: 7px 8px; border-radius: 5px; font-size: 12px; color: var(--color-text-3); }
+.chat-catalog-browse:hover { background: var(--color-bg-2); color: var(--color-text-1); }
 .chat-catalog-error, .chat-menu-empty { padding: 10px 16px; font-size: 12px; color: var(--color-text-3); }
 .chat-catalog-error { color: var(--color-red); }
 .chat-catalog-footer { border-top: 1px solid var(--color-line-soft); padding: 4px; }
@@ -199,6 +232,15 @@
 .chat-catalog-custom button:disabled { opacity: .4; cursor: default; }
 .chat-catalog-backdrop { position: fixed; inset: 0; z-index: 60; display: flex; justify-content: center; align-items: flex-start; padding: 14vh 12px 24px; background: rgb(0 0 0 / .25); }
 .chat-catalog-backdrop > div { width: 420px; max-width: 100%; }
+
+/* Effort + Fast, inside the model picker under the model list. The rule above
+   the group is what keeps it from reading as two more models: same rows, but
+   plainly a different kind of thing. */
+.chat-turn-controls { border-top: 1px solid var(--color-line-soft); margin-top: 4px; padding: 4px; }
+/* `.chat-option-label` already flexes, so the chord needs no push — only to
+   sit quieter than the value it precedes. */
+.chat-turn-controls .chat-turn-chord { opacity: .75; }
+.chat-turn-hint { display: flex; align-items: center; gap: 6px; padding: 4px 6px 2px; font-size: 11px; color: var(--color-text-4); }
 
 .chat-options-fields { width: 100%; }
 .chat-options-fields .chat-option-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 5px 6px; border-radius: 4px; color: var(--color-text-2); font-size: 12px; text-align: left; }

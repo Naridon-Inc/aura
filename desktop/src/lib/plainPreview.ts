@@ -75,10 +75,9 @@ export function plainPreview(source: string): string {
 
   // Ours first, before any rule can mistake a payload for markup.
   for (const [re, mark] of SENTINELS) s = s.replace(re, mark);
-  // HTML comments, which in this app are never a person talking: a scribble
-  // and a team task line each park their own metadata in one, and a preview
-  // that keeps it prints `<!--aura:taskbar a=mhask t=1721808000000-->` after
-  // the sentence.
+  // HTML comments, which in this app are never a person talking: a team task
+  // line parks its own metadata in one, and a preview that keeps it prints
+  // `<!--aura:taskbar a=mhask t=1721808000000-->` after the sentence.
   s = s.replace(/<!--[\s\S]*?-->/g, "");
 
   // Block level, in order: fences first (their bodies are not markup), then

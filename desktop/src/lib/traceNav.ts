@@ -1,15 +1,16 @@
 // traceNav — the seam that lets any surface say "open the Trace session detail
-// for this run". The Project Timeline uses it to jump from the moment under the
-// playhead to that run's full Session detail (transcript, changes, attestation).
+// for this run". A session deep link uses it: `aura://session/…` arrives from
+// the website, a teammate's message or the phone, App resolves it to a run, and
+// this carries that row the rest of the way to the Session detail (transcript,
+// changes, attestation).
 //
-// Why a tiny module instead of a direct call: the Timeline lives in a
-// full-screen overlay; the Session detail lives inside the Sessions Trace tab in
-// the main editor area. Bridging them means (a) closing the overlay + opening
-// the Sessions tab (App owns that) and (b) selecting the right row once that tab
-// is mounted (TraceSurface owns that). A window event covers the already-mounted
-// case; a module-level "pending" cell covers the first-mount case (the event can
-// fire before TraceSurface exists). TraceSurface drains whichever arrives first
-// and clears the other, so the row is never opened twice.
+// Why a tiny module instead of a direct call: the request comes from outside the
+// Trace tree, and answering it takes two owners — App opens the Sessions tab,
+// TraceSurface selects the row once that tab is mounted. A window event covers
+// the already-mounted case; a module-level "pending" cell covers the first-mount
+// case (the event can fire before TraceSurface exists). TraceSurface drains
+// whichever arrives first and clears the other, so the row is never opened
+// twice.
 
 import type { IntentRow } from "./api";
 

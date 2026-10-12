@@ -25,7 +25,6 @@ import {
   Hash,
   History,
   MessageSquareText,
-  Puzzle,
   Zap,
 } from "lucide-react";
 
@@ -176,21 +175,6 @@ export function PaletteResultRow({
           </span>
           {entry.hint && (
             <span className="ml-auto truncate text-sm text-text-4" style={{ maxWidth: 320 }}>
-              {entry.hint}
-            </span>
-          )}
-        </>,
-      );
-
-    case "extCommand":
-      return shell(
-        <>
-          <Lead active={active}>
-            <Puzzle />
-          </Lead>
-          <span className="truncate text-base">{entry.label}</span>
-          {entry.hint && (
-            <span className="ml-auto shrink-0 rounded-full bg-bg-2 px-2 py-0.5 text-xs text-text-3">
               {entry.hint}
             </span>
           )}

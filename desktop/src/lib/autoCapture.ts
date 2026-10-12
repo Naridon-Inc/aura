@@ -47,6 +47,10 @@ export async function autoEnableCapture(
     }
     const cap = await api.captureStatus(root);
     if (!cap.is_git || cap.enabled) return; // nothing to do
+    // We could not read the hook, so we do not know it is off — and the
+    // enable we would run next fails the same way the read just did. Silently
+    // retrying it every time the project opens is worse than nothing.
+    if (cap.unreadable) return;
     const res = await api.captureEnable(root);
     if (res.status !== 0) return; // CLI refused — stay quiet, pill still nudges
     window.dispatchEvent(

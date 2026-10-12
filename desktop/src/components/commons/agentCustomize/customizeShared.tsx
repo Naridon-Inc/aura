@@ -31,11 +31,10 @@ export type CustomizeViewId =
   | "hooks"
   | "mcp"
   | "addons"
-  // `plugins`/`extensions` are kept as deep-link aliases: a rail row or ⌘K
-  // entry can land straight on the Add-ons surface's right sub-tab. The
-  // sidebar shows a single "Add-ons" row; these route into it.
-  | "plugins"
-  | "extensions";
+  // `plugins` is kept as a deep-link alias: a rail row or ⌘K entry can land
+  // straight on the Add-ons surface. The sidebar shows a single "Add-ons"
+  // row; this routes into it.
+  | "plugins";
 
 export type CustomizeNavItem = {
   id: CustomizeViewId;

@@ -1,22 +1,25 @@
-// The three collaboration places, and one way to ask for them.
+// The collaboration place, and one way to ask for it.
 //
-// Pages, Tasks and Team were workpane tabs — documents you accumulated in the
-// same strip that holds your files, your terminal and your agents. None of the
-// three is a document. Each is a place with its own navigation inside it: Team
-// carries its conversation list, Pages its index of documents, Tasks its
-// buckets and saved views. Standing in one of them, the frame around it was
-// telling you about something else entirely — one repo's branch, its review
-// rail, its changed files, a terminal toggle — while the surface you came for
-// had to share the window with all of it.
+// Tasks was a workpane tab — a board you accumulated in the same strip that
+// holds your files, your terminal and your agents. It is not a document. It is
+// a place with its own navigation inside it: its buckets and its saved views.
+// Standing in it, the frame around it was telling you about something else
+// entirely — one repo's branch, its review rail, its changed files, a terminal
+// toggle — while the surface you came for had to share the window with all of
+// it.
 //
-// So they are pages, the same as Workspaces, Mission Control, Aura and Trace:
-// they take the window, the repo chrome comes off, and you leave by asking for
+// So it is a page, the same as Workspaces, Mission Control, Aura and Trace: it
+// takes the window, the repo chrome comes off, and you leave by asking for
 // somewhere else in the rail.
 //
 // This mirrors components/trace/traceRoute for the same reason it exists: the
-// callers are deep (an empty pane offering "open chat", a page mention, a
-// palette command), and threading a router down to them would put navigation
-// in the props of components that only draw.
+// callers are deep (a palette command, a page mention), and threading a router
+// down to them would put navigation in the props of components that only draw.
+//
+// `CollabPlace` is a union of one. It stays a union because the plural shape is
+// what every caller and every `place === …` branch is written against, and
+// because this is where a second board-like page would be named — collapsing it
+// to the string "tasks" would buy nothing and cost that.
 
 /** A collaboration surface that owns the window. Not a document, not a dialog.
  *
@@ -25,7 +28,7 @@
  *  brought, an Aura-managed VM. Two types called `Place` in one `lib`, one
  *  naming a tab and one naming a computer, is a collision a reader has to
  *  resolve by opening both files. */
-export type CollabPlace = "pages" | "tasks" | "team";
+export type CollabPlace = "tasks";
 
 export const PLACE_GO_EVENT = "aura:place:go";
 

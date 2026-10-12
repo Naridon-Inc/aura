@@ -25,11 +25,38 @@ export const MENU_ANIM =
   "data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 " +
   "data-[side=bottom]:slide-in-from-top-1 data-[side=left]:slide-in-from-right-1 data-[side=right]:slide-in-from-left-1 data-[side=top]:slide-in-from-bottom-1";
 
+/** Marker class on every panel below. It draws nothing — no rule in any sheet
+ *  styles it — and exists so one question can be asked of the DOM: "is this
+ *  element one of our flyouts?"
+ *
+ *  The native GPU terminal is a wgpu view the host floats OVER the webview, so
+ *  no z-index can put a menu in front of it; `lib/nativeSurfacePlacement`
+ *  instead steps the surface off the rectangle an open overlay needs, and it
+ *  recognises overlays by selector. Radix panels it finds by their popper
+ *  wrapper and hand-rolled sheets by `role="menu"`, which between them miss
+ *  every panel that is a popover rather than a menu of commands — the CLI
+ *  version chip, the topbar's two pickers, Ports, the cloud machine pickers,
+ *  the two mention pickers. Those opened behind a running terminal and showed
+ *  only the strip of themselves that happened to clear it, which reads as a
+ *  half-drawn panel rather than an occluded one.
+ *
+ *  Naming the shared recipe is the fix that does not have to be repeated: a
+ *  panel is readable over the terminal because it was built from MENU_PANEL,
+ *  not because whoever built it remembered to opt in. `data-over-native-surface`
+ *  stays for sheets that don't use this recipe at all.
+ *
+ *  It is safe to treat presence as openness — the invariant the overlay list
+ *  already relies on for `role="menu"` — because every panel in this app that
+ *  carries this class is mounted only while it is open (`{open && …}`). A
+ *  permanently-mounted panel must NOT carry it: it would shrink the terminal
+ *  for the life of the app. */
+export const MENU_SURFACE_CLASS = "aura-menu-surface";
+
 /** The floating panel: the Medusa Popover surface the console's finder panels
  *  sit on, with 4px of vertical air and no horizontal padding, so rows and
  *  rules run to the edge as they do there. Caller adds width + positioning. */
 export const MENU_PANEL =
-  "z-50 min-w-[10rem] overflow-hidden rounded-lg bg-ui-bg-base py-1 text-text-1 shadow-elevation-flyout";
+  `${MENU_SURFACE_CLASS} z-50 min-w-[10rem] overflow-hidden rounded-lg bg-ui-bg-base py-1 text-text-1 shadow-elevation-flyout`;
 
 /** One row, the finder row: works for Radix items (data-[highlighted]) and
  *  hand-rolled <button> rows (hover:) alike. */

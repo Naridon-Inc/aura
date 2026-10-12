@@ -45,6 +45,7 @@ import {
   setTasksSharedGoal,
   useTasksSharedFilters,
 } from "../../lib/tasksFilterStore";
+import { CREW_GRAPH_LENS_ENABLED } from "../../lib/featureFlags";
 import { goToWork } from "../../lib/workRoute";
 import { relativeAgeAuto } from "../../lib/relativeTime";
 import { PlaceRailGroup, PlaceRailRow } from "../places/PlaceRail";
@@ -221,15 +222,15 @@ export function WorkRailGroups({
         count={goals.length}
         empty={
           repoRoot
-            ? "No goals yet. Open the map and hand the crew a job, or ask Aura chat for one, and it works the tasks in order."
+            ? "No goals yet. Ask Aura chat for one, and the crew works the tasks in order."
             : "Goals belong to one project. Pick a project to see them."
         }
         actions={
-          // A second door to the map, beside the goals it draws. The strip in
-          // the header is the first — this one is here because the map IS a
-          // picture of the goals, so it's worth reaching from the group that
-          // lists them rather than only from a cell two hundred pixels away.
-          repoRoot ? (
+          // A second door to the map, beside the goals it draws — the strip in
+          // the header is the first. Both stand down together: with the map
+          // flagged off this would be a button to a lens the strip no longer
+          // offers, which is the dangling door the flag exists to prevent.
+          repoRoot && CREW_GRAPH_LENS_ENABLED ? (
             <Button
               type="button"
               variant="ghost"

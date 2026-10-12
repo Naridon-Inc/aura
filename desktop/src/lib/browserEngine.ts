@@ -10,42 +10,48 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+
+import { webviewZoom } from "./nativeSurfacePlacement";
 
 /** Logical-pixel rect for positioning the native webview over the hole. */
 export type BrowserRect = { x: number; y: number; width: number; height: number };
 
 // ── Page-zoom correction ─────────────────────────────────────────────────────
 //
-// The hole is measured with getBoundingClientRect, which returns CSS pixels —
-// i.e. *page* logical pixels. Tauri positions a child webview from a
-// LogicalPosition by multiplying by the WINDOW's OS scale factor
-// (`scaleFactor()`), which knows nothing about the webview's page zoom. When the
-// two differ (e.g. the UI is at 110% zoom on a 1× display: devicePixelRatio 1.1,
-// scaleFactor 1), a raw CSS-px rect lands the webview at 1/zoom of where the
-// hole visually is — shifted up-left and shrunk. Pre-scaling the rect by
-// `devicePixelRatio / scaleFactor` (the page-zoom ratio) cancels the mismatch:
-// Tauri then multiplies back by scaleFactor, yielding physical = CSS × dpr =
-// the hole's true on-screen box. The ratio is 1 when there's no zoom (retina or
-// not), so this is a no-op on the common path.
-let cachedScaleFactor = 1;
-void getCurrentWindow()
-  .scaleFactor()
-  .then((sf) => {
-    if (sf > 0) cachedScaleFactor = sf;
-  })
-  .catch(() => {});
-void getCurrentWindow()
-  .onScaleChanged(({ payload }) => {
-    if (payload.scaleFactor > 0) cachedScaleFactor = payload.scaleFactor;
-  })
-  .catch(() => {});
+// The hole is measured with getBoundingClientRect, which answers in CSS px.
+// Tauri positions a child webview from a LogicalPosition — window points — and
+// page zoom multiplies every CSS px on its way to the window. So at any zoom
+// but 100% a raw rect lands the webview at 1/zoom of where the hole visually
+// is: shifted up-left and shrunk by the same factor. Multiplying the zoom back
+// in is the whole correction.
+//
+// The number has to come from the zoom the app itself published, not be
+// inferred from the environment. This used to read
+// `devicePixelRatio / scaleFactor`, which is a sound-looking identity and a
+// dead letter in practice: WebKit's page zoom — what `getCurrentWebview()
+// .setZoom` drives, see App.tsx — deliberately does NOT fold into
+// `devicePixelRatio`, so that ratio is backingScale/backingScale, exactly 1, on
+// every display, retina or not. The correction returned the rect untouched at
+// every zoom level it was written to fix, and its `zoom === 1` early return
+// disguised an always-no-op as a fast path on the common one. The browser panel
+// drifted off its hole the same way the GPU terminal surface did, for the same
+// reason.
+//
+// `webviewZoom()` reads the `--webview-zoom` custom property App.tsx sets
+// alongside the real `setZoom` call, so this and the terminal surface convert
+// units through one source of truth rather than two derivations that can
+// disagree. An absent or unparseable value falls back to 1 there, so a missing
+// property leaves the rect alone instead of collapsing it to nothing.
 
-/** Convert a CSS-px hole rect into the window-logical rect Tauri expects, so
- *  the native webview lands exactly over the hole regardless of page zoom. */
-function toWindowRect(rect: BrowserRect): BrowserRect {
-  const zoom = window.devicePixelRatio / cachedScaleFactor;
-  if (!Number.isFinite(zoom) || zoom <= 0 || zoom === 1) return rect;
+/** Convert a CSS-px hole rect into the window-point rect Tauri expects, so
+ *  the native webview lands exactly over the hole regardless of page zoom.
+ *
+ *  `zoom` is injectable only so the scaling can be asserted without a DOM —
+ *  `webviewZoom()` reads a CSS property and answers 1 when there is no
+ *  document, which is precisely the always-1 behaviour this replaced and so
+ *  cannot be the thing a test exercises. Callers pass nothing. */
+export function toWindowRect(rect: BrowserRect, zoom: number = webviewZoom()): BrowserRect {
+  if (zoom === 1) return rect;
   return {
     x: rect.x * zoom,
     y: rect.y * zoom,

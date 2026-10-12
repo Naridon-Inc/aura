@@ -311,6 +311,11 @@ export function StatePillPicker({
       {open && popoverStyle && createPortal(
         <div
           ref={popoverRef}
+          /* The native GPU terminal floats over the webview, so no z-index
+             puts this in front of it; the opt-in is what makes the surface
+             step off the rectangle this panel needs. Hand-rolled here rather
+             than built from MENU_PANEL, which carries the marker itself. */
+          data-over-native-surface=""
           className="min-w-[220px] max-w-[280px] rounded-md border border-line-soft bg-bg-1 shadow-lg"
           style={{ ...popoverStyle, boxShadow: "0 8px 32px rgba(0,0,0,0.35)" }}
           onKeyDown={onKey}

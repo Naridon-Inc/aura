@@ -1,13 +1,20 @@
 // Trace surface (Trace v2) — the center-pane host for one Trace view.
 //
 // Each top-level view (Overview / My sessions / Team activity / Cost & usage)
-// is now its OWN openable workpane tab; this component renders exactly the one
+// is its OWN openable workpane tab; this component renders exactly the one
 // view its tab carries (decoded from the pane id by WorkSurface and handed in
 // as `view`). The old in-pane segmented toggle is gone — switching views is
 // switching tabs. Cross-links inside a view (Overview → sessions / usage) open
 // the sibling tab via `onOpenView`. Real data only throughout: Overview shows
 // intent-log aggregates, My sessions the per-run list, detail renders purely
 // from the chosen row.
+//
+// Cost & usage is the one view with no cell of its own on the Trace strip.
+// Spend is a reading of the runs rather than a fifth subject, so Sessions
+// carries the door into it and the pane carries the way back, and the strip
+// reads "My sessions" throughout. The view is still a first-class address, so
+// `goToTrace({ kind: "sessions", view: "usage" })` and Overview's cost link
+// both land exactly where they always did.
 
 import { useEffect, useState } from "react";
 import { type IntentRow } from "../../lib/api";
@@ -40,8 +47,8 @@ export function TraceSurface({
   // on the Overview tab underneath.
   const [wrapped, setWrapped] = useState(false);
 
-  // Cross-surface "open this run's Session detail" (e.g. the Project Timeline
-  // jumping from a moment to its full session). Two arrival paths:
+  // Cross-surface "open this run's Session detail" — a session deep link that
+  // App has already resolved to a row. Two arrival paths:
   //   • live event — this surface is already mounted when the request fires;
   //   • pending cell — the request fired before this surface mounted (App was
   //     still opening the Sessions tab), so we drain it on mount.
@@ -80,9 +87,16 @@ export function TraceSurface({
         ) : view === "team" && TEAM_ACTIVITY_ENABLED ? (
           <TeamActivityFeed repoRoot={repoRoot} onOpenSession={setSelected} />
         ) : view === "usage" ? (
-          <CostUsagePane repoRoot={repoRoot} />
+          <CostUsagePane
+            repoRoot={repoRoot}
+            onBack={() => onOpenView("sessions")}
+          />
         ) : (
-          <SessionsPane repoRoot={repoRoot} onOpenSession={setSelected} />
+          <SessionsPane
+            repoRoot={repoRoot}
+            onOpenSession={setSelected}
+            onOpenCostUsage={() => onOpenView("usage")}
+          />
         )}
       </div>
       {wrapped ? (

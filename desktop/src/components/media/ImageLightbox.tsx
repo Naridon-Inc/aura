@@ -122,6 +122,8 @@ export function ImageLightbox({
   name,
   className,
   style,
+  loading,
+  onError,
 }: {
   src: string;
   alt: string;
@@ -132,6 +134,14 @@ export function ImageLightbox({
    *  replaced. */
   className?: string;
   style?: React.CSSProperties;
+  /** Passed through to the inline image. A transcript holding a few hundred
+   *  screenshots wants `lazy`; the overlay always loads eagerly, since it only
+   *  exists once someone asked for it. */
+  loading?: "lazy" | "eager";
+  /** Told when the picture will not decode, so a caller that had its own
+   *  fallback before keeps it — a transcript would rather show the payload
+   *  it could not render than a broken-image glyph. */
+  onError?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [fit, setFit] = useState(true);
@@ -220,6 +230,8 @@ export function ImageLightbox({
             title="Click to open full size"
             className={cn("cursor-zoom-in", className)}
             style={style}
+            loading={loading}
+            onError={onError}
             onClick={() => {
               setFit(true);
               setOpen(true);

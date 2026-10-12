@@ -81,6 +81,7 @@ import {
   tailLogCommand,
   type BoxKind,
 } from "./connectMachine";
+import { decodePtyChunk, type PtyChunk } from "../../../lib/ptyPayload";
 
 const STEPS: WizardStepMeta[] = [
   { id: "machine", label: "Machine" },
@@ -321,7 +322,7 @@ export function ConnectMachineWizard({ repoRoot, onClose, onOnline }: Props) {
     let unlisten: UnlistenFn | undefined;
     const decoder = new TextDecoder();
     (async () => {
-      unlisten = await listen<number[]>(`pty:${ptyId}`, (e) => {
+      unlisten = await listen<PtyChunk>(`pty:${ptyId}`, (e) => {
         if (
           !awaitingReady.current &&
           !awaitingUrl.current &&
@@ -330,7 +331,7 @@ export function ConnectMachineWizard({ repoRoot, onClose, onOnline }: Props) {
         ) {
           return;
         }
-        const chunk = decoder.decode(new Uint8Array(e.payload));
+        const chunk = decoder.decode(decodePtyChunk(e.payload));
         if (whoWaiter.current) {
           whoScrollback.current += chunk;
           if (whoScrollback.current.length > 8000) {

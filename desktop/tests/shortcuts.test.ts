@@ -39,6 +39,16 @@ describe("the keymap chords are listed, and the listed chords resolve", () => {
     { keys: "⌘⌥←", id: "prev_tab", chord: { key: "ArrowLeft", meta: true, shift: false, alt: true, editable: false } },
     { keys: "⌘⌥L", id: "next_attention", chord: { key: "L", meta: true, shift: false, alt: true, editable: false } },
     { keys: "⌘⌥U", id: "toggle_changes", chord: { key: "U", meta: true, shift: false, alt: true, editable: false } },
+    // The loadout slots and the latency switch. `editable: true` on all six is
+    // deliberate and load-bearing: you pick the model for a prompt while you
+    // are typing that prompt, so a chord that stood down for a text cursor
+    // would stand down exactly when it is wanted.
+    { keys: "⌘1", id: "pick_model_1", chord: { key: "1", meta: true, shift: false, alt: false, editable: true } },
+    { keys: "⌘2", id: "pick_model_2", chord: { key: "2", meta: true, shift: false, alt: false, editable: true } },
+    { keys: "⌘3", id: "pick_model_3", chord: { key: "3", meta: true, shift: false, alt: false, editable: true } },
+    { keys: "⌘4", id: "pick_model_4", chord: { key: "4", meta: true, shift: false, alt: false, editable: true } },
+    { keys: "⌘5", id: "pick_model_5", chord: { key: "5", meta: true, shift: false, alt: false, editable: true } },
+    { keys: "⌘⇧E", id: "toggle_fast", chord: { key: "e", meta: true, shift: true, alt: false, editable: true } },
   ];
   const listed = new Map(
     SHORTCUT_GROUPS.flatMap((g) => g.items).map((s) => [s.keys, s.label] as const),
@@ -83,7 +93,10 @@ describe("the keymap chords are listed, and the listed chords resolve", () => {
     // would be bound with no row on the sheet.
     const keymap = stripComments(await Bun.file(`${SRC}/lib/keymap.ts`).text());
     const block = keymap.slice(keymap.indexOf('| "next_tab"'), keymap.indexOf("export type Dispatch"));
-    const declared = [...block.matchAll(/\| "([a-z_]+)"/g)].map((m) => m[1]!);
+    // `[a-z0-9_]`, not `[a-z_]`: the first numbered id (`pick_model_1`) was
+    // invisible to a letters-only scan, so the union could have grown five
+    // bound-but-undocumented keys and this test would still have passed.
+    const declared = [...block.matchAll(/\| "([a-z0-9_]+)"/g)].map((m) => m[1]!);
     expect(declared.sort()).toEqual(BOUND.map((b) => b.id).sort());
   });
 });

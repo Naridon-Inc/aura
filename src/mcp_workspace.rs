@@ -55,7 +55,8 @@ pub fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "id": id("Workspace id from aura_workspace_create / aura_workspace_list."),
                     "message": id("What to send."),
-                    "model": id("Model override for this one turn.")
+                    "model": id("Model override for this one turn."),
+                    "message_id": id("Your own key for this send. If a call times out and you cannot tell whether it landed, retry with the same key — the prompt you already sent is acknowledged and nothing new is queued. Name the intent of the send ('review-pr-412'), not the attempt.")
                 },
                 "required": ["id", "message"]
             },
@@ -86,11 +87,13 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "aura_workspace_list",
-            "description": "List the cloud workspaces this key can see, newest activity first, each with its status and the intent it was created with. Call it to find a workspace another agent started for you, or to check what is still running before you create another one.",
+            "description": "List the cloud workspaces this key can see, newest activity first, each with its status and the intent it was created with. Call it to find a workspace another agent started for you, or to check what is still running before you create another one. Answers with at most 200 rows; pass `offset` to walk past that.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "status": id("Keep only this status: running, sleeping, archived, ended.")
+                    "status": id("Keep only this status: running, sleeping, archived, ended. Applied before the page is cut, so this filters the list and not the page."),
+                    "limit": { "type": "integer", "description": "Rows to return. Default and maximum 200." },
+                    "offset": { "type": "integer", "description": "Rows to skip. Without it the 201st workspace cannot be reached." }
                 }
             },
             "annotations": {
@@ -202,7 +205,12 @@ fn dispatch(name: &str, args: &Value) -> Result<Value, ApiError> {
             let id = required(args, "id")?;
             let message = required(args, "message")?;
             let c = Client::from_env()?;
-            c.prompt(&id, &message, arg_str(args, "model").as_deref())
+            c.prompt(
+                &id,
+                &message,
+                arg_str(args, "model").as_deref(),
+                arg_str(args, "message_id").as_deref(),
+            )
         }
         "aura_workspace_messages" => {
             let id = required(args, "id")?;
@@ -224,7 +232,11 @@ fn dispatch(name: &str, args: &Value) -> Result<Value, ApiError> {
         }
         "aura_workspace_list" => {
             let c = Client::from_env()?;
-            c.list(arg_str(args, "status").as_deref())
+            c.list(
+                arg_str(args, "status").as_deref(),
+                arg_i64(args, "limit"),
+                arg_i64(args, "offset"),
+            )
         }
         "aura_workspace_get" => {
             let id = required(args, "id")?;
@@ -264,6 +276,16 @@ fn arg_str(args: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// A whole number argument, however the client typed it.
+///
+/// Some MCP clients send every argument as a string even where the schema says
+/// integer, so `"5"` has to mean 5 — the alternative is a page size that is
+/// silently ignored and a caller who thinks they asked for one.
+fn arg_i64(args: &Value, key: &str) -> Option<i64> {
+    let v = args.get(key)?;
+    v.as_i64().or_else(|| v.as_str()?.trim().parse().ok())
 }
 
 fn required(args: &Value, key: &str) -> Result<String, ApiError> {

@@ -1,14 +1,12 @@
 // Plugins pane — the add-ons installed in this workspace. A plugin extends
 // what Aura itself can do (a new panel, a game in the Lounge, a shared tool).
 // Every plugin here is a signed bundle on disk, so we show who signed it and
-// let you switch it on or off. Finding and installing new ones lives in the
-// Extensions browser, one click away.
+// let you switch it on or off.
 
 import { useState } from "react";
 import { BadgeCheck, Blocks, ShieldAlert } from "lucide-react";
 
 import { api, type PluginRow } from "../../../lib/api";
-import { Button } from "../../ui/button";
 import { Switch } from "../../ui/switch";
 import {
   Card,
@@ -50,15 +48,6 @@ export function PluginsPane({
       <PaneIntro
         title="Plugins"
         blurb="Add-ons that extend what Aura can do. Each one is a signed package. You can see who made it and turn it on or off any time."
-        action={
-          <Button
-            size="sm"
-            variant="subtle"
-            onClick={() => window.dispatchEvent(new CustomEvent("aura:open-extensions"))}
-          >
-            Browse add-ons
-          </Button>
-        }
       />
       {loading && plugins.length === 0 ? (
         <PaneSpinner label="Loading plugins…" />
@@ -66,7 +55,7 @@ export function PluginsPane({
         <EmptyHint
           icon={Blocks}
           title="No plugins installed"
-          body="Browse add-ons to install one. Aura only runs plugins that are signed, so you always know what you're getting."
+          body="Plugins you install land in ~/.aura/plugins and show up here. Aura only runs plugins that are signed, so you always know what you're getting."
         />
       ) : (
         <Card>

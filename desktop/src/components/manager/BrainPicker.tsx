@@ -26,6 +26,12 @@ import {
   type CatalogModel,
   type SelectedModel,
 } from "../../lib/modelCatalog";
+import { loadoutSlotKey } from "../../lib/modelLoadout";
+import {
+  PICK_MODEL_SLOT_EVENT,
+  type PickModelSlotDetail,
+} from "../../lib/composerChords";
+import { toast } from "../../lib/toast";
 import { AgentIcon } from "../agent/AgentIcon";
 import { BrainSwitcherModal } from "./BrainSwitcherModal";
 import { ChevronDown } from "lucide-react";
@@ -52,7 +58,15 @@ type Props = {
    *  auto-routing). Lets the composer carry a single model chip instead of a
    *  second look-alike "Auto" chip beside this one. Modal variant only. */
   modalFooter?: ReactNode;
+  /** The per-turn knobs (Effort, Fast), rendered inside the picker under the
+   *  model list — they share the model's scope, so they share its surface. */
   turnControls?: ReactNode;
+  /** True while those controls have a list open over themselves — the models
+   *  stand down for it. Passed straight through to the panel. */
+  turnControlsExpanded?: boolean;
+  /** What `turnControls` currently reads, printed on the chip so the state of
+   *  a control that now lives behind a click is still visible without one. */
+  chipDetail?: string | null;
 };
 
 /** A brain can't run if it needs an API key the keychain doesn't hold —
@@ -84,13 +98,15 @@ export function BrainPicker({
   variant = "inline",
   modalFooter,
   turnControls,
+  turnControlsExpanded,
+  chipDetail,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [brains, setBrains] = useState<BrainChoice[]>([]);
   const [liveCatalog, setLiveCatalog] = useState<ModelCatalog | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const { favorites, toggleFavorite } = useModelFavorites();
+  const { favorites, toggleFavorite, reorderFavorites } = useModelFavorites();
   const pickLock = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -243,6 +259,40 @@ export function BrainPicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, flatRows, variant]);
 
+  // ⌘1…⌘5 pick that slot of the loadout without opening anything. The chord
+  // is dispatched app-wide, but only the picker whose composer holds the focus
+  // acts: this changes the model for ONE session's next turn, and several
+  // chats can be mounted at once, so a broadcast would retarget a conversation
+  // the user is not looking at. The composer frame is the scope because that
+  // is where the caret is while someone is writing the prompt they are about
+  // to send — which is exactly when this key is for.
+  const slotRef = useRef<{ favorites: string[]; rows: typeof flatRows }>({
+    favorites,
+    rows: flatRows,
+  });
+  slotRef.current = { favorites, rows: flatRows };
+  useEffect(() => {
+    const onSlot = (e: Event) => {
+      const slot = (e as CustomEvent<PickModelSlotDetail>).detail?.slot;
+      if (!slot || disabled) return;
+      const frame = rootRef.current?.closest(".unified-composer");
+      if (!frame || !frame.contains(document.activeElement)) return;
+      const key = loadoutSlotKey(slotRef.current.favorites, slot);
+      if (!key) return;
+      const row = slotRef.current.rows.find(
+        (r) => rowKey(r.brain.id, r.model) === key,
+      );
+      if (!row || isUnusable(row.brain)) return;
+      void pick(row.brain, row.model);
+      toast.info(`Model: ${row.model.label}`, undefined, { durationMs: 1500 });
+    };
+    window.addEventListener(PICK_MODEL_SLOT_EVENT, onSlot);
+    return () => window.removeEventListener(PICK_MODEL_SLOT_EVENT, onSlot);
+    // `pick` closes over props that are stable for this picker's lifetime; the
+    // data the handler reads comes through slotRef.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [disabled]);
+
   const chipLabel = value ? value.label : "Auto";
 
   if (variant === "popover")
@@ -250,6 +300,7 @@ export function BrainPicker({
       <div className="relative" ref={rootRef} data-tour="brain">
         <ModelCatalogPopover
           label={chipLabel}
+          detail={chipDetail}
           open={open}
           onOpenChange={setOpen}
           disabled={disabled}
@@ -266,9 +317,11 @@ export function BrainPicker({
             onPick={(brain, model) => void pick(brain, model)}
             onPickAuto={() => void pick(null, null)}
             onToggleFav={toggleFavorite}
+            onReorderFav={reorderFavorites}
             onClose={() => setOpen(false)}
             footer={modalFooter}
             turnControls={turnControls}
+            turnControlsExpanded={turnControlsExpanded}
           />
         </ModelCatalogPopover>
       </div>
@@ -304,9 +357,11 @@ export function BrainPicker({
           onPick={(brain, model) => void pick(brain, model)}
           onPickAuto={() => void pick(null, null)}
           onToggleFav={toggleFavorite}
+          onReorderFav={reorderFavorites}
           onClose={() => setOpen(false)}
           footer={modalFooter}
           turnControls={turnControls}
+          turnControlsExpanded={turnControlsExpanded}
         />
       )}
       {open && variant === "inline" && (

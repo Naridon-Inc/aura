@@ -205,13 +205,12 @@ describe("a tab keeps its width and the strip scrolls", () => {
     // A hidden scrollbar plus cells that refuse to shrink means a narrow bar
     // shows one cell and presents it as the whole set — the other places are
     // not merely offscreen, they are unannounced and unreachable with a mouse.
-    // Both strips that scroll therefore carry the arrows, and they carry the
-    // SAME ones: this defect was found on Tasks, fixed there, and then found
-    // again unfixed in the conversation header a day later.
-    for (const file of [
-      "components/ui/tabs.tsx",
-      "components/team/presentation/ConversationView.tsx",
-    ]) {
+    // The strip that scrolls therefore carries the arrows. This defect was
+    // found on Tasks, fixed there, and then found again unfixed in Team's
+    // conversation header a day later; that header left with the messaging
+    // surface, so the shared strip is the one place that still has to carry
+    // them.
+    for (const file of ["components/ui/tabs.tsx"]) {
       const src = await readSrc(file);
       expect(src).toContain("useStripOverflow");
       expect(src).toContain("<StripArrows");

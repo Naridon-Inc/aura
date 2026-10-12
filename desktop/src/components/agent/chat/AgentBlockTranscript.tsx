@@ -30,6 +30,7 @@
 import { useMemo } from "react";
 
 import type { BlockEnvelope } from "../../../lib/api";
+import { visibleUserText } from "../../../lib/injectedContext";
 import { LinkifiedText } from "../normalized/TaskChip";
 
 /** One exchange: what was sent, and what came back. `output` is null while the
@@ -119,9 +120,15 @@ function ExchangeRow({
 }) {
   const body = exchange.output ? tidyOutput(exchange.output.text) : "";
   const failed = (exchange.exit?.exit_code ?? 0) !== 0;
+  // The first prompt a CLI sees is usually the repo's instruction file, not a
+  // question — it goes down the same `send_prompt` path as typed input and
+  // lands in a bubble styled as the user's. Show the typed remainder; an
+  // all-scaffolding prompt leaves the answer on its own row, which is what it
+  // is: the agent's opening banner.
+  const prompt = exchange.prompt ? visibleUserText(exchange.prompt.text) : "";
   return (
     <div className="flex flex-col gap-2">
-      {exchange.prompt && exchange.prompt.text.trim().length > 0 && (
+      {prompt.trim().length > 0 && (
         <div className="self-end max-w-[88%]">
           <div
             // `break-words` is load-bearing, not decoration: prompts routinely
@@ -137,7 +144,7 @@ function ExchangeRow({
                 "1px solid color-mix(in srgb, var(--color-accent) 22%, transparent)",
             }}
           >
-            <LinkifiedText text={exchange.prompt.text} repoRoot={repoRoot} />
+            <LinkifiedText text={prompt} repoRoot={repoRoot} />
           </div>
         </div>
       )}

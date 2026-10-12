@@ -23,8 +23,6 @@ import { WorkspaceRoster } from "./components/WorkspaceRoster";
 import { PeopleRailMount } from "./components/collab/rail/PeopleRailMount";
 import { BuildNav } from "./components/BuildNav";
 import { useWorktreeBadges } from "./lib/useWorktreeBadges";
-import { useChatNotifier } from "./lib/useChatNotifier";
-import { usePagesSync } from "./lib/usePagesSync";
 import { openPopout } from "./lib/popout";
 import { requestRun } from "./lib/runRequest";
 import { onIdle } from "./lib/idle";
@@ -63,12 +61,7 @@ import {
   syncMachines,
 } from "./lib/activeMachine";
 import { placeForNewWork, writeAmbientSid } from "./lib/ambientSession";
-import {
-  placeProjectName,
-  useKnownProjects,
-  usePlaceRoot,
-} from "./lib/projectRoots";
-import { PlacePage } from "./components/places/PlacePage";
+import { usePlaceRoot } from "./lib/projectRoots";
 import {
   WORK_GO_EVENT,
   goToWork,
@@ -77,7 +70,6 @@ import {
   type WorkLens,
 } from "./lib/workRoute";
 import { TasksPlace } from "./components/tasks/TasksPlace";
-import { PagesSurface } from "./components/pages2/PagesSurface";
 import { useWorkspaceCustomization } from "./lib/workspaceCustomization";
 // Managed agent/sibling worktrees live under
 // `<repo>/.{claude,gemini,aura}/worktrees/<name>` — machine-created checkouts
@@ -106,10 +98,6 @@ import { StatusBar } from "./components/StatusBar";
 import { managerBootCommand } from "./lib/managerBoot";
 import { refreshPluginContributes } from "./lib/pluginContributesStore";
 import {
-  bootExtensionHost,
-  executeExtCommand,
-} from "./lib/vscodeExt/extHostRuntime";
-import {
   configurePluginRuntime,
   dispatchPluginPillClick,
 } from "./lib/pluginRuntime";
@@ -132,8 +120,6 @@ import { WorkSurface } from "./components/WorkSurface";
 import { PRDetailPane } from "./components/workpanes/PRDetailPane";
 import { useAgents } from "./lib/agents";
 import { TerminalPanel } from "./components/terminal/TerminalPanel";
-import { TeamSurface } from "./components/team/TeamSurface";
-import { TeamChatProvider } from "./components/team/application/TeamChatContext";
 import { SidebarHeader } from "./components/SidebarHeader";
 import { isWorktreeRoot } from "./lib/workspaceLabel";
 import { CallPanel } from "./components/chat/CallPanel";
@@ -144,7 +130,6 @@ import {
 } from "./components/rightrail/RightRail";
 import { ReviewStateHeader } from "./components/rightrail/ReviewStateHeader";
 import { ChecksPanel } from "./components/rightrail/ChecksPanel";
-import { ScribblePanel } from "./components/rightrail/scribble/ScribblePanel";
 import { RailBrowser } from "./components/rightrail/RailBrowser";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { ShortcutsDialog } from "./components/dialogs/ShortcutsDialog";
@@ -161,7 +146,6 @@ import { RemoteDialog } from "./components/dialogs/RemoteDialog";
 import { PairPhoneDialog } from "./components/dialogs/PairPhoneDialog";
 import { SettingsDialog } from "./components/dialogs/SettingsDialog";
 import { TimeMachineWizard } from "./components/workpanes/TimeMachineWizard";
-import { TimelineWizard } from "./components/workpanes/timeline/TimelineWizard";
 import { ChecksPane } from "./components/workpanes/ChecksPane";
 import { GitView } from "./components/git/GitView";
 import { SignInWizard } from "./components/account/SignInWizard";
@@ -174,9 +158,7 @@ import {
 } from "./components/cloud/RemoteWorkspace";
 import { PublishRepoDialog } from "./components/workpanes/workspaces/PublishRepoDialog";
 import { SearchWorkpane } from "./components/SearchWorkpane";
-import { ShareCodeDialog } from "./components/ShareCodeDialog";
 import { askConfirm, askNotice } from "./components/ui/ask";
-import { ChannelNotesPanel } from "./components/chat/ChannelNotesPanel";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { AgentGateHost } from "./components/agent/AgentGateHost";
@@ -194,13 +176,17 @@ import {
   type HistoryEvent,
 } from "./components/sidebars";
 import { CommonsRailPanel } from "./components/rightrail/CommonsRailPanel";
-import { PagesSidebarMount } from "./components/pages/PagesSidebar";
 import { useEditorStore, armWorkspaceSnapshots, readPersistedAgents, readPersistedManagers, pendingFilePaths, openFileImperative, treeLeafNodes, openBrowserTab } from "./lib/editorStore";
 import { useIdeTabBridge } from "./lib/ideBridge/useIdeTabBridge";
 // AURA-1296 — keyboard + chat ergonomics chords (see dispatchAction).
 import { cycleOpenTab, jumpToAttentionTab } from "./lib/tabNav";
 import { forkActiveChat } from "./lib/forkFromTab";
 import { CYCLE_EFFORT_EVENT } from "./lib/effortCycle";
+import {
+  TOGGLE_FAST_EVENT,
+  modelSlotFromActionId,
+  pickModelSlotEvent,
+} from "./lib/composerChords";
 import { sectionForRef } from "./lib/paneSection";
 import {
   clubHolds,
@@ -251,12 +237,18 @@ import {
 import { resumeCwdOf } from "./lib/agentSessionScope";
 import { fetchManagerList } from "./lib/managerCache";
 import { fetchPrList } from "./lib/prsCache";
-import { useApplyThemeClass } from "./lib/themeStore";
+import {
+  useApplyThemeClass,
+  useResolvedTheme,
+  useThemeContrast,
+  useThemeVariant,
+} from "./lib/themeStore";
+import { pushNativeTerminalAppearance } from "./lib/terminalAppearance";
 // AURA-1298
-import { useZoomLevel } from "./lib/zoomStore";
+import { useZoom, useZoomLevel } from "./lib/zoomStore";
 import { useIsFullscreen } from "./lib/useIsFullscreen";
 import { useApplyVsCodeChrome } from "./lib/vscodeThemesStore";
-import { loadSettings } from "./lib/settingsStore";
+import { loadSettings, useTerminalPrefs } from "./lib/settingsStore";
 import {
   bindChannelMeta,
   forgetAgentStream,
@@ -398,6 +390,36 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // variant tokens). No-op otherwise; clears cleanly when turned off.
   useApplyVsCodeChrome();
 
+  // Hand the resolved terminal colors and text size to the native terminals.
+  //
+  // This has to run after the two hooks above, not with them: both change what
+  // `--term-*` resolves to — one by swapping the class on <html>, the other by
+  // writing inline variables over it — and the tokens can only be read once
+  // that has landed. Hence the rAF: a read in the same tick returns the
+  // outgoing theme's colors, so the terminal would lag exactly one theme
+  // change behind, which looks like caching rather than ordering.
+  //
+  // Keyed on every input that can change the answer. A terminal opened later
+  // picks the appearance up on its own, because Rust keeps the last value.
+  //
+  // The zoom is one of those inputs, and it is the reason ⌘+ did nothing to
+  // terminal text: the GPU terminal paints into a surface that is the
+  // webview's sibling, so `setZoom` scaled every other pixel in the window and
+  // left the glyphs alone. Read through `useZoom` rather than the tuple below,
+  // which is declared further down — a dependency array is evaluated during
+  // render, so naming it here would read it before its own initializer.
+  const termPrefs = useTerminalPrefs();
+  const resolvedTheme = useResolvedTheme();
+  const themeVariant = useThemeVariant();
+  const themeContrast = useThemeContrast();
+  const termZoom = useZoom();
+  useEffect(() => {
+    const id = requestAnimationFrame(() => {
+      void pushNativeTerminalAppearance(termPrefs.font_size, termZoom);
+    });
+    return () => cancelAnimationFrame(id);
+  }, [resolvedTheme, themeVariant, themeContrast, termPrefs.font_size, termZoom]);
+
   // Reconcile the durable ~/.aura/settings.toml against the localStorage
   // boot cache once at startup (seeds the TOML on first run, otherwise
   // adopts it + re-applies the live theme). Fire-and-forget; the boot
@@ -483,7 +505,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       raw === "files" ||
       raw === "changes" ||
       (raw === "commons" && COMMONS_ENABLED) ||
-      raw === "scribble" ||
       raw === "browser"
     )
       return raw;
@@ -596,9 +617,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   useEffect(() => {
     configurePluginRuntime({ getRepoRoot: () => projectRootRef.current });
     void refreshPluginContributes();
-    // Boot the VS Code web-extension host — it reconciles itself against the
-    // enabled extension set and only spawns a worker when there's one to run.
-    bootExtensionHost();
   }, []);
 
   // Live plugin contributes snapshot — drives the second-rail tile
@@ -621,7 +639,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     { identifier: string | null; file: string | null } | null
   >(null);
   const [checksOpen, setChecksOpen] = useState(false);
-  const [timelineOpen, setTimelineOpen] = useState(false);
   const [sourceControlOpen, setSourceControlOpen] = useState(false);
   const [signInOpen, setSignInOpen] = useState(false);
   const [agentCustomizeOpen, setAgentCustomizeOpen] = useState(false);
@@ -698,22 +715,11 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       remotePlaces.focusedKey,
     );
   }, [remotePlaces]);
-  // The project a place is pointed at. The place rails carry the picker — the
-  // things they list belong to a project — and it writes one shared scope, so
-  // Pages and Team follow the same choice the Tasks rail offers rather than
-  // being stuck on whatever folder happens to be open.
+  // The project a place is pointed at. The place rail carries the picker — the
+  // things it lists belong to a project — and it writes one shared scope, so
+  // Tasks follows the same choice the rail offers rather than being stuck on
+  // whatever folder happens to be open.
   const placeRoot = usePlaceRoot(project?.root ?? "");
-  // …and what to call it. Team's chat model takes a name beside the root, and
-  // it used to get the OPEN project's — so following the picker to another
-  // project labelled that project's conversations with the name of the one you
-  // left. The open project's own name is only offered as a fallback when the
-  // place is still pointed at it.
-  const placeProjects = useKnownProjects(project?.root ?? "");
-  const placeName = placeProjectName(
-    placeRoot,
-    placeProjects,
-    placeRoot === project?.root ? project?.name : undefined,
-  );
   // Which Trace question is out with the brain. Goals and Safety check don't
   // open a pane — they send a prompt into the ambient Aura chat — so nothing on
   // screen said the first click had landed, and a second click queued the
@@ -773,9 +779,8 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     window.addEventListener(TRACE_GO_EVENT, onGo);
     return () => window.removeEventListener(TRACE_GO_EVENT, onGo);
   }, [goTrace]);
-  // Going to Pages / Tasks / Team. Same single door as Trace: the rail row,
-  // a keyboard shortcut, a palette command, a page mention and an empty
-  // pane's "open chat" all arrive here.
+  // Going to Tasks. Same single door as Trace: the rail row, a keyboard
+  // shortcut and a palette command all arrive here.
   const goPlace = useCallback(
     (next: CollabPlace) => {
       leavePages();
@@ -874,19 +879,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     window.addEventListener("aura:open-settings", onEvent);
     return () => window.removeEventListener("aura:open-settings", onEvent);
   }, []);
-  // `aura:open-extensions` — the Commons Apps banner and the command palette
-  // both dispatch this. Extensions no longer own a standalone wizard; they now
-  // live inside the unified "Agents & extensions" surface, so route the event
-  // there and land directly on the Extensions pane. One home, opened from
-  // anywhere.
-  useEffect(() => {
-    function onEvent() {
-      setAgentCustomizeView("extensions");
-      setAgentCustomizeOpen(true);
-    }
-    window.addEventListener("aura:open-extensions", onEvent);
-    return () => window.removeEventListener("aura:open-extensions", onEvent);
-  }, []);
   // `aura:open-time-machine` — the in-pane expand affordance, ⌘⌥T, and the
   // command palette all dispatch this; route it into the immersive full-screen
   // Time machine wizard. An optional { identifier, file } detail carries a
@@ -900,29 +892,13 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         identifier: detail?.identifier ?? null,
         file: detail?.file ?? null,
       });
-      // The Timeline is the other immersive overlay, and it mounts LATER in
-      // the tree — left open it would sit on top of the Time machine it just
-      // summoned (its scrubber's per-file "Bring back" dispatches this event).
-      // Jumping surfaces means leaving the old one, so close it.
-      setTimelineOpen(false);
     }
     window.addEventListener("aura:open-time-machine", onEvent);
     return () => window.removeEventListener("aura:open-time-machine", onEvent);
   }, []);
-  // `aura:open-timeline` — the Trace rail's "Project timeline" row (and any
-  // future entry point) dispatches this; route it into the immersive full-screen
-  // Project Timeline wizard. One overlay, opened from anywhere, mirroring the
-  // Time machine / Extensions wiring.
-  useEffect(() => {
-    function onEvent() {
-      setTimelineOpen(true);
-    }
-    window.addEventListener("aura:open-timeline", onEvent);
-    return () => window.removeEventListener("aura:open-timeline", onEvent);
-  }, []);
   // `aura:open-checks` — the BuildNav "Checks" row (and any future entry point)
   // dispatches this; route it into the full-screen Semantic CI surface. One
-  // overlay, opened from anywhere, mirroring the Extensions wiring.
+  // overlay, opened from anywhere, mirroring the Time machine wiring.
   useEffect(() => {
     function onEvent() {
       setChecksOpen(true);
@@ -1258,7 +1234,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         tool === "review" ||
         tool === "rewind" ||
         tool === "attest" ||
-        tool === "memory" ||
         tool === "impacts" ||
         tool === "doctor"
       ) {
@@ -1503,14 +1478,13 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     }
   }, [editor.activeInbox, editor]);
 
-  // `aura:open-session-detail` — the Project Timeline (and any future surface)
-  // asks to jump from a moment to its full Trace Session detail. We close the
-  // immersive Timeline overlay and open the Sessions tab; TraceSurface itself
-  // selects the right row (live event when already mounted, pending cell on
-  // first mount). Stable []-deps via the always-current editor ref.
+  // `aura:open-session-detail` — a surface asking to jump from one run to its
+  // full Trace Session detail (the resume handoff does it). We open the
+  // Sessions tab; TraceSurface itself selects the right row (live event when
+  // already mounted, pending cell on first mount). Stable []-deps via the
+  // always-current editor ref.
   useEffect(() => {
     function onOpenSessionDetail() {
-      setTimelineOpen(false);
       editorRef.current.openSessions("sessions");
     }
     window.addEventListener("aura:open-session-detail", onOpenSessionDetail);
@@ -1700,13 +1674,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       // not a reason to yank you off the page you're reading.
       editor.openScreenshare(id);
     }
-    // RR.3 — Cmd+Shift+N (or `aura:open-notes`) opens the Pages
-    // workpane tab. No-op without a repo open — Pages needs a project
-    // to read team notes from.
-    function openPages() {
-      if (!projectRootRef.current) return;
-      goPlace("pages");
-    }
     function onKey(e: KeyboardEvent) {
       if (!(e.metaKey || e.ctrlKey)) return;
       const k = e.key.toLowerCase();
@@ -1730,17 +1697,10 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         e.preventDefault();
         openStandup();
       }
-      // ⌘⇧N used to also land here, on Pages. It is already the roster's
-      // "new workspace from…" key (see the handler above), and both
-      // listeners are on `window`, so one press ran both: you arrived on
-      // Pages with a create-workspace composer open over it. ⌘⇧N belongs
-      // to the creation family alongside ⌘N; Pages keeps the rail and the
-      // command palette, which is how people reach it anyway.
     }
     window.addEventListener("aura:open-tasks", openTasks);
     window.addEventListener("aura:open-standup", openStandup);
     window.addEventListener("aura:open-screenshare", openScreenshare);
-    window.addEventListener("aura:open-notes", openPages);
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("aura:open-tasks", openTasks);
@@ -1749,7 +1709,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         "aura:open-screenshare",
         openScreenshare,
       );
-      window.removeEventListener("aura:open-notes", openPages);
       window.removeEventListener("keydown", onKey);
     };
   }, [editor, leavePages, goPlace]);
@@ -1768,8 +1727,8 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // W1.4 — plugin status pills. Pass through to StatusBar so it can
   // render them after the built-in pill list.
   const pluginPillEntries = pluginStatusPills(pluginContribs.rows);
-  // Deep-links carried in auto-DMs + page mentions (see the matching comment
-  // up by the `aura:open-crew` listener).
+  // Deep-links carried in a task assignment (see the matching comment up by
+  // the `aura:open-crew` listener).
   useEffect(() => {
     const onOpenTask = (e: Event) => {
       const id = (e as CustomEvent<{ id?: string }>).detail?.id;
@@ -1778,39 +1737,15 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       leavePages();
       editor.openTaskDetail(id, root);
     };
-    const onOpenDm = () => {
-      // Surface the Team activity pane; useTeamChat focuses the 1:1 by handle.
-      leavePages();
-      goTrace({ kind: "sessions", view: "team" });
-    };
-    const onOpenPage = (e: Event) => {
-      const d = (
-        e as CustomEvent<{ scope?: string; bucket?: string; id?: string }>
-      ).detail;
-      const root = projectRootRef.current;
-      if (!d?.id || !d.scope || !root) return;
-      goPlace("pages");
-      const key = `${d.scope}|${d.bucket ?? ""}|${d.id}`;
-      window.setTimeout(() => {
-        window.dispatchEvent(
-          new CustomEvent("aura:pages:open", { detail: { key } }),
-        );
-      }, 160);
-    };
     window.addEventListener("aura:open-task", onOpenTask as EventListener);
-    window.addEventListener("aura:open-dm", onOpenDm);
-    window.addEventListener("aura:open-page", onOpenPage as EventListener);
     return () => {
       window.removeEventListener("aura:open-task", onOpenTask as EventListener);
-      window.removeEventListener("aura:open-dm", onOpenDm);
-      window.removeEventListener("aura:open-page", onOpenPage as EventListener);
     };
   }, [editor, leavePages]);
 
-  // ADE — the left AdeSidebar section (Build/Team/Plan/Trace) auto-
-  // follows whatever the user is actually looking at in the center
-  // pane: a Claude Code / terminal / file pane → Build, the Tasks board
-  // or a Page → Plan, a huddle screenshare → Team, the moat surfaces
+  // ADE — the left AdeSidebar section (Build/Trace) auto-follows whatever
+  // the user is actually looking at in the center pane: a Claude Code /
+  // terminal / file pane or the Tasks board → Build, the moat surfaces
   // (Inspector / Replay / Code Map / Prove / PR Inbox) → Trace. Manual
   // footer clicks still win until the next pane switch — AdeSidebar only
   // re-syncs when this derived value actually changes. Mirrors the
@@ -1820,16 +1755,13 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     // The page first — it covers the work surface, so whatever tab is open
     // underneath is not where the user is.
     if (tracePage) return "trace";
-    // Pages is Plan, Team is Team, and Tasks is Build — it is one of Build's
-    // three rows, in the slot Mission Control used to hold. This said Tasks
-    // was Team, which was true back when a board could only be reached as a
-    // tab under Team's umbrella; after the merge it meant clicking Tasks lit
-    // Team, so the rail disagreed with the page for the whole time you were
-    // on it. BuildNav lights the Tasks row inside the group; this lights the
-    // group.
-    if (place === "pages") return "plan";
-    if (place === "tasks") return "build";
-    if (place) return "team";
+    // Tasks is Build — it is one of Build's three rows, in the slot Mission
+    // Control used to hold. This said Tasks was Team, which was true back
+    // when a board could only be reached as a tab under Team's umbrella;
+    // after the merge it meant clicking Tasks lit Team, so the rail disagreed
+    // with the page for the whole time you were on it. BuildNav lights the
+    // Tasks row inside the group; this lights the group.
+    if (place) return "build";
     if (
       editor.activePlanBuilder ||
       editor.activeGraph ||
@@ -1848,16 +1780,13 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     }
     const layout = editor.splitLayout;
     if (layout) {
-      // Per-leaf active tabs; precedence plan > team > build. Trace can't
-      // reach the tree — its surfaces are flat-flag singletons, handled
-      // above. sectionForRef (lib/paneSection) is shared with WorkSurface's
-      // per-pane tab strip so the left-nav section and that strip never
-      // diverge — a Tasks board reads as Team from both.
+      // Per-leaf active tabs; precedence build > trace. Trace can't reach the
+      // tree — its surfaces are flat-flag singletons, handled above.
+      // sectionForRef (lib/paneSection) is shared with WorkSurface's per-pane
+      // tab strip so the left-nav section and that strip never diverge.
       const rank: Record<AdeSection, number> = {
-        plan: 0,
-        team: 1,
-        build: 2,
-        trace: 3,
+        build: 0,
+        trace: 1,
       };
       let section: AdeSection | null = null;
       for (const leaf of treeLeafNodes(layout)) {
@@ -1868,7 +1797,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       }
       return section ?? "build";
     }
-    if (editor.activePlanId) return "plan";
     return "build";
   }, [
     editor.splitLayout,
@@ -2131,17 +2059,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     });
   }, [recents, project?.root, worktreesByRoot]);
   const rosterBadges = useWorktreeBadges(rosterBadgeGroups);
-
-  // Always-on chat notifications: fires an OS banner for every inbound
-  // team-chat message (per-repo rooms + the cross-repo #aura channel),
-  // even when the Team surface isn't mounted. The mention-only bridge
-  // below now just flashes the title; this hook owns the OS notification.
-  useChatNotifier(project?.root ?? null);
-
-  // Same reasoning for pages: a teammate's note has to land on this machine
-  // whether or not Pages is the screen you're on, so the poll belongs to the
-  // open project. Pages joins this same poll when it mounts.
-  usePagesSync(project?.root ?? null);
 
   // Warm the PR list cache as soon as a repo opens, before the user
   // navigates to the PR Inbox. `fetchPrList` is SWR-aware: if the cache
@@ -2638,57 +2555,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       if (unlisten) unlisten();
     };
   }, [editor]);
-
-  // Chat mention bridge: CommsPanel dispatches `aura:chat-mention` on
-  // each poll when a new message mentions the current user. We surface
-  // it as an OS toast + a transient document-title flash so users
-  // notice even when the panel is collapsed. Throttled per session so
-  // a burst of mentions doesn't fire a notification per line.
-  useEffect(() => {
-    let lastNotify = 0;
-    const originalTitle = document.title;
-    let flashTimer: number | null = null;
-
-    // Mentions get an in-app cue (a transient document-title flash) so the
-    // user notices even with the Team panel collapsed. The OS notification
-    // itself is now owned by `useChatNotifier` (always-on, all messages),
-    // so we no longer fire one here — that would double-notify on mentions.
-    function notifyMention(detail: { from: string; body: string; channel: string }) {
-      const now = Date.now();
-      if (now - lastNotify < 4000) return;
-      lastNotify = now;
-
-      document.title = `● mention from @${detail.from}`;
-      if (flashTimer) window.clearTimeout(flashTimer);
-      flashTimer = window.setTimeout(() => {
-        document.title = originalTitle;
-      }, 6000);
-    }
-
-    const handler = (e: Event) => {
-      const ev = e as CustomEvent<{ from: string; body: string; channel: string }>;
-      if (ev.detail) notifyMention(ev.detail);
-    };
-    window.addEventListener("aura:chat-mention", handler);
-    // Warm the OS notification permission once at startup so the first
-    // real mention doesn't pop a system dialog instead of a banner.
-    (async () => {
-      try {
-        const { isPermissionGranted, requestPermission } = await import(
-          "@tauri-apps/plugin-notification"
-        );
-        const ok = await isPermissionGranted();
-        if (!ok) await requestPermission();
-      } catch {
-        /* plugin not loaded — non-fatal */
-      }
-    })();
-    return () => {
-      window.removeEventListener("aura:chat-mention", handler);
-      if (flashTimer) window.clearTimeout(flashTimer);
-      document.title = originalTitle;
-    };
-  }, []);
 
   // Let a coding agent running in a tab drive the editor: open a file, and
   // — the one that matters — put a change it wants to make in front of you
@@ -3900,17 +3766,11 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         case "shortcuts":
           setShortcutsOpen(true);
           return;
-        case "extensions":
-          window.dispatchEvent(new CustomEvent("aura:open-extensions"));
-          return;
         case "time_machine":
           window.dispatchEvent(new CustomEvent("aura:open-time-machine"));
           return;
         case "open_aura":
           window.dispatchEvent(new CustomEvent("aura:open-aura"));
-          return;
-        case "project_timeline":
-          window.dispatchEvent(new CustomEvent("aura:open-timeline"));
           return;
         case "workspaces":
           // Unscoped on purpose — a keyboard/palette summon has no project in
@@ -3919,10 +3779,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           return;
         case "tasks_board": {
           if (projectRootRef.current) goPlace("tasks");
-          return;
-        }
-        case "notes": {
-          if (projectRootRef.current) goPlace("pages");
           return;
         }
         case "open_prs":
@@ -3940,9 +3796,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           return;
         case "aura_status":
           runCli("aura status", ["status"]);
-          return;
-        case "aura_doctor":
-          goTrace({ kind: "tool", tool: "doctor" });
           return;
         case "aura_impacts":
           runCli("aura live impacts", ["live", "impacts"]);
@@ -4011,6 +3864,23 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           window.dispatchEvent(new Event(CYCLE_EFFORT_EVENT));
           return;
         // end AURA-1296
+        case "toggle_fast":
+          // One persisted value, so every mounted composer answers and they
+          // stay in agreement.
+          window.dispatchEvent(new Event(TOGGLE_FAST_EVENT));
+          return;
+        case "pick_model_1":
+        case "pick_model_2":
+        case "pick_model_3":
+        case "pick_model_4":
+        case "pick_model_5": {
+          // Only the picker in the FOCUSED composer answers — this changes the
+          // model of one session's next turn, so a broadcast would retarget a
+          // chat the user is not looking at. See `composerChords`.
+          const slot = modelSlotFromActionId(id);
+          if (slot) window.dispatchEvent(pickModelSlotEvent(slot));
+          return;
+        }
       }
     },
     [editor, runCli, runHandover, pickAndOpenFolder, reviewOpen, rightRailTab],
@@ -4418,10 +4288,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       editor.open(entry.id).catch((e) => console.error("open failed:", e));
       return;
     }
-    if (entry.kind === "extCommand") {
-      void executeExtCommand(entry.command);
-      return;
-    }
     if (entry.kind === "match" || entry.kind === "symbol") {
       // Open the file, then scroll to the hit. Editor mount listens
       // for "aura:scroll-to-line" — fire after a beat so the model is
@@ -4511,7 +4377,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       if (cmd.target === "remote") setRemoteOpen(true);
       if (cmd.target === "intent_inspector") goTrace({ kind: "inspector" });
       if (cmd.target === "provenance_replay") goTrace({ kind: "replay" });
-      if (cmd.target === "semantic_graph") goTrace({ kind: "graph" });
       if (cmd.target === "plan_builder") editor.openPlanBuilder();
       if (cmd.target === "prove") goTrace({ kind: "prove" });
       if (cmd.target === "ask") {
@@ -4614,7 +4479,14 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         goTrace({ kind: "prove" });
         return;
       case "aura_memory_read":
-        goTrace({ kind: "tool", tool: "memory" });
+        // Memory left Trace; Agent customizations is where it lives, and that
+        // is where `/memory` goes, rather than at a Trace tool that no longer
+        // exists.
+        window.dispatchEvent(
+          new CustomEvent("aura:open-agent-customizations", {
+            detail: { pane: "memory" },
+          }),
+        );
         return;
       default:
         runCli(cmd.name, [cmd.target.replace(/^aura_/, "").replace(/_/g, "-")]);
@@ -4683,18 +4555,14 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     onOverview: () => goTrace({ kind: "sessions", view: "overview" }),
     onSessions: () => goTrace({ kind: "sessions", view: "sessions" }),
     onTeamActivity: () => goTrace({ kind: "sessions", view: "team" }),
-    onCostUsage: () => goTrace({ kind: "sessions", view: "usage" }),
     onIntentAst: () => goTrace({ kind: "inspector" }),
     onReview: () => askAura("review", safetyCheckPrompt()),
     onChecks: () => window.dispatchEvent(new CustomEvent("aura:open-checks")),
     onImpacts: () => goTrace({ kind: "tool", tool: "impacts" }),
     onProve: () => askAura("goals", proveGoalsPrompt()),
     onRewind: () => goTrace({ kind: "tool", tool: "rewind" }),
-    onTimeline: () =>
-      window.dispatchEvent(new CustomEvent("aura:open-timeline")),
     onAttest: () => goTrace({ kind: "tool", tool: "attest" }),
     onCodeMap: () => goTrace({ kind: "graph" }),
-    onMemory: () => goTrace({ kind: "tool", tool: "memory" }),
     onDoctor: () => goTrace({ kind: "tool", tool: "doctor" }),
     impactsCount,
     busyKey: traceAsk,
@@ -4734,17 +4602,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       onDest={setTracePage}
       onClose={() => setTracePage(null)}
     />
-  ) : place === "team" && project.root ? (
-    // Takes the window bare because it mounts its OWN `PlacePage` — Team is
-    // the one place whose rail and page share a `useTeamChat()` instance, so
-    // the shell has to be inside the surface rather than around it. The result
-    // on screen is the same as Pages and Tasks: the conversation list on the
-    // right, at the same width, on the page's ground.
-    <TeamSurface repoRoot={placeRoot} mode="full" />
-  ) : place === "pages" && project.root ? (
-    <PlacePage rail={<PagesSidebarMount repoRoot={placeRoot} />}>
-      <PagesSurface repoRoot={placeRoot} />
-    </PlacePage>
   ) : place === "tasks" && project.root ? (
     // One destination, four lenses, ONE rail — see tasks/TasksPlace. This
     // branch used to fork on which surface owned the lens and mount the rail
@@ -4811,14 +4668,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
 
 
   return (
-    // Pointed at the PLACE root, not the open folder. Team's shell asserts that
-    // the chat model it renders was built for the root it was handed — a model
-    // for project A drawn as project B would file messages into the wrong repo
-    // — and the place mount below hands it `placeRoot`. With the provider stuck
-    // on the open folder, picking any other project in the Team rail's switcher
-    // made those two disagree and the assertion threw: the switcher didn't
-    // "not work", it took the whole surface down. One root, one model.
-    <TeamChatProvider repoRoot={placeRoot} projectName={placeName}>
+    <>
       {/* Feed the always-on-top floating HUD. Only the real main window
           publishes — a workspace popout also renders <App>, and two publishers
           would fight over the `hud:state` channel. Every detached window, not
@@ -4857,24 +4707,22 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
             activeSection={adeSection}
             // Clicking a destination goes to it. `adeSection` above is
             // derived from the focused pane, so without this the rail could
-            // only ever REPORT where you were: clicking Team lit the row and
+            // only ever REPORT where you were: clicking Trace lit the row and
             // swapped the rail's list while the work surface kept showing
-            // whatever was already there. Each of these opens the section's
-            // home, and `adeSection` then comes back around agreeing.
+            // whatever was already there. This opens the section's home, and
+            // `adeSection` then comes back around agreeing.
             //
-            // Build is absent on purpose — Aura / Workspaces / Mission
-            // Control are its rows and each carries its own door.
+            // Build is absent on purpose — Aura / Workspaces / Tasks are its
+            // rows and each carries its own door.
             //
             // `leavePages` first, for the reason it documents: Aura,
             // Workspaces and Mission Control are full pages layered OVER the
-            // workpane, so opening a channel underneath one of them lands a
-            // tab you cannot see. Asking for somewhere else is leaving here.
+            // workpane, so opening a tab underneath one of them lands a tab
+            // you cannot see. Asking for somewhere else is leaving here.
             onNavigate={(s) => {
               if (s === "build") return;
               leavePages();
-              if (s === "team") goPlace("team");
-              else if (s === "plan") goPlace("pages");
-              else if (s === "trace") goTrace({ kind: "sessions", view: "overview" });
+              if (s === "trace") goTrace({ kind: "sessions", view: "overview" });
             }}
             workspaceKey={project.root}
             // Only what Trace actually holds. This used to add
@@ -5078,19 +4926,15 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
                 />
               </div>
             }
-            /* No team / plan / trace body. The rail under the nav is the
-                project roster and only ever that.
+            /* No trace body. The rail under the nav is the project roster and
+                only ever that.
 
-                Each of the other three used to hand it a body of its own —
-                Team its conversation list, Pages its document list, Trace a
-                232px column of ten destinations — so the widest column on
-                screen changed its subject every time you changed destination,
-                and your projects were reachable from exactly one of the four.
-                All three navigate from their own page now: Trace's switcher
-                is WorkSurface's TraceTabs, Team opens `mode="full"` with its
-                conversation list as its first column, and PagesSurface mounts
-                the same `PagesSidebarMount` as its own. A page's navigation
-                belongs to the page; the rail belongs to the app. */
+                Trace used to hand it a body of its own — a 232px column of ten
+                destinations — so the widest column on screen changed its
+                subject every time you changed destination, and your projects
+                were reachable from exactly one place. Trace navigates from its
+                own page now: its switcher is WorkSurface's TraceTabs. A page's
+                navigation belongs to the page; the rail belongs to the app. */
           />
         }
         // Only so the shell knows whether the macOS traffic lights need a bare
@@ -5171,7 +5015,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
                 />
               ) : undefined
             }
-            scribbleView={<ScribblePanel repoRoot={project.root} />}
             browserView={BROWSER_RAIL_ENABLED ? <RailBrowser /> : undefined}
             changesCount={diffStats?.changed_files}
             pluginPanels={pluginPanelDescriptors}
@@ -5603,12 +5446,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           onClose={() => setTimeMachine(null)}
         />
       )}
-      {timelineOpen && project.root && (
-        <TimelineWizard
-          repoRoot={project.root}
-          onClose={() => setTimelineOpen(false)}
-        />
-      )}
       {checksOpen && project.root && (
         <ChecksPane
           repoRoot={project.root}
@@ -5653,8 +5490,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         repoRoot={project.root}
         onClose={() => setSearchOpen(false)}
       />
-      <ShareCodeDialog repoRoot={project.root} />
-      <ChannelNotesPanel repoRoot={project.root} />
       {ONBOARDING_V2 ? <OnboardingFlow /> : <OnboardingDialog />}
       {/* Global host for Aura's destructive-op gate. Catches the bare
           `agent-gate-request` event for every session and overlays a
@@ -5728,7 +5563,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           focusAmbientManager(project.root, sid);
         }}
       />
-    </TeamChatProvider>
+    </>
   );
 }
 

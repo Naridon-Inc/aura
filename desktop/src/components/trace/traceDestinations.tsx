@@ -8,19 +8,25 @@
 // other keeps a stale hint — so both surfaces read this instead.
 //
 // A destination is a QUESTION Trace answers, not a kind of tool: what happened
-// and what it taught Aura (Overview, My sessions, Team activity, Memory), is my
-// work sound (Goals, Safety check, Impacts), travel the past (Project
-// timeline), then the quiet utilities (Cost & usage, Project health, Code Map).
-// The order below is that reading, and the `gap` flag marks where one cluster
-// ends and the next begins — rhythm rather than a row of ALL-CAPS headings.
+// (Overview, My sessions, Team activity), then is my work sound (Goals, Safety
+// check, Impacts). The order below is that reading, and the `gap` flag marks
+// where one cluster ends and the next begins — rhythm rather than a row of
+// ALL-CAPS headings.
+//
+// The trim left five rows, plus Impacts when something is really reaching your
+// work. Memory and Project timeline are gone from the product; Cost & usage
+// moved under My sessions, where spend reads as a fact about those runs rather
+// than a subject of its own; Project health and Code Map are no longer offered
+// here. Those last two are hidden rather than deleted, and both are still
+// addressed — `{ kind: "tool", tool: "doctor" }` and `{ kind: "graph" }` — so a
+// saved link keeps working while nothing on screen points at them.
 
 import type { ReactNode } from "react";
 
 import {
   CODE_MAP_ENABLED,
-  MEMORY_SURFACE_ENABLED,
+  PROJECT_HEALTH_ENABLED,
   TEAM_ACTIVITY_ENABLED,
-  TIMELINE_V2,
 } from "../../lib/featureFlags";
 
 /** Which destination the work surface is currently showing. `goals` and
@@ -30,17 +36,14 @@ export type TraceKey =
   | "overview"
   | "sessions"
   | "team"
-  | "usage"
   | "goals"
   | "intent"
   | "review"
   | "checks"
   | "impacts"
   | "rewind"
-  | "timeline"
   | "attest"
   | "doctor"
-  | "memory"
   | "codemap";
 
 /** The handlers a destination can call. Kept as a bag of callbacks (rather
@@ -51,17 +54,14 @@ export type TraceHandlers = {
   onOverview: () => void;
   onSessions: () => void;
   onTeamActivity: () => void;
-  onCostUsage: () => void;
   onIntentAst: () => void;
   onReview: () => void;
   onChecks: () => void;
   onImpacts: () => void;
   onProve: () => void;
   onRewind: () => void;
-  onTimeline: () => void;
   onAttest: () => void;
   onCodeMap: () => void;
-  onMemory: () => void;
   onDoctor: () => void;
 };
 
@@ -94,12 +94,6 @@ export const GLYPH_GOAL = (
     <circle cx="12" cy="12" r="9" />
     <circle cx="12" cy="12" r="5" />
     <circle cx="12" cy="12" r="1" />
-  </>
-);
-export const GLYPH_MEMORY = (
-  <>
-    <ellipse cx="12" cy="6" rx="8" ry="3" />
-    <path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" />
   </>
 );
 export const GLYPH_DOCTOR = (
@@ -141,7 +135,9 @@ export const GLYPH_TEAM_ACTIVITY = (
   </>
 );
 // Cost & usage — a banknote: a rounded bill with a coin in the middle,
-// hinting "what this is costing us in tokens and dollars".
+// hinting "what this is costing us in tokens and dollars". No longer a cell
+// here; it marks the door Sessions carries into the pane, which is why the
+// shape still lives in this file: one mark wherever you meet the surface.
 export const GLYPH_USAGE = (
   <>
     <rect x="2.5" y="6" width="19" height="12" rx="2" />
@@ -171,15 +167,6 @@ export const GLYPH_SAFETY = (
     <path d="m9 11.5 2 2 4-4.2" />
   </>
 );
-// Project timeline — a churn sparkline over a baseline with a playhead dot,
-// echoing the scrubber: "scrub the project's history and watch it evolve".
-export const GLYPH_TIMELINE = (
-  <>
-    <path d="M3 17h18" />
-    <path d="M7 17v-3M11 17v-6M15 17v-2.5M19 17v-7" />
-    <circle cx="11" cy="11" r="1.9" />
-  </>
-);
 
 // ── The list ─────────────────────────────────────────────────────────────────
 
@@ -193,8 +180,8 @@ export const TRACE_DESTINATIONS: TraceDestination[] = [
     run: (h) => h.onOverview(),
   },
 
-  // What happened — and what it taught Aura. Your runs and the team's are the
-  // raw activity; Memory is its durable distillation.
+  // What happened: your own runs, then the team's. Same material, two
+  // scopes, which is why they sit together.
   {
     key: "sessions",
     label: "My sessions",
@@ -211,14 +198,6 @@ export const TRACE_DESTINATIONS: TraceDestination[] = [
     glyph: GLYPH_TEAM_ACTIVITY,
     enabled: TEAM_ACTIVITY_ENABLED,
     run: (h) => h.onTeamActivity(),
-  },
-  {
-    key: "memory",
-    label: "Memory",
-    hint: "What Aura remembers about this project. The decisions, conventions, and gotchas it carries into every session. Search it, see where each fact came from, and forget anything that's wrong.",
-    glyph: GLYPH_MEMORY,
-    enabled: MEMORY_SURFACE_ENABLED,
-    run: (h) => h.onMemory(),
   },
 
   // Two trust rungs: built right (Goals) → reviewed (Safety check). Each
@@ -252,33 +231,15 @@ export const TRACE_DESTINATIONS: TraceDestination[] = [
     run: (h) => h.onImpacts(),
   },
 
-  // The past, in one home.
-  {
-    key: "timeline",
-    label: "Project timeline",
-    hint: "Relive how the project came to be. Scrub a bottom timeline through every moment, with the reason and the code behind it.",
-    glyph: GLYPH_TIMELINE,
-    enabled: TIMELINE_V2,
-    gap: true,
-    run: (h) => h.onTimeline(),
-  },
-
-  // Quiet utilities — money, diagnostics, and the structural map.
-  {
-    key: "usage",
-    label: "Cost & usage",
-    hint: "Token spend and per-developer cost. This month and all time, the one home for usage.",
-    glyph: GLYPH_USAGE,
-    enabled: true,
-    gap: true,
-    run: (h) => h.onCostUsage(),
-  },
+  // Quiet utilities — diagnostics and the structural map. Both are parked;
+  // see their flags for why each is hidden rather than deleted.
   {
     key: "doctor",
     label: "Project health",
     hint: "A quick health check of your project. Finds anything stuck or half-set-up before it trips you, and tells you how to fix it.",
     glyph: GLYPH_DOCTOR,
-    enabled: true,
+    enabled: PROJECT_HEALTH_ENABLED,
+    gap: true,
     run: (h) => h.onDoctor(),
   },
   {

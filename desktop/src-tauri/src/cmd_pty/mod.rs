@@ -88,8 +88,10 @@ pub(super) fn pump_plain(
     recent: &Arc<Mutex<HashMap<String, VecDeque<RecentCommand>>>>,
     last_byte_ms: &Arc<Mutex<u64>>,
 ) {
-    // 1. Raw bytes → xterm, verbatim.
-    let _ = app.emit(&format!("pty:{id}"), bytes.to_vec());
+    // 1. Raw bytes → xterm, verbatim — base64 so the exact stream
+    //    survives JSON without being inflated into an integer array.
+    //    See `pty_emit::encode_chunk`.
+    let _ = app.emit(&format!("pty:{id}"), crate::pty_emit::encode_chunk(bytes));
 
     // 2. Tee into the scrollback ring (consumed by `pty_replay_bytes`
     //    on a remount, and as the live source for the serialized cold

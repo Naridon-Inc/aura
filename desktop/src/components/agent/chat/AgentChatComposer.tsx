@@ -1,7 +1,7 @@
 import { ComposerFrame, ComposerToolbar, ChatModePicker, promptForChatMode, type ChatMode } from "../../chat/ChatComposer";
 import { BrainSwitcherModal } from "../../manager/BrainSwitcherModal";
 import { ModelCatalogPopover, agentCatalogBrain, useLiveModelCatalog, useModelFavorites } from "../../chat/ModelCatalogPopover";
-import { ChevronDown } from "lucide-react";
+import { SquareTerminal } from "lucide-react";
 //! The CLI agent's composer, built to the same spec as the Aura brain's.
 //!
 //! What was here before was a bare `<textarea>` and a send button. The brain's
@@ -480,9 +480,14 @@ function AgentModelChip({
   const [error, setError] = useState<string | null>(null);
   const [switching, setSwitching] = useState(false);
   const brain = useMemo(() => agentCatalogBrain(agentId), [agentId]);
-  const { favorites, toggleFavorite } = useModelFavorites();
+  const { favorites, toggleFavorite, reorderFavorites } = useModelFavorites();
   if (!model) return null;
   if (model.kind === "picker")
+    // A chevron on this button was a lie with a cursor on it. Every other chip
+    // in this strip opens a menu under itself; this one types `/model` into the
+    // session and moves you to the Terminal tab, because the chooser is drawn
+    // by the CLI and lives there. Same click, same reason — it just stops
+    // claiming to be a dropdown and says where it goes instead.
     return (
       <button
         type="button"
@@ -492,10 +497,10 @@ function AgentModelChip({
             if (ok) onSwitchToTerminal?.();
           });
         }}
-        title={`Open ${brain.label}’s model chooser in the terminal`}
+        title={`${brain.label} draws its own model chooser — this types ${model.line} and takes you to the terminal to use it`}
       >
+        <SquareTerminal size={12} />
         <span>{model.label}</span>
-        <ChevronDown size={12} />
       </button>
     );
   return (
@@ -539,6 +544,7 @@ function AgentModelChip({
         }}
         onPickAuto={() => {}}
         onToggleFav={toggleFavorite}
+        onReorderFav={reorderFavorites}
         onClose={() => setOpen(false)}
       />
     </ModelCatalogPopover>

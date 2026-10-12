@@ -144,6 +144,27 @@ mod tests {
     }
 
     #[test]
+    fn geometry_above_the_viewport_still_reaches_the_gpu() {
+        // A clipped surface draws the same full-size frame shifted upward, so
+        // the rows above the clip arrive here at a negative y. They must be
+        // emitted: the render pass's own clipping decides what is visible, and
+        // it does it per pixel, so a glyph straddling the top edge is cut in
+        // half rather than vanishing. Culling whole quads here instead would
+        // chop characters at the boundary.
+        let list = RenderList {
+            bg_rects: vec![BgRect { x: -40.0, y: -234.0, w: 80.0, h: 20.0, color: white() }],
+            glyphs: vec![GlyphQuad { x: -40.0, y: -234.0, ch: 'A', color: white(), bold: false }],
+            cursor: Some(CursorRect { x: -40.0, y: -234.0, w: 8.0, h: 20.0, color: white() }),
+        };
+        let mut atlas = Atlas::new(16.0, 256);
+        let (solids, glyphs) = build_instances(&list, &mut atlas);
+        assert_eq!(solids.len(), 2, "an off-screen bg run and cursor still draw");
+        assert_eq!(solids[0].rect[1], -234.0, "the negative y is passed through");
+        assert_eq!(glyphs.len(), 1, "an off-screen glyph still draws");
+        assert!(glyphs[0].rect[1] < 0.0, "and keeps its negative y");
+    }
+
+    #[test]
     fn blank_glyph_emits_nothing() {
         let list = RenderList {
             bg_rects: vec![],

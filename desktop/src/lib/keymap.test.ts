@@ -79,6 +79,40 @@ describe("the chords that stand down for a text cursor", () => {
   });
 });
 
+describe("the composer's model loadout", () => {
+  test("a digit picks that slot of the loadout", () => {
+    expect(resolveShortcut(chord("1"))).toBe("pick_model_1");
+    expect(resolveShortcut(chord("5"))).toBe("pick_model_5");
+  });
+
+  test("the digits past the loadout's slots are not ours", () => {
+    // Five slots have a chord. Claiming ⌘6 would swallow a key that does
+    // nothing, which is worse than leaving it to the webview.
+    expect(resolveShortcut(chord("6"))).toBeNull();
+    expect(resolveShortcut(chord("9"))).toBeNull();
+  });
+
+  test("a digit still picks while the prompt is being typed", () => {
+    // Switching model mid-sentence is the common case, not the odd one, and a
+    // digit with ⌘ held is not text.
+    expect(resolveShortcut(chord("3", { editable: true }))).toBe("pick_model_3");
+  });
+
+  test("a digit with another modifier belongs to whoever had it", () => {
+    expect(resolveShortcut(chord("1", { shift: true }))).toBeNull();
+    expect(resolveShortcut(chord("1", { alt: true }))).toBeNull();
+  });
+
+  test("Ctrl+0 is still zoom, not a sixth slot", () => {
+    expect(resolveShortcut(chord("0"))).toBe("zoom_reset");
+  });
+
+  test("Ctrl+Shift+E flips Fast, and plain Ctrl+E stays the editors'", () => {
+    expect(resolveShortcut(chord("e", { shift: true }))).toBe("toggle_fast");
+    expect(resolveShortcut(chord("e"))).toBeNull();
+  });
+});
+
 describe("what we never claim", () => {
   test("an unmodified key is the page's", () => {
     expect(resolveShortcut(chord("s", { meta: false }))).toBeNull();

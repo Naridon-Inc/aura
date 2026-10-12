@@ -103,18 +103,10 @@ describe("team panes — 'we don't know who you are' is its own sentence", () =>
     expect(note).toContain('detail: { pane: "identity" }');
   });
 
-  test("both roster panes say it", async () => {
+  test("the roster pane says it", async () => {
     const src = await readSrc(TEAM);
-    expect(src.split("<WhoAmINote identity={identity} />").length - 1).toBe(2);
-  });
-});
-
-describe("channels — a permissions note only for a reader we found", () => {
-  test("the team-admin sentence waits until identity resolves", async () => {
-    const src = await readSrc(TEAM);
-    // Unmatched, this reads as "you are not an admin" — a different claim
-    // from "we could not tell", and the one that sends people looking for
-    // an admin who may be themselves.
-    expect(src).toContain("{!iAmAdmin && identity?.in_team && (");
+    // One mount, on the roster. The second used to sit above the channel
+    // member list, which left with the messaging surface.
+    expect(src.split("<WhoAmINote identity={identity} />").length - 1).toBe(1);
   });
 });

@@ -206,6 +206,43 @@ pub fn append_selection_rects(
     }
 }
 
+/// Shift an entire frame by `(dx, dy)` pixels, in place.
+///
+/// This exists for the clipped native surface. When a menu or a popover opens
+/// over a terminal pane, the surface is not taken away and the grid is not
+/// resized: the native view is moved and shrunk to the largest part of its
+/// hole that no overlay is sitting on, and the frame is drawn into that
+/// smaller window onto the same, unchanged grid. The view's own origin is now
+/// somewhere in the middle of the terminal, so every rect and glyph has to
+/// move the other way by exactly that much — a clip 234pt down the hole draws
+/// the frame at `dy = -234`, and row 0 ends up above the top edge where it
+/// belongs.
+///
+/// It is a translation and nothing else. No clamping, no culling, no dropping
+/// of geometry that now falls outside: the renderer's own scissor (the
+/// swapchain is configured at the clip's size) is what discards off-screen
+/// quads, and it does that per-pixel, which is the only place the decision can
+/// be made correctly for a glyph that is half in and half out. Trying to cull
+/// whole quads here would chop characters at the boundary instead of clipping
+/// them.
+pub fn translate(list: &mut RenderList, dx: f32, dy: f32) {
+    if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    for r in &mut list.bg_rects {
+        r.x += dx;
+        r.y += dy;
+    }
+    for g in &mut list.glyphs {
+        g.x += dx;
+        g.y += dy;
+    }
+    if let Some(c) = &mut list.cursor {
+        c.x += dx;
+        c.y += dy;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +344,64 @@ mod tests {
         assert!(snap.cursor_hidden());
         let list = build_render_list(&snap, M, &Palette::default(), true);
         assert!(list.cursor.is_none(), "scrolled-back frame hides the cursor");
+    }
+
+    #[test]
+    fn translate_moves_every_kind_of_geometry_by_the_same_offset() {
+        let mut term = GridTerminal::with_size(10, 3);
+        term.apply_output(b"\x1b[41mAB\x1b[0m");
+        let snap = term.snapshot();
+        let before = build_render_list(&snap, M, &Palette::default(), true);
+        assert!(!before.bg_rects.is_empty() && !before.glyphs.is_empty());
+        assert!(before.cursor.is_some());
+
+        let mut after = before.clone();
+        translate(&mut after, -40.0, -234.0);
+
+        for (b, a) in before.bg_rects.iter().zip(&after.bg_rects) {
+            assert_eq!(a.x, b.x - 40.0);
+            assert_eq!(a.y, b.y - 234.0);
+            assert_eq!(a.w, b.w, "a shift never resizes");
+            assert_eq!(a.h, b.h);
+        }
+        for (b, a) in before.glyphs.iter().zip(&after.glyphs) {
+            assert_eq!(a.x, b.x - 40.0);
+            assert_eq!(a.y, b.y - 234.0);
+            assert_eq!(a.ch, b.ch, "a shift never rewrites a glyph");
+        }
+        let (b, a) = (before.cursor.unwrap(), after.cursor.unwrap());
+        assert_eq!(a.x, b.x - 40.0);
+        assert_eq!(a.y, b.y - 234.0);
+    }
+
+    #[test]
+    fn translate_keeps_geometry_that_moved_off_screen() {
+        // The scissor discards off-screen pixels, not this function: a glyph
+        // pushed to a negative y must survive so the half of it that is still
+        // inside the clip gets drawn.
+        let mut term = GridTerminal::with_size(10, 4);
+        term.apply_output(b"top\r\n\r\n\r\nlow");
+        let snap = term.snapshot();
+        let mut list = build_render_list(&snap, M, &Palette::default(), false);
+        let n = list.glyphs.len();
+        translate(&mut list, 0.0, -M.cell_h * 2.0);
+        assert_eq!(list.glyphs.len(), n, "nothing is culled by a translate");
+        assert!(
+            list.glyphs.iter().any(|g| g.y < 0.0),
+            "the rows above the clip stay in the list at a negative y"
+        );
+    }
+
+    #[test]
+    fn translate_by_zero_is_identity() {
+        let mut term = GridTerminal::with_size(10, 2);
+        term.apply_output(b"hi");
+        let snap = term.snapshot();
+        let before = build_render_list(&snap, M, &Palette::default(), true);
+        let mut after = before.clone();
+        translate(&mut after, 0.0, 0.0);
+        assert_eq!(before.glyphs, after.glyphs);
+        assert_eq!(before.bg_rects, after.bg_rects);
+        assert_eq!(before.cursor, after.cursor);
     }
 }

@@ -88,6 +88,10 @@ import {
   sidebarGlassEnabled,
 } from "../../lib/sidebarGlass";
 import {
+  isNativeTerminalEnabled,
+  setNativeTerminalEnabled,
+} from "../../lib/nativeTerminalStore";
+import {
   completionSoundEnabled,
   setCompletionSoundEnabled,
   playCompletionChime,
@@ -137,11 +141,6 @@ import {
 } from "../../lib/vscodeThemesStore";
 import { THEME_PRESETS } from "../../lib/vscodeThemePresets";
 import type { ConvertedTheme } from "../../lib/vscodeTheme";
-import {
-  useExtensionThemes,
-  useInstalledExtensions,
-} from "../../lib/vscodeExt/vsixStore";
-import { ensureExtensionThemesLoaded } from "../../lib/vscodeExt/applyContributes";
 import {
   defaultTerminalFontSize,
   setEditorPref,
@@ -293,7 +292,7 @@ const PANE_GROUPS: PaneGroup[] = [
   {
     label: "Team",
     items: [
-      { id: "team", label: "Team", icon: <Users className="h-4 w-4" />, keywords: ["team", "members", "admin", "standup", "activity", "tokens", "usage", "billing", "report", "rollup", "channels"] },
+      { id: "team", label: "Team", icon: <Users className="h-4 w-4" />, keywords: ["team", "members", "admin", "standup", "activity", "tokens", "usage", "billing", "report", "rollup"] },
     ],
   },
   // AURA-1298 — what an agent finds on a machine: the secrets in its
@@ -1243,16 +1242,6 @@ function EditorThemesTab() {
   const [showPaste, setShowPaste] = useState(false);
   const [paste, setPaste] = useState("");
 
-  // Themes contributed by installed extensions. The registry is normally filled
-  // when a code editor mounts; load it here too so the picker is complete even
-  // if the user opens Settings before opening a file, and refresh it whenever
-  // the installed set changes (install/remove/toggle from the Extensions wizard).
-  const installedExts = useInstalledExtensions();
-  const extThemes = useExtensionThemes();
-  useEffect(() => {
-    void ensureExtensionThemesLoaded();
-  }, [installedExts]);
-
   function doImport(text: string) {
     setError(null);
     setNote(null);
@@ -1397,50 +1386,6 @@ function EditorThemesTab() {
         </div>
       </Section>
 
-      {extThemes.length > 0 && (
-        <Section title="From your extensions">
-          <div className="text-xs text-text-4 mb-2 leading-relaxed">
-            Color themes from the extensions you’ve installed. Pick one to apply
-            it. It joins your themes below.
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            {extThemes.map((t) => {
-              const isActive = active?.name === t.converted.name;
-              return (
-                <button
-                  key={t.themeName}
-                  type="button"
-                  onClick={() => {
-                    setError(null);
-                    setNote(null);
-                    applyPresetTheme(t.converted, Date.now());
-                    setNote(`Applied “${t.converted.name}”.`);
-                  }}
-                  className={`flex items-center gap-2.5 py-2 px-2.5 rounded-md border text-left transition-colors ${
-                    isActive
-                      ? "border-accent bg-accent/5"
-                      : "border-line hover:bg-state-hover"
-                  }`}
-                >
-                  <ThemeSwatchRow colors={themeSwatches(t.converted)} />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm text-text-1 truncate">
-                      {t.converted.name}
-                    </div>
-                    <div className="text-xs text-text-4 truncate">
-                      {t.extName} · {t.isDark ? "Dark" : "Light"}
-                    </div>
-                  </div>
-                  {isActive && (
-                    <Check className="h-3.5 w-3.5 text-accent shrink-0" />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </Section>
-      )}
-
       {/* Titled "Active theme" until it was read on screen: the heading sat
           over eight rows, seven of them carrying an Activate button and a
           delete. It is the library — one row of it happens to be active. */}
@@ -1484,17 +1429,6 @@ function EditorThemesTab() {
         )}
       </Section>
 
-      <Section title="VS Code compatibility">
-        <div className="text-sm text-text-3 leading-relaxed">
-          Color themes are the first slice of broader VS Code interop. Planned
-          next: LSP-backed language features (hover, completion) and a growing{" "}
-          <code className="text-text-2">vscode</code>-API subset so a portion of
-          simple extensions run. Running an unmodified{" "}
-          <code className="text-text-2">.vsix</code> is an explicit non-goal. 
-          Aura's own capability-sandboxed mini-apps are the path for richer
-          surfaces.
-        </div>
-      </Section>
     </>
   );
 }
@@ -1723,6 +1657,10 @@ function CaptureTab({ repoRoot }: { repoRoot: string }) {
 
   const on = status?.enabled ?? false;
   const isGit = status?.is_git ?? false;
+  // Aura could not read the hook, so it does not know. Saying "Not
+  // capturing" here is a guess printed as a fact, next to a button that is
+  // about to fail for the same reason.
+  const cantTell = status?.unreadable ?? null;
 
   return (
     <>
@@ -1741,24 +1679,32 @@ function CaptureTab({ repoRoot }: { repoRoot: string }) {
             <span
               className="inline-block h-2 w-2 rounded-full shrink-0"
               style={{
-                background: on
-                  ? "var(--color-accent-green)"
-                  : "var(--color-text-4)",
+                background: cantTell
+                  ? "var(--color-caret-orange)"
+                  : on
+                    ? "var(--color-accent-green)"
+                    : "var(--color-text-4)",
               }}
             />
             <div className="flex-1">
               <div className="text-sm text-text-1">
-                {on ? "Capturing" : "Not capturing"}
+                {cantTell
+                  ? "Can't tell"
+                  : on
+                    ? "Capturing"
+                    : "Not capturing"}
               </div>
               <div className="text-xs text-text-3 leading-relaxed">
-                {on
-                  ? "Every time you save (commit), Aura records what changed, why, and which AI made it. Right inside your project's history."
-                  : "Turn on to record what changed and why on every save. It runs quietly alongside any existing Git hooks (Husky, Lefthook) without disturbing them."}
+                {cantTell
+                  ? cantTell
+                  : on
+                    ? "Every time you save (commit), Aura records what changed, why, and which AI made it. Right inside your project's history."
+                    : "Turn on to record what changed and why on every save. It runs quietly alongside any existing Git hooks (Husky, Lefthook) without disturbing them."}
               </div>
             </div>
             <Button
               variant={on ? "subtle" : "default"}
-              disabled={busy}
+              disabled={busy || cantTell !== null}
               onClick={() => toggle(!on)}
             >
               {busy ? (
@@ -1993,6 +1939,10 @@ function BehaviorTab() {
 
 function TerminalTab() {
   const terminal = useTerminalPrefs();
+  // Read once on mount, the way the sidebar-glass toggle does: the engine is
+  // resolved per terminal mount rather than subscribed to, so there is no
+  // store to watch and nothing else can change it behind this pane's back.
+  const [gpu, setGpu] = useState(isNativeTerminalEnabled);
   // Profiles + the persisted default live backend-side
   // (`cmd_terminal_profiles`, auto-seeded from `/etc/shells` + `$SHELL`),
   // not in the localStorage settings store — so this loads them directly
@@ -2074,6 +2024,21 @@ function TerminalTab() {
           hint="Play the system bell when a program asks for it."
           value={terminal.bell}
           onChange={(v) => setTerminalBool("bell", v)}
+        />
+      </Section>
+      {/* The engine had no switch at all — `NATIVE_TERMINAL` was a
+          localStorage key with no UI, so the only way to choose was devtools.
+          A pane whose GPU surface fails to start drops itself back to xterm
+          automatically; this is for the user who would rather it didn't try. */}
+      <Section title="Rendering">
+        <Toggle
+          label="GPU rendering"
+          hint="Draw terminals with Aura's native GPU engine instead of the in-page one. Takes effect for terminals opened from now on — tabs already open keep the engine they started with."
+          value={gpu}
+          onChange={(v) => {
+            setGpu(v);
+            setNativeTerminalEnabled(v);
+          }}
         />
       </Section>
       <Section title="History">

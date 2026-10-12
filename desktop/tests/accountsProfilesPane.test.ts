@@ -21,7 +21,6 @@ import { describe, expect, test } from "bun:test";
 import { readSrc } from "./support/code";
 
 const SETTINGS = "components/dialogs/SettingsDialog.tsx";
-const CHOICE = "components/chat/IdentityChoiceDialog.tsx";
 
 describe("accounts & profiles pane", () => {
   test("the save-scope choice is named by what it does", async () => {
@@ -57,7 +56,6 @@ describe("radios wear the brand accent", () => {
   test("every radio input in the app sets an accent colour", async () => {
     for (const file of [
       SETTINGS,
-      CHOICE,
       "components/dialogs/IntentSplitMergeDialog.tsx",
     ]) {
       const src = await readSrc(file);

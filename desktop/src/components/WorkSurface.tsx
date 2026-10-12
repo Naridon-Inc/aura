@@ -17,8 +17,6 @@ import {
 import type { TraceActions } from "./AdeSidebar";
 import { TraceTabs } from "./trace/TraceTabs";
 import { TraceToolSurface } from "./trace/TraceToolSurface";
-import { goToPlace } from "../lib/placeRoute";
-import { usePlaceRoot } from "../lib/projectRoots";
 import type { TraceKey } from "./trace/traceDestinations";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { startWindowDrag } from "./TopBar";
@@ -60,6 +58,7 @@ import { TraceSurface } from "./workpanes/TraceSurface";
 import { PlanTab } from "./workpanes/PlanTab";
 import { PlanMarkdownTab } from "./workpanes/PlanMarkdownTab";
 import { EmptyPanePicker } from "./EmptyPanePicker";
+import { activeRefForLeaf, dropEmptyCells } from "./splitPaneCells";
 import { AURA_MANAGER_ENABLED, COMMONS_ENABLED } from "../lib/featureFlags";
 import { TasksBoard } from "./TasksBoard";
 import { openPopout } from "../lib/popout";
@@ -69,13 +68,11 @@ import { StandupView } from "./standup/StandupView";
 import { AutomationsSurface } from "./automations/AutomationsSurface";
 import { CommonsSurface } from "./commons/CommonsSurface";
 import { AppPaneSurface } from "./plugins/AppPaneSurface";
-import { TeamSurface } from "./team/TeamSurface";
 import { ScreenshareTab } from "./chat/ScreenshareTab";
 import { LiveSessionPane } from "./collab";
 // Read, not subscribed: the tab label is recomputed on every layout render
 // anyway, so it can take the current value without the pane's own hook.
 import { getSessionLive } from "../lib/sessionLiveRegistry";
-import { PagesSurface } from "./pages2/PagesSurface";
 import {
   useEditorStore,
   MAX_SPLIT_PANES,
@@ -101,7 +98,6 @@ import { TabMark, projectName } from "./TabMark";
 import { PaneAddPopover } from "./PaneAddPopover";
 import { api, type OutlineNode, type StrictModeInfo } from "../lib/api";
 import { useTeammatePresence } from "../lib/usePresence";
-import { usePagesActiveTitle } from "../lib/pagesActiveTitle";
 import {
   useBrowserTabTitles,
   type BrowserTabMeta,
@@ -185,12 +181,6 @@ export function WorkSurface({
 }: WorkSurfaceProps) {
   const store = useEditorStore();
   const inFlight = useInFlight();
-  // The project the place rails' switcher is pointed at. Team is a place that
-  // can also open as a pane, and its shell asserts the chat model it draws was
-  // built for the root it was handed — so this pane has to name the same root
-  // the app-level provider does, or a pane open while someone switches project
-  // takes the surface down. See lib/projectRoots.
-  const placeRoot = usePlaceRoot(repoRoot);
   const [showDiff, setShowDiff] = useState(false);
   const [showOutline, setShowOutline] = useState<boolean>(() => {
     return localStorage.getItem("aura.outline.open") !== "0";
@@ -252,7 +242,6 @@ export function WorkSurface({
         ref.kind === "task" ||
         ref.kind === "standup" ||
         ref.kind === "automations" ||
-        ref.kind === "channels" ||
         ref.kind === "commons" ||
         ref.kind === "app" ||
         ref.kind === "screenshare" ||
@@ -263,7 +252,6 @@ export function WorkSurface({
         ref.kind === "replay" ||
         ref.kind === "prove" ||
         ref.kind === "graph" ||
-        ref.kind === "pages" ||
         ref.kind === "planBuilder" ||
         ref.kind === "cloudJob" ||
         ref.kind === "inbox"
@@ -510,7 +498,10 @@ export function WorkSurface({
     const renderTree = (node: WorkSplitTree, path: number[] = []): ReactNode => {
       if (node.kind === "leaf") {
         const idx = leafCursor++;
-        const activeRef = node.tabs[node.activeIndex];
+        // A leaf with no tabs at all is dead weight — render nothing and let
+        // SplitContainer skip its cell entirely. Every other leaf gets drawn,
+        // because the alternative is the bug described below.
+        const activeRef = activeRefForLeaf(node);
         if (!activeRef) return null;
         const pane = resolveSplitPane(
           activeRef,
@@ -520,11 +511,19 @@ export function WorkSurface({
           store.managerTabs,
           store.planTabs,
         );
-        if (!pane) return null;
+        // `pane` is null when the ref points at an agent / terminal / manager /
+        // plan / file that is no longer in the store — a tab closed through a
+        // path that didn't also prune this leaf. That used to `return null`,
+        // which did NOT remove the pane: SplitContainer still gave the null
+        // child a full flex cell, so the layout kept a blank column with no tab
+        // strip, no content and therefore no close button and nothing for the
+        // resize handle to move. The pane was unremovable without clearing the
+        // whole layout. It keeps its shell and its strip now, and the body
+        // below says so and offers the way out.
         return (
           <SplitPaneShell
             key={`leaf-${node.paneId}`}
-            active={paneIsActive(pane.ref, activeSplitRef)}
+            active={pane ? paneIsActive(pane.ref, activeSplitRef) : false}
             index={idx}
             direction="row"
             onReorder={store.reorderSplitPanes}
@@ -534,14 +533,21 @@ export function WorkSurface({
                 leaf={node}
                 paneIndex={idx}
                 currentRepoRoot={repoRoot}
-                trailing={paneTrailingControls(pane)}
+                trailing={pane ? paneTrailingControls(pane) : undefined}
                 chromeLeading={idx === 0 ? chromeLeading : undefined}
                 chromeTrailing={
                   idx === topRightLeaf ? chromeTrailing : undefined
                 }
               />
-              <div className="flex-1 min-h-0 min-w-0">
-                {renderSplitPane(pane, idx)}
+              <div className="flex-1 min-h-0 min-w-0 flex">
+                {pane ? (
+                  renderSplitPane(pane, idx)
+                ) : (
+                  <PaneUnavailable
+                    reason="gone"
+                    onClosePane={() => store.removeSplitPane(idx)}
+                  />
+                )}
               </div>
             </div>
           </SplitPaneShell>
@@ -726,7 +732,6 @@ export function WorkSurface({
             <WorkSurfaceEmpty
               repoRoot={repoRoot}
               projectName={fallbackName}
-              onOpenChat={() => goToPlace("team")}
               onSearch={() => window.dispatchEvent(new CustomEvent("aura:open-search"))}
             />
           )}
@@ -743,7 +748,6 @@ export function WorkSurface({
           <WorkSurfaceEmpty
             repoRoot={repoRoot}
             projectName={fallbackName}
-            onOpenChat={() => goToPlace("team")}
             onSearch={() => window.dispatchEvent(new CustomEvent("aura:open-search"))}
           />
         </div>
@@ -1102,16 +1106,6 @@ export function WorkSurface({
     if (pane.kind === "automations") {
       return <AutomationsSurface repoRoot={pane.repoRoot} />;
     }
-    if (pane.kind === "channels") {
-      // Team opens whole: its conversation list, the conversation, and the
-      // thread rail, all in this pane. The list used to be the app sidebar's
-      // body instead — so stepping into Team took your projects off screen and
-      // replaced them with a second index, and stepping back out took the
-      // conversations away mid-read. A page's own navigation belongs to the
-      // page. `full` already lays out all three columns and folds them down as
-      // the pane narrows; nothing new was built for this.
-      return <TeamSurface repoRoot={placeRoot} mode="full" />;
-    }
     if (pane.kind === "commons") {
       // Full-width Commons (Lounge + Plugin Exchange). Gated behind
       // COMMONS_ENABLED at the render — not just the opener — so a stale
@@ -1162,7 +1156,10 @@ export function WorkSurface({
       // toggle is gone. Cross-links (Overview → sessions/usage) open the
       // sibling tab via openSessions.
       return inTrace(
-        pane.view,
+        // Cost & usage has no cell of its own — it is a reading of the runs,
+        // reached from them — so the Sessions cell stays lit rather than the
+        // strip going blank under it.
+        pane.view === "usage" ? "sessions" : pane.view,
         <TraceSurface
           repoRoot={repoRoot}
           view={pane.view}
@@ -1198,9 +1195,6 @@ export function WorkSurface({
         "codemap",
         <SemanticGraphPane repoRoot={repoRoot} onClose={store.closeGraph} />,
       );
-    }
-    if (pane.kind === "pages") {
-      return <PagesSurface repoRoot={pane.repoRoot} />;
     }
     if (pane.kind === "planBuilder") {
       return <PlanBuilderSurface repoRoot={repoRoot} onClose={store.closePlanBuilder} />;
@@ -1282,7 +1276,6 @@ type ResolvedSplitPane =
   | { kind: "cloudJob"; ref: WorkPaneRef; threadKey: string; repoRoot: string }
   | { kind: "standup"; ref: WorkPaneRef; repoRoot: string }
   | { kind: "automations"; ref: WorkPaneRef; repoRoot: string }
-  | { kind: "channels"; ref: WorkPaneRef; repoRoot: string }
   | { kind: "commons"; ref: WorkPaneRef; repoRoot: string }
   | { kind: "app"; ref: WorkPaneRef; appKey: string }
   | { kind: "screenshare"; ref: WorkPaneRef; huddleKey: string }
@@ -1298,7 +1291,6 @@ type ResolvedSplitPane =
   | { kind: "replay"; ref: WorkPaneRef }
   | { kind: "prove"; ref: WorkPaneRef }
   | { kind: "graph"; ref: WorkPaneRef }
-  | { kind: "pages"; ref: WorkPaneRef; repoRoot: string }
   | { kind: "browser"; ref: WorkPaneRef; id: string; url?: string }
   | { kind: "planBuilder"; ref: WorkPaneRef }
   | { kind: "inbox"; ref: WorkPaneRef };
@@ -1350,9 +1342,6 @@ function resolveSplitPane(
   if (ref.kind === "automations") {
     return { kind: "automations", ref, repoRoot: ref.id };
   }
-  if (ref.kind === "channels") {
-    return { kind: "channels", ref, repoRoot: ref.id };
-  }
   if (ref.kind === "commons") {
     return { kind: "commons", ref, repoRoot: ref.id };
   }
@@ -1382,9 +1371,6 @@ function resolveSplitPane(
   }
   if (ref.kind === "graph") {
     return { kind: "graph", ref };
-  }
-  if (ref.kind === "pages") {
-    return { kind: "pages", ref, repoRoot: ref.id };
   }
   if (ref.kind === "planBuilder") {
     return { kind: "planBuilder", ref };
@@ -1481,7 +1467,15 @@ function SplitContainer({
   onCommitSizes: (weights: number[]) => void;
   children: ReactNode;
 }) {
-  const kids = Array.isArray(children) ? (children as ReactNode[]) : [children];
+  // Drop children that rendered to nothing BEFORE counting cells. Each kid
+  // gets its own flex-grow cell below, so a null child used to reserve a
+  // full-height column that showed nothing and could not be closed or
+  // resized — the pane was stuck until the whole layout was cleared. Weights
+  // are normalized against the surviving count, which is the same fallback a
+  // dropped child already triggers on restore (length mismatch → equal).
+  const kids = dropEmptyCells(
+    Array.isArray(children) ? (children as ReactNode[]) : [children],
+  );
   const n = kids.length;
   const isRow = direction === "row";
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -2162,7 +2156,6 @@ function describeRef(
   ref: WorkPaneRef,
   store: ReturnType<typeof useEditorStore>,
   currentRepoRoot: string,
-  pagesActiveTitle?: string | null,
   browserTitles?: Record<string, BrowserTabMeta>,
   agentTitles?: Record<string, string>,
 ): PaneTabPillData | null {
@@ -2170,7 +2163,6 @@ function describeRef(
     ref,
     store,
     currentRepoRoot,
-    pagesActiveTitle,
     browserTitles,
     agentTitles,
   );
@@ -2184,7 +2176,6 @@ function describeRefRaw(
   ref: WorkPaneRef,
   store: ReturnType<typeof useEditorStore>,
   currentRepoRoot: string,
-  pagesActiveTitle?: string | null,
   browserTitles?: Record<string, BrowserTabMeta>,
   agentTitles?: Record<string, string>,
 ): PaneTabPillData | null {
@@ -2298,14 +2289,6 @@ function describeRefRaw(
       foreign: ref.id !== currentRepoRoot,
     };
   }
-  if (ref.kind === "channels") {
-    return {
-      ref,
-      label: "Team",
-      sub: shortRoot(ref.id),
-      foreign: ref.id !== currentRepoRoot,
-    };
-  }
   if (ref.kind === "commons") {
     return {
       ref,
@@ -2355,18 +2338,6 @@ function describeRefRaw(
       sub: "Joined",
       // Never dimmed as another project's: it belongs to no project of yours.
       foreign: false,
-    };
-  }
-  if (ref.kind === "pages") {
-    // The pages pane stays a single repoRoot-keyed tab; only its LABEL
-    // tracks the open page. Falls back to "Pages" before the first
-    // `aura:pages:summaries` fires or when no page is open.
-    const title = pagesActiveTitle?.trim();
-    return {
-      ref,
-      label: title && title.length > 0 ? title : "Pages",
-      sub: shortRoot(ref.id),
-      foreign: ref.id !== currentRepoRoot,
     };
   }
   if (ref.kind === "trace") {
@@ -2476,9 +2447,6 @@ function PerPaneTabStrip({
   const store = useEditorStore();
   const [addOpen, setAddOpen] = useState(false);
   const [overTab, setOverTab] = useState(false);
-  // Live title of the currently-open page — the pages tab pill reads this
-  // instead of the static word "Pages". Null until a page is open.
-  const pagesActiveTitle = usePagesActiveTitle();
   const browserTitles = useBrowserTabTitles();
   // What each running agent last called itself, straight off its terminal.
   const agentTitles = useAgentTerminalTitles();
@@ -2532,7 +2500,10 @@ function PerPaneTabStrip({
       ref.kind === "agent"
         ? buildAgentTabMenuItems({
             sessionId: ref.id,
-            inSplit: true,
+            // There is nothing to leave when this is the only pane. Offering
+            // it anyway was how "Leave split view" got clicked on a layout
+            // that had already collapsed to one pane.
+            inSplit: paneCount > 1,
             canClosePane: paneCount > 2,
           })
         : ref.kind === "manager"
@@ -2646,7 +2617,6 @@ function PerPaneTabStrip({
             ref,
             store,
             currentRepoRoot,
-            pagesActiveTitle,
             browserTitles,
             agentTitles,
           );
@@ -2858,16 +2828,40 @@ function PerPaneTabStrip({
   );
 }
 
-/** Calm fallback when a persisted pane references a feature that is gated off
- *  (e.g. a stale Commons / mini-app leaf after the community platform was
- *  hidden). Keeps a restored split-tree from showing a broken pane. */
-function PaneUnavailable() {
+/** Calm fallback when a pane can't show what it was pointed at. Two cases:
+ *  "off" — the feature is gated off (e.g. a stale Commons / mini-app leaf
+ *  after the community platform was hidden); "gone" — the tab it referenced
+ *  is no longer open, so there is nothing left to resolve. The "gone" case
+ *  carries its own close button: that pane has already proved it can outlive
+ *  its content, and a user staring at a blank column needs an exit that does
+ *  not depend on the tab strip being right. */
+function PaneUnavailable({
+  reason = "off",
+  onClosePane,
+}: {
+  reason?: "off" | "gone";
+  onClosePane?: () => void;
+} = {}) {
+  const gone = reason === "gone";
   return (
     <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-center px-6 bg-bg-0">
-      <div className="text-base text-text-2">Not available</div>
-      <div className="text-xs text-text-3 max-w-[260px]">
-        This surface is turned off. You can close this tab.
+      <div className="text-base text-text-2">
+        {gone ? "Nothing open here" : "Not available"}
       </div>
+      <div className="text-xs text-text-3 max-w-[260px]">
+        {gone
+          ? "This pane's tab was closed somewhere else."
+          : "This surface is turned off. You can close this tab."}
+      </div>
+      {gone && onClosePane ? (
+        <button
+          type="button"
+          onClick={onClosePane}
+          className="mt-3 px-3 py-1.5 rounded-md text-xs text-text-1 bg-bg-2 hover:bg-bg-3 border border-border-1"
+        >
+          Close pane
+        </button>
+      ) : null}
     </div>
   );
 }

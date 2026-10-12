@@ -22,7 +22,6 @@ export type PaletteCategory = PaletteEntry["kind"];
 const CATEGORY_ORDER: PaletteCategory[] = [
   "action",
   "slash",
-  "extCommand",
   "workspace",
   "chat",
   "symbol",
@@ -37,7 +36,6 @@ const CATEGORY_ORDER: PaletteCategory[] = [
 const CATEGORY_LABEL: Record<PaletteCategory, string> = {
   action: "Actions",
   slash: "Commands",
-  extCommand: "Extension commands",
   workspace: "Workspaces",
   chat: "Conversations",
   file: "Files",

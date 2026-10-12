@@ -1,9 +1,14 @@
 // CostUsagePane — the single home for "what is this costing us": token spend,
 // per-model split, the cumulative trend, per-coding-agent usage and the
-// per-developer team breakdown. It is the dedicated Trace "Cost & usage" view
-// (a sibling of Overview / Team activity / My sessions), so the Overview pane
-// only ever shows a one-line cost summary that links here — no usage dashboard
-// is rendered in two places.
+// per-developer team breakdown. The Overview pane only ever shows a one-line
+// cost summary that links here — no usage dashboard is rendered in two places.
+//
+// It lives UNDER My sessions rather than beside it. Spend is a reading of the
+// runs, not a fifth thing Trace is about, and as its own cell on the strip it
+// made the reader choose between the two every time they came to look at
+// either. So Sessions carries the door, this pane carries the way back, and
+// the strip says "My sessions" the whole time — the same relationship a
+// session detail has to the list it opened from.
 //
 // HONESTY RULE (inherited from OverviewPane): every figure is real. The month
 // hero prefers the cloud org total (authoritative, whole team) and falls back
@@ -20,7 +25,7 @@ import {
 } from "../../lib/api";
 import { TeamAgentUsage } from "./TeamAgentUsage";
 import { TeamOverview } from "./TeamOverview";
-import { Receipt } from "lucide-react";
+import { ChevronLeft, Receipt } from "lucide-react";
 import { Button } from "../ui/button";
 import { EmptyState, LoadingState } from "../ui/state";
 import {
@@ -120,7 +125,15 @@ function RefreshIcon() {
   );
 }
 
-export function CostUsagePane({ repoRoot }: { repoRoot: string }) {
+export function CostUsagePane({
+  repoRoot,
+  onBack,
+}: {
+  repoRoot: string;
+  /** Back to the sessions list this opened from. Absent where there is
+   *  nowhere to go back to — a restored workpane tab stands on its own. */
+  onBack?: () => void;
+}) {
   // Team + usage are best-effort: each source may be unavailable (no team, no
   // cloud auth, usage CLI absent) and degrades only its own section.
   const [roster, setRoster] = useState<TeamMember[]>([]);
@@ -334,7 +347,21 @@ export function CostUsagePane({ repoRoot }: { repoRoot: string }) {
           project's name under it — the exact two words on the tab you clicked
           to get here, over the exact name in the window's breadcrumb. 56px
           spent telling the reader where they already know they are. */}
-      <div className="flex shrink-0 items-center justify-end border-b border-line-soft px-4 py-1.5">
+      <div className="flex shrink-0 items-center justify-between border-b border-line-soft px-4 py-1.5">
+        {onBack ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            onClick={onBack}
+            className="-ml-1.5 gap-1 text-text-3 hover:text-text-1"
+          >
+            <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />
+            My sessions
+          </Button>
+        ) : (
+          <span />
+        )}
         <Button
           type="button"
           variant="ghost"

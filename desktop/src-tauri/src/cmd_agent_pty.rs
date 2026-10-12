@@ -25,8 +25,11 @@
 //!     even without a real ;D marker.
 //!
 //! Two events fire per session:
-//!   - `agent-pty:<id>` — raw bytes (`Vec<u8>`); xterm.js consumes them
-//!     directly to render the Terminal view.
+//!   - `agent-pty:<id>` — raw bytes, base64-encoded (`pty_emit::encode_chunk`);
+//!     the frontend decodes with `decodePtyChunk` and hands them to
+//!     xterm.js to render the Terminal view. The encoding is there
+//!     because `emit` is JSON: a `Vec<u8>` crossed as an array of
+//!     decimal integers, ~3.5x the bytes it carried.
 //!   - `agent-block:<id>` — `BlockUpdate { op: open|append|close, ... }`
 //!     deltas; the AgentBlocksView store applies them in order.
 
@@ -469,6 +472,16 @@ impl AgentPtyRegistry {
 
     fn session(&self, session_id: &str) -> Option<Arc<AgentPtySession>> {
         self.sessions.lock().unwrap().get(session_id).cloned()
+    }
+
+    /// Whether this id names a live session, in-process or daemon-backed.
+    /// A native pane checks before it builds a GPU surface: attaching to an
+    /// id with nothing behind it would otherwise leave a transparent hole
+    /// where a terminal should be, instead of failing early enough for the
+    /// frontend to fall back to xterm.
+    pub(crate) fn has_session(&self, session_id: &str) -> bool {
+        self.sessions.lock().unwrap().contains_key(session_id)
+            || self.daemon_sessions.lock().unwrap().contains_key(session_id)
     }
 
     /// The pid of an in-process session's child — the process the PTY
@@ -1505,8 +1518,16 @@ pub async fn agent_pty_open(
                 continue;
             }
             // Forward raw bytes to xterm verbatim — the Terminal view
-            // wants a faithful render of every escape code.
-            let _ = app_for_emit.emit(&pty_event, bytes.clone());
+            // wants a faithful render of every escape code. Base64
+            // keeps that exact, and borrowing to encode drops the copy
+            // this used to make of every chunk. See `pty_emit::encode_chunk`.
+            let _ = app_for_emit.emit(&pty_event, crate::pty_emit::encode_chunk(&bytes));
+
+            // Same bytes, but staying in this process: a native GPU pane
+            // renders on a Rust thread, so sending it through the webview and
+            // back would undo the point of rendering natively. Costs nothing
+            // when nothing is attached, which is the usual case.
+            crate::agent_pty_tap::publish(&id_for_task, &bytes);
 
             // Tee into the registry-level history map so phone clients
             // can replay this output via `agent_pty_history` regardless
@@ -1790,7 +1811,8 @@ async fn open_via_daemon(
             // be a worse bug than the one this batching fixes.
             let bytes = gathered.take();
             if !bytes.is_empty() {
-                let _ = app_for_loop.emit(&pty_event, bytes);
+                let _ = app_for_loop.emit(&pty_event, crate::pty_emit::encode_chunk(&bytes));
+                crate::agent_pty_tap::publish(&sid_for_loop, &bytes);
             }
             match ended {
                 Some(Some(e)) => {
@@ -2215,20 +2237,32 @@ pub async fn agent_pty_write(
     session_id: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
+    write_session_bytes(&state, &session_id, data).await
+}
+
+/// Write to a session's PTY. Split out of the command so a native terminal
+/// pane can reach the same path — the daemon proxy and the writer clone that
+/// must escape the registry lock are not things a second caller should
+/// reimplement.
+pub(crate) async fn write_session_bytes(
+    state: &AgentPtyRegistry,
+    session_id: &str,
+    data: Vec<u8>,
+) -> Result<(), String> {
     // Daemon-backed session — proxy via the client. Read the flag
     // without holding the lock across the await.
     let is_daemon = state
         .daemon_sessions
         .lock()
         .unwrap()
-        .contains_key(&session_id);
+        .contains_key(session_id);
     if is_daemon {
-        return crate::pty_daemon::client::write_session(&session_id, &data)
+        return crate::pty_daemon::client::write_session(session_id, &data)
             .await
             .map_err(|e| e.to_string());
     }
     let sess = state
-        .session(&session_id)
+        .session(session_id)
         .ok_or_else(|| format!("unknown session: {session_id}"))?;
     // Clone the writer handle and let go of the session BEFORE the
     // write — see the note on `AgentPtySession::writer`. A wedged agent
@@ -2246,18 +2280,30 @@ pub async fn agent_pty_resize(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    resize_session_pty(&state, &session_id, cols, rows).await
+}
+
+/// Resize a session's PTY and its shadow grid. Split out of the command for
+/// the same reason as [`write_session_bytes`]: a native pane owns the size of
+/// the agent it renders, and the daemon proxy is not worth duplicating.
+pub(crate) async fn resize_session_pty(
+    state: &AgentPtyRegistry,
+    session_id: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
     let is_daemon = state
         .daemon_sessions
         .lock()
         .unwrap()
-        .contains_key(&session_id);
+        .contains_key(session_id);
     if is_daemon {
-        return crate::pty_daemon::client::resize_session(&session_id, cols, rows)
+        return crate::pty_daemon::client::resize_session(session_id, cols, rows)
             .await
             .map_err(|e| e.to_string());
     }
     let sess = state
-        .session(&session_id)
+        .session(session_id)
         .ok_or_else(|| format!("unknown session: {session_id}"))?;
     // Bound to a local for the same E0597 reason as agent_pty_write.
     // Keep the shadow terminal the same shape as the real one. A grid that
@@ -2310,6 +2356,17 @@ pub fn agent_pty_replay_bytes(
     };
     let snap = sess.raw_bytes.lock().unwrap().clone();
     Ok(snap)
+}
+
+/// The same scrollback ring [`agent_pty_replay_bytes`] serves, for callers
+/// inside the process. A native pane attaching to a session that has been
+/// running for an hour needs the screen the user was already looking at;
+/// without this it would show a correct, live, empty terminal.
+pub(crate) fn session_raw_tail(state: &AgentPtyRegistry, session_id: &str) -> Vec<u8> {
+    state
+        .session(session_id)
+        .map(|sess| sess.raw_bytes.lock().unwrap().clone())
+        .unwrap_or_default()
 }
 
 /// Current native window title (OSC 0 / OSC 2) for a session, or null

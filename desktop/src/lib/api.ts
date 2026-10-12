@@ -23,11 +23,6 @@ import type { KeyPlan } from "./place/agentKey";
 import type { SecretBoot, SecretRef } from "./place/secrets";
 import type { BaseBuild, EnvReport, TeamBase } from "./place/teamBase";
 import type { ToolchainReport } from "./place/toolchain";
-import type {
-  ContributesSummary,
-  InstalledExtension,
-  OpenVsxHit,
-} from "./vscodeExt/vsixTypes";
 
 export type AuraStatus = {
   db_path: string;
@@ -5924,60 +5919,6 @@ export const api = {
    *  an optional human-readable `note` sent back to the agent. */
   agentGateResolve: (gateId: string, allow: boolean, note?: string) =>
     invoke<void>("agent_gate_resolve", { gateId, allow, note }),
-
-  // ── VS Code extensions (Tier 0 — declarative content from Open VSX) ──────
-  // Open VSX (Eclipse Foundation) is the only gallery a non-Microsoft product
-  // may legally use; the Rust side host-pins downloads to it. No extension code
-  // is ever executed — only themes / language-config / snippets / grammars are
-  // read back through `vsixReadText` and applied to Monaco.
-
-  /** Search the Open VSX gallery. Listing metadata only — no code fetched. */
-  vsixSearch: (query: string, size?: number) =>
-    invoke<OpenVsxHit[]>("vsix_search", { query, size }),
-  /** Browse the gallery without a search term — curated rows by category
-   *  ("Themes", "Programming Languages", "Snippets", …) and/or popularity.
-   *  `sort` ∈ "downloads" | "rating" | "updated" | "relevance". */
-  vsixBrowse: (
-    category?: string | null,
-    sort?: "downloads" | "rating" | "updated" | "relevance",
-    size?: number,
-  ) => invoke<OpenVsxHit[]>("vsix_browse", { category, sort, size }),
-  /** Preview what an extension would actually contribute — read straight from
-   *  the gallery manifest, WITHOUT downloading or extracting the `.vsix`. Lets
-   *  Discover be honest before the user installs. */
-  vsixPreviewContributes: (namespace: string, name: string) =>
-    invoke<ContributesSummary>("vsix_preview_contributes", { namespace, name }),
-  /** Install by namespace + name (+ optional version) from Open VSX. */
-  vsixInstall: (namespace: string, name: string, version?: string) =>
-    invoke<InstalledExtension>("vsix_install", { namespace, name, version }),
-  /** Install from a local `.vsix` the user picked from disk. */
-  vsixInstallFile: (path: string) =>
-    invoke<InstalledExtension>("vsix_install_file", { path }),
-  /** Every installed extension Aura currently knows about. */
-  vsixList: () => invoke<InstalledExtension[]>("vsix_list"),
-  /** Read a UTF-8 asset (manifest, theme/grammar/snippet file) jailed to the
-   *  extension's own package root. */
-  vsixReadText: (id: string, rel: string) =>
-    invoke<string>("vsix_read_text", { id, rel }),
-  /** Enable/disable an installed extension (disabled = router skips it). */
-  vsixSetEnabled: (id: string, enabled: boolean) =>
-    invoke<void>("vsix_set_enabled", { id, enabled }),
-  /** Uninstall: drop the index entry and delete the bundle from disk. */
-  vsixRemove: (id: string) => invoke<void>("vsix_remove", { id }),
-
-  // ── Node extension host (Tier 2 — runs language extensions + their LSP) ──────
-  // The sidecar is a single Node process (`resources/ext-host/host.js`) that runs
-  // every enabled Node VS Code extension and bridges their language servers to
-  // Monaco. The frontend drives it with JSON-line messages over `ext_host_send`
-  // and listens to `ext-host:msg` / `ext-host:exit` / `ext-host:log` for replies.
-  /** Spawn the host if not already running; returns the resolved node path. */
-  extHostStart: () => invoke<string>("ext_host_start"),
-  /** Push one JSON-encoded protocol message to the host's stdin. */
-  extHostSend: (json: string) => invoke<void>("ext_host_send", { json }),
-  /** True when the sidecar process is alive. */
-  extHostStatus: () => invoke<boolean>("ext_host_status"),
-  /** Kill the sidecar (e.g. when the last node extension is disabled). */
-  extHostStop: () => invoke<void>("ext_host_stop"),
 };
 
 /** The GitHub owner (user or org) of a repo's `origin` remote, or `null`
@@ -8503,6 +8444,11 @@ export type CaptureStatus = {
   enabled: boolean;
   is_git: boolean;
   hooks_dir: string | null;
+  /** Set when the hook could not be read at all, with a sentence saying why
+   *  and what to do. `enabled: false` alongside this means "couldn't look",
+   *  not "it's off" — show this instead of claiming the repo isn't
+   *  capturing, because it very likely is. */
+  unreadable: string | null;
 };
 
 export type DaemonStatus = {

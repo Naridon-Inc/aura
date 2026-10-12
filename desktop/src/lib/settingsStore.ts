@@ -421,13 +421,32 @@ export function setScrollback(n: number) {
   saveSoon();
 }
 
-/** The type size a terminal uses when the user has never set one. VS Code's
- *  own terminal defaults, which the xterm construction in `Terminal.tsx`
- *  already matched by hand: 12 on macOS, 14 elsewhere. */
+/** The type size a terminal uses when the user has never set one.
+ *
+ *  Owned by the renderer, not by this file: it is `DEFAULT_FONT_PX` in
+ *  `src-tauri/src/cmd_native_term/appearance.rs`, because the wgpu terminal is
+ *  the default engine on macOS and Linux and is therefore the thing people are
+ *  actually looking at. `terminalFontDefault.test.ts` reads that constant off
+ *  disk and fails if this number stops matching it, so the two cannot drift
+ *  apart quietly.
+ *
+ *  Stated here rather than fetched over IPC because all three readers need it
+ *  synchronously while they are being constructed — the Settings slider as it
+ *  renders, and each xterm as it is built. Fetching would mean a cache, a boot
+ *  fetch and a stale-cache story, three moving parts to obtain a number the
+ *  test already guarantees, and it would paint one wrong frame before the
+ *  answer arrived — which is the defect this replaces, not a fix for it.
+ *
+ *  This used to answer 12 on macOS and 14 elsewhere — VS Code's own terminal
+ *  defaults — while the wgpu terminal drew 13 on both. So the slider showed a
+ *  number no terminal on screen was using, and dragging it to the value it
+ *  already displayed made the text jump. The platform split went with it: the
+ *  engine that actually draws does not have one, and a split here only put the
+ *  two engines out of step with each other. */
+export const DEFAULT_TERMINAL_FONT_PX = 13;
+
 export function defaultTerminalFontSize(): number {
-  const isMac =
-    typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
-  return isMac ? 12 : 14;
+  return DEFAULT_TERMINAL_FONT_PX;
 }
 
 /** Type size in terminal panes (px). Applies to terminals opened after the

@@ -2,7 +2,7 @@
 // requests from worktree cards and edit requests from PR detail, so the dialog
 // survives hover-card dismissal and both entry points share one honest form.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Dialog } from "../Dialog";
 import { Button } from "../ui/button";
@@ -14,6 +14,7 @@ import { prCreate, prEdit } from "../../lib/prApi";
 import { invalidatePrDetail } from "../../lib/prDetailCache";
 import { invalidatePrList } from "../../lib/prsCache";
 import { useEditorStore } from "../../lib/editorStore";
+import { seedPrBody } from "./prTemplate";
 
 export const PR_AUTHOR_EVENT = "aura:author-pr";
 
@@ -22,6 +23,11 @@ type CreateRequest = {
   repoRoot: string;
   headBranch: string;
   title: string;
+  /** A description to open with. Absent means nobody has written one yet, and
+   *  the box starts from the PR template; present — a generator that already
+   *  read the diff, say — is used as given, so generated prose replaces the
+   *  template rather than landing underneath it. */
+  body?: string;
   draft?: boolean;
 };
 
@@ -51,14 +57,28 @@ export function PrAuthoringDialogHost() {
   const [branches, setBranches] = useState<GitBranchRich[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The compose session the template has already been offered to, as
+  // repo + branch. A second create request for the same branch is the same
+  // session — a click on the card behind the dialog, or a return visit after
+  // a cancel — and resetting it would throw away a half-written description
+  // and put the template back over one the author had deliberately emptied.
+  const seededFor = useRef<string | null>(null);
 
   useEffect(() => {
     function onRequest(event: Event) {
       const next = (event as CustomEvent<PrAuthoringRequest>).detail;
       if (!next?.repoRoot) return;
+      const session =
+        next.mode === "create" ? `${next.repoRoot}\u0000${next.headBranch}` : null;
+      const resuming = session !== null && session === seededFor.current;
+      seededFor.current = session;
       setRequest(next);
-      setTitle(next.title ?? "");
-      setBody(next.mode === "edit" ? next.body : "");
+      setTitle((current) => (resuming ? current : (next.title ?? "")));
+      setBody((current) =>
+        next.mode === "edit"
+          ? next.body
+          : seedPrBody(resuming ? current : next.body, resuming),
+      );
       setBaseBranch(next.mode === "edit" ? next.baseBranch : "");
       setDraft(next.draft ?? false);
       setBusy(false);
@@ -112,6 +132,9 @@ export function PrAuthoringDialogHost() {
           draft,
         });
         await invalidatePrList(request.repoRoot).catch(() => []);
+        // The branch has a pull request now, so the next compose from here is
+        // a new one and starts from the template again.
+        seededFor.current = null;
         editor.openPrDetail(request.repoRoot, created.number, created.title);
       } else {
         await prEdit({

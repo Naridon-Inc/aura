@@ -12,6 +12,7 @@ mod agent_event_listener;
 mod agent_installs;
 mod agent_mutation_guard;
 mod agent_policy;
+mod agent_pty_tap;
 mod agent_session_title;
 mod api_spend;
 mod aurawatch_agentcli;
@@ -73,7 +74,6 @@ mod cmd_device;
 mod cmd_doctor_cli;
 mod cmd_verify_intent;
 mod cmd_editors;
-mod cmd_ext_host;
 mod cmd_files;
 // Pure readers of git's output, shared by the local commands and their
 // remote-workspace twins (AURA-1306).
@@ -155,7 +155,6 @@ mod cmd_fallback_avatar;
 mod notify;
 mod cmd_dialog;
 mod cmd_team_upload;
-mod cmd_vsix;
 mod cmd_watcher;
 mod cmd_window;
 mod cmd_emoji;
@@ -339,6 +338,11 @@ fn fix_path_for_gui_macos() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First, before a runtime or a window exists: a thread inherits the signal
+    // mask of whoever created it, so this is the only moment at which blocking
+    // SIGCHLD here covers every thread the app will go on to spawn.
+    child_reaper::confine_sigchld();
+
     // Capture panics from any thread into ~/.aura/aura-shell-crashes/<ts>.json
     // before the renderer dies. Frontend reads them on next launch.
     crash::install_panic_hook();
@@ -359,7 +363,6 @@ pub fn run() {
         .manage(deep_link::Pending::default())
         .manage(cmd_pty::PtyRegistry::new())
         .manage(cmd_agent_pty::AgentPtyRegistry::new())
-        .manage(cmd_ext_host::ExtHostState::new())
         .manage(agent_mutation_guard::GuardRegistry::new())
         .manage(agent_mutation_guard::EditorWriteTracker::new())
         .manage(cmd_daemon::DaemonHandle::new())
@@ -996,7 +999,9 @@ pub fn run() {
             cmd_browser::browser_eval_read,
             cmd_browser::browser_reparent,
             cmd_native_term::native_term_open,
+            cmd_native_term::attach::native_term_attach,
             cmd_native_term::native_term_set_bounds,
+            cmd_native_term::native_term_set_appearance,
             cmd_native_term::native_term_write,
             cmd_native_term::native_term_scroll,
             cmd_native_term::native_term_focus,
@@ -1418,19 +1423,6 @@ pub fn run() {
             plugin_exchange::plugin_exchange_unpublish,
             cmd_plugin_realtime::plugin_rt_send,
             cmd_plugin_realtime::plugin_rt_poll,
-            cmd_vsix::vsix_search,
-            cmd_vsix::vsix_browse,
-            cmd_vsix::vsix_preview_contributes,
-            cmd_vsix::vsix_install,
-            cmd_vsix::vsix_install_file,
-            cmd_vsix::vsix_list,
-            cmd_vsix::vsix_read_text,
-            cmd_vsix::vsix_set_enabled,
-            cmd_vsix::vsix_remove,
-            cmd_ext_host::ext_host_start,
-            cmd_ext_host::ext_host_send,
-            cmd_ext_host::ext_host_status,
-            cmd_ext_host::ext_host_stop,
             cmd_lounge::lounge_react,
             cmd_lounge::lounge_reactions,
             cmd_openai_compat::openai_compat_profiles_list,

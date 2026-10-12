@@ -1,4 +1,4 @@
-// Tasks — one place for the work, and three drawings of it.
+// Tasks — one place for the work, and the drawings of it.
 //
 // This app shipped two boards. "Tasks" read `.aura/tasks/`: the backlog, the
 // same store the CLI's `aura_tasks_list` and the phone read. "Mission Control"
@@ -20,8 +20,10 @@
 // picking a lens the other surface owns is a navigation, not a different
 // control living somewhere else.
 //
-// Three cells, because two of the five this once carried were the same records
-// drawn again.
+// Two cells on the strip today, down from five. Three of those five were the
+// same records drawn again, and the fourth — the crew's map — is parked behind
+// `CREW_GRAPH_LENS_ENABLED`; see the flag for why it is hidden rather than
+// removed.
 //
 //   Plan was the crew's tasks with their goal above them, in dependency order.
 //   That is a GROUPING of the list, not a second product: every row wears the
@@ -37,10 +39,11 @@
 //   does: pick a sprint there and List and Board answer for it. Its two
 //   lifecycle doors moved to the rail's Sprints group.
 //
-// What is left is three genuinely different pictures. List groups the work and
+// What is left is two genuinely different pictures. List groups the work and
 // reads top to bottom. Board lanes it and reads across — the same records, but
-// "what is in review right now" is one glance instead of a scroll. Graph is
-// nodes and edges: what feeds what, which neither of the other two can draw.
+// "what is in review right now" is one glance instead of a scroll. Graph, when
+// it is on, is nodes and edges: what feeds what, which neither of the other two
+// can draw.
 //
 // Mirrors lib/placeRoute and components/trace/traceRoute for the same reason
 // those exist: the callers are deep — a header strip, a nav row, a deep link —
@@ -50,15 +53,18 @@
 import { KanbanSquare, List, Network } from "lucide-react";
 
 import type { BoardLayoutOption } from "../components/board/BoardLayoutSwitch";
+import { CREW_GRAPH_LENS_ENABLED } from "./featureFlags";
 
 /** How you're looking at the work. The first two are the board's own drawings;
- *  the last is the crew's. */
+ *  the last is the crew's, and stays in the union while the map is flagged off
+ *  so the surface that draws it still typechecks. */
 export type WorkLens = "list" | "board" | "graph";
 
 /** The lenses the crew surface owns. Everything else is the task board. One
- *  predicate, so the host and both surfaces agree on which is which. */
+ *  predicate, so the host and both surfaces agree on which is which — and,
+ *  while the map is off, so they agree that nothing reaches it. */
 export function isCrewLens(lens: WorkLens): boolean {
-  return lens === "graph";
+  return CREW_GRAPH_LENS_ENABLED && lens === "graph";
 }
 
 /** The task board's internal view for a board lens. A crew lens never reaches
@@ -68,9 +74,9 @@ export function taskViewFor(lens: WorkLens): "list" | "board" {
 }
 
 /** The one option list. Both headers render this, so the strip a reader sees
- *  on the Board lens is the strip they see on the Graph lens — same cells,
- *  same order, same widths — and the surface swapping underneath is not
- *  something they have to notice. */
+ *  on one lens is the strip they see on every other — same cells, same order,
+ *  same widths — and the surface swapping underneath is not something they
+ *  have to notice. */
 export const WORK_LENSES: readonly BoardLayoutOption<WorkLens>[] = [
   {
     value: "list",
@@ -84,12 +90,16 @@ export const WORK_LENSES: readonly BoardLayoutOption<WorkLens>[] = [
     icon: KanbanSquare,
     hint: "See the work as lanes you can scan across",
   },
-  {
-    value: "graph",
-    label: "Graph",
-    icon: Network,
-    hint: "See what feeds what. The dependency map",
-  },
+  ...(CREW_GRAPH_LENS_ENABLED
+    ? [
+        {
+          value: "graph" as WorkLens,
+          label: "Graph",
+          icon: Network,
+          hint: "See what feeds what. The dependency map",
+        },
+      ]
+    : []),
 ];
 
 /** Every lens on the strip, in strip order. Exported so the guard below and
@@ -105,8 +115,9 @@ const KEY = "aura.work.lens";
 /** The lens the destination reopens on: the work itself, as a list.
  *
  *  The membership test is also the migration. Anyone whose last lens was
- *  `plan`, `sprint` or `map` has a string in storage that is no longer a lens,
- *  and reopens on the list rather than on a cell that isn't there. */
+ *  `plan`, `sprint` or `map` — or `graph`, while the crew map is flagged off —
+ *  has a string in storage the strip no longer offers, and reopens on the list
+ *  rather than on a cell that isn't there. */
 export function readWorkLens(): WorkLens {
   try {
     const raw = localStorage.getItem(KEY) as WorkLens | null;

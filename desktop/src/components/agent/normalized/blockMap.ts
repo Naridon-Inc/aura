@@ -26,6 +26,7 @@ import type {
   SessionInitEvent,
   TodoEvent,
 } from "../../../lib/agentProtocol";
+import { compactionHandoff, visibleUserText } from "../../../lib/injectedContext";
 import type { StreamBlock, ToolResult } from "../../manager/chat/types";
 
 /** One row of the rendered transcript. A `stream` group carries a run of
@@ -40,6 +41,10 @@ export type TranscriptGroup =
   | { kind: "raw"; id: string; ev: RawEvent }
   | { kind: "status"; id: string; ev: StatusEvent }
   | { kind: "user"; id: string; text: string }
+  /** The seam where the run ran out of context and the earlier turns were
+   *  summarised back into it. Arrives on the user channel but nobody typed
+   *  it, so it is a marker, not a message. */
+  | { kind: "compaction"; id: string; summary: string }
   | { kind: "stream"; id: string; blocks: StreamBlock[]; usage?: GroupUsage }
   /** `live` = this prompt is still the one the agent is waiting on. A settled
    *  one stays in the transcript as a record of what was asked and answered,
@@ -172,8 +177,29 @@ export function toTranscriptGroups(
         break;
       case "text":
         if (ev.role === "user") {
+          // A "user" turn is not always from the user: the engine prepends
+          // the repo's AGENTS.md/CLAUDE.md, system reminders and tool
+          // preambles on this same channel. Draw what the person typed; when
+          // that is nothing, draw no row rather than an empty bubble. The
+          // event itself is untouched — this is the display copy.
+          // A compaction handoff is the loudest of these: a whole summary of
+          // the conversation so far, in a bubble that says the person wrote
+          // it. It is the one kind worth marking rather than dropping, since
+          // the reader is owed an explanation for the seam.
+          const compacted = compactionHandoff(ev.text);
+          if (compacted) {
+            flush();
+            groups.push({
+              kind: "compaction",
+              id: ev.id,
+              summary: compacted.summary,
+            });
+            break;
+          }
+          const typed = visibleUserText(ev.text);
+          if (typed.length === 0 && ev.text.trim().length > 0) break;
           flush();
-          groups.push({ kind: "user", id: ev.id, text: ev.text });
+          groups.push({ kind: "user", id: ev.id, text: typed });
         } else {
           ensureRun(ev.id);
           runBlocks!.push({

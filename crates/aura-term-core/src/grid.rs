@@ -19,6 +19,7 @@ use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::Config as TermConfig;
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
 
@@ -322,6 +323,18 @@ impl TermState {
     fn display_offset(&self) -> usize {
         self.term.grid().display_offset()
     }
+
+    /// The modes that decide what a wheel event should do.
+    fn wheel_modes(&self) -> crate::wheel::WheelModes {
+        let mode = self.term.mode();
+        crate::wheel::WheelModes {
+            alt_screen: mode.contains(TermMode::ALT_SCREEN),
+            mouse_report: mode.intersects(TermMode::MOUSE_MODE),
+            sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
+            app_cursor: mode.contains(TermMode::APP_CURSOR),
+            alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
+        }
+    }
 }
 
 /// Owns a terminal + parser and exposes byte-in / snapshot-out. UI-agnostic:
@@ -360,6 +373,21 @@ impl GridTerminal {
     /// The palette this terminal resolves colors against.
     pub fn palette(&self) -> Palette {
         self.palette
+    }
+
+    /// Swap the palette on a running terminal, so a theme change recolors the
+    /// scrollback that is already on screen rather than only what arrives next.
+    ///
+    /// The palette is deliberately held twice — once here for the render-list
+    /// path and once inside the shared state, which resolves each cell's
+    /// `Color` and fills blanks — so both have to move together. Updating only
+    /// one leaves a terminal whose new output is themed and whose history is
+    /// not, which looks like a repaint bug rather than a missed assignment.
+    pub fn set_palette(&mut self, palette: Palette) {
+        self.palette = palette;
+        if let Ok(mut st) = self.state.lock() {
+            st.palette = palette;
+        }
     }
 
     /// Snapshot the grid and lower it into a backend-neutral draw list in one
@@ -483,6 +511,34 @@ impl GridTerminal {
         if let Ok(mut state) = self.state.lock() {
             state.scroll(Scroll::Bottom);
         }
+    }
+
+    /// The modes that decide what a wheel event means *right now* — whether
+    /// the child is on the alternate screen, and what it has asked to be sent.
+    pub fn wheel_modes(&self) -> crate::wheel::WheelModes {
+        self.state
+            .lock()
+            .map(|s| s.wheel_modes())
+            .unwrap_or_default()
+    }
+
+    /// Act on a wheel movement of `lines` (positive = toward older output),
+    /// with the pointer over cell `at`.
+    ///
+    /// Scrolling the scrollback is done here; bytes for the child are handed
+    /// back for the caller to write, because only the caller holds the PTY.
+    /// The returned action says what happened, so a caller can tell a frame
+    /// that needs repainting from one that does not.
+    ///
+    /// This is the one entry point worth using: calling [`Self::scroll_lines`]
+    /// directly on a full-screen program moves an offset the alternate screen
+    /// pins at zero, which is a scroll that silently does nothing.
+    pub fn apply_wheel(&mut self, lines: i32, at: (u16, u16)) -> crate::wheel::WheelAction {
+        let action = crate::wheel::action(lines, self.wheel_modes(), at);
+        if let crate::wheel::WheelAction::Scroll(n) = action {
+            self.scroll_lines(n);
+        }
+        action
     }
 
     /// Distance above the live bottom, in lines. `0` = live.
@@ -769,6 +825,94 @@ mod tests {
         term.clear_selection();
         assert!(!term.has_selection());
         assert!(term.selected_text().is_none());
+    }
+
+    #[test]
+    // A wheel on the normal screen reaches history, and says so.
+    #[test]
+    fn apply_wheel_scrolls_history_on_the_normal_screen() {
+        let mut term = GridTerminal::with_size(20, 10);
+        let mut bytes = Vec::new();
+        for i in 0..40 {
+            bytes.extend_from_slice(format!("line-{i:02}\r\n").as_bytes());
+        }
+        term.apply_output(&bytes);
+
+        assert!(!term.wheel_modes().alt_screen);
+        assert_eq!(term.apply_wheel(5, (0, 0)), crate::wheel::WheelAction::Scroll(5));
+        assert_eq!(term.display_offset(), 5);
+
+        let top: String = term.snapshot().cells[0].iter().map(|c| c.ch).collect();
+        // Five lines up from a viewport whose last row is the blank line after
+        // line-39: the top row was line-31, and is now line-26.
+        assert!(
+            top.starts_with("line-26"),
+            "expected the view to have moved into history, got {top:?}"
+        );
+    }
+
+    // A pane being dragged wider, or the app's text size changing, both land
+    // here as a resize. Neither is a reason to be thrown back to the prompt.
+    #[test]
+    fn a_resize_does_not_throw_the_view_out_of_history() {
+        let mut term = GridTerminal::with_size(40, 10);
+        let mut bytes = Vec::new();
+        for i in 0..60 {
+            bytes.extend_from_slice(format!("line-{i:02}\r\n").as_bytes());
+        }
+        term.apply_output(&bytes);
+        term.apply_wheel(20, (0, 0));
+        assert_eq!(term.display_offset(), 20);
+
+        // Wider and shorter, the way a drag or a bigger font changes a grid.
+        term.resize(52, 8);
+        assert!(
+            term.display_offset() > 0,
+            "the view should still be in history after a resize, not snapped to the prompt"
+        );
+        assert!(
+            !term.visible_text().contains("line-59"),
+            "the live bottom should not be back on screen, got:\n{}",
+            term.visible_text()
+        );
+
+        // And the wheel still works afterwards.
+        assert!(matches!(term.apply_wheel(5, (0, 0)), crate::wheel::WheelAction::Scroll(5)));
+        assert!(term.display_offset() > 20);
+    }
+
+    // The bug that makes a terminal look broken: on the alternate screen the
+    // scroll limit is zero, so moving the offset moves nothing at all. The
+    // wheel has to become keys the program can act on instead.
+    #[test]
+    fn apply_wheel_sends_keys_on_the_alternate_screen() {
+        let mut term = GridTerminal::with_size(20, 10);
+        let mut bytes = Vec::new();
+        for i in 0..40 {
+            bytes.extend_from_slice(format!("line-{i:02}\r\n").as_bytes());
+        }
+        term.apply_output(&bytes);
+        // DECSET 1049: enter the alternate screen, as every full-screen
+        // program does on startup.
+        term.apply_output(b"\x1b[?1049h");
+        assert!(term.wheel_modes().alt_screen);
+
+        // Proof that scrolling really is a no-op here, which is what made the
+        // old path silently do nothing.
+        term.scroll_lines(5);
+        assert_eq!(term.display_offset(), 0, "the alternate screen has no scrollback to move");
+
+        assert_eq!(
+            term.apply_wheel(2, (0, 0)),
+            crate::wheel::WheelAction::Send(b"\x1b[A\x1b[A".to_vec())
+        );
+
+        // Leaving the alternate screen hands the wheel back to the scrollback,
+        // with the history that was there before still intact.
+        term.apply_output(b"\x1b[?1049l");
+        assert!(!term.wheel_modes().alt_screen);
+        assert_eq!(term.apply_wheel(3, (0, 0)), crate::wheel::WheelAction::Scroll(3));
+        assert_eq!(term.display_offset(), 3);
     }
 
     #[test]

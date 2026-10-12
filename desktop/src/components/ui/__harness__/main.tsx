@@ -41,17 +41,14 @@ const traceHandlers: TraceHandlers = {
   onOverview: noop,
   onSessions: noop,
   onTeamActivity: noop,
-  onCostUsage: noop,
   onIntentAst: noop,
   onReview: noop,
   onChecks: noop,
   onImpacts: noop,
   onProve: noop,
   onRewind: noop,
-  onTimeline: noop,
   onAttest: noop,
   onCodeMap: noop,
-  onMemory: noop,
   onDoctor: noop,
 };
 
@@ -178,13 +175,13 @@ function Harness(): JSX.Element {
         <Scene
           id="trace-tabs"
           title="Trace. The same strip, and the line it draws"
-          note="Nine places are tabs; the two questions on the right hand work to Aura and change nothing below, so they are buttons and now visibly a different kind of control."
+          note="The places are tabs; the two questions on the right hand work to Aura and change nothing below, so they are buttons and now visibly a different kind of control."
         >
           <div>
             <TraceTabs
               repoRoot="/Users/you/project"
               handlers={traceHandlers}
-              activeKey="timeline"
+              activeKey="sessions"
               impactsCount={3}
             />
             <div style={{ height: 56 }} />

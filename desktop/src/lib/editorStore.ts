@@ -45,6 +45,7 @@ import {
   releaseTerminalSession,
   releaseNativeTerminalSession,
 } from "../components/Terminal";
+import { agentNativeTermId } from "../components/agent/AgentNativeCanvas";
 import {
   loadSnapshot,
   loadSnapshotAt,
@@ -257,21 +258,10 @@ export type WorkPaneRef =
    *  the session (the "Leave" button does); the store keeps the transcript, so
    *  re-opening walks straight back in. */
   | { kind: "live"; id: string }
-  /** Pages (notes/wiki) as a workpane tab — RR.3. id is the repo
-   *  root so one tab per repo (re-opening re-focuses). Body renders
-   *  NotesWorkpane in `embedded` mode (no modal overlay, no internal
-   *  × — the tab strip carries the close affordance). */
-  | { kind: "pages"; id: string }
   /** Automations — orchestration runs + saved launch presets, as a
    *  workpane tab. id is the repo root (one tab per repo, same shape as
    *  openTasks/openStandup). Body renders AutomationsSurface. */
   | { kind: "automations"; id: string }
-  /** Team chat in the wide center pane — id is the repo root (one tab
-   *  per repo). Body renders the full CommsPanel (channel rail + message
-   *  stream + members), which only breathes at center width. The ADE
-   *  Team sidebar section collapses to a slim launcher while this is
-   *  open so there's a single CommsPanel instance (one WS, one poller). */
-  | { kind: "channels"; id: string }
   /** Commons — the shared social/plugin surface in the wide center pane.
    *  id is the repo root (one tab per repo). Body renders CommonsSurface
    *  (Lounge presence + ship log, and the Plugin Exchange), which only
@@ -286,7 +276,7 @@ export type WorkPaneRef =
   /** Trace verify/insight tool as a workpane tab — Review / Rewind /
    *  Attestations / Doctor / Memory (was a mutually-exclusive singleton
    *  flag, `traceTool`). Living in the leaf lets it sit in the unified
-   *  strip beside the agent/Tasks/Pages tabs instead of swapping the
+   *  strip beside the agent/Tasks tabs instead of swapping the
    *  whole surface out and hiding them. `id` is the tool name so one tab
    *  per tool (re-opening re-focuses); `tool` selects the rendered body;
    *  `arg` carries Rewind's symbol/file prefill. Persisted across reload
@@ -504,6 +494,48 @@ export function treeFindLeafByRef(
     if (leaf.tabs.some((r) => samePaneRef(r, ref))) return leaf;
   }
   return null;
+}
+
+/** Fold every pane in the tree down to a single leaf, keeping every tab
+ *  that was open in any of them.
+ *
+ *  "Leave split view" used to mean `splitLayout = null`, and that is not the
+ *  same thing: each leaf owns its own tab list, so dropping the tree dropped
+ *  every tab that was not the one being looked at. The pane you left came
+ *  back; the tab in the other pane simply disappeared. Same mistake, same
+ *  reason, as the one `removeSplitPane` already documents.
+ *
+ *  Tabs arrive in DFS order — left-to-right, top-to-bottom, which is the
+ *  order they were on screen. `keep` names the tab that asked to leave, and
+ *  it stays focused; the leaf that held it keeps its `paneId` so the pane
+ *  that survives is a surviving pane rather than a new one React has to
+ *  mount from scratch. */
+export function treeCollapse(
+  t: WorkSplitTree,
+  keep?: WorkPaneRef | null,
+): WorkSplitLeaf {
+  const leaves = treeLeafNodes(t);
+  const home = (keep ? treeFindLeafByRef(t, keep) : null) ?? leaves[0];
+  if (leaves.length === 1) return home;
+
+  const tabs: WorkPaneRef[] = [];
+  for (const leaf of leaves) {
+    for (const ref of leaf.tabs) {
+      // A ref is meant to live in one pane at a time, but a duplicate here
+      // would show up as two tabs for one session, so it costs nothing to
+      // refuse it.
+      if (!tabs.some((r) => samePaneRef(r, ref))) tabs.push(ref);
+    }
+  }
+
+  const wanted = keep ?? home.tabs[home.activeIndex];
+  const at = wanted ? tabs.findIndex((r) => samePaneRef(r, wanted)) : -1;
+  return {
+    kind: "leaf",
+    paneId: home.paneId,
+    tabs,
+    activeIndex: at >= 0 ? at : 0,
+  };
 }
 
 /** Replace every occurrence of `target` ref with `next` (across every
@@ -883,14 +915,15 @@ export type PlanTabData = {
 };
 
 /** The Trace verify/insight tools that open as singleton center pages
- *  (formerly modal dialogs). "memory" joined the set so the memory +
- *  sessions browser reads as a page, not a popup. */
+ *  (formerly modal dialogs). Memory left the set with the surface: the dialog
+ *  survives under Agent customizations, but nothing routes to it as a Trace
+ *  tool, and a kind the store still accepted would let a saved layout re-mount
+ *  a page the product no longer has. */
 export type TraceToolKind =
   | "review"
   | "rewind"
   | "attest"
   | "doctor"
-  | "memory"
   | "impacts";
 
 /** The sub-views the Trace Sessions surface can land on. "team" is the
@@ -945,7 +978,7 @@ type State = {
   splitLayout: WorkSplitLayout | null;
   /** Recently-closed tabs, oldest→newest, for ⌘⇧T "reopen closed tab"
    *  (VS Code parity). Only cleanly-reopenable kinds are recorded: a file
-   *  reopens to its buffer, a view tab (Tasks/Pages/task/Trace/Sessions/…)
+   *  reopens to its buffer, a view tab (Tasks/task/Trace/Sessions/…)
    *  re-queries on mount. Live-PTY kinds (terminal/agent) and session-only
    *  kinds (plan/empty/screenshare) are NOT recorded — their process/session
    *  is gone on close, so "reopen" would be a lie. Session-only, capped, and
@@ -1600,30 +1633,19 @@ type PersistedSplitLayout = {
 };
 
 /** Section/nav surfaces — Tasks, Automations, Goals, Safety check,
- *  My sessions, Team, Code Map, mini-apps, and the Trace tools. Every one of
- *  these is a destination reachable from the nav rail in a single click, NOT
- *  a document you author. Persisting them (the old #222 behaviour) meant a
+ *  My sessions, Code Map, mini-apps, and the Trace tools. Every one of these
+ *  is a destination reachable from the nav rail in a single click, NOT a
+ *  document you author. Persisting them (the old #222 behaviour) meant a
  *  workspace snapshot or split-layout blob would resurrect them on reload as
  *  "phantom tabs" the user never opened — exactly the bug report. So they are
  *  dropped on BOTH persist (`sanitizeRefForPersist`) and restore
  *  (`validateTree`); only real documents/sessions — file / agent / manager /
- *  task / pages — survive a reload. A stale blob already on disk self-heals
- *  the next time it's read.
- *
- *  NOTE: `pages` is deliberately NOT here. After the Pages redesign a page tab
- *  is an authored document (it carries the open page's title, not just the
- *  word "Pages"), so it must be workspace-dependent: opening a page belongs to
- *  the CURRENT workspace's tab set, and switching workspaces has to swap the
- *  strip to that workspace's own pages and bring them back on return. The
- *  per-workspace snapshot is keyed by repoRoot and the global split-layout key
- *  is stamped with its root (see `currentWorkspaceRoot`), so a restored pages
- *  tab can only ever re-mount in the exact workspace it was open in — never as
- *  a cross-workspace phantom. */
+ *  task — survive a reload. A stale blob already on disk self-heals the next
+ *  time it's read. */
 const EPHEMERAL_SURFACE_KINDS: ReadonlySet<string> = new Set([
   "tasks",
   "standup",
   "automations",
-  "channels",
   "commons",
   "app",
   "sessions",
@@ -1704,7 +1726,6 @@ const TRACE_TOOL_KINDS = new Set<TraceToolKind>([
   "rewind",
   "attest",
   "doctor",
-  "memory",
   "impacts",
 ]);
 
@@ -1773,12 +1794,8 @@ function validateTree(v: unknown): WorkSplitTree | null {
         });
       else if (r.kind === "standup" && typeof r.id === "string")
         tabs.push({ kind: "standup", id: r.id });
-      else if (r.kind === "pages" && typeof r.id === "string")
-        tabs.push({ kind: "pages", id: r.id });
       else if (r.kind === "automations" && typeof r.id === "string")
         tabs.push({ kind: "automations", id: r.id });
-      else if (r.kind === "channels" && typeof r.id === "string")
-        tabs.push({ kind: "channels", id: r.id });
       else if (
         r.kind === "commons" &&
         typeof r.id === "string" &&
@@ -2094,7 +2111,10 @@ export function useEditorStore(): State & {
   moveTabBetweenPanes: (srcPaneId: string, srcIndex: number, dstPaneId: string) => void;
   removeSplitPane: (index: number) => void;
   setSplitDirection: (direction: WorkSplitDirection) => void;
-  clearSplitLayout: () => void;
+  /** Leave split view: fold every pane into one leaf, keeping every tab that
+   *  was open in any of them. `keep` names the tab that asked to leave, and
+   *  stays focused. */
+  collapseSplitLayout: (keep?: WorkPaneRef | null) => void;
   openManager: (sessionId: string, label: string) => void;
   /** Retitle an open Aura conversation's tab WITHOUT focusing it. `openManager`
    *  also refreshes the label, but it moves the user, so it can't be used to
@@ -2217,9 +2237,6 @@ export function useEditorStore(): State & {
   /** Per-repo Automations view (orchestration runs + saved presets). */
   openAutomations: (repoRoot: string) => void;
   closeAutomations: (repoRoot: string) => void;
-  /** Per-repo Team chat in the center pane (full CommsPanel). */
-  openChannels: (repoRoot: string) => void;
-  closeChannels: (repoRoot: string) => void;
   /** Per-repo Commons surface (Lounge + Plugin Exchange), full center width. */
   openCommons: (repoRoot: string) => void;
   closeCommons: (repoRoot: string) => void;
@@ -2237,10 +2254,6 @@ export function useEditorStore(): State & {
    *  the session; the pane's own "Leave" is what drops it. */
   openLiveSession: (sessionId: string) => void;
   closeLiveSession: (sessionId: string) => void;
-  /** RR.3 — open the Pages (notes/wiki) surface as a workpane tab
-   *  keyed by repo root. Replaces the legacy full-screen overlay. */
-  openPages: (repoRoot: string) => void;
-  closePages: (repoRoot: string) => void;
   setActiveDashboard: () => void;
   reloadFromDisk: (path: string) => Promise<void>;
   setSidebarTab: (tab: "sessions" | "code") => void;
@@ -2315,7 +2328,7 @@ export function useEditorStore(): State & {
     moveTabBetweenPanes,
     removeSplitPane,
     setSplitDirection,
-    clearSplitLayout,
+    collapseSplitLayout,
     openManager,
     renameManagerTab,
     closeManager,
@@ -2369,8 +2382,6 @@ export function useEditorStore(): State & {
     closeStandup,
     openAutomations,
     closeAutomations,
-    openChannels,
-    closeChannels,
     openCommons,
     closeCommons,
     openApp,
@@ -2379,8 +2390,6 @@ export function useEditorStore(): State & {
     closeScreenshare,
     openLiveSession,
     closeLiveSession,
-    openPages,
-    closePages,
     setActiveDashboard,
     reloadFromDisk,
     setSidebarTab,
@@ -2708,23 +2717,25 @@ function restorePanelGroups(snap: WorkspaceSnapshot): {
 }
 
 /** Which "surface" the user is currently looking at, for the project-switch
- *  carry-over below. Pages/Tasks are docked, repo-keyed workpanes the user
- *  lives in — when they switch projects from the header while reading one, they
- *  expect to stay on that surface in the next project, not get dumped back to
- *  Build. Returns the surface if ANY leaf's active tab is that kind (matching
- *  App.tsx's `inPagesSurface` / `inTasksSurface`); Pages wins a tie. */
+ *  carry-over below. Tasks is a docked, repo-keyed workpane the user lives in
+ *  — when they switch projects from the header while reading it, they expect to
+ *  stay on that surface in the next project, not get dumped back to Build.
+ *  Returns the surface if ANY leaf's active tab is that kind (matching
+ *  App.tsx's `inTasksSurface`).
+ *
+ *  Still a union rather than a boolean: it answers "which surface", and Pages
+ *  was the second answer until it was taken out. The next docked destination
+ *  joins it here, and a boolean would have to be widened back. */
 export function activeWorkSurface(
   layout: WorkSplitTree | null,
-): "pages" | "tasks" | null {
+): "tasks" | null {
   if (!layout) return null;
-  let sawTasks = false;
   for (const leaf of treeLeafNodes(layout)) {
     const active = leaf.tabs[leaf.activeIndex];
     if (!active) continue;
-    if (active.kind === "pages") return "pages";
-    if (active.kind === "tasks") sawTasks = true;
+    if (active.kind === "tasks") return "tasks";
   }
-  return sawTasks ? "tasks" : null;
+  return null;
 }
 
 /** What a workspace switch actually did.
@@ -2760,8 +2771,8 @@ function withGlobalPrefs(parked: State): State {
 
 function switchWorkspace(prev: string | null, next: string): WorkspaceSwitch {
   // Capture the surface the user is leaving BEFORE anything moves, so a header
-  // project switch made while reading Pages/Tasks lands them on the SAME
-  // surface in the next project (carried forward at the end).
+  // project switch made while reading Tasks lands them on the SAME surface
+  // in the next project (carried forward at the end).
   const outgoingSurface = activeWorkSurface(state.splitLayout);
   // 1) Park the outgoing place's LIVE state so coming back is a focus, and
   //    write its snapshot too — the snapshot is what a RESTART reads, and it
@@ -2898,25 +2909,21 @@ function switchWorkspace(prev: string | null, next: string): WorkspaceSwitch {
   return "hydrated";
 }
 
-/** Carry the Pages/Tasks surface across a workspace switch. If the user was
- *  reading one and the incoming workspace isn't already on it, open that
- *  surface pointed at the new root and focus it — so "switch project while on
- *  Pages" stays on Pages instead of resetting to Build. Build (null) never
- *  carries, so an ordinary switch leaves the target's own tabs untouched.
- *  Shared by both switch outcomes: a focused place owes the user the same
- *  carry-over a hydrated one does. `focusOrAppendRef` is hoisted, so calling
- *  it from above its lexical definition is fine. */
+/** Carry the Tasks surface across a workspace switch. If the user was reading
+ *  it and the incoming workspace isn't already on it, open that surface
+ *  pointed at the new root and focus it — so "switch project while on Tasks"
+ *  stays on Tasks instead of resetting to Build. Build (null) never carries,
+ *  so an ordinary switch leaves the target's own tabs untouched. Shared by
+ *  both switch outcomes: a focused place owes the user the same carry-over a
+ *  hydrated one does. `focusOrAppendRef` is hoisted, so calling it from above
+ *  its lexical definition is fine. */
 function carryWorkSurface(
-  outgoingSurface: "pages" | "tasks" | null,
+  outgoingSurface: "tasks" | null,
   next: string,
 ) {
   if (!outgoingSurface) return;
   if (activeWorkSurface(state.splitLayout) === outgoingSurface) return;
-  focusOrAppendRef(
-    outgoingSurface === "pages"
-      ? { kind: "pages", id: next }
-      : { kind: "tasks", id: next },
-  );
+  focusOrAppendRef({ kind: "tasks", id: next });
 }
 
 /** Close a place: drop its live state so the next entry rebuilds from its
@@ -3670,6 +3677,12 @@ function closeAgent(sessionId: string) {
   // the tab actually stops existing, in this window at least: detach() routes
   // through closeAgent too, and the popout reads the title off its own PTY.
   clearAgentTerminalTitle(sessionId);
+  // A GPU-drawn agent pane parks its surface offscreen on tab switches so the
+  // grid keeps filling; here the tab is actually gone, so tear the surface and
+  // its render thread down. No-op for a pane that was drawn by xterm. The
+  // agent's own PTY is untouched either way — it belongs to cmd_agent_pty, and
+  // stopping it is the Stop button's job.
+  releaseNativeTerminalSession(agentNativeTermId(sessionId));
   const next = state.agentTabs.slice();
   next.splice(idx, 1);
   let activeAgentId = state.activeAgentId;
@@ -4793,8 +4806,8 @@ function moveTabBetweenPanes(
 // ── ⌘⇧T "reopen closed tab" (VS Code parity) ──────────────────────
 //
 // Only kinds whose content survives a close are recorded. A file reopens to
-// its on-disk buffer; every "view" tab (Tasks / task detail / Pages / Trace
-// tools / Sessions / Commons / …) re-queries live state on mount, so
+// its on-disk buffer; every "view" tab (Tasks / task detail / Trace tools /
+// Sessions / Commons / …) re-queries live state on mount, so
 // re-opening is loss-free. Live-PTY kinds (terminal / agent) and session-only
 // kinds (manager / plan / empty / screenshare) are deliberately excluded — the
 // process or session is gone the instant the tab closed, so "reopen" could only
@@ -4803,10 +4816,8 @@ const REOPENABLE_TAB_KINDS: ReadonlySet<WorkPaneRef["kind"]> = new Set([
   "file",
   "tasks",
   "task",
-  "pages",
   "standup",
   "automations",
-  "channels",
   "commons",
   "app",
   "sessions",
@@ -5100,9 +5111,26 @@ function setSplitDirection(direction: WorkSplitDirection) {
   setState({ ...state, splitLayout: { ...tree, direction } });
 }
 
-function clearSplitLayout() {
-  if (!state.splitLayout) return;
-  setState({ ...state, splitLayout: null });
+/** Leave split view: fold every pane into one, keeping every tab.
+ *
+ *  This replaces `clearSplitLayout`, which set the tree to null. That read
+ *  as "no layout" and rendered as "my other tab is gone", because the tabs
+ *  live in the leaves — see `treeCollapse`. `keep` is the tab that asked to
+ *  leave, and it is the one still focused afterwards. */
+function collapseSplitLayout(keep?: WorkPaneRef | null) {
+  const tree = state.splitLayout;
+  if (!tree) return;
+  const next = treeCollapse(tree, keep);
+  if (next === tree) return;
+  const survivor = next.tabs[next.activeIndex];
+  setState({
+    ...state,
+    splitLayout: next,
+    activePath: survivor?.kind === "file" ? survivor.path : null,
+    activeAgentId: survivor?.kind === "agent" ? survivor.id : null,
+    activeTermId: survivor?.kind === "terminal" ? survivor.id : null,
+    activeManagerId: survivor?.kind === "manager" ? survivor.id : null,
+  });
 }
 
 export function samePaneRef(a: WorkPaneRef, b: WorkPaneRef): boolean {
@@ -5808,7 +5836,7 @@ function setActiveDashboard() {
 // so the strip stays continuous — the user sees
 // [Claude Code | Gemini CLI | … | Tasks] as one row instead of having
 // their workspace tabs disappear behind the new tab. Shared by
-// focusOrAppendRef (Tasks/Pages/Standup/…) and openTraceTool.
+// focusOrAppendRef (Tasks/Standup/…) and openTraceTool.
 // Pure: given an EXISTING layout, return it with `ref` present and
 // focused — focus the owning leaf's tab if it's already there, else
 // append to the first leaf. This is what keeps a freshly-opened or
@@ -6117,14 +6145,6 @@ function closeAutomations(repoRoot: string) {
   removeRefFromLayout({ kind: "automations", id: repoRoot });
 }
 
-function openChannels(repoRoot: string) {
-  focusOrAppendRef({ kind: "channels", id: repoRoot });
-}
-
-function closeChannels(repoRoot: string) {
-  removeRefFromLayout({ kind: "channels", id: repoRoot });
-}
-
 function openCommons(repoRoot: string) {
   // Commons (community platform) is gated off — never mount its center pane.
   if (!COMMONS_ENABLED) return;
@@ -6171,17 +6191,6 @@ function openLiveSession(sessionId: string) {
 
 function closeLiveSession(sessionId: string) {
   removeRefFromLayout({ kind: "live", id: sessionId });
-}
-
-// RR.3 — Pages as a first-class workpane tab. id is the repo root
-// (one tab per repo, same shape as openTasks/openStandup). Replaces
-// the legacy full-screen overlay that lived in App.tsx.
-function openPages(repoRoot: string) {
-  focusOrAppendRef({ kind: "pages", id: repoRoot });
-}
-
-function closePages(repoRoot: string) {
-  removeRefFromLayout({ kind: "pages", id: repoRoot });
 }
 
 // ── PR Detail (Stage 8N tab kind, was singleton in Stage 7A) ───────
@@ -6452,7 +6461,7 @@ function openSessions(view: TraceView = "overview") {
 
 function openTraceTool(tool: TraceToolKind, arg?: { identifier?: string; file?: string }) {
   // The tool is a tab in the unified leaf (one per tool; id === tool), so
-  // it sits beside the agent/Tasks/Pages tabs and survives switching to
+  // it sits beside the agent/Tasks tabs and survives switching to
   // them — opening Memory no longer hides Tasks, and clicking Claude Code
   // no longer closes Memory. `treeReplace` refreshes the ref so a second
   // open with a new Rewind prefill (symbol/file) actually updates it.

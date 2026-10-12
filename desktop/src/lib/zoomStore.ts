@@ -66,8 +66,14 @@ export function zoomPercent(z: number): number {
   return Math.round(z * 100);
 }
 
-/** `[zoom, setZoom]` — the tuple App.tsx's `useState` used to return. */
-export function useZoomLevel(): [number, typeof setZoom] {
+/** The level alone, for a reader that only needs to re-render when it moves.
+ *
+ *  Separate from `useZoomLevel` so a caller that has no business changing the
+ *  zoom cannot, and so it can be called early in a component whose setter
+ *  lives further down — a dependency array is evaluated during render, so a
+ *  `const [zoom] = useZoomLevel()` declared below an effect that depends on it
+ *  is a temporal-dead-zone error rather than a stale value. */
+export function useZoom(): number {
   const [z, setLocal] = useState<number>(level);
   useEffect(() => {
     const fn = () => setLocal(level);
@@ -77,5 +83,10 @@ export function useZoomLevel(): [number, typeof setZoom] {
       subs.delete(fn);
     };
   }, []);
-  return [z, setZoom];
+  return z;
+}
+
+/** `[zoom, setZoom]` — the tuple App.tsx's `useState` used to return. */
+export function useZoomLevel(): [number, typeof setZoom] {
+  return [useZoom(), setZoom];
 }

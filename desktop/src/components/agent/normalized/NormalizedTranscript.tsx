@@ -21,7 +21,7 @@ import { PlanPreview } from "../../chat/PlanPreview";
 //! offers a jump back to the terminal to answer.
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { onExternalAnchorClick } from "../../../lib/openExternal";
+import { ImageLightbox } from "../../media/ImageLightbox";
 import {
   ArrowUp,
   ArrowDown,
@@ -67,6 +67,8 @@ import type {
   TodoEvent,
 } from "../../../lib/agentProtocol";
 import { StreamingBubble } from "../../manager/chat/ToolCard";
+import { TurnActivity } from "../../manager/chat/TurnActivity";
+import { splitSettledTurn } from "./turnSplit";
 import { ThinkingLine } from "../../manager/chat/StatusLine";
 import { MarkdownBody } from "../../manager/chat/Markdown";
 
@@ -665,6 +667,44 @@ function UserRow({ text, repoRoot }: { text: string; repoRoot: string }) {
 
 // ── Session-init chip ───────────────────────────────────────────────────────
 
+/** The seam where the run ran out of context and its earlier turns were
+ *  summarised back into it.
+ *
+ *  The handoff arrives on the user channel, so it used to render as a message
+ *  the person had sent — a thousand words of "1. Primary Request and Intent"
+ *  in a bubble styled to say they typed it. It is not a message, but it is not
+ *  nothing either: the agent's memory of the conversation changed here, and a
+ *  reader who cannot see that is left wondering why it suddenly refers to work
+ *  no visible turn describes. So it is a rule across the column, and the
+ *  summary is one click away for anyone who wants to know what was kept. */
+function CompactionSeam({ summary }: { summary: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2 text-[11px] text-text-3">
+        <span className="h-px flex-1 bg-line-soft" />
+        {summary ? (
+          <button
+            type="button"
+            className="hover:text-text-2"
+            onClick={() => setOpen((v) => !v)}
+          >
+            Earlier conversation summarised · {open ? "hide" : "read it"}
+          </button>
+        ) : (
+          <span>Earlier conversation summarised</span>
+        )}
+        <span className="h-px flex-1 bg-line-soft" />
+      </div>
+      {open && (
+        <div className="whitespace-pre-wrap text-[12px] leading-relaxed text-text-3">
+          {summary}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function InitChip({ ev }: { ev: SessionInitEvent }) {
   const tools = ev.tools?.length ?? 0;
   return (
@@ -987,9 +1027,9 @@ function ResultFooter({ ev }: { ev: ResultEvent }) {
 // ── Inline image ────────────────────────────────────────────────────────────
 
 /** A picture in the conversation — a screenshot the user attached, or one the
- *  agent read back / produced. Shown as a bounded thumbnail; click opens the
- *  full-size image in a new tab. Aligned right for the user, left for the
- *  agent, matching the prose bubbles. */
+ *  agent read back / produced. Shown as a bounded thumbnail; click fills the
+ *  window with it. Aligned right for the user, left for the agent, matching
+ *  the prose bubbles. */
 function ImageBubble({ ev }: { ev: ImageEvent }) {
   const [failed, setFailed] = useState(false);
   if (failed || !/^image\/(png|jpeg|gif|webp|avif)$/i.test(ev.mediaType)) {
@@ -1006,25 +1046,20 @@ function ImageBubble({ ev }: { ev: ImageEvent }) {
   }
   const src = `data:${ev.mediaType};base64,${ev.data}`;
   const mine = ev.role === "user";
+  // This used to be an `<a href>` to the data URL, opened through the system
+  // opener. Inside the webview that is two dead ends at once: the anchor has
+  // no tab to open, and the opener will not hand the OS a megabyte of base64.
+  // Clicking a screenshot in a transcript did nothing at all. The lightbox
+  // the chat already uses opens it in place, and brings Copy and Save with it.
   return (
     <div className={mine ? "self-end max-w-[88%]" : "self-start max-w-[88%]"}>
-      <a
-        href={src}
-        target="_blank"
-        rel="noreferrer"
-        onClick={onExternalAnchorClick}
-        title="Open full size"
-        className="block rounded-lg overflow-hidden"
+      <ImageLightbox
+        src={src}
+        alt={mine ? "Attached image" : "Image from the agent"}
+        onError={() => setFailed(true)}
+        className="block max-h-[360px] w-auto max-w-full rounded-lg object-contain bg-bg-2"
         style={{ border: "1px solid var(--color-line-soft)" }}
-      >
-        <img
-          src={src}
-          loading="lazy"
-          onError={() => setFailed(true)}
-          alt={mine ? "Attached image" : "Image from the agent"}
-          className="block max-h-[360px] w-auto max-w-full object-contain bg-bg-2"
-        />
-      </a>
+      />
     </div>
   );
 }
@@ -1101,16 +1136,29 @@ export function TranscriptRows({
             return <InitChip key={g.id} ev={g.ev} />;
           case "user":
             return <UserRow key={g.id} text={g.text} repoRoot={repoRoot} />;
-          case "stream":
+          case "compaction":
+            return <CompactionSeam key={g.id} summary={g.summary} />;
+          case "stream": {
+            // A turn still being written stays in emission order — watching it
+            // work is the point while it is working. Once it has settled, the
+            // steps fold into one quiet roll-up and the answer stands on its
+            // own, which is what the manager chat already does with its turns
+            // (TurnActivity) and what an agent's flat stream needs a split to
+            // reach.
+            const live = running && isLast;
+            const { steps, answer } = live
+              ? { steps: [], answer: g.blocks }
+              : splitSettledTurn(g.blocks);
             return (
               <div key={g.id} className="flex flex-col gap-1">
-                <StreamingBubble
-                  blocks={g.blocks}
-                  streaming={running && isLast}
-                />
+                {steps.length > 0 && <TurnActivity blocks={steps} />}
+                {answer.length > 0 && (
+                  <StreamingBubble blocks={answer} streaming={live} />
+                )}
                 {g.usage && <UsageFooter usage={g.usage} />}
               </div>
             );
+          }
           case "question":
             return (
               <QuestionSetCard

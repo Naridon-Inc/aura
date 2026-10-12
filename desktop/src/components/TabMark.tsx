@@ -38,7 +38,6 @@ export function TabMark({
   if (refr.kind === "terminal")
     return <Icons.Terminal size={size} className="opacity-80" />;
   if (refr.kind === "file") return <FileIcon name={label} size={size + 1} />;
-  if (refr.kind === "pages") return <Icons.Pages size={size} />;
   if (refr.kind === "tasks")
     return <Icons.Tasks size={size} className="opacity-80" />;
   // Everything else: the mark its sidebar row draws. Null for the handful of

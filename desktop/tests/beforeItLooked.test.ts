@@ -26,7 +26,6 @@ import { describe, expect, test } from "bun:test";
 
 import { undoCopy } from "../src/components/dialogs/OpLogDialog";
 import { spendFootnote } from "../src/components/workpanes/CostUsagePane";
-import { pagesRailState, type PagesRead } from "../src/components/pages/PagesSidebar";
 import { changesReadout } from "../src/components/rightrail/ChangesPanel";
 import { stripComments as code } from "./support/code";
 
@@ -132,72 +131,6 @@ describe("the spend page asks whether you're signed in, not whether spend arrive
     const all = [spendFootnote(true), spendFootnote(false), spendFootnote(null)];
     expect(new Set(all).size).toBe(3);
     expect(all.every((s) => s.trim().length > 0)).toBe(true);
-  });
-});
-
-describe("the Pages rail knows the difference between none and not-yet", () => {
-  const R = (over: Partial<Parameters<typeof pagesRailState>[0]> = {}) =>
-    pagesRailState({
-      hasProject: true,
-      read: "done",
-      hasRows: false,
-      filtering: false,
-      ...over,
-    });
-
-  test("the first frame of a visit is not a verdict", () => {
-    expect(R({ read: "pending" })).toBe("loading");
-  });
-
-  test("a read that threw is its own state", () => {
-    // The catch here was a comment whose excuse — "NotesWorkpane will mirror
-    // once it mounts" — names the exact case this read exists to cover when it
-    // hasn't. So nothing was coming to correct the wrong answer.
-    expect(R({ read: "failed" })).toBe("failed");
-  });
-
-  test("rows beat the read state, because the mirror can arrive first", () => {
-    expect(R({ read: "pending", hasRows: true })).toBe("list");
-    expect(R({ read: "failed", hasRows: true })).toBe("list");
-  });
-
-  test("no project is not an empty project", () => {
-    expect(R({ hasProject: false })).toBe("no-project");
-    expect(R({ hasProject: false, read: "pending" })).toBe("no-project");
-  });
-
-  test("a filter that matches nothing is not a project with nothing", () => {
-    expect(R({ filtering: true })).toBe("no-match");
-    expect(R({})).toBe("empty");
-  });
-
-  test("only a finished read of a real project with nothing in it says so", () => {
-    const READS: PagesRead[] = ["pending", "failed", "done"];
-    for (const hasProject of [false, true])
-      for (const read of READS)
-        for (const hasRows of [false, true])
-          for (const filtering of [false, true]) {
-            const got = pagesRailState({ hasProject, read, hasRows, filtering });
-            expect(got === "empty").toBe(
-              hasProject && read === "done" && !hasRows && !filtering,
-            );
-            // …and every combination lands somewhere. A state machine that
-            // returns undefined for a corner renders nothing at all, which
-            // reads as an empty rail — the same lie by another route.
-            expect(typeof got).toBe("string");
-          }
-  });
-
-  test("the six answers are six different answers", () => {
-    const seen = new Set([
-      R({ hasProject: false }),
-      R({ hasRows: true }),
-      R({ read: "pending" }),
-      R({ read: "failed" }),
-      R({ filtering: true }),
-      R({}),
-    ]);
-    expect(seen.size).toBe(6);
   });
 });
 
@@ -334,33 +267,6 @@ describe("both surfaces render the state their readouts computed", () => {
     // the defect wearing a new variable name.
     expect(src).toContain("api.cloudAuthStatus()");
     expect(src).toContain("setSignedIn(st?.connected === true)");
-  });
-
-  test("the Pages rail draws all five bodies, and every read has a failure arm", async () => {
-    const src = await read("components/pages/PagesSidebar.tsx");
-    expect(src).toContain("pagesRailState({");
-    for (const arm of ["loading", "failed", "no-project", "no-match", "empty"]) {
-      expect(src).toContain(`body === "${arm}"`);
-    }
-    // The reassuring sentence exists once, in the arm that earned it.
-    expect(src.split("No pages yet").length - 1).toBe(1);
-    // Positive invariant rather than a ban: every notesList read must set a
-    // failed state, so a new read can't quietly reintroduce the swallow.
-    const reads = src.split("api\n      .notesList(").length - 1;
-    expect(reads).toBeGreaterThan(0);
-    expect(src.split('setRead("failed")').length - 1).toBe(reads);
-    // The live mirror is a completed read too — without this the rail stays on
-    // the spinner under real rows if notesList is slower than the workpane.
-    const i = src.indexOf("function onMirror");
-    expect(i).toBeGreaterThan(-1);
-    expect(src.slice(i, i + 600)).toContain('setRead("done")');
-    // And the mount has to hand the rail the state it tracks. A correct state
-    // machine fed a constant is a dead state machine: `read={"done"}` at the
-    // call site puts "No pages yet" back on the first frame with every test
-    // above still green. Pin the arguments, not only the function.
-    expect(src).toContain("read={read}");
-    expect(src).toContain("hasProject={!!repoRoot}");
-    expect(src).toContain("onRetry={reloadSummaries}");
   });
 
   test("the Source Control panel reads the error its own hook computes", async () => {

@@ -217,4 +217,58 @@ describe("runs, rows and token accounting", () => {
     const block = groups[0].kind === "stream" ? groups[0].blocks[0] : null;
     expect(block?.kind === "tool" && block.result).toBeUndefined();
   });
+  test("a preamble-only user turn gets no row, but a real one still does", () => {
+    // The engine sends the repo's instruction file on the user channel. It is
+    // not a message anyone sent, so it must not appear as one.
+    const preamble = [
+      "# AGENTS.md instructions for /repo",
+      "<INSTRUCTIONS>",
+      "Run bd prime for workflow context.",
+      "</INSTRUCTIONS>",
+    ].join("\n");
+    const groups = toTranscriptGroups([
+      { ...base, kind: "text", id: "u0", role: "user", source: "user", text: preamble },
+      { ...base, kind: "text", id: "u1", role: "user", source: "user", text: "add the move verb" },
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ kind: "user", text: "add the move verb" });
+  });
+
+  // The biggest of these by far: a compacted run writes a page-long summary
+  // of itself onto the user channel. It is not a message, but it is a real
+  // event — the agent's memory of the conversation changed here — so it gets
+  // a seam rather than silence, and it still breaks the prose run.
+  test("a compaction handoff is a seam, not a message", () => {
+    const handoff = [
+      "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.",
+      "",
+      "Summary:",
+      "1. Primary Request and Intent",
+      "Wire the move verb.",
+    ].join("\n");
+    const groups = toTranscriptGroups([
+      say("a0", "Working on it."),
+      { ...base, kind: "text", id: "u0", role: "user", source: "user", text: handoff },
+      say("a1", "Picking up where we left off."),
+    ]);
+    expect(groups.map((g) => g.kind)).toEqual(["stream", "compaction", "stream"]);
+    expect(groups[1]).toMatchObject({
+      kind: "compaction",
+      summary: "1. Primary Request and Intent\nWire the move verb.",
+    });
+  });
+
+  test("a prompt glued after a preamble keeps the typed half", () => {
+    const groups = toTranscriptGroups([
+      {
+        ...base,
+        kind: "text",
+        id: "u0",
+        role: "user",
+        source: "user",
+        text: "<system-reminder>Codebase instructions.</system-reminder>\nwhat broke?",
+      },
+    ]);
+    expect(groups[0]).toMatchObject({ kind: "user", text: "what broke?" });
+  });
 });

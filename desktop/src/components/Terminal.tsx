@@ -38,10 +38,11 @@ import { handleClipboardKey, mapKeyEvent } from "../lib/terminalKeymap";
 import { api } from "../lib/api";
 import { registerFilePathLinks } from "../lib/terminalLinks";
 import { openExternal } from "../lib/openExternal";
-import { getSettings } from "../lib/settingsStore";
+import { defaultTerminalFontSize, getSettings } from "../lib/settingsStore";
 import { playTerminalBell } from "../lib/terminalBell";
 import { isNativeTerminalEnabled } from "../lib/nativeTerminalStore";
 import { NativeTerminal } from "./NativeTerminal";
+import { decodePtyChunk, type PtyChunk } from "../lib/ptyPayload";
 export { releaseNativeTerminalSession } from "./NativeTerminal";
 
 type TerminalProps = {
@@ -523,8 +524,6 @@ function XtermTerminal({
       // default held for everyone until now, because there was nowhere to
       // change it — Settings → Terminal has a Text size row, and a number
       // there wins over the platform's.
-      const isMac =
-        typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
       const term = new XTerm({
         // A split-pane terminal overrides just the background (+ its cursor
         // accent so the block cursor's inner fill still matches) to read as a
@@ -535,7 +534,11 @@ function XtermTerminal({
           : THEME,
         // Exact VSCode defaults — Menlo on mac, platform monospace elsewhere.
         fontFamily: "Menlo, Monaco, 'Courier New', monospace",
-        fontSize: tprefs.font_size ?? (isMac ? 12 : 14),
+        // The size is the one exception to that parity, and deliberately: this
+        // is the fallback engine, so it has to agree with the wgpu terminal it
+        // stands in for. VS Code's 12-on-macOS against the renderer's 13 made
+        // switching Settings → Terminal → Rendering resize the text.
+        fontSize: tprefs.font_size ?? defaultTerminalFontSize(),
         fontWeight: "normal",
         fontWeightBold: "bold",
         letterSpacing: 0,
@@ -697,8 +700,8 @@ function XtermTerminal({
         }
       }
 
-      const unlistenData = await listen<number[]>(`pty:${ptyId}`, (e) => {
-        term.write(new Uint8Array(e.payload));
+      const unlistenData = await listen<PtyChunk>(`pty:${ptyId}`, (e) => {
+        term.write(decodePtyChunk(e.payload));
       });
       const unlistenExit = await listen(`pty-exit:${ptyId}`, () => {
         term.write("\r\n\x1b[2m── this terminal has closed ──\x1b[0m\r\n");

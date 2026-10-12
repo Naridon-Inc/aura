@@ -271,6 +271,10 @@ export function AssigneePicker(props: Props) {
       {open && popoverStyle && createPortal(
         <div
           ref={popoverRef}
+          /* Same opt-in, same reason as the state picker: a portal escapes
+             the DOM's clipping but not a native view drawn over the whole
+             webview. See `lib/nativeSurfacePlacement`. */
+          data-over-native-surface=""
           className="min-w-[220px] max-w-[280px] rounded-md border border-line-soft bg-bg-1 shadow-lg"
           style={{ ...popoverStyle, boxShadow: "0 8px 32px rgba(0,0,0,0.35)" }}
           onKeyDown={onKey}

@@ -22,24 +22,16 @@ import {
   type ReactNode,
 } from "react";
 import type { TraceKey } from "./trace/traceDestinations";
-import { Segment } from "./ui/segment";
-import {
-  readTeamUnread,
-  subscribeTeamUnread,
-  type TeamUnreadSummary,
-} from "../lib/teamUnread";
 import { SidebarFooter } from "./ade/SidebarFooter";
 import { WhatsNewCard } from "./WhatsNewCard";
 import type { ReleaseCta, ReleaseNote } from "../lib/releaseNotes";
 
-export type AdeSection = "build" | "team" | "plan" | "trace";
+export type AdeSection = "build" | "trace";
 
 const SECTION_KEY = "aura.ade.section";
 
 const SECTIONS: { id: AdeSection; label: string; glyph: ReactNode }[] = [
   { id: "build", label: "Build", glyph: <LayersGlyph /> },
-  { id: "team", label: "Team", glyph: <MessageGlyph /> },
-  { id: "plan", label: "Pages", glyph: <PagesGlyph /> },
   { id: "trace", label: "Trace", glyph: <ShieldGlyph /> },
 ];
 
@@ -127,13 +119,10 @@ const NAV_MIN_H = 44;
 function readSection(): AdeSection {
   try {
     const raw = localStorage.getItem(SECTION_KEY);
-    if (
-      raw === "build" ||
-      raw === "team" ||
-      raw === "plan" ||
-      raw === "trace"
-    )
-      return raw;
+    // "team" and "plan" are deliberately not read back. Both destinations are
+    // gone, and a reader whose last visit was one of them would otherwise boot
+    // into a section the app can no longer render.
+    if (raw === "build" || raw === "trace") return raw;
   } catch {
     /* ignore */
   }
@@ -162,13 +151,6 @@ export function AdeSidebar({
   onNavigate,
 }: AdeSidebarProps) {
   const [section, setSection] = useState<AdeSection>(() => readSection());
-
-  // Live team unread (count + who sent it) from CommsPanel's bridge —
-  // seeded from localStorage so the badge is right on first paint.
-  const [teamUnread, setTeamUnread] = useState<TeamUnreadSummary>(() =>
-    readTeamUnread(),
-  );
-  useEffect(() => subscribeTeamUnread(setTeamUnread), []);
 
   useEffect(() => {
     try {
@@ -338,12 +320,7 @@ export function AdeSidebar({
           </div>
         ) : null}
         {(buildRows ? TAIL_SECTIONS : SECTIONS).map((s) => {
-          const count =
-            s.id === "team"
-              ? teamUnread.total
-              : s.id === "trace"
-                ? traceCount
-                : 0;
+          const count = s.id === "trace" ? traceCount : 0;
           const active = section === s.id;
           return (
             <button
@@ -360,12 +337,11 @@ export function AdeSidebar({
             >
               {s.glyph}
               <span className="nm">{s.label}</span>
-              {/* Not while you're standing in it. This badge exists to tell
-                  you from Pages or Trace that 69 messages are waiting; the
-                  section itself says so again, in the same amber, on the row
-                  you'd actually click to read them ("Catch up" in Team,
-                  "Impacts on me" in Trace). One number on screen, and it's
-                  the one nearest the thing it's about. */}
+              {/* Not while you're standing in it. The badge exists to tell you
+                  from elsewhere that something is waiting; the section itself
+                  says so again, in the same amber, on the row you'd actually
+                  click to read it ("Impacts on me" in Trace). One number on
+                  screen, and it's the one nearest the thing it's about. */}
               {count > 0 && !active ? <CountBadge count={count} /> : null}
             </button>
           );
@@ -460,43 +436,6 @@ function LayersGlyph() {
   );
 }
 
-function MessageGlyph() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path
-        d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-// Pages — a document with a folded corner and text lines. The Plan section is
-// Pages-only now (Tasks moved to Team), so it reads as its own thing.
-// Stacked pages — a sheet with a second one behind it. It used to draw a
-// single document with two text lines in it, which reads as "Document"; the
-// nav rail's mark for the very same destination drew stacked pages, so Pages
-// wore two different icons depending on which surface you were looking at (and
-// none at all on its pane tab). One concept now, rendered in each surface's own
-// stroke system — this sidebar's 24-grid/2px, the rail's 16-grid/1.2px.
-function PagesGlyph() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path
-        d="M15 3H10a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8Z"
-        strokeLinejoin="round"
-      />
-      <path d="M15 3v5h5" strokeLinecap="round" strokeLinejoin="round" />
-      <path
-        d="M5 7v12a2 2 0 0 0 2 2h8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        opacity="0.55"
-      />
-    </svg>
-  );
-}
-
 function ShieldGlyph() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -509,188 +448,6 @@ function ShieldGlyph() {
   );
 }
 
-// Small generic row glyph — one consistent stroke style across the
-// Plan/Trace launcher rows.
-//
-// A `moat` prop used to paint eight of these nine glyphs with the accent, so
-// the Trace tools would "read as the differentiated moat". In this rail the
-// accent means you are here — the count pill forty lines below says so in its
-// own comment — and eight rows wearing it permanently left the one row you
-// were actually on with nothing to distinguish it but a fill. It also put a
-// second glyph vocabulary directly under six neutral navigation glyphs in the
-// same column. Marketing emphasis is not a state.
-function RowGlyph({ children }: { children: ReactNode }) {
-  return (
-    <svg
-      className="ade-glyph"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      {children}
-    </svg>
-  );
-}
-
-// ── Plan section — Tasks + Pages launchers ──────────────────────────
-// Real openers: clicking opens the same Tasks board / Pages surface the
-// legacy rail tiles did. Richer in-section lists (task filters, page
-// summaries) are a follow-up; these never no-op.
-export function PlanBody({
-  onOpenTasks,
-  onOpenPages,
-}: {
-  onOpenTasks: () => void;
-  onOpenPages: () => void;
-}) {
-  // Two rows, and each used to carry its own ALL-CAPS heading above it —
-  // "TASKS" over "Board", "PAGES" over "Open Pages". A heading that captions
-  // exactly one row isn't a group, it's the row's label written twice at two
-  // sizes. The rows say what they open.
-  return (
-    <div className="px-1.5 pt-1">
-      <button type="button" className="ade-row" onClick={onOpenTasks}>
-        <RowGlyph>
-          <rect x="3" y="3" width="18" height="18" rx="2" />
-          <path d="M8 7v10M12 7v6M16 7v8" />
-        </RowGlyph>
-        <span className="nm">Board</span>
-      </button>
-      <button type="button" className="ade-row" onClick={onOpenPages}>
-        <RowGlyph>
-          <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" />
-          <path d="M14 3v6h6M8 13h8M8 17h6" />
-        </RowGlyph>
-        <span className="nm">Pages</span>
-      </button>
-    </div>
-  );
-}
-
-// ── Plan section (rich) — Tasks board + Pages, combined under one ───
-// sub-tab toggle. The actual TasksSidebar / PagesSidebarMount surfaces
-// are passed in by the host (App) and mounted here, so the old takeover
-// panels are re-homed into Plan rather than removed; clicking an item
-// still opens the board / page in the center pane.
-const PLAN_SUBTAB_KEY = "aura.ade.plan";
-type PlanSubtab = "tasks" | "pages";
-
-export function PlanSection({
-  tasksView,
-  pagesView,
-  activeSubtab,
-  onOpenTasks,
-  onOpenPages,
-  onOpenStandup,
-  onOpenAutomations,
-}: {
-  tasksView: ReactNode;
-  pagesView: ReactNode;
-  /** ADE auto-follow — when the active center pane is a Tasks tab this
-   *  is "tasks", a Page "pages"; the toggle re-selects to match so the
-   *  rail mirrors the pane. Undefined (Standup / a plan doc) leaves the
-   *  user's current toggle untouched. Only re-syncs on value change, so
-   *  a manual sub-tab pick sticks until the next pane switch. */
-  activeSubtab?: PlanSubtab;
-  /** Open/focus the Tasks board center pane when the Tasks sub-tab is
-   *  picked — otherwise the sub-tab only swaps the left rail and the
-   *  board never surfaces. */
-  onOpenTasks?: () => void;
-  /** Open/focus the Pages center pane when the Pages sub-tab is picked. */
-  onOpenPages?: () => void;
-  /** Open the Standup rollup as a center {standup} pane. */
-  onOpenStandup?: () => void;
-  /** Open the Automations surface as a center {automations} pane. Re-homed
-   *  here from the Build rail — scheduled / orchestrated runs are planning. */
-  onOpenAutomations?: () => void;
-}) {
-  const [tab, setTab] = useState<PlanSubtab>(() => {
-    try {
-      return localStorage.getItem(PLAN_SUBTAB_KEY) === "pages"
-        ? "pages"
-        : "tasks";
-    } catch {
-      return "tasks";
-    }
-  });
-
-  // Mirror the active center pane's kind onto the Tasks/Pages toggle.
-  // Keyed on `activeSubtab` only (same reasoning as AdeSidebar's section
-  // sync): a manual toggle persists until the next pane switch. This
-  // does NOT call onOpenTasks/onOpenPages — the pane is already the one
-  // driving this value, so re-opening would be a redundant focus churn.
-  useEffect(() => {
-    if (!activeSubtab) return;
-    setTab(activeSubtab);
-    try {
-      localStorage.setItem(PLAN_SUBTAB_KEY, activeSubtab);
-    } catch {
-      /* private mode — best-effort */
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSubtab]);
-  const pick = (t: PlanSubtab) => {
-    setTab(t);
-    try {
-      localStorage.setItem(PLAN_SUBTAB_KEY, t);
-    } catch {
-      /* private mode — best-effort */
-    }
-    // Surface the matching center pane so picking the sub-tab actually
-    // shows the board / pages, not just the left rail.
-    if (t === "tasks") onOpenTasks?.();
-    else onOpenPages?.();
-  };
-  return (
-    <div className="ade-subsec">
-      <div className="mb-1 flex items-center gap-1 min-w-0">
-        <Segment<PlanSubtab>
-          size="xs"
-          stretch
-          className="flex-1"
-          ariaLabel="Tasks or Pages"
-          value={tab}
-          onChange={pick}
-          options={[
-            { value: "tasks", label: "Tasks" },
-            { value: "pages", label: "Pages" },
-          ]}
-        />
-        {(onOpenAutomations || onOpenStandup) && (
-          <div className="flex items-center gap-0.5 border-l border-line pl-1">
-            {onOpenAutomations && (
-              <button
-                type="button"
-                title="Automations. Schedule and orchestrate agent runs"
-                onClick={onOpenAutomations}
-                className="h-[22px] px-1.5 rounded text-xs text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
-              >
-                Automations
-              </button>
-            )}
-            {onOpenStandup && (
-              <button
-                type="button"
-                title="A quick summary of what everyone got done"
-                onClick={onOpenStandup}
-                className="h-[22px] px-1.5 rounded text-xs text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
-              >
-                Standup
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-      <div className="ade-sec-fill">
-        {tab === "tasks" ? tasksView : pagesView}
-      </div>
-    </div>
-  );
-}
-
 // ── Trace section — the moat: accountability + insight tools ────────
 // Every row dispatches to an existing surface/dialog/CLI; no row is a
 // placeholder.
@@ -698,7 +455,6 @@ export type TraceActions = {
   onOverview: () => void;
   onSessions: () => void;
   onTeamActivity: () => void;
-  onCostUsage: () => void;
   onIntentAst: () => void;
   onReview: () => void;
   /** Opens the "Ready to ship" surface (Semantic CI) — secrets, half-finished
@@ -709,13 +465,12 @@ export type TraceActions = {
   onImpacts: () => void;
   onProve: () => void;
   onRewind: () => void;
-  /** Opens the full-screen Project Timeline — relive how the project evolved
-   *  (intent + sessions + code) on a scrubbable bottom timeline. Gated by
-   *  TIMELINE_V2; the row is hidden when the flag is off. */
-  onTimeline: () => void;
   onAttest: () => void;
+  /** Opens Code Map / Project health. Both are parked behind their own flags,
+   *  so the strip has no cell for either and nothing calls these until a flag
+   *  comes back on — they stay in the bag so flipping one is a one-line
+   *  change rather than a re-wiring. */
   onCodeMap: () => void;
-  onMemory: () => void;
   onDoctor: () => void;
   /** Unresolved cross-branch impact count. Drives the conditional
    *  "Impacts on me" row — when 0 the row is hidden entirely (nothing is

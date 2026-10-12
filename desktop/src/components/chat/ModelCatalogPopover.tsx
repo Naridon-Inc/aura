@@ -28,14 +28,16 @@ import {
   type SelectedModel,
 } from "../../lib/modelCatalog";
 import {
-  loadModelFavorites,
-  saveModelFavorites,
-  toggleModelFavorite,
-} from "../../lib/modelFavorites";
+  loadModelLoadout,
+  moveLoadoutKey,
+  saveModelLoadout,
+  toggleLoadoutEntry,
+} from "../../lib/modelLoadout";
 import { BrainSwitcherModal } from "../manager/BrainSwitcherModal";
 
 export function ModelCatalogPopover({
   label,
+  detail,
   open,
   onOpenChange,
   disabled,
@@ -43,12 +45,19 @@ export function ModelCatalogPopover({
 }: {
   /** What the chip says: the chosen model, or the default it falls back to. */
   label: string;
+  /** A second, quieter word after the model name — how hard the next turn is
+   *  set to think. The knob moved inside this popover, so without it the chip
+   *  would be the one control that hides its own state: you would have to open
+   *  the picker to find out whether Fast was on. Omitted when there is nothing
+   *  to say, so the plain case stays a plain label. */
+  detail?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   disabled?: boolean;
   /** The catalog panel (an embedded `BrainSwitcherModal`). */
   children: ReactNode;
 }) {
+  const spoken = detail ? `Model: ${label}, ${detail}` : `Model: ${label}`;
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger asChild>
@@ -56,10 +65,11 @@ export function ModelCatalogPopover({
           type="button"
           className="composer-selector composer-model-selector"
           disabled={disabled}
-          aria-label={`Model: ${label}`}
-          title={`Model: ${label}`}
+          aria-label={spoken}
+          title={spoken}
         >
           <span>{label}</span>
+          {detail && <span className="composer-model-detail">{detail}</span>}
           <ChevronDown size={12} />
         </button>
       </PopoverTrigger>
@@ -78,20 +88,31 @@ export function ModelCatalogPopover({
   );
 }
 
-/** Starred models, persisted and shared across pickers (see `modelFavorites`). */
+/** The loadout — the models this user switches between, in their order,
+ *  persisted and shared across every picker (see `modelLoadout`). The list is
+ *  the same one the stars always wrote, read as an ordered shortlist. */
 export function useModelFavorites(): {
   favorites: string[];
   toggleFavorite: (brainId: string, model: CatalogModel) => void;
+  reorderFavorites: (fromKey: string, toKey: string) => void;
 } {
-  const [favorites, setFavorites] = useState<string[]>(() => loadModelFavorites());
+  const [favorites, setFavorites] = useState<string[]>(() => loadModelLoadout());
   const toggleFavorite = useCallback((brainId: string, model: CatalogModel) => {
     setFavorites((current) => {
-      const next = toggleModelFavorite(current, rowKey(brainId, model));
-      saveModelFavorites(next);
+      const next = toggleLoadoutEntry(current, rowKey(brainId, model));
+      saveModelLoadout(next);
       return next;
     });
   }, []);
-  return { favorites, toggleFavorite };
+  const reorderFavorites = useCallback((fromKey: string, toKey: string) => {
+    setFavorites((current) => {
+      const next = moveLoadoutKey(current, fromKey, toKey);
+      if (next === current) return current;
+      saveModelLoadout(next);
+      return next;
+    });
+  }, []);
+  return { favorites, toggleFavorite, reorderFavorites };
 }
 
 /** An agent tab, as the one "brain" its own catalog lists under. The label is
@@ -150,7 +171,7 @@ export function AgentTurnModelPicker({
 }) {
   const [open, setOpen] = useState(false);
   const live = useLiveModelCatalog(open);
-  const { favorites, toggleFavorite } = useModelFavorites();
+  const { favorites, toggleFavorite, reorderFavorites } = useModelFavorites();
   const brain = useMemo(() => agentCatalogBrain(agentId), [agentId]);
   const selected = useMemo<SelectedModel | null>(() => {
     if (!value) return null;
@@ -191,6 +212,7 @@ export function AgentTurnModelPicker({
         onPick={(_brain, row) => choose(row.id ?? "")}
         onPickAuto={() => choose("")}
         onToggleFav={toggleFavorite}
+        onReorderFav={reorderFavorites}
         onClose={() => setOpen(false)}
         footer={<CustomModelField value={value} onApply={choose} />}
       />

@@ -21,9 +21,10 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use alacritty_terminal::event::WindowSize;
-use alacritty_terminal::tty::{self, Options, Shell};
+use alacritty_terminal::tty::{self, ChildEvent, EventedPty, Options, Shell};
 use alacritty_terminal::vte::{Params, Parser, Perform};
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -32,6 +33,23 @@ use crate::error::{Error, Result};
 
 const READ_BUF_BYTES: usize = 4096;
 const EVENT_CHANNEL_CAPACITY: usize = 512;
+
+/// How often the child-event pipe behind each PTY is emptied.
+///
+/// This is not a latency budget — nothing waits on a child exit — it is a
+/// drain *rate*, and the only thing it has to beat is how fast bytes arrive.
+/// One arrives per child this process reaps, so an agent running tool calls
+/// flat out produces maybe tens a second. Together with the per-pass cap
+/// below this clears a few hundred a second, with the pipe's own buffer
+/// absorbing bursts in between.
+const CHILD_DRAIN_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How many bytes to take off that pipe in one pass.
+///
+/// Each one costs a read that usually returns `EAGAIN`, so this is bounded
+/// rather than drained-to-empty: the point is to stay far ahead of arrivals
+/// without a thread per terminal spinning on an empty pipe.
+const CHILD_DRAIN_PER_PASS: usize = 64;
 
 #[derive(Debug, Clone)]
 pub enum PtyEvent {
@@ -129,12 +147,22 @@ pub fn spawn(cfg: PtyConfig<'_>) -> Result<PtySession> {
         .map_err(|e| Error::Pty(format!("pty spawn: {e}")))?;
 
     let write_file = pty.file().try_clone().map_err(Error::Io)?;
+    let read_file = pty.file().try_clone().map_err(Error::Io)?;
 
     let (ev_tx, ev_rx) = mpsc::channel::<PtyEvent>(EVENT_CHANNEL_CAPACITY);
+    let child_tx = ev_tx.clone();
 
     thread::Builder::new()
         .name("aura-term-pty-read".into())
-        .spawn(move || read_loop(pty, ev_tx))
+        .spawn(move || read_loop(read_file, ev_tx))
+        .map_err(Error::Io)?;
+
+    // The Pty itself goes to the watcher, not the reader. Holding it is what
+    // keeps the master fd and the child's signal registration alive, and the
+    // watcher is the one that has to let go of both.
+    thread::Builder::new()
+        .name("aura-term-pty-child".into())
+        .spawn(move || child_watch(pty, child_tx))
         .map_err(Error::Io)?;
 
     Ok(PtySession {
@@ -143,17 +171,15 @@ pub fn spawn(cfg: PtyConfig<'_>) -> Result<PtySession> {
     })
 }
 
-/// Drives the read side: owns the Pty (keeps the child alive), reads bytes,
-/// feeds them through the vte parser to detect OSC 133, and emits PtyEvents.
-fn read_loop(pty: tty::Pty, tx: mpsc::Sender<PtyEvent>) {
-    let mut read_file = match pty.file().try_clone() {
-        Ok(f) => f,
-        Err(_) => {
-            let _ = tx.blocking_send(PtyEvent::Closed);
-            return;
-        }
-    };
-
+/// Drives the read side: reads bytes off the master fd, feeds them through
+/// the vte parser to detect OSC 133, and emits PtyEvents.
+///
+/// Takes a clone of the master rather than the `Pty`, because the `Pty` is
+/// also the handle on the child's SIGCHLD registration and that has to be
+/// serviced on a schedule this loop cannot keep — see [`child_watch`]. The
+/// clone keeps the master open for as long as this loop runs regardless of
+/// what the watcher does with its own.
+fn read_loop(mut read_file: File, tx: mpsc::Sender<PtyEvent>) {
     // alacritty_terminal sets O_NONBLOCK on the master fd for use with its
     // own poller. We drive reads from a dedicated blocking thread, so flip
     // the flag off on our view. F_SETFL on a dup'd fd alters the shared
@@ -162,7 +188,6 @@ fn read_loop(pty: tty::Pty, tx: mpsc::Sender<PtyEvent>) {
     if let Err(e) = set_blocking(&read_file) {
         let _ = tx.blocking_send(PtyEvent::Closed);
         tracing::warn!(error = %e, "failed to clear O_NONBLOCK on pty master");
-        drop(pty);
         return;
     }
 
@@ -178,13 +203,11 @@ fn read_loop(pty: tty::Pty, tx: mpsc::Sender<PtyEvent>) {
                 parser.advance(&mut handler, &buf[..n]);
                 for marker in handler.markers.drain(..) {
                     if tx.blocking_send(PtyEvent::Marker(marker)).is_err() {
-                        drop(pty);
                         return;
                     }
                 }
                 let bytes = Bytes::copy_from_slice(&buf[..n]);
                 if tx.blocking_send(PtyEvent::Output(bytes)).is_err() {
-                    drop(pty);
                     return;
                 }
             }
@@ -194,6 +217,61 @@ fn read_loop(pty: tty::Pty, tx: mpsc::Sender<PtyEvent>) {
     }
 
     let _ = tx.blocking_send(PtyEvent::Closed);
+}
+
+/// Owns the Pty, and empties the child-event pipe that comes with it.
+///
+/// `tty::new` registers a SIGCHLD handler per PTY whose only job is to write
+/// one byte into a self-pipe belonging to that PTY. The handler runs on
+/// whichever thread the kernel delivers the signal to — in a GUI process that
+/// is usually the UI thread, sitting in its event loop — and it fires for
+/// *every* child this process reaps, not just the shell behind this terminal.
+/// Opening a terminal therefore installs a per-terminal obligation on the
+/// whole process, and `next_child_event` is the only way to meet it, because
+/// the pipe's read end is private to the `Pty`.
+///
+/// Nothing here used to call it. The reader owned the `Pty` purely to keep it
+/// alive and spent its life blocked in `read` on the master, so every pipe we
+/// ever opened filled up and stayed full. On 2026-10-08 a dev build went to
+/// 0% CPU and stopped answering clicks, accessibility queries and IPC for an
+/// hour and three quarters; every sample put the main thread in `_sigtramp` →
+/// this handler → `sendto`, on top of an idle `mach_msg`. The event loop never
+/// got its thread back.
+///
+/// So the obligation gets its own thread, and the `Pty` goes with it: a drain
+/// has to keep running when the terminal is quiet, which is exactly when a
+/// reader blocked on output is doing nothing.
+///
+/// Dropping the `Pty` at the end is the teardown the reader used to do —
+/// SIGHUP to the child, the signal registration removed, the child reaped. The
+/// master stays open either way, because the reader and the writer hold clones
+/// of it.
+fn child_watch(mut pty: tty::Pty, tx: mpsc::Sender<PtyEvent>) {
+    loop {
+        // The session is gone: nobody is left to receive output, so stop
+        // holding the child's registration open.
+        if tx.is_closed() {
+            break;
+        }
+
+        let mut exited = false;
+        for _ in 0..CHILD_DRAIN_PER_PASS {
+            // `None` means both "the pipe is empty" and "a byte came off it
+            // for a child that is still running", and the two are not
+            // distinguishable from out here — so there is nothing to stop a
+            // pass early on, and it runs to its cap either way.
+            if let Some(ChildEvent::Exited(_)) = pty.next_child_event() {
+                exited = true;
+                break;
+            }
+        }
+        if exited {
+            break;
+        }
+
+        thread::sleep(CHILD_DRAIN_INTERVAL);
+    }
+
     drop(pty);
 }
 

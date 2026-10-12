@@ -71,6 +71,25 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     ],
   },
   {
+    // AURA-1296 — bound in lib/keymap.ts (`pick_model_1`…`pick_model_5`,
+    // `toggle_fast`), answered by the composer that holds the focus.
+    //
+    // Five near-identical rows, printed anyway: the sheet is checked against
+    // the keymap in both directions, and a slot key left off here is a key
+    // that works and that nobody can find. They read as a set because they
+    // are one.
+    title: "Picking a model",
+    note: "Anywhere there's a message box",
+    items: [
+      { label: "Switch to your 1st model", keys: "⌘1" },
+      { label: "Switch to your 2nd model", keys: "⌘2" },
+      { label: "Switch to your 3rd model", keys: "⌘3" },
+      { label: "Switch to your 4th model", keys: "⌘4" },
+      { label: "Switch to your 5th model", keys: "⌘5" },
+      { label: "Faster replies on / off", keys: "⌘⇧E" },
+    ],
+  },
+  {
     title: "Panels & tabs",
     items: [
       { label: "Toggle sidebar", keys: "⌘B" },

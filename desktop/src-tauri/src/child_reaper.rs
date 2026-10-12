@@ -361,6 +361,123 @@ impl Drop for TreeGuard {
     }
 }
 
+/// Whether [`confine_sigchld`] has already run. Calling it twice would block
+/// an already-blocked signal (harmless) and park a second thread forever (not).
+static SIGCHLD_CONFINED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Take SIGCHLD off the UI thread and give it a thread of its own.
+///
+/// A process-directed signal is delivered to any thread that is not blocking
+/// it, and the handler runs *on that thread*, borrowing it until it returns.
+/// In a GUI process the thread most likely to be available is the one parked
+/// in the event loop — so a SIGCHLD handler that does not return does not
+/// merely lose a child notification, it takes the app's ability to draw,
+/// answer clicks, serve accessibility or receive IPC with it.
+///
+/// Which is what happened on 2026-10-08. A dev build went to 0% CPU and
+/// stopped responding for an hour and three quarters; every sample showed the
+/// main thread inside `_sigtramp` → a `signal_hook` pipe handler → `sendto`,
+/// stacked on top of an idle `mach_msg`. The pipe belonged to
+/// `alacritty_terminal`, which registers one SIGCHLD handler per PTY (see
+/// `aura_term_core::pty::child_watch` for the drain that keeps them empty).
+///
+/// Draining those pipes addresses that handler. This addresses the shape of
+/// the failure: we spawn agent CLIs, terminals and tool children constantly,
+/// so SIGCHLD arrives at the UI thread all day, and every handler any
+/// dependency registers for it runs there. One of them stalling must not be
+/// able to stop the app. Blocked on the main thread, the kernel has to find
+/// another thread — and we give it one that does nothing else.
+///
+/// Call this before anything else spawns a thread: a new thread inherits the
+/// mask of the thread that created it, so this must run before the async
+/// runtime and the window, or they will be the threads delivery lands on.
+/// Conversely the dedicated thread has to unblock it explicitly, since it
+/// inherits the block.
+///
+/// SIGCHLD is the only signal touched. Blocking it does not stop children
+/// being reaped: `wait`-based reaping (`std::process`, and the polling in this
+/// module) never needed the signal, and handler-based reaping — tokio's, which
+/// is how every agent child is waited on — only needs the handler to run
+/// *somewhere*.
+#[cfg(unix)]
+pub fn confine_sigchld() {
+    use std::sync::atomic::Ordering;
+
+    if SIGCHLD_CONFINED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    if let Err(e) = mask_sigchld(libc::SIG_BLOCK) {
+        // Nothing is confined, but nothing is broken either — this is the
+        // behaviour we have shipped until now.
+        tracing::warn!(error = %e, "could not block SIGCHLD on the main thread");
+        SIGCHLD_CONFINED.store(false, Ordering::SeqCst);
+        return;
+    }
+
+    let spawned = std::thread::Builder::new()
+        .name("aura-sigchld".into())
+        .spawn(|| {
+            if let Err(e) = mask_sigchld(libc::SIG_UNBLOCK) {
+                tracing::error!(error = %e, "SIGCHLD has no thread to be delivered on");
+                return;
+            }
+            // Parked, so that the only thing this thread can ever be doing is
+            // running a signal handler. `sleep` resumes after a handler
+            // interrupts it, which is the whole arrangement working.
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        });
+
+    if let Err(e) = spawned {
+        // Leaving it blocked with no unblocked thread would make SIGCHLD
+        // pending forever and strand tokio's reaper, which is worse than the
+        // hang this guards against.
+        tracing::warn!(error = %e, "no thread for SIGCHLD; leaving it on the main thread");
+        let _ = mask_sigchld(libc::SIG_UNBLOCK);
+        SIGCHLD_CONFINED.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn confine_sigchld() {}
+
+/// Apply `how` (`SIG_BLOCK` / `SIG_UNBLOCK`) to SIGCHLD on the calling thread.
+#[cfg(unix)]
+fn mask_sigchld(how: libc::c_int) -> std::io::Result<()> {
+    // SAFETY: `set` is a local sigset_t that sigemptyset initialises before
+    // anything reads it, SIGCHLD is a valid signal number, and passing null
+    // for the old set means "do not report it".
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGCHLD);
+        if libc::pthread_sigmask(how, &set, std::ptr::null_mut()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// Whether SIGCHLD is blocked on the calling thread.
+#[cfg(unix)]
+fn sigchld_blocked_here() -> bool {
+    // SAFETY: an empty set with SIG_BLOCK changes nothing and only reads the
+    // current mask out into `old`.
+    unsafe {
+        let mut empty: libc::sigset_t = std::mem::zeroed();
+        let mut old: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut empty);
+        libc::sigemptyset(&mut old);
+        if libc::pthread_sigmask(libc::SIG_BLOCK, &empty, &mut old) != 0 {
+            return false;
+        }
+        libc::sigismember(&old, libc::SIGCHLD) == 1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +508,36 @@ mod tests {
     fn the_grace_period_leaves_room_to_flush_but_still_feels_immediate() {
         assert!(GRACE >= Duration::from_millis(500), "too short to flush stdout");
         assert!(GRACE <= Duration::from_secs(3), "Stop must feel like Stop");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confining_sigchld_takes_it_off_the_calling_thread() {
+        // The calling thread is the UI thread in production, and the whole
+        // point is that the kernel can no longer choose it for delivery.
+        confine_sigchld();
+        assert!(
+            sigchld_blocked_here(),
+            "SIGCHLD can still be delivered to the thread that asked to be left out of it"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_is_still_reaped_once_sigchld_is_confined() {
+        // The risk in blocking a signal is blocking it everywhere: a thread
+        // inherits its creator's mask, so doing this too late — or without
+        // leaving one thread unblocked — would strand tokio's SIGCHLD-driven
+        // reaper and hang every agent turn on `wait`. A child that exits must
+        // still be collected.
+        confine_sigchld();
+
+        let status = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .status()
+            .await
+            .expect("spawn sh");
+        assert_eq!(status.code(), Some(7), "the child was never reaped");
     }
 
     #[cfg(unix)]

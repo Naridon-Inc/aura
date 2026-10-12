@@ -23,6 +23,7 @@ pub mod error;
 pub mod grid;
 pub mod pty;
 pub mod render;
+pub mod wheel;
 
 pub use color::{Palette, Rgba};
 pub use error::{Error, Result};
@@ -32,8 +33,9 @@ pub use grid::{
 pub use pty::{Osc133, PtyConfig, PtyEvent, PtySession, default_window_size, spawn};
 pub use render::{
     BgRect, CellMetrics, CursorRect, GlyphQuad, RenderList, append_selection_rects,
-    build_render_list,
+    build_render_list, translate,
 };
+pub use wheel::{LINES_PER_NOTCH, WheelAccum, WheelAction, WheelInput, WheelModes};
 
 // Re-export the alacritty window-size type so callers can build a `PtyConfig`
 // without depending on `alacritty_terminal` directly.

@@ -97,6 +97,31 @@ impl Coalescer {
     }
 }
 
+/// A chunk in the form it crosses to the webview in.
+///
+/// `emit` serializes whatever it is handed as JSON, and a `Vec<u8>` becomes a
+/// JSON array of integers — a decimal number and a comma for every byte.
+/// Measured on a 64 KB chunk of build output that is ~3.5x the bytes it
+/// carries, and the cost does not stop at the wire: the webview parses that
+/// text into a JS array, and the frontend then copies it elementwise into a
+/// `Uint8Array`. Measured end to end at 132 MB/s.
+///
+/// Base64 spends 4 bytes per 3 and decodes in a single pass, so the same chunk
+/// crosses as ~1.33x instead of ~3.5x — measured 4.8x faster to take delivery
+/// of, and faster still where the engine has a native `Uint8Array.fromBase64`.
+///
+/// It has to be an encoding rather than a plain string. PTY output is arbitrary
+/// binary — half a UTF-8 sequence left at a chunk boundary, a bare `0x1b`, a
+/// `0x00` — so there is no `String` that round-trips it unchanged. Base64 is
+/// the cheapest form that is both exact and valid JSON.
+///
+/// The frontend counterpart is `decodePtyChunk` in `src/lib/ptyPayload.ts`;
+/// the two must change together.
+pub fn encode_chunk(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +196,49 @@ mod tests {
         std::thread::sleep(FLUSH_WINDOW + Duration::from_millis(5));
         assert!(c.due());
         assert_eq!(c.wait(Duration::from_secs(9)), Duration::ZERO);
+    }
+
+    #[test]
+    fn encoding_round_trips_bytes_that_are_not_valid_utf8() {
+        use base64::Engine as _;
+        // A chunk boundary can fall mid-sequence, so the stream is not text:
+        // a lone continuation byte, a bare escape, an interior NUL.
+        let raw = b"\x1b[31m\x80\x00ready\xff";
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encode_chunk(raw))
+            .expect("what we emit must decode");
+        assert_eq!(decoded, raw.to_vec(), "the stream must survive exactly");
+    }
+
+    /// Pinned on both sides of the boundary: `src/lib/ptyPayload.test.ts`
+    /// decodes this exact string back to these exact bytes. Neither end can
+    /// change alphabet or padding without the other's test failing.
+    #[test]
+    fn the_wire_format_matches_the_vector_the_frontend_pins() {
+        let raw = [
+            0x1b, 0x5b, 0x33, 0x31, 0x6d, 0x80, 0x00, 0x6f, 0x6b, 0xff, 0xfe, 0x0d, 0x0a,
+        ];
+        // Standard alphabet, padded. URL-safe would end `__4NCg==` here.
+        assert_eq!(encode_chunk(&raw), "G1szMW2AAG9r//4NCg==");
+    }
+
+    #[test]
+    fn an_empty_chunk_encodes_to_an_empty_string() {
+        assert_eq!(encode_chunk(b""), "");
+    }
+
+    #[test]
+    fn encoding_is_far_smaller_than_the_json_array_it_replaces() {
+        let chunk = vec![b'x'; FLUSH_BYTES];
+        let as_json_array = serde_json::to_string(&chunk).expect("bytes serialize");
+        let as_base64 = serde_json::to_string(&encode_chunk(&chunk)).expect("string serializes");
+        // The whole point of the change: the payload a full flush puts on the
+        // wire has to shrink, not merely change shape.
+        assert!(
+            as_base64.len() * 2 < as_json_array.len(),
+            "base64 {} should be less than half of the JSON array {}",
+            as_base64.len(),
+            as_json_array.len()
+        );
     }
 }

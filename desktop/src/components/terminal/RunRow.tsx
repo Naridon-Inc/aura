@@ -28,6 +28,7 @@ import { machineIdForRoot, useActiveMachine } from "../../lib/activeMachine";
 import { openExternal } from "../../lib/openExternal";
 import { localUrlPort, placePortForward } from "../../lib/place/ports";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { decodePtyChunk, type PtyChunk } from "../../lib/ptyPayload";
 // end AURA-1294
 
 type Props = {
@@ -65,8 +66,8 @@ export function RunRow({ repoRoot, runPtyId, active, open, onRun, onFocus, onSto
     // A URL can straddle two chunks; keep a short tail so the join is seen.
     let tail = "";
     void (async () => {
-      const off = await listen<number[]>(`pty:${runPtyId}`, (e) => {
-        const text = tail + decoder.decode(new Uint8Array(e.payload));
+      const off = await listen<PtyChunk>(`pty:${runPtyId}`, (e) => {
+        const text = tail + decoder.decode(decodePtyChunk(e.payload));
         const port = localUrlPort(text);
         if (port !== null) setRemotePort(port);
         tail = text.slice(-160);

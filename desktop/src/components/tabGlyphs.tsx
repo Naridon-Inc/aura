@@ -81,17 +81,6 @@ export const TRACE_TOOL_GLYPH: Record<TraceToolKind, ReactNode> = {
       />
     </>
   ),
-  // Memory — a store: stacked bands, the shape every database wears.
-  memory: (
-    <>
-      <ellipse cx="8" cy="4" rx="5.3" ry="2" stroke="currentColor" strokeWidth="1.2" />
-      <path
-        d="M2.7 4v8c0 1.1 2.4 2 5.3 2s5.3-.9 5.3-2V4M2.7 8c0 1.1 2.4 2 5.3 2s5.3-.9 5.3-2"
-        stroke="currentColor"
-        strokeWidth="1.2"
-      />
-    </>
-  ),
   // Impacts on me — a horizontal fork: one node splitting rightward into two
   // diverged branch nodes, i.e. "a change on another branch reaches yours".
   impacts: (
@@ -278,8 +267,6 @@ export function tabGlyph(ref: WorkPaneRef, size = 11): ReactNode {
     // drawing a second one that means the same thing.
     case "task":
       return <Icons.Tasks size={size} className="flex-shrink-0" />;
-    case "channels":
-      return <Icons.Users size={size} className="flex-shrink-0" />;
     case "automations":
       return <Icons.Workflow size={size} className="flex-shrink-0" />;
     default:

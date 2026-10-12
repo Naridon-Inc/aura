@@ -46,12 +46,13 @@ describe("a member row with no address says so in words", () => {
     expect(memberIdentityLine("  ")).toBe("");
   });
 
-  test("the roster and the channel list both go through the helper", async () => {
+  test("the roster and its merge candidates both go through the helper", async () => {
     const src = await readSrc("components/settings/TeamTab.tsx");
     expect(src).toContain('from "../../lib/memberIdentity"');
-    // Three places a member's identity is rendered: the roster row, the merge
-    // candidates under it, and the channel member list.
-    expect(src.match(/memberIdentityLine\(/g)).toHaveLength(3);
+    // Two places a member's identity is rendered: the roster row and the merge
+    // candidates under it. A third used to sit in the channel member list,
+    // which left with the messaging surface.
+    expect(src.match(/memberIdentityLine\(/g)).toHaveLength(2);
     // And none of them prints the raw field any more. `key={m.email}` stays —
     // React needs a stable identity per row, and the join key is exactly that.
     // What must not survive is the field standing alone as a text node.

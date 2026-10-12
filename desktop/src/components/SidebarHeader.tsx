@@ -13,9 +13,8 @@
 //
 // The workspace back/forward arrows are the app-wide project visit-history
 // control (grouped with settings at the right end, beside the gear) — distinct
-// from the Pages-scoped arrows inside the Pages surface. The Agents &
-// extensions entry stays in Settings + the command palette; the account
-// popover carries "Account settings".
+// from the Pages-scoped arrows inside the Pages surface. The Agents entry
+// stays in Settings; the account popover carries "Account settings".
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { beginWindowDrag } from "../lib/windowDrag";
@@ -47,7 +46,7 @@ type SidebarHeaderProps = {
   canForward?: boolean;
   onToggleSidebar?: () => void;
   onOpenPalette?: () => void;
-  /** Opens Settings (where Agents & extensions now live). Rendered as a small
+  /** Opens Settings (where the Agents surface now lives). Rendered as a small
    *  gear in the right cluster. */
   onOpenSettings?: () => void;
   projectLabel: string;

@@ -24,9 +24,12 @@ describe("nextEffort", () => {
   });
 
   test("the ladder matches the composer's strip order", async () => {
-    // EFFORT_OPTIONS in ManagerComposer draws the buttons; the key must walk
-    // them in the same order or the chord and the strip disagree.
-    const src = await readSrc("components/manager/ManagerComposer.tsx");
+    // EFFORT_OPTIONS draws the buttons; the key must walk them in the same
+    // order or the chord and the strip disagree. It lives with the control
+    // that renders it — it was in ManagerComposer until Effort and Fast folded
+    // into the model picker, and this test moved with it rather than being
+    // loosened to look in two places.
+    const src = await readSrc("components/chat/TurnModelControls.tsx");
     const block = src.match(/const EFFORT_OPTIONS[\s\S]*?\] = \[([\s\S]*?)\n\];/)?.[1] ?? "";
     const values = [...block.matchAll(/value: (null|"[a-z]+")/g)].map((m) =>
       m[1] === "null" ? null : m[1]!.slice(1, -1),

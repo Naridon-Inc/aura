@@ -1,16 +1,14 @@
 // Settings → Team pane.
 //
-// Admin surface: roster (Members), the channels people talk in
-// (Channels), a per-member daily intent rollup (Activity), and
-// per-member token spend (Usage). Members loads from `team_load`;
+// Admin surface: roster (Members), a per-member daily intent rollup
+// (Activity), and per-member token spend (Usage). Members loads from
+// `team_load`;
 // Activity embeds StandupView; Usage hits the cloud
 // `/api/v1/billing/usage/by_member` endpoint (admin sees all, member
 // sees self only — enforced server-side).
 
 import { useCallback, useEffect, useState } from "react";
 import { Cloud, Users } from "lucide-react";
-import { Input } from "../ui/input";
-import { Select } from "../ui/select";
 import { EmptyState, ErrorState, LoadingState } from "../ui/state";
 import { CloudInviteRow } from "./CloudInviteRow";
 import { CloudOrgRoster } from "./CloudOrgRoster";
@@ -22,7 +20,6 @@ import {
   type TeamMember,
   type TeamIdentity,
   type DuplicateSuggestion,
-  type ChannelMeta,
 } from "../../lib/api";
 import { peekCache, writeCache } from "../../lib/resourceCache";
 import { DuplicatesBanner } from "../team/presentation/DuplicatesBanner";
@@ -35,7 +32,7 @@ import { relativeAgeFromSecs } from "../../lib/relativeTime";
 import { compactNumber } from "../../lib/compactNumber";
 import { useDismiss } from "../../lib/useDismiss";
 import { formatCost } from "../../lib/money";
-import { askConfirm, askText } from "../ui/ask";
+import { askConfirm } from "../ui/ask";
 import { refreshTeam, fetchIdentity, refreshIdentity } from "../../lib/teamCache";
 import {
   fetchBillingUsage,
@@ -45,7 +42,7 @@ import { useCloudOrgs, orgLabel } from "../../lib/cloudOrgs";
 import { humanizeWorkspaceName } from "../../lib/workspaceLabel";
 import { rosterCountLine, rosterSourceNote } from "./teamRoster";
 
-type TeamSubTab = "members" | "channels" | "activity" | "usage";
+type TeamSubTab = "members" | "activity" | "usage";
 
 export function TeamTab({ repoRoot }: { repoRoot: string }) {
   const [sub, setSub] = useState<TeamSubTab>("members");
@@ -62,11 +59,6 @@ export function TeamTab({ repoRoot }: { repoRoot: string }) {
           label="Members"
         />
         <SubTabButton
-          active={sub === "channels"}
-          onClick={() => setSub("channels")}
-          label="Channels"
-        />
-        <SubTabButton
           active={sub === "activity"}
           onClick={() => setSub("activity")}
           label="Activity"
@@ -78,7 +70,6 @@ export function TeamTab({ repoRoot }: { repoRoot: string }) {
         />
       </div>
       {sub === "members" && <TeamMembersPane repoRoot={repoRoot} />}
-      {sub === "channels" && <TeamChannelsPane repoRoot={repoRoot} />}
       {sub === "activity" && <TeamActivityPane repoRoot={repoRoot} />}
       {sub === "usage" && <TeamUsagePane repoRoot={repoRoot} />}
     </div>
@@ -121,11 +112,9 @@ function SubTabButton({
  *  one is you".
  *
  *  Driven in a real window on a machine whose git has no `user.email`, the
- *  Team pane read: two members, one badged `admin`, neither badged `you` —
- *  and under Channels, a note telling the reader that visibility, topics and
- *  deletion "needs team-admin rights". Both panes had asked
- *  `identity?.admin ?? false` and gotten a truthful answer to a question
- *  neither of them asked out loud: we don't know who you are. So the reader
+ *  Team pane read: two members, one badged `admin`, neither badged `you`. It
+ *  had asked `identity?.admin ?? false` and gotten a truthful answer to a
+ *  question it never asked out loud: we don't know who you are. So the reader
  *  is told they lack a permission, when what actually happened is that Aura
  *  never found their row.
  *
@@ -763,445 +752,6 @@ function RoleBtn({
 function humanizeErr(e: unknown): string {
   const s = String((e as { message?: string })?.message ?? e ?? "").trim();
   return s.replace(/^Error:\s*/i, "") || "Something went wrong";
-}
-
-// Channels admin panel. Channels are advisory-private: the `visibility`
-// flag governs what the rail surfaces, not cryptographic access (anyone
-// with the clone can read the JSONL). Team admins (and per-channel
-// admins) can create open/private channels, manage membership, set a
-// topic, and delete non-core channels. Built-in channels are protected.
-const CORE_CHANNEL_SLUGS = ["general", "agents", "sentinel", "pull-requests"];
-
-function TeamChannelsPane({ repoRoot }: { repoRoot: string }) {
-  // Cached per repo (SWR) so reopening Settings → Team → Channels paints from
-  // the last load instead of blanking to "Loading…" every time.
-  const cacheKey = `settings-team-channels:${repoRoot}`;
-  const [manifest, setManifest] = useState<TeamManifest | null>(
-    () => peekCache<{ manifest: TeamManifest | null; identity: TeamIdentity | null }>(cacheKey)?.manifest ?? null,
-  );
-  const [identity, setIdentity] = useState<TeamIdentity | null>(
-    () => peekCache<{ manifest: TeamManifest | null; identity: TeamIdentity | null }>(cacheKey)?.identity ?? null,
-  );
-  const [err, setErr] = useState<string | null>(null);
-  const [actionErr, setActionErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [newName, setNewName] = useState("");
-  const [newVisibility, setNewVisibility] = useState<"open" | "private">("open");
-  const [expanded, setExpanded] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setErr(null);
-    const [t, id] = await Promise.all([
-      refreshTeam(repoRoot),
-      fetchIdentity(repoRoot).catch(() => null),
-    ]);
-    setManifest(t);
-    setIdentity(id);
-    writeCache(cacheKey, { manifest: t, identity: id });
-  }, [repoRoot, cacheKey]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const cached = peekCache<{ manifest: TeamManifest | null; identity: TeamIdentity | null }>(cacheKey);
-    setManifest(cached?.manifest ?? null);
-    setIdentity(cached?.identity ?? null);
-    setActionErr(null);
-    load().catch((e) => {
-      if (!cancelled) setErr(String(e));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [repoRoot, load, cacheKey]);
-
-  const run = useCallback(
-    async (key: string, fn: () => Promise<TeamManifest>) => {
-      setBusy(key);
-      setActionErr(null);
-      try {
-        const m = await fn();
-        setManifest(m);
-        const id = await refreshIdentity(repoRoot).catch(() => null);
-        setIdentity(id);
-      } catch (e) {
-        setActionErr(humanizeErr(e));
-      } finally {
-        setBusy(null);
-      }
-    },
-    [repoRoot],
-  );
-
-  if (err) {
-    return (
-      <ErrorState
-        title="Couldn’t load your team settings"
-        message={err}
-        onRetry={() => void load()}
-        size="sm"
-      />
-    );
-  }
-  if (!manifest) return <LoadingState label="Loading your team settings…" />;
-
-  const iAmAdmin = identity?.admin ?? false;
-  const myEmail = (identity?.email ?? "").toLowerCase();
-  const members = manifest.members ?? [];
-  const metaBySlug = new Map<string, ChannelMeta>(
-    (manifest.channel_meta ?? []).map((c) => [c.slug, c]),
-  );
-  // Stable ordering: core channels first (in canonical order), then the
-  // rest alphabetically — mirrors how the chat rail groups them.
-  const channels = [...(manifest.channels ?? [])].sort((a, b) => {
-    const ai = CORE_CHANNEL_SLUGS.indexOf(a);
-    const bi = CORE_CHANNEL_SLUGS.indexOf(b);
-    if (ai !== -1 || bi !== -1) {
-      if (ai === -1) return 1;
-      if (bi === -1) return -1;
-      return ai - bi;
-    }
-    return a.localeCompare(b);
-  });
-
-  const canAdminChannel = (slug: string) =>
-    iAmAdmin ||
-    (metaBySlug.get(slug)?.admins ?? []).some(
-      (a) => a.toLowerCase() === myEmail,
-    );
-
-  const createChannel = () => {
-    const name = newName.trim();
-    if (!name) return;
-    run("__create__", () =>
-      api.teamChannelCreate(
-        repoRoot,
-        name,
-        newVisibility === "private"
-          ? { visibility: "private", members: [] }
-          : undefined,
-      ),
-    ).then(() => {
-      setNewName("");
-      if (newVisibility === "private") {
-        setExpanded(slugify(name));
-      }
-      setNewVisibility("open");
-    });
-  };
-
-  return (
-    <div className="space-y-2">
-      <div className="text-xs font-medium text-text-4">
-        {channels.length} channel{channels.length === 1 ? "" : "s"}
-      </div>
-
-      <WhoAmINote identity={identity} />
-
-      {/* Create row */}
-      <div className="flex items-center gap-1.5">
-        <span className="text-text-4 text-base pl-0.5">#</span>
-        <Input
-          value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") createChannel();
-          }}
-          placeholder="new-channel"
-          className="flex-1 min-w-0"
-        />
-        <Select
-          value={newVisibility}
-          onChange={(v) => setNewVisibility(v as "open" | "private")}
-          options={[
-            { value: "open", label: "Open" },
-            { value: "private", label: "Private" },
-          ]}
-          aria-label="Channel visibility"
-          className="w-auto min-w-[110px]"
-        />
-        <button
-          type="button"
-          disabled={busy === "__create__" || !newName.trim()}
-          onClick={createChannel}
-          className="text-sm font-medium px-2 py-1 rounded text-bg-deep disabled:opacity-40"
-          style={{ background: "var(--color-accent)" }}
-        >
-          {busy === "__create__" ? "…" : "Create"}
-        </button>
-      </div>
-
-      {actionErr && (
-        <div
-          className="text-xs rounded px-2 py-1 leading-snug"
-          style={{
-            color: "var(--color-red)",
-            background: "color-mix(in srgb, var(--color-red) 12%, transparent)",
-            border:
-              "1px solid color-mix(in srgb, var(--color-red) 30%, transparent)",
-          }}
-        >
-          {actionErr}
-        </div>
-      )}
-
-      <div className="space-y-0.5">
-        {channels.map((slug) => {
-          const meta = metaBySlug.get(slug);
-          const isPrivate = (meta?.visibility ?? "open") === "private";
-          const isCore = CORE_CHANNEL_SLUGS.includes(slug);
-          const admin = canAdminChannel(slug);
-          const rowBusy = busy === slug;
-          const memberCount = meta?.members?.length ?? 0;
-          const isOpen = expanded === slug;
-          return (
-            <div
-              key={slug}
-              className="rounded border border-transparent hover:border-line-soft hover:bg-state-hover transition-colors"
-            >
-              <div className="flex items-center gap-2 px-2 py-1.5">
-                <span className="text-text-4 flex-shrink-0">
-                  {isPrivate ? <LockGlyph /> : <span className="text-base">#</span>}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-text-1 font-medium truncate">
-                      {slug}
-                    </span>
-                    {isCore && (
-                      <span className="text-2xs px-1 py-0.5 rounded bg-bg-3 text-text-4">
-                        built-in
-                      </span>
-                    )}
-                    {isPrivate && (
-                      <span className="text-2xs text-text-4">
-                        {memberCount} member{memberCount === 1 ? "" : "s"}
-                      </span>
-                    )}
-                  </div>
-                  {meta?.topic && (
-                    <div className="text-xs text-text-4 truncate italic">
-                      {meta.topic}
-                    </div>
-                  )}
-                </div>
-
-                {admin && (
-                  <div className="flex items-center gap-1 flex-shrink-0">
-                    <RoleBtn
-                      label={isPrivate ? "Make open" : "Make private"}
-                      busy={rowBusy}
-                      onClick={() =>
-                        run(slug, () =>
-                          api.teamChannelUpdate(repoRoot, slug, {
-                            visibility: isPrivate ? "open" : "private",
-                          }),
-                        )
-                      }
-                    />
-                    <RoleBtn
-                      label="Topic"
-                      busy={rowBusy}
-                      onClick={async () => {
-                        const t = await askText({
-                          title: `Topic for #${slug}`,
-                          label: "Topic",
-                          value: meta?.topic ?? "",
-                          placeholder: "What this channel is for",
-                          submitLabel: "Set topic",
-                        });
-                        if (t !== null) {
-                          run(slug, () =>
-                            api.teamChannelUpdate(repoRoot, slug, { topic: t }),
-                          );
-                        }
-                      }}
-                    />
-                    {isPrivate && (
-                      <RoleBtn
-                        label={isOpen ? "Done" : "Members"}
-                        busy={false}
-                        onClick={() => setExpanded(isOpen ? null : slug)}
-                      />
-                    )}
-                    {!isCore && (
-                      <RoleBtn
-                        label="Delete"
-                        busy={rowBusy}
-                        onClick={async () => {
-                          if (
-                            await askConfirm({
-                              title: `Delete #${slug}?`,
-                              body: "Everything said in it goes too. This can't be undone.",
-                              confirmLabel: "Delete channel",
-                              tone: "danger",
-                            })
-                          ) {
-                            run(slug, () => api.teamChannelDelete(repoRoot, slug));
-                          }
-                        }}
-                      />
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {isOpen && isPrivate && admin && (
-                <div className="px-2 pb-2 pt-0.5 ml-6 space-y-0.5 border-t border-line-soft mt-0.5">
-                  <div className="text-xs text-text-4 pt-1.5 pb-0.5">
-                    Who's in #{slug}
-                  </div>
-                  {members.map((m) => {
-                    const inChannel = (meta?.members ?? []).some(
-                      (e) => e.toLowerCase() === m.email.toLowerCase(),
-                    );
-                    const isChAdmin = (meta?.admins ?? []).some(
-                      (e) => e.toLowerCase() === m.email.toLowerCase(),
-                    );
-                    return (
-                      <div key={m.email} className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          disabled={rowBusy}
-                          onClick={() =>
-                            run(slug, () =>
-                              inChannel
-                                ? api.teamChannelMemberRemove(repoRoot, slug, m.email)
-                                : api.teamChannelMemberAdd(repoRoot, slug, m.email),
-                            )
-                          }
-                          className="flex-1 min-w-0 flex items-center gap-2 px-1.5 py-1 rounded text-left hover:bg-state-hover transition-colors disabled:opacity-50"
-                        >
-                          <span
-                            className="w-3.5 h-3.5 rounded-sm border flex items-center justify-center flex-shrink-0"
-                            style={{
-                              borderColor: inChannel
-                                ? "var(--color-accent)"
-                                : "var(--color-line)",
-                              background: inChannel
-                                ? "var(--color-accent)"
-                                : "transparent",
-                            }}
-                          >
-                            {inChannel && (
-                              <svg width="9" height="9" viewBox="0 0 16 16" fill="none">
-                                <path
-                                  d="M3.5 8.5l3 3 6-7"
-                                  stroke="var(--color-bg-deep)"
-                                  strokeWidth="2"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                />
-                              </svg>
-                            )}
-                          </span>
-                          <span className="text-sm text-text-2 truncate">
-                            {m.name || m.handle}
-                          </span>
-                          <span className="text-2xs text-text-5 truncate">
-                            {memberIdentityLine(m.email)}
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={rowBusy || !inChannel}
-                          title={
-                            isChAdmin
-                              ? "Channel admin. Click to demote"
-                              : inChannel
-                                ? "Make channel admin"
-                                : "Add as member first"
-                          }
-                          onClick={() =>
-                            run(slug, () =>
-                              api.teamChannelAdminSet(
-                                repoRoot,
-                                slug,
-                                m.email,
-                                !isChAdmin,
-                              ),
-                            )
-                          }
-                          className="flex-shrink-0 w-6 h-6 rounded flex items-center justify-center hover:bg-state-hover disabled:opacity-30 transition-colors"
-                          style={{
-                            color: isChAdmin
-                              ? "var(--color-amber)"
-                              : "var(--color-text-5)",
-                          }}
-                        >
-                          <StarGlyph filled={isChAdmin} />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Only a reader Aura has actually matched to a roster row is being
-          told about their permissions. Unmatched, the same sentence reads as
-          "you are not an admin" when the truth is "we don't know who you
-          are" — WhoAmINote above says that instead. */}
-      {!iAmAdmin && identity?.in_team && (
-        <div className="text-xs text-text-4 leading-snug pt-1">
-          You can create channels. Managing visibility, membership, topics
-          and deletion needs team-admin (or channel-admin) rights.
-        </div>
-      )}
-    </div>
-  );
-}
-
-function LockGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-      <rect
-        x="3.5"
-        y="7"
-        width="9"
-        height="6.5"
-        rx="1.2"
-        stroke="currentColor"
-        strokeWidth="1.3"
-      />
-      <path
-        d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-// Star marking a channel-level admin — filled when active, outline when
-// the member is just a regular channel member.
-function StarGlyph({ filled }: { filled: boolean }) {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 16 16"
-      fill={filled ? "currentColor" : "none"}
-      stroke="currentColor"
-      strokeWidth="1.2"
-      strokeLinejoin="round"
-    >
-      <path d="M8 1.8l1.8 3.9 4.2.5-3.1 2.9.8 4.2L8 11.9 4.3 14l.8-4.2L2 6.9l4.2-.5z" />
-    </svg>
-  );
-}
-
-// Local slugify mirroring the Rust `slugify_channel` for optimistic UI
-// (auto-expanding the just-created private channel's member manager).
-function slugify(name: string): string {
-  return name
-    .trim()
-    .replace(/^#+/, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, "-");
 }
 
 function TeamActivityPane({ repoRoot }: { repoRoot: string }) {

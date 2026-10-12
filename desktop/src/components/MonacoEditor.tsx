@@ -27,17 +27,6 @@ import {
   registerEditorTheme,
   useActiveVsCodeTheme,
 } from "../lib/vscodeThemesStore";
-import { applyInstalledExtensions } from "../lib/vscodeExt/applyContributes";
-import { setExtHostMonaco } from "../lib/vscodeExt/extHostMonacoLang";
-import { setExtHostDiagMonaco } from "../lib/vscodeExt/extHostMonacoDiag";
-import {
-  nodeDocChanged,
-  nodeDocClosed,
-  nodeDocOpened,
-  setNodeWorkspaceRoot,
-} from "../lib/vscodeExt/extHostNodeRuntime";
-import type { WireDoc } from "../lib/vscodeExt/langFeatures";
-import { useInstalledExtensions } from "../lib/vscodeExt/vsixStore";
 import { useEditorPrefs, useFontSize } from "../lib/settingsStore";
 import { registerUndoTarget } from "../lib/undoRouter";
 import { api, type BlameLine } from "../lib/api";
@@ -146,14 +135,9 @@ export function MonacoEditor({
   const blameDecorationsRef = useRef<editor.IEditorDecorationsCollection | null>(null);
   const vimRef = useRef<ReturnType<typeof initVimMode> | null>(null);
   const vimStatusRef = useRef<HTMLDivElement | null>(null);
-  // Doc-sync to the Node extension host: the last document uri we told it about
-  // (so a file switch closes the old one) + a debounce handle for edit pushes.
-  const lastModelUriRef = useRef<string | null>(null);
-  const docDebounceRef = useRef<number | null>(null);
   const resolvedTheme = useResolvedTheme();
   const variant = useThemeVariant();
   const activeVs = useActiveVsCodeTheme();
-  const installedExts = useInstalledExtensions();
   const editorPrefs = useEditorPrefs();
   const fontSize = useFontSize();
   const isDark = resolvedTheme !== "light";
@@ -192,48 +176,6 @@ export function MonacoEditor({
         endLine: e.selection.endLineNumber,
         endColumn: e.selection.endColumn,
       });
-    });
-
-    // Cmd+Shift+S → "Share to chat…" with the current selection (or
-    // the current line if there's no selection). Fires the global
-    // event ShareCodeDialog listens for.
-    editorInstance.addAction({
-      id: "aura.share-to-chat",
-      label: "Share to chat…",
-      keybindings: [
-        monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyS,
-      ],
-      contextMenuGroupId: "9_cutcopypaste",
-      contextMenuOrder: 99,
-      run: (ed) => {
-        const model = ed.getModel();
-        if (!model) return;
-        const sel = ed.getSelection();
-        let code: string;
-        let lineStart: number;
-        let lineEnd: number;
-        if (sel && !sel.isEmpty()) {
-          code = model.getValueInRange(sel);
-          lineStart = sel.startLineNumber;
-          lineEnd = sel.endLineNumber;
-        } else {
-          const lineNo = sel?.startLineNumber ?? 1;
-          code = model.getLineContent(lineNo);
-          lineStart = lineNo;
-          lineEnd = lineNo;
-        }
-        window.dispatchEvent(
-          new CustomEvent("aura:share-code-to-chat", {
-            detail: {
-              filePath,
-              language: model.getLanguageId(),
-              lineStart,
-              lineEnd,
-              code,
-            },
-          }),
-        );
-      },
     });
 
     // v0.2.28 — Cmd+Shift+. → "Find References" against the symbol at
@@ -276,44 +218,8 @@ export function MonacoEditor({
     };
     window.addEventListener("aura:scroll-to-line", onScroll);
 
-    // ── Stream this editor's document to the Node extension host ──────────────
-    // A language extension's server (Python/rust-analyzer/…) needs the live text
-    // to offer completions/hover and to publish diagnostics as you type. The host
-    // self-syncs on each request, but pushing proactively is what makes squiggles
-    // appear live. The runtime no-ops cheaply when no Node extension is running.
-    const pushDoc = (action: "open" | "change") => {
-      const model = editorInstance.getModel();
-      if (!model) return;
-      const doc: WireDoc = {
-        uri: model.uri.toString(),
-        languageId: model.getLanguageId(),
-        version: model.getVersionId(),
-        text: model.getValue(),
-      };
-      if (action === "open") nodeDocOpened(doc);
-      else nodeDocChanged(doc);
-    };
-    pushDoc("open");
-    lastModelUriRef.current = editorInstance.getModel()?.uri.toString() ?? null;
-    // The editor instance is REUSED across files (per-path models), so a file
-    // switch is an internal setModel, not a remount — close the old doc, open new.
-    editorInstance.onDidChangeModel(() => {
-      const prev = lastModelUriRef.current;
-      const nextUri = editorInstance.getModel()?.uri.toString() ?? null;
-      if (prev && prev !== nextUri) nodeDocClosed(prev);
-      pushDoc("open");
-      lastModelUriRef.current = nextUri;
-    });
-    editorInstance.onDidChangeModelContent(() => {
-      if (docDebounceRef.current != null) window.clearTimeout(docDebounceRef.current);
-      docDebounceRef.current = window.setTimeout(() => pushDoc("change"), 250);
-    });
-
     editorInstance.onDidDispose(() => {
       window.removeEventListener("aura:scroll-to-line", onScroll);
-      if (docDebounceRef.current != null) window.clearTimeout(docDebounceRef.current);
-      const prev = lastModelUriRef.current;
-      if (prev) nodeDocClosed(prev);
     });
   };
 
@@ -435,27 +341,6 @@ export function MonacoEditor({
     if (activeVs) registerEditorTheme(monaco, activeVs);
     monaco.editor.setTheme(editorThemeName(isDark, activeVs));
   }, [isDark, variant, activeVs]);
-
-  // Apply enabled VS Code extensions' declarative contributes (themes /
-  // language-configuration / snippets) to Monaco. Re-runs when the installed
-  // set changes; the router's signature guard makes redundant calls cheap and
-  // never executes any extension code.
-  useEffect(() => {
-    const monaco = monacoRef.current;
-    if (!mounted || !monaco) return;
-    // Hand the extension host this Monaco so contributed completion/hover
-    // providers (Tier 1, W2) and diagnostics (W3) can attach; idempotent.
-    setExtHostMonaco(monaco);
-    setExtHostDiagMonaco(monaco);
-    void applyInstalledExtensions(monaco);
-  }, [mounted, installedExts]);
-
-  // Tell the Node extension host which folder a language server should treat as
-  // its workspace root. Idempotent; only re-inits the host when the folder
-  // actually changes (e.g. switching workspaces).
-  useEffect(() => {
-    if (repoRoot) setNodeWorkspaceRoot(repoRoot);
-  }, [repoRoot]);
 
   // Vim mode (monaco-vim). Attach when the Behavior setting is on, detach
   // when off. The status-bar node (rendered below when vim is on) hosts

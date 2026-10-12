@@ -27,7 +27,6 @@ import { Kbd } from "../ui/kbd";
 type Props = {
   repoRoot: string;
   projectName: string;
-  onOpenChat: () => void;
   onSearch: () => void;
 };
 
@@ -37,7 +36,6 @@ const EMPTY: WorkPaneRef[] = [];
 export function WorkSurfaceEmpty({
   repoRoot,
   projectName,
-  onOpenChat,
   onSearch,
 }: Props) {
   const store = useEditorStore();
@@ -69,11 +67,9 @@ export function WorkSurfaceEmpty({
 
         {/* No "Earlier sessions" here any more: the launcher's own switch is
             that, one click nearer and with the sessions themselves under it
-            rather than a page you leave for. What stays are the two things
-            this surface can't start — a conversation with people, and a search
-            across the files. */}
+            rather than a page you leave for. What stays is the one thing this
+            surface can't start — a search across the files. */}
         <div className="mt-3 flex items-center justify-center gap-0.5 flex-wrap text-xs text-text-5">
-          <FooterLink icon={<ChatIcon />} label="Team chat" onClick={onOpenChat} />
           <FooterLink
             icon={<SearchIcon />}
             label="Search files"
@@ -121,19 +117,6 @@ function FooterLink({
         </span>
       )}
     </button>
-  );
-}
-
-function ChatIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path
-        d="M2 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6l-3 3v-3H3a1 1 0 0 1-1-1V4z"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinejoin="round"
-      />
-    </svg>
   );
 }
 

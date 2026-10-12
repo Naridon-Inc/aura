@@ -36,11 +36,15 @@ import { SemanticGraphPane } from "../workpanes/SemanticGraphPane";
  *  session rather than the strip, and "Goals" on the strip hands a question to
  *  Aura instead of opening this pane — so in both cases nothing on the strip
  *  corresponds to what you are looking at, and lighting something would be a
- *  guess. */
+ *  guess.
+ *
+ *  Cost & usage is the opposite case: it has no cell of its own, but it is a
+ *  reading of the runs and you reached it from them, so the Sessions cell
+ *  stays lit rather than the strip going blank under you. */
 function activeKeyFor(dest: TraceDest): TraceKey | null {
   switch (dest.kind) {
     case "sessions":
-      return dest.view;
+      return dest.view === "usage" ? "sessions" : dest.view;
     case "inspector":
       return "intent";
     case "graph":

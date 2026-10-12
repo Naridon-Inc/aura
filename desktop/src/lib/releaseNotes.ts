@@ -41,6 +41,36 @@ export type ReleaseCta = "mobile-waitlist";
 // one shown after an update.
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: "0.19.58",
+    date: "October 2026",
+    title: "In front, and fewer places to look",
+    highlights: [
+      "Panels stopped opening behind the terminal. Nine of them did it — the one you most likely hit is the small \"old aura on PATH\" chip in the status bar — and all nine now open in front, where you can read them.",
+      "Starting a pull request gives you a description to fill in instead of an empty box: Summary, Changes, Related Issues. A description you already wrote is left alone.",
+      "Tasks is List and Board. Trace is Overview, My sessions and Team activity, with cost and usage now a button inside My sessions.",
+      "Scribble and the project timeline have come out of the app, and so have Project health and the code map. The things they were standing in front of — the doctor, your history in the Time Machine, what the agent remembers — are all still there.",
+    ],
+  },
+  {
+    version: "0.19.57",
+    date: "October 2026",
+    title: "The pane that wouldn't go away",
+    highlights: [
+      "A pane left holding a tab you closed somewhere else no longer sits there as a blank strip you can't shut. It tells you what happened and gives you a button to close it.",
+    ],
+  },
+  {
+    version: "0.19.56",
+    date: "October 2026",
+    title: "A terminal that keeps up",
+    highlights: [
+      "Terminals are drawn by your graphics card now. Scrolling a long run, zooming in and resizing a pane keep up the way a terminal should — and ⌘+ makes the text bigger, not just the box around it.",
+      "Work can start without you. Save a prompt, give it a time or a web address that fires it, and Aura opens the session and gets on with it, keeping a record of every run.",
+      "The models you star become your own shortlist at the top of the model menu, with ⌘1 to ⌘5 on the first five. How hard the model thinks, and whether it answers fast, moved in there too.",
+      "Team chat and Pages have come out of the app. Who is working, what landed and which session did it all stay.",
+    ],
+  },
+  {
     version: "0.19.53",
     date: "September 2026",
     title: "Chat that stays in step",

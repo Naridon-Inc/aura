@@ -13,10 +13,8 @@ import type { JSX } from "react";
 import { ReviewDialog } from "../dialogs/ReviewDialog";
 import { AttestationsDialog } from "../dialogs/AttestationsDialog";
 import { DoctorDialog } from "../dialogs/DoctorDialog";
-import { MemoryDialog } from "../dialogs/MemoryDialog";
 import { TimeMachinePane } from "../workpanes/TimeMachinePane";
 import { ImpactsPane } from "../workpanes";
-import { MEMORY_SURFACE_ENABLED } from "../../lib/featureFlags";
 import type { TraceToolKind } from "../../lib/editorStore";
 
 export function TraceToolSurface({
@@ -57,20 +55,15 @@ export function TraceToolSurface({
   if (tool === "attest") {
     return <AttestationsDialog inline open repoRoot={repoRoot} onClose={onClose} />;
   }
-  if (tool === "memory") {
-    // Memory is hidden until it works end-to-end / folds into agent
-    // customizations. Guard the render too, so a stale persisted "memory was
-    // open" workpane can't re-mount the dialog past the hidden nav.
-    if (!MEMORY_SURFACE_ENABLED) {
-      return <div className="h-full w-full bg-bg-content" />;
-    }
-    return <MemoryDialog inline open repoRoot={repoRoot} onClose={onClose} />;
-  }
   if (tool === "impacts") {
     // Cross-branch live impacts — the real home of cross-branch danger now
     // that the fake pr-review wall is gone. Reuses the same ImpactsPane the
     // sidebar tab renders (one component, one data source).
     return <ImpactsPane repoRoot={repoRoot} />;
   }
+  // Project health, and the arm every other kind falls through to. Nothing on
+  // screen opens it any more (see `PROJECT_HEALTH_ENABLED`); a saved
+  // `{ tool: "doctor" }` link does, and a reading of what is wrong with the
+  // repo is the least surprising thing to find at the end of this chain.
   return <DoctorDialog inline open repoRoot={repoRoot} onClose={onClose} />;
 }

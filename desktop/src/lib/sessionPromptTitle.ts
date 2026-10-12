@@ -14,6 +14,7 @@
 // wrapper-recognising function is exactly how one of them ends up recognising
 // a wrapper the other doesn't.
 
+import { compactionHandoff } from "./injectedContext";
 import { truncate } from "./truncate";
 
 /** The line to show for a session, from one of its prompts. Empty string when
@@ -43,6 +44,15 @@ export function sessionPromptTitle(s: string | null | undefined): string {
     const cmd = trimmed.match(/<command-name>([\s\S]*?)<\/command-name>/i);
     if (cmd && cmd[1].trim()) return `/ ${collapse(cmd[1])}`;
     return "/ command";
+  }
+
+  // The compaction handoff: the run filled its context, the earlier turns
+  // were summarised, and the summary came back on this channel. Left alone it
+  // wins the row with "This session is being continued from a previous
+  // conversation…", which is the one thing every compacted session says and
+  // so tells the reader nothing about which one they are looking at.
+  if (compactionHandoff(trimmed)) {
+    return "↻ continued after compaction";
   }
 
   // <system-reminder> — runtime nag, not a real prompt.

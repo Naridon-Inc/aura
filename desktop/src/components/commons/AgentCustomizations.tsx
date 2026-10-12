@@ -1,15 +1,12 @@
-// AgentCustomizations — "Agents & extensions", the single full-screen home for
-// everything that shapes how your AI works on this project AND the editor
-// add-ons it runs in. A grouped left sidebar (our wizard aesthetic) carries the
-// sections; the chosen pane fills the rest. Every pane reads and writes real
-// Aura state — installed agents, their real on-disk skills, signed plugins, MCP
-// connections, project memory, the safety net, the VS-Code-compatible extension
-// gallery — so nothing here is a mockup.
+// AgentCustomizations — the single full-screen home for everything that shapes
+// how your AI works on this project. A grouped left sidebar (our wizard
+// aesthetic) carries the sections; the chosen pane fills the rest. Every pane
+// reads and writes real Aura state — installed agents, their real on-disk
+// skills, signed plugins, MCP connections, project memory, the safety net — so
+// nothing here is a mockup.
 //
-// One home, on purpose: the Build rail stays a single calm "Agents &
-// extensions" row instead of a column of per-thing links. Plugins are the
-// ADE-native add-on track; Extensions is the compatibility track for what VS
-// Code supports — both live here, ADE-first.
+// One home, on purpose: the Build rail stays a single calm row instead of a
+// column of per-thing links. Add-ons here are the ADE-native plugins.
 //
 // Grouped, not a flat tab strip: the sections are clustered by what they mean
 // to you — who does the work (Agents), what your AI knows (Knowledge),
@@ -46,7 +43,7 @@ import { SkillsPane } from "./agentCustomize/SkillsPane";
 import { InstructionsPane } from "./agentCustomize/InstructionsPane";
 import { HooksPane } from "./agentCustomize/HooksPane";
 import { McpServersPane } from "./agentCustomize/McpServersPane";
-import { AddOnsPane } from "./agentCustomize/AddOnsPane";
+import { PluginsPane } from "./agentCustomize/PluginsPane";
 
 const NAV: CustomizeNavItem[] = [
   {
@@ -88,8 +85,7 @@ const NAV: CustomizeNavItem[] = [
   {
     id: "addons",
     label: "Add-ons",
-    blurb:
-      "Extend what Aura can do. Plugins built for it, plus editor add-ons from the VS Code world.",
+    blurb: "Extend what Aura can do with plugins built for it.",
     icon: <Blocks size={15} />,
   },
   {
@@ -143,10 +139,9 @@ export function AgentCustomizations({
   const stores = useCustomizeStores(repoRoot);
 
   const categories = NAV.filter((n) => n.id !== "overview");
-  // The Add-ons row owns the `plugins`/`extensions` deep-link aliases, so it
-  // stays highlighted whichever track is showing.
-  const navView: CustomizeViewId =
-    view === "plugins" || view === "extensions" ? "addons" : view;
+  // The Add-ons row owns the `plugins` deep-link alias, so it stays
+  // highlighted when something routed in that way.
+  const navView: CustomizeViewId = view === "plugins" ? "addons" : view;
 
   return (
     <FullscreenOverlay onClose={onClose}>
@@ -235,14 +230,12 @@ export function AgentCustomizations({
               onClose={onClose}
             />
           ) : (
-            // Add-ons: Plugins (built for Aura) + Extensions (from VS Code)
-            // clubbed behind one switch. `extensions`/`plugins` are deep-link
-            // aliases that just pick the starting track.
-            <AddOnsPane
+            // Add-ons: the plugins built for Aura. `plugins` is a
+            // deep-link alias that lands here.
+            <PluginsPane
               plugins={stores.plugins}
               loading={stores.loading}
               refresh={stores.refresh}
-              initialTab={view === "extensions" ? "extensions" : "plugins"}
             />
           )}
         </div>

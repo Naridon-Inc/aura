@@ -190,7 +190,6 @@ fn build(app: &App<Wry>) -> tauri::Result<Menu<Wry>> {
         .item(&MenuItemBuilder::with_id("open_prs", "Pull Requests").build(h)?)
         .item(&MenuItemBuilder::with_id("extensions", "Extensions").build(h)?)
         .separator()
-        .item(&MenuItemBuilder::with_id("project_timeline", "Project Timeline").build(h)?)
         .item(&MenuItemBuilder::with_id("time_machine", "Time Machine").build(h)?)
         .build()?;
 
@@ -206,7 +205,6 @@ fn build(app: &App<Wry>) -> tauri::Result<Menu<Wry>> {
         .item(&MenuItemBuilder::with_id("orchestrate", "Orchestrate…").build(h)?)
         .separator()
         .item(&MenuItemBuilder::with_id("aura_status", "Show Status").build(h)?)
-        .item(&MenuItemBuilder::with_id("aura_doctor", "Run Doctor").build(h)?)
         .item(&MenuItemBuilder::with_id("aura_impacts", "Show Impacts").build(h)?)
         .item(&MenuItemBuilder::with_id("aura_pr_review", "PR Review").build(h)?)
         .separator()

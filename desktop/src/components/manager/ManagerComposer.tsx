@@ -3,7 +3,7 @@ import {
   ComposerToolbar,
   ChatModePicker,
 } from "../chat/ChatComposer";
-import { ChevronLeft, ChevronRight, Zap, Shield, ArrowUp } from "lucide-react";
+import { ChevronLeft, ChevronRight, Shield, ArrowUp } from "lucide-react";
 // Cursor-style chat composer for the Manager tab. Renders the prototype's
 // `.composer` block (Stage 11.6 — Forge Chat-States port): a transparent
 // textarea sits on top, then a `.composer-bottom` row carries the Plan
@@ -50,6 +50,10 @@ import {
 import { OS_FILE_DROP_COMPOSER, OS_FILE_DRAG } from "../../lib/osFileDrop";
 import { type SelectedModel } from "../../lib/modelCatalog";
 import { ModelDefaultsPanel } from "./ModelDefaultsPanel";
+import {
+  TurnModelControls,
+  turnModelDetail,
+} from "../chat/TurnModelControls";
 import { registerComposerInserter } from "../../lib/composerBridge";
 import { useFollowUpBehavior } from "../../lib/followUpBehavior";
 import {
@@ -86,6 +90,7 @@ import {
   effortLabel,
   nextEffort,
 } from "../../lib/effortCycle";
+import { TOGGLE_FAST_EVENT } from "../../lib/composerChords";
 import {
   readOutputStyle,
   toggleOutputStyle,
@@ -291,6 +296,9 @@ const EFFORT_KEY = "aura.manager.effort";
 // CYCLE_EFFORT_EVENT listener); module-level so they can share it.
 let lastEffortCycleAt = -1;
 const FAST_KEY = "aura.manager.fast";
+/** The ⌘⇧E keypress every mounted composer last answered — same sharing
+ *  trick as the effort ladder's, so one chord raises one toast. */
+let lastFastToggleAt = -1;
 const APPROVAL_KEY = "aura.manager.approval";
 
 // Per-session composer draft and the up-arrow recall ring. Unlike the chips
@@ -315,48 +323,9 @@ function historyKey(sessionId?: string | null): string {
   return composerKey(HISTORY_PREFIX, sessionId);
 }
 
-// The Effort chip is a cross-agent control: whichever brain runs the next
-// turn, the backend translates the chosen level into that provider's real
-// thinking/reasoning knob. `null` = Auto (leave the model at its default).
-const EFFORT_OPTIONS: {
-  value: ReasoningEffort | null;
-  label: string;
-  hint: string;
-  blurb: string;
-}[] = [
-  // "Default", not "Auto" — this strip lives inside the model switcher, where
-  // the model row and the routing summary each had an "Auto" of their own.
-  {
-    value: null,
-    label: "Default",
-    hint: "Whatever depth the model reasons at on its own",
-    blurb: "model decides",
-  },
-  {
-    value: "low",
-    label: "Low",
-    hint: "Quick, shallow reasoning",
-    blurb: "quick",
-  },
-  {
-    value: "medium",
-    label: "Medium",
-    hint: "Balanced reasoning",
-    blurb: "balanced",
-  },
-  {
-    value: "high",
-    label: "High",
-    hint: "Deep, careful reasoning. Slower",
-    blurb: "deep",
-  },
-  {
-    value: "max",
-    label: "Max",
-    hint: "Maximum depth. Ultrathink, slowest",
-    blurb: "ultrathink",
-  },
-];
+// EFFORT_OPTIONS and EffortGauge now live in `chat/TurnModelControls`, with
+// the control that reads them — they moved when Effort and Fast folded into
+// the model picker.
 
 // The Approvals chip is a cross-agent autonomy control (Claude's
 // acceptEdits/plan/bypassPermissions, generalized). `null` = the agent's
@@ -524,6 +493,12 @@ export function ManagerComposer({
       return false;
     }
   });
+  // Whether the Effort list is open inside the model picker. It lives here,
+  // and not in `TurnModelControls` alone, because the model list on the other
+  // side of the panel has to stand down while it is — two regions, one piece
+  // of state, so it belongs to the thing that renders both of them. Not
+  // persisted: it is a menu that is open, not a setting.
+  const [effortListOpen, setEffortListOpen] = useState(false);
   const [approval, setApproval] = useState<ApprovalPolicy | null>(() => {
     try {
       const v = localStorage.getItem(APPROVAL_KEY);
@@ -599,6 +574,26 @@ export function ManagerComposer({
     };
     window.addEventListener(CYCLE_EFFORT_EVENT, onCycle);
     return () => window.removeEventListener(CYCLE_EFFORT_EVENT, onCycle);
+  }, []);
+
+  // ⌘⇧E flips Fast. Same shape as the effort ladder above, for the same
+  // reason: Fast is one persisted value, so every mounted composer updates its
+  // own chip and only the first to hear a given keypress says so out loud.
+  const fastRef = useRef(fast);
+  fastRef.current = fast;
+  useEffect(() => {
+    const onToggle = (e: Event) => {
+      const next = !fastRef.current;
+      setFast(next);
+      if (e.timeStamp !== lastFastToggleAt) {
+        lastFastToggleAt = e.timeStamp;
+        toast.info(`Fast: ${next ? "on" : "off"}`, undefined, {
+          durationMs: 1500,
+        });
+      }
+    };
+    window.addEventListener(TOGGLE_FAST_EVENT, onToggle);
+    return () => window.removeEventListener(TOGGLE_FAST_EVENT, onToggle);
   }, []);
 
   // AURA-1296 — "Concise" answers. Read at send time by ManagerChatView and
@@ -1356,10 +1351,14 @@ export function ManagerComposer({
   // a non-busy editor would otherwise stop forwarding Esc to onStop.
   const editorBusy = busy && !onQueue && !onSteer;
 
-  // "This turn" strip folded into the model switcher (#17): Fast + Effort now
-  // ride inside the BrainPicker modal instead of sitting as two extra chips on
-  // the composer bar. All three are per-turn knobs for whichever agent runs the
-  // next turn, so they belong on one surface — the model chip carries them.
+  // "This turn" strip folded into the model switcher (#17): Fast + Effort ride
+  // inside the BrainPicker popover (`TurnModelControls`, passed as
+  // `turnControls`) instead of sitting as extra chips on the composer bar or,
+  // as they did until now, as two rows of a separate options popover one chip
+  // over. They are per-turn knobs for whichever agent runs the next turn, the
+  // same scope as the model, so they belong on the model's surface — and the
+  // chip carries what they currently say (`chipDetail`) so nothing is hidden
+  // by the move.
 
   return (
     <ComposerFrame
@@ -1488,6 +1487,17 @@ export function ManagerComposer({
                 disabled={editorBusy}
                 variant="popover"
                 modalFooter={<ModelDefaultsPanel />}
+                turnControls={
+                  <TurnModelControls
+                    fast={fast}
+                    effort={effort}
+                    onFastChange={setFast}
+                    onEffortChange={setEffort}
+                    onPickingChange={setEffortListOpen}
+                  />
+                }
+                turnControlsExpanded={effortListOpen}
+                chipDetail={turnModelDetail(effort, fast)}
               />
             )}
           </>
@@ -1495,11 +1505,7 @@ export function ManagerComposer({
         options={
           <>
             <ChatOptionsFields
-              fast={fast}
-              effort={effort}
               approval={approval}
-              onFastChange={setFast}
-              onEffortChange={setEffort}
               onApprovalChange={setApproval}
             />
             {onPlanGoal && (
@@ -1707,48 +1713,8 @@ export function ManagerComposer({
   );
 }
 
-/** Reasoning-effort gauge — three ascending bars that light low → high,
- *  mirroring Conductor's signal-strength glyph. Purely presentational; the
- *  cross-agent backend translates the level into each provider's own knob.
- *  `level` 0 = none/unset (all bars dim), 1 = low, 2 = medium, 3 = high.
- *  `dim` renders the whole gauge muted when Fast has overridden effort. */
-function EffortGauge({
-  level,
-  dim,
-}: {
-  level: 0 | 1 | 2 | 3 | 4;
-  dim?: boolean;
-}) {
-  // Four ascending bars: Low / Medium / High / Max.
-  const bars = [
-    { x: 0.5, y: 8, h: 3 },
-    { x: 4, y: 5.5, h: 5.5 },
-    { x: 7.5, y: 3, h: 8 },
-    { x: 11, y: 0.5, h: 10.5 },
-  ];
-  return (
-    <svg
-      width="14"
-      height="12"
-      viewBox="0 0 14 12"
-      fill="currentColor"
-      aria-hidden
-      style={dim ? { opacity: 0.45 } : undefined}
-    >
-      {bars.map((b, i) => (
-        <rect
-          key={b.x}
-          x={b.x}
-          y={b.y}
-          width="2.2"
-          height={b.h}
-          rx="0.8"
-          style={{ opacity: !dim && i < level ? 1 : 0.28 }}
-        />
-      ))}
-    </svg>
-  );
-}
+// (EffortGauge moved to `chat/TurnModelControls`, where the Effort row it
+// draws for now lives.)
 
 function ImageThumb({
   img,
@@ -1793,100 +1759,77 @@ function ImageThumb({
   );
 }
 
+/** The options popover — Approvals, and only Approvals.
+ *
+ *  Fast and Effort used to be its first two rows. They moved into the model
+ *  picker (`chat/TurnModelControls`), because they describe the next turn the
+ *  way the model does and reading them meant opening a second menu that the
+ *  first one never mentioned.
+ *
+ *  Approvals stayed deliberately. It is an autonomy policy, not a property of
+ *  the turn: it decides what the agent may do to the repo without asking, and
+ *  it holds until someone changes it back. "Bypass" in particular should take
+ *  a trip to a settings menu, not ride along behind the chip you click to
+ *  switch models. */
 function ChatOptionsFields({
-  fast,
-  effort,
   approval,
-  onFastChange,
-  onEffortChange,
   onApprovalChange,
 }: {
-  fast: boolean;
-  effort: ReasoningEffort | null;
   approval: ApprovalPolicy | null;
-  onFastChange: (value: boolean) => void;
-  onEffortChange: (value: ReasoningEffort | null) => void;
   onApprovalChange: (value: ApprovalPolicy | null) => void;
 }) {
-  const [section, setSection] = useState<"effort" | "approval" | null>(null);
-  const previousSection = useRef(section);
+  const [listing, setListing] = useState(false);
+  const wasListing = useRef(listing);
   const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (previousSection.current !== section) {
-      const selector = section
-        ? ".chat-options-back"
-        : `[data-setting="${previousSection.current}"]`;
-      panelRef.current?.querySelector<HTMLButtonElement>(selector)?.focus();
+    if (wasListing.current !== listing) {
+      panelRef.current
+        ?.querySelector<HTMLButtonElement>(
+          listing ? ".chat-options-back" : '[data-setting="approval"]',
+        )
+        ?.focus();
     }
-    previousSection.current = section;
-  }, [section]);
-  const effortOption =
-    EFFORT_OPTIONS.find((option) => option.value === effort) ??
-    EFFORT_OPTIONS[0];
+    wasListing.current = listing;
+  }, [listing]);
   const approvalOption =
     APPROVAL_OPTIONS.find((option) => option.value === approval) ??
     APPROVAL_OPTIONS[0];
-  if (section)
+  if (listing)
     return (
       <div className="chat-options-fields" ref={panelRef}>
         <button
           type="button"
           className="chat-options-back"
-          onClick={() => setSection(null)}
+          onClick={() => setListing(false)}
         >
           <ChevronLeft size={14} />
-          <span>{section === "effort" ? "Reasoning effort" : "Approvals"}</span>
+          <span>Approvals</span>
         </button>
-        <div
-          className="chat-settings-list"
-          role="group"
-          aria-label={section === "effort" ? "Reasoning effort" : "Approvals"}
-        >
-          {section === "effort"
-            ? EFFORT_OPTIONS.map((option) => (
-                <button
-                  type="button"
-                  key={option.label}
-                  className="chat-setting-choice"
-                  aria-pressed={effort === option.value}
-                  onClick={() => {
-                    onEffortChange(option.value);
-                    setSection(null);
-                  }}
-                >
-                  <span className="chat-menu-copy">
-                    <strong>{option.label}</strong>
-                    <small>{option.hint}</small>
-                  </span>
-                  {effort === option.value && (
-                    <CheckMini width={14} height={14} />
-                  )}
-                </button>
-              ))
-            : APPROVAL_OPTIONS.map((option) => {
-                const Icon = APPROVAL_ICONS[option.value ?? "default"];
-                return (
-                  <button
-                    type="button"
-                    key={option.label}
-                    className={`chat-setting-choice${option.value === "bypass" ? " is-danger" : ""}`}
-                    aria-pressed={approval === option.value}
-                    onClick={() => {
-                      onApprovalChange(option.value);
-                      setSection(null);
-                    }}
-                  >
-                    <Icon width={14} height={14} />
-                    <span className="chat-menu-copy">
-                      <strong>{option.label}</strong>
-                      <small>{option.hint}</small>
-                    </span>
-                    {approval === option.value && (
-                      <CheckMini width={14} height={14} />
-                    )}
-                  </button>
-                );
-              })}
+        <div className="chat-settings-list" role="group" aria-label="Approvals">
+          {APPROVAL_OPTIONS.map((option) => {
+            const Icon = APPROVAL_ICONS[option.value ?? "default"];
+            return (
+              <button
+                type="button"
+                key={option.label}
+                className={`chat-setting-choice${option.value === "bypass" ? " is-danger" : ""}`}
+                aria-pressed={approval === option.value}
+                onClick={() => {
+                  onApprovalChange(option.value);
+                  setListing(false);
+                }}
+              >
+                <Icon width={14} height={14} />
+                <span className="chat-menu-copy">
+                  <strong>{option.label}</strong>
+                  <small>{option.hint}</small>
+                </span>
+                {approval === option.value && (
+                  <CheckMini width={14} height={14} />
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
     );
@@ -1894,46 +1837,9 @@ function ChatOptionsFields({
     <div className="chat-options-fields" ref={panelRef}>
       <button
         type="button"
-        className="chat-option-row"
-        aria-pressed={fast}
-        title="Use minimal reasoning for a faster response"
-        onClick={() => onFastChange(!fast)}
-      >
-        <Zap size={14} />
-        <span className="chat-option-label">Fast response</span>
-        <span className="chat-option-value">{fast ? "On" : "Off"}</span>
-      </button>
-      <button
-        type="button"
-        className="chat-option-row"
-        data-setting="effort"
-        onClick={() => setSection("effort")}
-      >
-        <EffortGauge
-          level={
-            effort == null
-              ? 0
-              : effort === "low"
-                ? 1
-                : effort === "medium"
-                  ? 2
-                  : effort === "high"
-                    ? 3
-                    : 4
-          }
-          dim={fast}
-        />
-        <span className="chat-option-label">Reasoning effort</span>
-        <span className="chat-option-value">
-          {fast ? "Fast" : effortOption.label}
-        </span>
-        <ChevronRight size={12} />
-      </button>
-      <button
-        type="button"
         className={`chat-option-row${approval === "bypass" ? " is-danger" : ""}`}
         data-setting="approval"
-        onClick={() => setSection("approval")}
+        onClick={() => setListing(true)}
       >
         <Shield size={14} />
         <span className="chat-option-label">Approvals</span>

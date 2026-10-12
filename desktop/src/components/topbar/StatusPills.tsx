@@ -102,7 +102,10 @@ export function StatusPills({
       if (repoRoot) {
         try {
           const cap = await api.captureStatus(repoRoot);
-          captureOff = cap.is_git && !cap.enabled;
+          // `unreadable` means the probe could not look, not that capture is
+          // off — nudging someone to turn on something already on is how a
+          // status pill loses their trust.
+          captureOff = cap.is_git && !cap.enabled && !cap.unreadable;
         } catch {}
       } else {
         captureOff = false;

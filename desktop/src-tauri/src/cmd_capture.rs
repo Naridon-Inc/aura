@@ -33,6 +33,13 @@ pub struct CaptureStatus {
     /// Surfaced so the pane can show *where* the hooks live — which, in a
     /// linked worktree, is the shared common dir, not the per-worktree one.
     pub hooks_dir: Option<String>,
+    /// Why the hook could not be read, when that is the reason `enabled` is
+    /// false. "Couldn't look" and "looked, it's off" are different answers
+    /// and the pane must not print the second when it means the first: a repo
+    /// that is capturing perfectly well reads as off the moment macOS denies
+    /// the read, and the only thing on screen is an Enable button that will
+    /// fail the same way.
+    pub unreadable: Option<String>,
 }
 
 /// Resolve the git hooks directory for `root`, honoring linked worktrees.
@@ -120,12 +127,38 @@ pub(crate) fn strip_worktrees(gitdir: &Path) -> PathBuf {
 /// hook that's been hand-edited (marker comment stripped) but still calls the
 /// CLI still reads as enabled. Same two needles the VS Code probe uses.
 pub(crate) fn marker_present(hooks: &Path) -> bool {
+    matches!(read_marker(hooks), Ok(present) if present)
+}
+
+/// The same question, keeping the difference between "no hook" and "couldn't
+/// read the hook". A missing file is a real answer — capture is off — so it
+/// comes back as `Ok(false)`. Anything else is us being unable to look, and
+/// the caller has to say so rather than reporting off.
+pub(crate) fn read_marker(hooks: &Path) -> Result<bool, std::io::Error> {
     match std::fs::read_to_string(hooks.join("pre-commit")) {
         Ok(body) => {
-            body.contains("AURA SEMANTIC ENGINE") || body.contains("aura capture-context")
+            Ok(body.contains("AURA SEMANTIC ENGINE") || body.contains("aura capture-context"))
         }
-        Err(_) => false,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
+}
+
+/// Turn a failed read into something a person can act on. macOS is the case
+/// that matters: when the app is denied a folder — most often because it is
+/// running from a copy the updater left in a temp directory, so its bundle
+/// can no longer be verified — every read under it comes back EPERM, and
+/// "Operation not permitted" on its own tells nobody what to do.
+fn explain_unreadable(hooks: &Path, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        return format!(
+            "macOS is not letting Aura read {}. Quit Aura and open it again from your \
+             Applications folder; if it still can't, allow Aura under System Settings → \
+             Privacy & Security → Files and Folders.",
+            hooks.display()
+        );
+    }
+    format!("Couldn't read {}: {}", hooks.join("pre-commit").display(), e)
 }
 
 /// Read-only probe: is passive semantic capture enabled for `repo_root`?
@@ -134,15 +167,23 @@ pub async fn aura_capture_status(repo_root: String) -> CaptureStatus {
     crate::blocking::run(move || {
         let root = PathBuf::from(&repo_root);
         match hooks_dir(&root) {
-            Some(h) => CaptureStatus {
-                enabled: marker_present(&h),
-                is_git: true,
-                hooks_dir: Some(h.to_string_lossy().into_owned()),
-            },
+            Some(h) => {
+                let (enabled, unreadable) = match read_marker(&h) {
+                    Ok(present) => (present, None),
+                    Err(e) => (false, Some(explain_unreadable(&h, &e))),
+                };
+                CaptureStatus {
+                    enabled,
+                    is_git: true,
+                    hooks_dir: Some(h.to_string_lossy().into_owned()),
+                    unreadable,
+                }
+            }
             None => CaptureStatus {
                 enabled: false,
                 is_git: false,
                 hooks_dir: None,
+                unreadable: None,
             },
         }
     })
@@ -153,6 +194,49 @@ pub async fn aura_capture_status(repo_root: String) -> CaptureStatus {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn a_missing_hook_is_off_not_a_mystery() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(read_marker(tmp.path()).unwrap(), false);
+    }
+
+    #[test]
+    fn a_hook_carrying_the_marker_reads_as_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("pre-commit"), "# AURA SEMANTIC ENGINE\n").unwrap();
+        assert!(read_marker(tmp.path()).unwrap());
+        assert!(marker_present(tmp.path()));
+    }
+
+    #[test]
+    fn a_hook_we_are_not_allowed_to_read_is_not_reported_as_off() {
+        // The bug this exists for: on a Mac that denies the app a folder —
+        // which is what happens when the updater leaves it running from a
+        // copy in a temp directory — reading the hook returns EPERM, and the
+        // pane said "Not capturing" about a repo that was capturing fine.
+        let tmp = tempfile::tempdir().unwrap();
+        let hook = tmp.path().join("pre-commit");
+        fs::write(&hook, "# AURA SEMANTIC ENGINE\n").unwrap();
+        let mut perms = fs::metadata(&hook).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
+        fs::set_permissions(&hook, perms).unwrap();
+
+        // Running as root defeats the mode bits entirely, so the only honest
+        // thing to do there is skip rather than assert something untrue.
+        if fs::read_to_string(&hook).is_ok() {
+            return;
+        }
+
+        let err = read_marker(tmp.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        // …and `marker_present`, which has to answer yes/no, still says no —
+        // the point is that the command now carries the reason alongside it.
+        assert!(!marker_present(tmp.path()));
+
+        let said = explain_unreadable(tmp.path(), &err);
+        assert!(said.contains("Applications"), "should say how to fix it: {said}");
+    }
 
     #[test]
     fn strip_worktrees_drops_trailing_pair() {

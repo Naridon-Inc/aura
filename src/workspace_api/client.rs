@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::cloud_contract::ExitCode;
 use crate::config::ConfigManager;
 
 /// The env var an agent is handed its key in.
@@ -52,8 +53,11 @@ pub struct Auth {
     pub source: TokenSource,
 }
 
-/// What can go wrong talking to the API, shaped for exit codes:
-/// `0` ok, `2` no credentials, `3` not found, `1` everything else.
+/// What can go wrong talking to the API.
+///
+/// The variants are the shapes a caller reacts to differently; the numbers they
+/// exit with are [`crate::cloud_contract::ExitCode`]'s, so that every `aura`
+/// cloud verb reads the same way from a shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiError {
     /// No bearer could be resolved.
@@ -71,11 +75,28 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    /// The code this failure exits with, on the shared contract.
+    ///
+    /// Note what moved: a refused key used to be `2` and a missing workspace
+    /// `3`. Auth is now `3` and not-found is folded into the general runtime
+    /// `1`, because a thing that does not exist is not a different *kind* of
+    /// problem to a request that was well-formed and still failed. `2` belongs
+    /// to usage errors, which clap has already exited with by the time any of
+    /// this runs. See [`crate::cloud_contract::ExitCode`].
     pub fn exit_code(&self) -> i32 {
+        self.outcome().code()
+    }
+
+    /// This failure as a contract outcome.
+    pub fn outcome(&self) -> ExitCode {
         match self {
-            ApiError::NoAuth | ApiError::Unauthorized { .. } => 2,
-            ApiError::NotFound { .. } => 3,
-            ApiError::Http { .. } | ApiError::Network(_) | ApiError::Parse(_) => 1,
+            ApiError::NoAuth | ApiError::Unauthorized { .. } => ExitCode::Auth,
+            // A status we were handed gets classified by the shared rule, so a
+            // 5xx is reported as the server's fault rather than ours.
+            ApiError::Http { status, .. } => ExitCode::for_status(*status),
+            ApiError::NotFound { .. } | ApiError::Network(_) | ApiError::Parse(_) => {
+                ExitCode::Runtime
+            }
         }
     }
 
@@ -182,6 +203,19 @@ pub fn endpoint(origin: &str, path: &str) -> String {
     format!("{}{}{}", origin.trim_end_matches('/'), API_PREFIX, path)
 }
 
+/// Join query parameters, or nothing at all when there are none.
+///
+/// A `?` with nothing after it is a legal URL and an unreadable one, and the
+/// alternative — each caller deciding whether its own first parameter gets the
+/// `?` — is how a second parameter ends up appended with the wrong separator.
+pub fn query(parts: Vec<String>) -> String {
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
+}
+
 /// Build the query string for `messages`, omitting what was not asked for.
 pub fn messages_query(since: Option<&str>, limit: Option<u32>) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -191,11 +225,7 @@ pub fn messages_query(since: Option<&str>, limit: Option<u32>) -> String {
     if let Some(l) = limit {
         parts.push(format!("limit={l}"));
     }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("?{}", parts.join("&"))
-    }
+    query(parts)
 }
 
 /// Minimal percent-encoding for a query value (RFC3339 timestamps carry `+`
@@ -295,11 +325,25 @@ impl Client {
         self.send(self.http.post(self.url("/workspaces")).json(&req.body()))
     }
 
-    pub fn list(&self, status: Option<&str>) -> Result<Value, ApiError> {
-        let q = match status.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(s) => format!("?status={}", url_encode(s)),
-            None => String::new(),
-        };
+    /// The caller's workspaces, newest activity first.
+    ///
+    /// `limit`/`offset` are passed through only when set, so a caller that
+    /// wants a page says so and everyone else keeps the size this endpoint has
+    /// always answered with. Both narrowings — the status and the window — are
+    /// the server's to apply, in that order: a filter applied after a cap
+    /// answers about the page instead of about the list.
+    pub fn list(
+        &self,
+        status: Option<&str>,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<Value, ApiError> {
+        let mut parts = Vec::new();
+        if let Some(s) = status.map(str::trim).filter(|s| !s.is_empty()) {
+            parts.push(format!("status={}", url_encode(s)));
+        }
+        parts.extend(Self::page_parts(limit, offset));
+        let q = query(parts);
         self.send(self.http.get(format!("{}{}", self.url("/workspaces"), q)))
     }
 
@@ -307,10 +351,22 @@ impl Client {
         self.send(self.http.get(self.url(&format!("/workspaces/{}", url_encode(id)))))
     }
 
-    pub fn prompt(&self, id: &str, text: &str, model: Option<&str>) -> Result<Value, ApiError> {
+    /// Send a prompt. Same send as [`Client::create_message`] behind a thinner
+    /// answer — the server runs one path for both — so `message_id` means the
+    /// same thing here: a retry with a key already used queues nothing.
+    pub fn prompt(
+        &self,
+        id: &str,
+        text: &str,
+        model: Option<&str>,
+        message_id: Option<&str>,
+    ) -> Result<Value, ApiError> {
         let mut body = json!({ "text": text });
         if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
             body["model"] = json!(m);
+        }
+        if let Some(k) = message_id.map(str::trim).filter(|k| !k.is_empty()) {
+            body["message_id"] = json!(k);
         }
         self.send(
             self.http
@@ -336,8 +392,252 @@ impl Client {
         self.send(self.http.get(self.url("/models")))
     }
 
+    // ─── Sections ───────────────────────────────────────────────────────────
+    //
+    // Sidebar sections, so an agent can file the workspaces it opened instead
+    // of leaving a sidebar only the user can tidy. They are personal to the
+    // account behind the token, which is why there is no org-wide listing.
+
+    pub fn sections(&self) -> Result<Value, ApiError> {
+        self.send(self.http.get(self.url("/sections")))
+    }
+
+    /// Create a section. The server treats this as an upsert on the name, so a
+    /// retry after a timeout returns the section that already exists rather
+    /// than a second one with the same label.
+    pub fn create_section(
+        &self,
+        name: &str,
+        emoji: Option<&str>,
+        position: Option<i32>,
+    ) -> Result<Value, ApiError> {
+        let mut body = json!({ "name": name });
+        if let Some(e) = emoji.map(str::trim).filter(|e| !e.is_empty()) {
+            body["emoji"] = json!(e);
+        }
+        if let Some(p) = position {
+            body["position"] = json!(p);
+        }
+        self.send(self.http.post(self.url("/sections")).json(&body))
+    }
+
+    pub fn delete_section(&self, id: &str) -> Result<Value, ApiError> {
+        self.send(self.http.delete(self.url(&format!("/sections/{}", url_encode(id)))))
+    }
+
+    /// File a workspace in a section, or unfile it with `None`.
+    ///
+    /// One call for both, because `--section <id>` and `--no-section` are the
+    /// same decision with different answers: a separate unfile endpoint would
+    /// let a caller send both and leave the winner to request ordering.
+    pub fn move_workspace(&self, id: &str, section: Option<&str>) -> Result<Value, ApiError> {
+        let body = json!({ "section_id": section });
+        self.send(
+            self.http
+                .post(self.url(&format!("/workspaces/{}/move", url_encode(id))))
+                .json(&body),
+        )
+    }
+
+    /// Rename a workspace. The server trims and bounds the name; this does
+    /// not pre-check, because the server is the authority for every other
+    /// client too and two copies of the rule drift.
+    pub fn rename(&self, id: &str, name: &str) -> Result<Value, ApiError> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/workspaces/{}/rename", url_encode(id))))
+                .json(&json!({ "name": name })),
+        )
+    }
+
+    /// Whose turn it is. A read — safe to poll.
+    pub fn status(&self, id: &str) -> Result<Value, ApiError> {
+        self.send(
+            self.http
+                .get(self.url(&format!("/workspaces/{}/status", url_encode(id)))),
+        )
+    }
+
+    // ─── Projects ───────────────────────────────────────────────────────────
+    //
+    // Reads only. A project is created by opening a workspace in it.
+
+    /// The `limit`/`offset` pair of a query, leaving out what the caller did
+    /// not set so the server's own defaults apply rather than this client's
+    /// guess at them.
+    ///
+    /// Returned as parts rather than as a string because `?status=` has to
+    /// compose with it, and a function that returns a leading `?` can only
+    /// ever be the first thing in a query.
+    fn page_parts(limit: Option<i64>, offset: Option<i64>) -> Vec<String> {
+        let mut parts = Vec::new();
+        if let Some(n) = limit {
+            parts.push(format!("limit={n}"));
+        }
+        if let Some(n) = offset {
+            parts.push(format!("offset={n}"));
+        }
+        parts
+    }
+
+    pub fn projects(&self, limit: Option<i64>, offset: Option<i64>) -> Result<Value, ApiError> {
+        let q = query(Self::page_parts(limit, offset));
+        self.send(self.http.get(format!("{}{}", self.url("/projects"), q)))
+    }
+
+    /// One project, by uuid or by `owner/name`. The name contains a slash, so
+    /// it is encoded — without that it would split the path and 404.
+    pub fn project(&self, id: &str) -> Result<Value, ApiError> {
+        self.send(self.http.get(self.url(&format!("/projects/{}", url_encode(id)))))
+    }
+
+    pub fn project_workspaces(
+        &self,
+        id: &str,
+        status: Option<&str>,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<Value, ApiError> {
+        let mut parts = Vec::new();
+        if let Some(s) = status.map(str::trim).filter(|s| !s.is_empty()) {
+            parts.push(format!("status={}", url_encode(s)));
+        }
+        parts.extend(Self::page_parts(limit, offset));
+        let q = query(parts);
+        let path = format!("/projects/{}/workspaces", url_encode(id));
+        self.send(self.http.get(format!("{}{}", self.url(&path), q)))
+    }
+
+    // ─── Messages ───────────────────────────────────────────────────────────
+    //
+    // `prompt` above is the same send with a thinner answer. These exist so a
+    // caller can carry an idempotency key and read a message back by id — the
+    // two things a retrying script needs and a person does not.
+
+    /// Send a message. `message_id` is the caller's own key: send the same one
+    /// twice and the first message comes back with `duplicate: true` instead of
+    /// a second being created.
+    pub fn create_message(
+        &self,
+        workspace: &str,
+        text: &str,
+        model: Option<&str>,
+        message_id: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let mut body = json!({ "text": text });
+        if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+            body["model"] = json!(m);
+        }
+        if let Some(k) = message_id.map(str::trim).filter(|k| !k.is_empty()) {
+            body["message_id"] = json!(k);
+        }
+        self.send(
+            self.http
+                .post(self.url(&format!("/workspaces/{}/messages", url_encode(workspace))))
+                .json(&body),
+        )
+    }
+
+    /// Read one message back. Hangs off `/messages/{id}` rather than off the
+    /// workspace, because the id a send returns is all a caller kept.
+    pub fn message(&self, id: &str) -> Result<Value, ApiError> {
+        self.send(self.http.get(self.url(&format!("/messages/{}", url_encode(id)))))
+    }
+
+    // ─── Routines ───────────────────────────────────────────────────────────
+
+    pub fn routines(&self) -> Result<Value, ApiError> {
+        self.send(self.http.get(self.url("/routines")))
+    }
+
+    pub fn routine(&self, id: &str) -> Result<Value, ApiError> {
+        self.send(self.http.get(self.url(&format!("/routines/{}", url_encode(id)))))
+    }
+
+    /// Create a routine. `triggers` arrive already parsed into the
+    /// `{ kind, config }` pairs the server validates — the mini-syntax
+    /// (`weekdays@09:00`) is a CLI convenience and the server has never heard
+    /// of it, so the translation happens before the request and its errors are
+    /// usage errors rather than 400s.
+    ///
+    /// Not an upsert, unlike `create_section`: a routine that silently
+    /// replaced one of the same name would silently replace its webhook
+    /// secret too, and break a delivery somebody else configured.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_routine(
+        &self,
+        name: &str,
+        repo: Option<&str>,
+        agent: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        prompt: &str,
+        enabled: bool,
+        triggers: &[Value],
+    ) -> Result<Value, ApiError> {
+        let mut body = json!({
+            "name": name,
+            "prompt": prompt,
+            "enabled": enabled,
+            "triggers": triggers,
+        });
+        for (key, value) in [
+            ("repo", repo),
+            ("agent", agent),
+            ("model", model),
+            ("effort", effort),
+        ] {
+            if let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) {
+                body[key] = json!(v);
+            }
+        }
+        self.send(self.http.post(self.url("/routines")).json(&body))
+    }
+
+    pub fn delete_routine(&self, id: &str) -> Result<Value, ApiError> {
+        self.send(self.http.delete(self.url(&format!("/routines/{}", url_encode(id)))))
+    }
+
+    /// Mint a new webhook secret. The old URL stops working immediately, and
+    /// the reply is the only place the new one is readable.
+    pub fn rotate_routine_secret(&self, id: &str) -> Result<Value, ApiError> {
+        self.send(self.http.post(self.url(&format!(
+            "/routines/{}/rotate-secret",
+            url_encode(id)
+        ))))
+    }
+
+    /// Fire a routine now, without waiting for its schedule. Runs even a
+    /// disabled one: switching a routine off stops its triggers, not its
+    /// owner.
+    pub fn run_routine(&self, id: &str) -> Result<Value, ApiError> {
+        self.send(
+            self.http
+                .post(self.url(&format!("/routines/{}/run", url_encode(id)))),
+        )
+    }
+
     pub fn whoami(&self) -> Result<Value, ApiError> {
         self.send(self.http.get(self.url("/whoami")))
+    }
+
+    /// `whoami`, plus the two facts the server cannot report: which credential
+    /// this process picked up, and which cloud answered.
+    ///
+    /// Both are the difference between "the key is wrong" and "you are asking
+    /// the wrong server", which is the first thing anyone wants to know when a
+    /// call is refused. Shared so that `aura workspace whoami` and `aura auth
+    /// status` cannot describe the same machine differently.
+    pub fn whoami_described(&self) -> Result<Value, ApiError> {
+        let mut v = self.whoami()?;
+        if let Value::Object(m) = &mut v {
+            m.insert(
+                "token_source".into(),
+                Value::String(self.auth.source.label().into()),
+            );
+            m.insert("origin".into(), Value::String(self.auth.origin.clone()));
+        }
+        Ok(v)
     }
 }
 

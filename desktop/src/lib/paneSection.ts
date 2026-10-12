@@ -1,8 +1,8 @@
 /** Pane → ADE section mapping.
  *
  *  Every workpane ref belongs to exactly one left-nav section
- *  (Build / Team / Plan / Trace). This is the single source of truth for the
- *  left-nav SECTION HIGHLIGHT only — it does NOT gate tab visibility:
+ *  (Build / Trace). This is the single source of truth for the left-nav
+ *  SECTION HIGHLIGHT only — it does NOT gate tab visibility:
  *    - `App.tsx` section-follow (adeSection useMemo) — derives the active
  *      `adeSection` from the active leaf tab's kind so the left nav lights up
  *      the section the user is looking at.
@@ -12,9 +12,9 @@
  *  NOTE: `PerPaneTabStrip` used to FILTER a leaf's tabs down to the active
  *  tab's section (each section showing only its own tabs). That filter was
  *  removed in #221 (commit 51d88a7) — the strip is now one unified bar that
- *  shows EVERY tab in the leaf, so opening a Plan/Trace/Team page never hides
- *  your open code/agent tabs. This helper no longer touches the strip; keep
- *  it for the nav highlight alone.
+ *  shows EVERY tab in the leaf, so opening a Trace page never hides your open
+ *  code/agent tabs. This helper no longer touches the strip; keep it for the
+ *  nav highlight alone.
  *
  *  Keep this mapping exhaustive over `WorkPaneRef["kind"]` — a new pane kind
  *  must be classified here or it silently falls through to `build`. */
@@ -28,39 +28,20 @@ export type PaneSection = AdeSection;
 
 /** Classify a workpane ref into its owning left-nav section.
  *
- *  Mirrors the section-follow switch that used to live inline in `App.tsx`:
- *    - Plan  — standup / plan / pages / automations
- *    - Team  — screenshare / channels / commons / app
- *    - Trace — trace tools (Review / Rewind / Attestations / Doctor / Memory)
- *    - Build — agent / terminal / manager / file / empty / tasks / task */
+ *    - Trace — the verify/insight surfaces (Review / Rewind / Attestations /
+ *      Doctor / Memory / Code Map / Goals / sessions)
+ *    - Build — everything else: agent / terminal / manager / file / empty /
+ *      tasks / task / standup / plan / automations / screenshare / commons /
+ *      app / browser
+ *
+ *  The rail used to carry Team and Plan sections too, and this switch named a
+ *  section per family — a huddle read as Team, a planning surface as Plan.
+ *  Both sections are gone, so a pane that is not one of Trace's lights Build,
+ *  which is the only other thing the rail can light. Written as an explicit
+ *  trace list with a default rather than one arm per kind, because the
+ *  alternative is a dozen cases that all say the same word. */
 export function sectionForRef(ref: WorkPaneRef): PaneSection {
   switch (ref.kind) {
-    // Tasks is a Build destination — its own row in the rail's Build group,
-    // in the slot Mission Control held before the two merged. A board opened
-    // as a tab is the same board the destination shows, so it lights the same
-    // row; reading as Team here (from back when a board could only be reached
-    // under Team's umbrella) meant one tab strip and the rail disagreed about
-    // where you were.
-    case "tasks":
-    case "task":
-      return "build";
-    case "standup":
-    case "plan":
-    case "pages":
-    // Automations (scheduled / orchestrated runs) is a planning surface — it
-    // re-homed from the Build rail into Plan alongside Pages.
-    case "automations":
-      return "plan";
-    case "screenshare":
-    case "channels":
-    // Commons (Lounge + Plugin Exchange) lives as a right-rail tab; when
-    // its full-width center surface is open via the rail's expand action,
-    // the left nav reads as Team — it's the social/collaboration family.
-    case "commons":
-    // Full-surface plugin mini-apps (Gemini / Gmail / Reddit clients) are
-    // launched from Commons, so they read as Team too.
-    case "app":
-      return "team";
     case "trace":
     case "sessions":
     case "inspector":
@@ -69,7 +50,6 @@ export function sectionForRef(ref: WorkPaneRef): PaneSection {
     case "graph":
       return "trace";
     default:
-      // agent / terminal / manager / file / empty / browser
       return "build";
   }
 }
