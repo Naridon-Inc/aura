@@ -1,0 +1,36 @@
+/* An answer's first and last blocks sit flush with the message edges; the
+   gap between blocks is the typography's own. */
+.ui-message-markdown > :first-child {
+  margin-top: 0;
+}
+.ui-message-markdown > :last-child {
+  margin-bottom: 0;
+}
+/* A wide table scrolls inside the answer instead of widening it. */
+.ui-markdown-table {
+  overflow-x: auto;
+  margin-block: 12px;
+}
+.ui-markdown-table > table {
+  margin-block: 0;
+}
+/* The caret that trails a reply while it is still being written. */
+.ui-markdown-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 12px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--ui-muted-fg);
+  animation: ui-markdown-cursor 1s steps(2, start) infinite;
+}
+@keyframes ui-markdown-cursor {
+  to {
+    visibility: hidden;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-markdown-cursor {
+    animation: none;
+  }
+}

@@ -29,7 +29,11 @@ let asks: string[] = [];
 /** Set to make detection fail the way a backend error would. */
 let failWith: string | null = null;
 
+/** The run script saved in the repository's settings, or null for none. */
+let savedRun: string | null = null;
+
 mock.module("../src/lib/api", () => ({
+  repoWorktreeSettingsGet: async () => ({ run: savedRun }),
   api: {
     runDetect: async (repoRoot: string) => {
       asks.push(repoRoot);
@@ -104,6 +108,7 @@ beforeEach(() => {
   asks = [];
   failWith = null;
   detected = { command: null, candidates: [] };
+  savedRun = null;
   store.clear();
   invalidateRunDetection();
 });
@@ -124,6 +129,30 @@ describe("what Run will actually run", () => {
       candidates: [{ command: "bun run dev", source: "package.json" }],
     };
     expect(await resolveRunCommand(REPO)).toBe("bun run dev");
+  });
+
+  it("uses the run script saved in the repository's settings over detection", async () => {
+    detected = {
+      command: "npm run start",
+      candidates: [{ command: "npm run start", source: "package.json" }],
+    };
+    savedRun = "  bun run dev  ";
+    expect(await resolveRunCommand(REPO)).toBe("bun run dev");
+  });
+
+  it("prefers the pin over the saved run script", async () => {
+    savedRun = "bun run dev";
+    setRunCommandOverride(REPO, "make serve");
+    expect(await resolveRunCommand(REPO)).toBe("make serve");
+  });
+
+  it("ignores a saved run script of only whitespace", async () => {
+    savedRun = "   ";
+    detected = {
+      command: "npm run start",
+      candidates: [{ command: "npm run start", source: "package.json" }],
+    };
+    expect(await resolveRunCommand(REPO)).toBe("npm run start");
   });
 
   it("prefers the command the person pinned over the one we read", async () => {

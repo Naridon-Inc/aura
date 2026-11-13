@@ -8,9 +8,9 @@
 //! have invented both, and the first disagreement would only show up in someone
 //! else's CI.
 //!
-//! Both halves are deliberately matched to Conductor's documented CLI contract,
-//! because parity on the agent-facing surface is the point (see the Page
-//! "Conductor 0.85 → 0.90.1 — gap read + parity plan"). Where their contract is
+//! Both halves follow the contract the agent-facing CLIs in this space
+//! already document, because a script written against one of them should read
+//! ours correctly without being rewritten. Where that common contract is
 //! *weaker* than ours we keep ours and say so — see [`ExitCode`] on usage
 //! errors, and the note on credentials at the bottom of this file.
 
@@ -22,8 +22,8 @@ use std::fmt;
 
 /// What `aura <noun> <verb>` exits with.
 ///
-/// The five values and their meanings are Conductor's, so that a script written
-/// against one CLI reads the other correctly:
+/// The five values and their meanings are the established ones, so that a
+/// script written against another agent CLI reads this one correctly:
 ///
 /// | code | meaning |
 /// |------|---------|
@@ -40,11 +40,11 @@ use std::fmt;
 /// runtime failure from the caller's point of view: the command was spelled
 /// correctly and the world did not contain what it named. Giving it a dedicated
 /// code reads nicely in isolation but means every caller has to learn one more
-/// number to answer "did this work", and it is not what Conductor does.
+/// number to answer "did this work", and it is not what the others do.
 ///
 /// **`2` is reserved for usage, and clap already produces it.** `clap` exits 2
 /// on an unknown flag or a missing argument without being asked to, which is
-/// the same number Conductor uses for the same class of mistake. So usage
+/// the same number the others use for the same class of mistake. So usage
 /// errors are already right before any of our code runs, and nothing here
 /// should ever return [`ExitCode::Usage`] for something the server rejected —
 /// that is the server's judgement, not the parser's, and it belongs in `1` or
@@ -120,10 +120,10 @@ impl fmt::Display for ExitCode {
 
 /// The largest page the API will serve, whatever the caller asks for.
 ///
-/// Conductor's number. A cap has to exist — an agent that passes `--limit
+/// The established number. A cap has to exist — an agent that passes `--limit
 /// 100000` on a busy org should get a page and a `has_more`, not a timeout —
-/// and picking theirs means a script tuned against one CLI pages the same way
-/// against the other.
+/// and picking the one already in the wild means a script tuned against
+/// another agent CLI pages the same way here.
 pub const MAX_LIMIT: u32 = 100;
 
 /// The page size a list verb uses when the caller does not say.
@@ -189,10 +189,11 @@ pub fn has_more(body: &serde_json::Value) -> bool {
 // A note on credentials, which is where we deliberately do NOT match
 // ---------------------------------------------------------------------------
 //
-// Conductor splits credentials two ways: a user API key and a workspace token,
-// with a handful of verbs (routines among them) refusing the workspace token.
+// The usual shape splits credentials two ways: a user API key and a workspace
+// token, with a handful of verbs (routines among them) refusing the workspace
+// token.
 //
-// Aura does not copy that, because Aura's model already subsumes it. We mint
+// Aura does not follow that, because Aura's model already subsumes it. We mint
 // three kinds of bearer — a human token (`aura_…`), an org API key
 // (`aura_ak_…`) and a runner token (`aura_runner_…`) — and an org API key
 // carries an explicit scope set out of a seven-scope vocabulary that

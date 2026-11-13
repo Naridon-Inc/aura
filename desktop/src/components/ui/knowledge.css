@@ -1,0 +1,98 @@
+/* Team knowledge: a search field over the entries in a bordered list box
+   (each expands in place to its answer), and a plain form for a new one. */
+.ui-knowledge {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 64vh;
+  min-height: 0;
+}
+.ui-knowledge-list {
+  min-height: 0;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+.ui-knowledge-entry + .ui-knowledge-entry {
+  margin-top: 2px;
+}
+.ui-knowledge-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ui-fg);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.ui-knowledge-row:hover,
+.ui-knowledge-row[aria-expanded="true"] {
+  background: var(--ui-accent);
+}
+.ui-knowledge-row:focus-visible {
+  outline: 2px solid var(--ui-ring);
+  outline-offset: -2px;
+}
+.ui-knowledge-row > .ui-badge {
+  flex-shrink: 0;
+}
+.ui-knowledge-question {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-knowledge-row > small {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-knowledge-answer {
+  padding: 8px 8px 12px;
+}
+.ui-knowledge-answer > p {
+  margin: 0;
+  color: var(--ui-fg);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ui-knowledge-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ui-knowledge-form {
+  display: flex;
+  flex-direction: column;
+}
+.ui-knowledge-form > * + * {
+  margin-top: 16px;
+}
+.ui-knowledge-answer-input {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ui-knowledge-form-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 12px;
+}
+.ui-knowledge-form-row > .ui-form-field + .ui-form-field {
+  margin-top: 0;
+}

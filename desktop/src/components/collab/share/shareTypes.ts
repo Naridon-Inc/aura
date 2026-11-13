@@ -76,15 +76,15 @@ export const ACCESS_META: Record<
     hostBlurb:
       "Follows along as the work happens. Can't type here, can't tell your agents to do anything, and can't open your files.",
     guestBlurb:
-      "You can follow everything happening here. Sending messages and opening the project are switched off until the host hands you the wheel.",
+      "You can follow everything happening here. Sending messages and opening the repository are switched off until the host hands you the wheel.",
   },
   drive: {
     label: "Can drive",
     short: "Driving",
     hostBlurb:
-      "Can send messages, give your agents instructions, and read your project's files. The same as you can.",
+      "Can send messages, give your agents instructions, and read your repository's files. The same as you can.",
     guestBlurb:
-      "You can send messages, give the agents instructions and read the project, the same as the person whose machine this is. Nothing is copied to your machine and you can't change files directly — ask the agents to.",
+      "You can send messages, give the agents instructions and read the repository, the same as the person whose machine this is. Nothing is copied to your machine and you can't change files directly — ask the agents to.",
   },
 };
 

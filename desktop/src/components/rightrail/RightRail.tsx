@@ -1,27 +1,30 @@
-// Right-rail collaboration container. Aura owns the always-on Manager
-// surface (chat-first oversight). Chat owns conversations. Story owns
-// intent + file-editing activity. Source Control remains the concrete
-// git review/stage/commit surface.
+// The right sidebar's body: one tab strip — Artifacts, All files, Changes,
+// Checks, Tasks, then the Aura sections (Commons, plugin panels) drawn as tabs
+// of the same strip — with the Review toggle and file search at its end. The
+// git status row above it is `ReviewStateHeader`, mounted by the layout.
 //
-// W1.4 — plugin right-rail panels stack alongside the four built-ins.
-// A plugin tab id is shaped `plugin:<pluginId>:<panelId>` so the host
-// can demux back to the bridge when dispatching events.
+// A browser is not a details tab: it opens as a workspace tab from ＋.
 
-import { useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { PanelActiveContext } from "../../lib/panelActive";
 import { PluginSandboxFrame } from "../plugins/PluginSandboxFrame";
+import { DetailsTabs, type DetailsTab } from "../ui/details-panel";
+import { RailFilterContext } from "./railFilter";
+import { useChangedFileCount } from "./useChangeList";
 
 export type BuiltinRightRailTab =
+  | "artifacts"
   | "files"
   | "changes"
+  | "review"
   | "checks"
   | "prs"
   | "commons"
   | "aura"
   | "chat"
   | "story"
-  | "tasks"
-  | "browser";
+  | "tasks";
+
 export type RightRailTab = BuiltinRightRailTab | `plugin:${string}:${string}`;
 
 export type PluginRightRailPanelDescriptor = {
@@ -37,116 +40,57 @@ export type PluginRightRailPanelDescriptor = {
 type Props = {
   activeTab: RightRailTab;
   onChangeTab: (tab: RightRailTab) => void;
-  /** ADE redesign — code-context tabs. The mockup homes the file tree
-   *  and the git changes list on the right. Both are rendered only when
-   *  the view prop is supplied, so the legacy rail keeps its four tabs
-   *  unchanged when these are omitted. */
+  /** Every section is drawn only when its view is supplied. */
+  /** What the workspace has made — changed documents, pages and pictures,
+   *  and a card for the code changes. */
+  artifactsView?: ReactNode;
   filesView?: ReactNode;
   changesView?: ReactNode;
-  /** ADE redesign — the Checks tab: a readable PR document (title +
-   *  description + Git-status + Aura's semantic checks) over the full PR
-   *  list. Checks and PRs are one surface — the list lives at the bottom of
-   *  this view, not a separate tab. Rendered only when supplied, so the
-   *  legacy rail is unaffected. */
+  /** The review checklist the Review button opens. Without it there is no
+   *  Review button. */
+  reviewView?: ReactNode;
+  /** The pull request: its git status, Aura's checks, CI, comments, and the
+   *  repo's other pull requests below. */
   checksView?: ReactNode;
-  /** ADE redesign — the in-rail browser. Rendered only when supplied. Note:
-   *  no visible entry point right now (the globe was removed); the body stays
-   *  wired so re-enabling it is a one-liner. */
-  browserView?: ReactNode;
-  /** Commons — the Lounge (presence + ship log) and Plugin Exchange, homed
-   *  in the rail next to Checks. Rendered only when supplied, so the legacy
-   *  rail is unaffected. */
+  /** The project's tasks — the board's home beside the work. */
+  tasksView?: ReactNode;
+  /** Commons — the Lounge (presence + ship log) and Plugin Exchange. */
   commonsView?: ReactNode;
-  /** Changed-file count badge for the Changes tab. */
-  changesCount?: number;
-  /** In-flight cloud A2A task count (Tasks tab badge). */
-  /** W1.4 — plugin panels. Each one renders as a separate tab whose
-   *  body is a sandboxed srcdoc iframe wired into the plugin's bridge
-   *  (PluginPanelFrame loads the entry HTML through the Rust-jailed
-   *  asset reader). */
+  /** The project the Changes view lists. The number beside "Changes" is
+   *  counted from it by the same list the Changes header counts, so the two
+   *  read the same. */
+  changesRoot?: string | null;
+  /** Plugin panels. Each is its own tab whose body is a sandboxed iframe
+   *  wired into the plugin's bridge. */
   pluginPanels?: PluginRightRailPanelDescriptor[];
 };
 
-// Segment icons — small stroked glyphs matching the old pill tabs.
-const ICON = {
-  // A folder — the Files tab is this workspace's tree.
-  files: (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.6l1.4 1.6h5A1.5 1.5 0 0 1 14 6.1v5.4A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5v-7z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinejoin="round"
-      />
-    </svg>
-  ),
-  // A pane split down the middle — before on one side, after on the other.
-  // The Changes tab's own split-diff view, at 11px.
-  changes: (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-      <rect x="2.5" y="3" width="11" height="10" rx="1.4" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M8 3v10" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M4.6 6.4h1.8M4.6 9.6h1.8M9.6 6.4h1.8" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-    </svg>
-  ),
-  // Two rings that overlap — what this repo shares with the wider commons.
-  commons: (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-      <circle cx="6.2" cy="8" r="3.6" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="9.8" cy="8" r="3.6" stroke="currentColor" strokeWidth="1.2" />
-    </svg>
-  ),
-  // Pull-request glyph — two branch nodes joined on the left, the right branch
-  // curving back with an arrowhead (a change merging into the base). Marks the
-  // Checks tab as the PR surface.
-  checks: (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-      <circle cx="4" cy="4" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="4" cy="12" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="12" cy="12" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M4 5.6v4.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-      <path
-        d="M12 10.4V7.2A2.2 2.2 0 0 0 9.8 5H7"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M8.4 3.4 6.8 5l1.6 1.6"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  ),
-} as const;
+/** Tabs whose body reads the file filter — the search button only shows on
+ *  these, because a filter box over a body that ignores it is a lie. */
+const FILTERED: ReadonlySet<RightRailTab> = new Set(["files", "changes", "review"]);
+
+/** Tabs where Enter in the filter box looks for the words inside the files:
+ *  the Search pane opens with what was typed. */
+const SEARCH_ON_ENTER: ReadonlySet<RightRailTab> = new Set(["files"]);
+
+function searchInsideFiles(query: string) {
+  window.dispatchEvent(new CustomEvent("aura:open-search", { detail: { query } }));
+}
 
 /** One tab body. `mounted` is the once-seen-stays rule below; `active` is
  *  whether it is the tab you are looking at right now.
  *
  *  Kept mounted is not the same as kept running. A body behind another tab
  *  holds its scroll, its half-typed message and its selection — that is why it
- *  stays — but its polls have nothing to keep current, and they used to run
- *  forever anyway. `PanelActiveContext` is how the rail says "you're parked"
- *  without unmounting; a poll that reads it stops while hidden and catches up
- *  the moment the tab comes back. Every body goes through here so a tab added
- *  later cannot quietly reintroduce a background timer. */
-function RailBody({
-  active,
-  children,
-}: {
-  active: boolean;
-  children: ReactNode;
-}) {
+ *  stays — but its polls have nothing to keep current. `PanelActiveContext` is
+ *  how the rail says "you're parked" without unmounting; a poll that reads it
+ *  stops while hidden and catches up the moment the tab comes back. Every body
+ *  goes through here so a tab added later cannot quietly reintroduce a
+ *  background timer. */
+function RailBody({ active, children }: { active: boolean; children: ReactNode }) {
   return (
     <PanelActiveContext.Provider value={active}>
-      <div
-        className={
-          active ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "hidden"
-        }
-      >
+      <div className={active ? "ui-details-panel ui-details-panel--fill" : "hidden"}>
         {children}
       </div>
     </PanelActiveContext.Provider>
@@ -156,189 +100,109 @@ function RailBody({
 export function RightRail({
   activeTab,
   onChangeTab,
+  artifactsView,
   filesView,
   changesView,
+  reviewView,
   checksView,
+  tasksView,
   commonsView,
-  browserView,
-  changesCount = 0,
+  changesRoot,
   pluginPanels = [],
 }: Props) {
-  // The rail's sections render through the one shared Segment control (the
-  // connected-cell pill track used across the app's chrome), so build its
-  // options in declaration order. Conditional surfaces only appear when their
-  // view prop is supplied; ADE mode drops the legacy Aura/Chat/Story/Tasks
-  // cluster (re-homed elsewhere in the IA).
-  const tabOptions: RailTab[] = [];
-  if (filesView != null)
-    tabOptions.push({ value: "files", label: "Files", icon: ICON.files });
-  if (changesView != null)
-    tabOptions.push({
-      value: "changes",
-      label: "Changes",
-      count: changesCount,
-      icon: ICON.changes,
-    });
-  if (checksView != null)
-    tabOptions.push({ value: "checks", label: "Checks", icon: ICON.checks });
-  if (commonsView != null)
-    tabOptions.push({ value: "commons", label: "Commons", icon: ICON.commons });
-  for (const p of pluginPanels) {
-    tabOptions.push({
-      value: p.id,
-      label: p.title,
-      icon: (
-        <span
-          className="inline-block w-1.5 h-1.5 rounded-full"
-          // "This tab came from a plugin, not from us." Neither
-          // `--color-accent-purple` nor `--color-accent-blue` is defined by any
-          // pack, so this dot rendered as nothing at all. `--color-violet` is
-          // the palette's real third-party mark and it is already what the
-          // plugin surfaces use elsewhere.
-          style={{ background: "var(--color-violet)" }}
-          aria-hidden
-        />
-      ),
-    });
-  }
+  const changesCount = useChangedFileCount(changesView != null ? changesRoot : null);
+  const tabs: DetailsTab[] = [];
+  if (artifactsView != null) tabs.push({ value: "artifacts", label: "Artifacts" });
+  if (filesView != null) tabs.push({ value: "files", label: "All files" });
+  if (changesView != null) tabs.push({ value: "changes", label: "Changes", count: changesCount });
+  if (checksView != null) tabs.push({ value: "checks", label: "Checks" });
+  if (tasksView != null) tabs.push({ value: "tasks", label: "Tasks" });
+  if (commonsView != null) tabs.push({ value: "commons", label: "Commons" });
+  for (const p of pluginPanels) tabs.push({ value: p.id, label: p.title });
 
-  // A section you have never opened is not mounted; a section you have opened
-  // stays mounted.
-  //
-  // Every body here used to render on every rail render and merely wear
-  // `hidden`. Hidden is a paint instruction, not a lifecycle one: all five
-  // panels mounted, so opening a project ran the file tree's directory reads,
-  // the git status, the checks fetch AND a 15-second team-roster poll for the
-  // Commons lounge — four of them for tabs you were not looking at, before you
-  // had clicked anything.
-  //
-  // Unmounting on every switch would be the other extreme: it throws away
-  // scroll position and whatever you had half-typed. So the rule is
-  // once-seen-stays: the first time a section becomes active it mounts, and
-  // from then on it keeps its `hidden` behaviour and all its state.
+  // Once-seen-stays: a section mounts the first time it is opened and then
+  // stays mounted (hidden) so its scroll and half-typed input survive.
   const seen = useRef<Set<RightRailTab>>(new Set());
   seen.current.add(activeTab);
   const opened = (tab: RightRailTab) => seen.current.has(tab);
 
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const filtered = FILTERED.has(activeTab);
+
+  // A tab opened from elsewhere — ⌘T, the palette, "watch them in Tasks" —
+  // can sit past the strip's right edge in a narrow panel. Scroll the strip
+  // just far enough that the open tab is in view, or the panel changes with
+  // nothing in the strip saying why.
+  const railRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const list = railRef.current?.querySelector<HTMLElement>(".ui-details-tabs");
+    const tab = list?.querySelector<HTMLElement>('[role="tab"][data-state="active"]');
+    if (!list || !tab) return;
+    const strip = list.getBoundingClientRect();
+    const open = tab.getBoundingClientRect();
+    if (open.left < strip.left) list.scrollLeft -= strip.left - open.left;
+    else if (open.right > strip.right) list.scrollLeft += open.right - strip.right;
+  }, [activeTab]);
+
   return (
-    <div className="h-full flex flex-col overflow-hidden bg-bg-1">
-      {/* The rail's own subtle tab segment. `--row` lays the cells out
-          horizontally; `--bare` is the deliberate opt-out from the track every
-          other segmented strip in the app now wears, and it is the only one.
-
-          Two structural reasons, not taste. The cells below change width as you
-          switch — inside a bordered box that reads as the control resizing
-          under your cursor. And the counts overhang their glyph, which the
-          track's own `overflow: hidden` would clip.
-
-          Only the tab you are on spells its name. This rail is ~310px wide and
-          carries a section per view prop plus whatever the installed plugins
-          add; every cell wearing its glyph AND its word ran the strip off the
-          end, so the
-          last section was sliced in half by the window edge with nothing to say
-          it was there. Scrolling chrome hides destinations — a section you
-          cannot see is a section you do not know exists. So the others keep
-          their mark and give back their word: the strip fits at any count,
-          nothing falls off, and hovering (or a screen reader) still names them.
-          Counts stay on show either way, because an unread number is the reason
-          you would reach for the tab in the first place. */}
-      <div className="flex items-center h-9 px-2 border-b border-line-soft shrink-0 overflow-x-auto bg-bg-1">
-        <div
-          className="ade-seg ade-seg--row ade-seg--bare"
-          role="tablist"
-          aria-label="Rail sections"
-        >
-          {tabOptions.map((opt) => {
-            const active = activeTab === opt.value;
-            const name = opt.count && opt.count > 0 ? `${opt.label} · ${opt.count}` : opt.label;
-            return (
-              <button
-                key={opt.value}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                aria-label={name}
-                className={active ? "active" : "mark-only"}
-                onClick={() => onChangeTab(opt.value)}
-                title={name}
-              >
-                {opt.icon}
-                {active && opt.label}
-                {opt.count != null && opt.count > 0 && (
-                  <span className="text-2xs tabular-nums rounded px-1 bg-state-hover text-text-3">
-                    {opt.count}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      {filesView != null && opened("files") && (
-        <RailBody active={activeTab === "files"}>{filesView}</RailBody>
-      )}
-      {changesView != null && opened("changes") && (
-        <RailBody active={activeTab === "changes"}>{changesView}</RailBody>
-      )}
-      {checksView != null && opened("checks") && (
-        <RailBody active={activeTab === "checks"}>{checksView}</RailBody>
-      )}
-      {commonsView != null && opened("commons") && (
-        <RailBody active={activeTab === "commons"}>{commonsView}</RailBody>
-      )}
-      {pluginPanels
-        .filter((p) => opened(p.id))
-        .map((p) => (
-          <RailBody key={p.id} active={activeTab === p.id}>
-            {/* A plugin panel is a sandboxed iframe running someone else's
-                code. Mounting one for a tab nobody opened is worse than the
-                cost — it runs a third party on your machine unasked. */}
-            <PluginPanelFrame
-              pluginId={p.pluginId}
-              panelId={p.panelId}
-              title={p.title}
-              entry={p.entry}
-            />
-          </RailBody>
-        ))}
-      {browserView != null && opened("browser") && (
-        <RailBody active={activeTab === "browser"}>{browserView}</RailBody>
-      )}
+    <div ref={railRef} className="ui-details-rail">
+      <DetailsTabs
+        tabs={tabs}
+        value={activeTab}
+        onValueChange={(next) => onChangeTab(next as RightRailTab)}
+        reviewValue={reviewView != null ? "review" : undefined}
+        search={
+          filtered
+            ? {
+                open: searchOpen,
+                onOpenChange: setSearchOpen,
+                query,
+                onQueryChange: setQuery,
+                onSubmit: SEARCH_ON_ENTER.has(activeTab) ? searchInsideFiles : undefined,
+              }
+            : undefined
+        }
+      >
+        <RailFilterContext.Provider value={filtered && searchOpen ? query : ""}>
+          {artifactsView != null && opened("artifacts") && (
+            <RailBody active={activeTab === "artifacts"}>{artifactsView}</RailBody>
+          )}
+          {filesView != null && opened("files") && (
+            <RailBody active={activeTab === "files"}>{filesView}</RailBody>
+          )}
+          {changesView != null && opened("changes") && (
+            <RailBody active={activeTab === "changes"}>{changesView}</RailBody>
+          )}
+          {reviewView != null && opened("review") && (
+            <RailBody active={activeTab === "review"}>{reviewView}</RailBody>
+          )}
+          {checksView != null && opened("checks") && (
+            <RailBody active={activeTab === "checks"}>{checksView}</RailBody>
+          )}
+          {tasksView != null && opened("tasks") && (
+            <RailBody active={activeTab === "tasks"}>{tasksView}</RailBody>
+          )}
+          {commonsView != null && opened("commons") && (
+            <RailBody active={activeTab === "commons"}>{commonsView}</RailBody>
+          )}
+          {pluginPanels
+            .filter((p) => opened(p.id))
+            .map((p) => (
+              <RailBody key={p.id} active={activeTab === p.id}>
+                {/* A plugin panel is a sandboxed iframe running someone else's
+                    code. Mounting one for a tab nobody opened would run a
+                    third party on your machine unasked. */}
+                <PluginSandboxFrame
+                  pluginId={p.pluginId}
+                  surfaceId={p.panelId}
+                  title={p.title}
+                  entry={p.entry}
+                />
+              </RailBody>
+            ))}
+        </RailFilterContext.Provider>
+      </DetailsTabs>
     </div>
   );
 }
-
-function PluginPanelFrame({
-  pluginId,
-  panelId,
-  title,
-  entry,
-}: {
-  pluginId: string;
-  panelId: string;
-  title: string;
-  entry: string;
-}) {
-  // Narrow rail panel — the sandbox + bridge logic lives in the shared
-  // PluginSandboxFrame so a rail panel and a full-surface app can never
-  // diverge on how they're isolated.
-  return (
-    <PluginSandboxFrame
-      pluginId={pluginId}
-      surfaceId={panelId}
-      title={title}
-      entry={entry}
-    />
-  );
-}
-
-// The rail's own tab shape. The shared `SegmentOption` folds everything into
-// one `label` node, which is fine for a strip that always spells its cells out;
-// this one shows the word for the active cell only, so the name and the count
-// have to stay separable right up to the render.
-type RailTab = {
-  value: RightRailTab;
-  label: string;
-  count?: number;
-  icon: ReactNode;
-};

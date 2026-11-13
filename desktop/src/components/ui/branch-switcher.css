@@ -1,0 +1,97 @@
+/* The branch switcher's rows inside the shared command list: a branch name in
+   mono over who moved it last, how far it is from its shared copy, and who
+   else is on it. The item, its selection and the group headings are the
+   library's; this only lays out what a branch row carries beyond a label. */
+
+.ui-command-item.ui-branch-switch-row {
+  align-items: flex-start;
+  padding-block: 6px;
+}
+.ui-command-item .ui-branch-switch-icon {
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+}
+.ui-command-item .ui-branch-switch-icon[data-current] {
+  color: var(--ui-fg);
+}
+.ui-branch-switch-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ui-branch-switch-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-branch-switch-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 13px/20px var(--font-mono);
+}
+.ui-branch-switch-line .ui-badge {
+  flex-shrink: 0;
+}
+.ui-branch-switch-sync {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ui-branch-switch-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 16px;
+}
+.ui-branch-switch-who {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  align-self: center;
+}
+.ui-branch-switch-who .ui-avatar {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--ui-popover);
+}
+.ui-branch-switch-who .ui-avatar + .ui-avatar {
+  margin-left: -4px;
+}
+.ui-branch-switch-who .ui-avatar-fallback {
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.ui-branch-switch-more {
+  margin-left: 4px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-branch-switch-new {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-branch-switch-new code {
+  font: 13px/20px var(--font-mono);
+}
+.ui-branch-switch-error {
+  margin: 8px 8px 0;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+/* The branch named in "Switch branch?" reads as a name, in mono. */
+.ui-branch-switch-confirm-name {
+  font-family: var(--font-mono);
+}

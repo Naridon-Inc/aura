@@ -44,6 +44,7 @@ import {
   remotePlaceForRoot,
 } from "../activeMachine";
 import * as place from "./placeWork";
+import { originText } from "../originUrl";
 
 /** A cache key that tells a project on this laptop apart from the same
  *  project as held by a machine. The two answer differently to every question
@@ -133,15 +134,17 @@ export function gitStatusV2(repoRoot: string): Promise<GitStatusEntry[]> {
   return m ? place.placeGitStatusV2(m) : api.gitStatusV2(repoRoot);
 }
 
+/** `ignoreWhitespace` reads the patch with `git -w`. */
 export function gitDiff(
   repoRoot: string,
   file: string,
   sinceBase?: boolean,
+  ignoreWhitespace?: boolean,
 ): Promise<string> {
   const m = remotePlaceForRoot(repoRoot);
   return m
-    ? place.placeGitDiff(m, file, sinceBase)
-    : api.gitDiff(repoRoot, file, sinceBase);
+    ? place.placeGitDiff(m, file, sinceBase, ignoreWhitespace)
+    : api.gitDiff(repoRoot, file, sinceBase, ignoreWhitespace);
 }
 
 export function gitDiffAtCommit(
@@ -230,7 +233,8 @@ export function gitShowHead(repoRoot: string, file: string): Promise<string> {
 
 export function gitRemoteOrigin(repoRoot: string): Promise<string> {
   const m = remotePlaceForRoot(repoRoot);
-  return m ? place.placeGitRemoteOrigin(m) : api.gitRemoteOrigin(repoRoot);
+  const read: Promise<unknown> = m ? place.placeGitRemoteOrigin(m) : api.gitRemoteOrigin(repoRoot);
+  return read.then(originText);
 }
 
 /** The History rail's graph — `git log --all`, typed refs and all. */

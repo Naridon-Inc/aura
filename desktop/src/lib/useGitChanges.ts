@@ -239,6 +239,41 @@ function wireGlobals(): void {
   });
 }
 
+// ─── Buckets ─────────────────────────────────────────────────────────────
+
+export type ChangeBuckets = Pick<GitChanges, "staged" | "unstaged" | "untracked" | "changedCount">;
+
+/** A snapshot as the sections draw it. A single porcelain entry can be both
+ *  staged AND have unstaged changes (`MM`); it is in BOTH lists so each side
+ *  can be staged or unstaged on its own. Untracked (`??`) is its own list. */
+function bucketsOf(snap: Snapshot): ChangeBuckets {
+  const all: ChangedFile[] = snap.entries.map((e) => {
+    const s = snap.stats.get(e.path);
+    return {
+      path: e.path,
+      status: deriveStatus(e),
+      index: e.index,
+      worktree: e.worktree,
+      additions: s?.additions ?? 0,
+      deletions: s?.deletions ?? 0,
+    };
+  });
+  const staged = all.filter((f) => f.index && f.index !== "?");
+  const unstaged = all.filter(
+    (f) => f.worktree && f.worktree !== "?" && f.index !== "?",
+  );
+  const untracked = all.filter((f) => f.index === "?" || f.worktree === "?");
+  const trackedPaths = new Set<string>();
+  for (const f of staged) trackedPaths.add(f.path);
+  for (const f of unstaged) trackedPaths.add(f.path);
+  return {
+    staged,
+    unstaged,
+    untracked,
+    changedCount: trackedPaths.size,
+  };
+}
+
 // ─── Hook ────────────────────────────────────────────────────────────────
 
 export function useGitChanges(repoRoot: string | null | undefined): GitChanges {
@@ -286,33 +321,7 @@ export function useGitChanges(repoRoot: string | null | undefined): GitChanges {
   // EditViewPanel, where an effect downstream of `changedFiles` set
   // state every commit. The store above keeps those refs stable across
   // an unchanged poll, so this memo now also survives the 4s tick.
-  const buckets = useMemo(() => {
-    const all: ChangedFile[] = snap.entries.map((e) => {
-      const s = snap.stats.get(e.path);
-      return {
-        path: e.path,
-        status: deriveStatus(e),
-        index: e.index,
-        worktree: e.worktree,
-        additions: s?.additions ?? 0,
-        deletions: s?.deletions ?? 0,
-      };
-    });
-    const staged = all.filter((f) => f.index && f.index !== "?");
-    const unstaged = all.filter(
-      (f) => f.worktree && f.worktree !== "?" && f.index !== "?",
-    );
-    const untracked = all.filter((f) => f.index === "?" || f.worktree === "?");
-    const trackedPaths = new Set<string>();
-    for (const f of staged) trackedPaths.add(f.path);
-    for (const f of unstaged) trackedPaths.add(f.path);
-    return {
-      staged,
-      unstaged,
-      untracked,
-      changedCount: trackedPaths.size,
-    };
-  }, [snap.entries, snap.stats]);
+  const buckets = useMemo(() => bucketsOf(snap), [snap.entries, snap.stats]);
 
   return {
     staged: buckets.staged,
@@ -323,4 +332,41 @@ export function useGitChanges(repoRoot: string | null | undefined): GitChanges {
     error: snap.error,
     refresh,
   };
+}
+
+/** The changes of several repositories at once, keyed by root, through the
+ *  same shared poll `useGitChanges` uses: for a surface that marks files
+ *  across a project and the repositories nested inside it. */
+export function useGitChangesMany(roots: readonly string[]): ReadonlyMap<string, ChangeBuckets> {
+  const panelActive = usePanelActive();
+  const key = roots.join("\0");
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!key || !panelActive) return;
+    wireGlobals();
+    const bump = () => setTick((t) => t + 1);
+    const scopes = key.split("\0").map(placeScope);
+    for (const scope of scopes) {
+      storeFor(scope).subs.add(bump);
+      retime(scope);
+      void read(scope);
+    }
+    bump();
+    return () => {
+      for (const scope of scopes) {
+        storeFor(scope).subs.delete(bump);
+        retime(scope);
+      }
+    };
+  }, [key, panelActive]);
+
+  return useMemo(() => {
+    const out = new Map<string, ChangeBuckets>();
+    if (!key) return out;
+    for (const root of key.split("\0")) out.set(root, bucketsOf(storeFor(placeScope(root)).snap));
+    return out;
+    // `tick` is the store telling us a snapshot moved.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, tick]);
 }

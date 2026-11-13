@@ -10,13 +10,30 @@
 //
 // The phone-side UI is a single embedded HTML page served by the same
 // server (no separate build artifact).
+//
+// The frame is the shared dialog, the same one Pair phone uses: two tabs
+// (same Wi-Fi, or anywhere through auravcs.com), each either one sentence
+// and a Turn on button, or the QR with its link and code under it.
 
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Dialog } from "../Dialog";
-import { Button } from "../ui/button";
+import { Check, Copy } from "lucide-react";
+
 import { api, type RemoteRelayStatus } from "../../lib/api";
 import { useQr } from "../../lib/qr";
+import { Alert, AlertDescription } from "../ui/alert";
+import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tab-panels";
+import "../ui/pair-phone.css";
+import "../ui/remote-phone.css";
 
 type Status = {
   running: boolean;
@@ -30,6 +47,8 @@ type RemoteDialogProps = {
   onClose: () => void;
 };
 
+type Reach = "wifi" | "internet";
+
 export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
   const [status, setStatus] = useState<Status>({
     running: false,
@@ -42,6 +61,7 @@ export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
     code: null,
     public_url: null,
   });
+  const [reach, setReach] = useState<Reach>("wifi");
   const [busy, setBusy] = useState(false);
   const [relayBusy, setRelayBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,7 +78,13 @@ export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
       .catch(() => {});
     api
       .remoteRelayStatus()
-      .then((s) => mounted && setRelay(s))
+      .then((s) => {
+        if (!mounted) return;
+        setRelay(s);
+        // Open on the link that's live, so a phone already reaching this
+        // computer over the internet isn't hidden behind the Wi-Fi tab.
+        if (s.running) setReach("internet");
+      })
       .catch(() => {});
     return () => {
       mounted = false;
@@ -82,7 +108,7 @@ export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
     };
   }, [open]);
 
-  // Listen for client-count changes from the backend so the chip
+  // Listen for client-count changes from the backend so the count
   // updates the moment a phone connects/disconnects without polling.
   useEffect(() => {
     if (!open) return;
@@ -149,184 +175,174 @@ export function RemoteDialog({ open, onClose }: RemoteDialogProps) {
     }
   }
 
+  const wifiOn = status.running;
+  const netOn = relay.running;
+
   return (
-    <Dialog open={open} onClose={onClose} title="Use Aura on your phone" width={460}>
-      <div className="px-5 py-4 flex flex-col gap-4">
-        {!status.running ? (
-          <div className="flex flex-col gap-3">
-            <p className="text-text-2 text-base leading-relaxed">
-              Turn this on and your phone, on the same Wi-Fi, can drive
-              whatever's running here. No login: the link carries a short
-              PIN so only you can connect.
-            </p>
-            <Button
-              variant="default"
-              size="default"
-              onClick={start}
-              disabled={busy}
-              className="self-start"
-            >
-              {busy ? "Turning on…" : "Turn on"}
-            </Button>
-          </div>
-        ) : (
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center gap-3">
-              <div className="flex-1 min-w-0">
-                <div className="section-label mb-0.5">
-                  Open on phone
-                </div>
-                <div className="text-text-1 text-base font-mono break-all">
-                  {status.url}
-                </div>
-              </div>
-              {qr && (
-                <img
-                  src={qr}
-                  alt="QR"
-                  width={104}
-                  height={104}
-                  className="rounded bg-white p-1"
-                />
-              )}
-            </div>
+    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
+      <DialogContent className="ui-pair-phone ui-remote-phone">
+        <DialogHeader>
+          <DialogTitle>Use Aura on your phone</DialogTitle>
+          <DialogDescription>
+            Your phone drives whatever's running here. No login: the link
+            carries a short code so only you can connect.
+          </DialogDescription>
+        </DialogHeader>
 
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-text-4">PIN</span>
-              <span className="font-mono text-text-1 tracking-[0.2em]">
-                {status.pin}
-              </span>
-              <span className="ml-auto text-text-4">
-                {status.clients} {status.clients === 1 ? "phone" : "phones"} connected
-              </span>
-            </div>
+        <Tabs value={reach} onValueChange={(v) => setReach(v as Reach)}>
+          <TabsList aria-label="How your phone reaches this computer">
+            <TabsTrigger value="wifi">
+              Same Wi-Fi
+              {wifiOn && <span className="ui-remote-phone-live" aria-label="on" />}
+            </TabsTrigger>
+            <TabsTrigger value="internet">
+              Anywhere
+              {netOn && <span className="ui-remote-phone-live" aria-label="on" />}
+            </TabsTrigger>
+          </TabsList>
 
-            <div className="flex items-center gap-2">
-              <Button
-                variant="secondary"
-                size="default"
-                onClick={stop}
-                disabled={busy}
-              >
-                Turn off
-              </Button>
-              {status.url && (
-                <Button
-                  variant="secondary"
-                  size="default"
-                  onClick={() => {
-                    if (status.url) navigator.clipboard.writeText(status.url);
-                  }}
-                >
-                  Copy URL
-                </Button>
-              )}
-            </div>
-
-            <div className="text-text-4 text-xs leading-relaxed">
-              The PIN keeps other devices on your Wi-Fi from connecting by
-              accident. It doesn't scramble the connection, though. Only
-              share this link on a network you trust.
-            </div>
-          </div>
-        )}
-
-        {error && (
-          <div className="text-sm text-red">
-            {error}
-          </div>
-        )}
-
-        <div className="border-t border-bd-2 pt-4 flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <span className="text-text-1 text-sm font-medium">
-              Internet access
-            </span>
-            <span className="section-label">
-              via auravcs.com
-            </span>
-          </div>
-
-          {!relay.running ? (
-            <div className="flex flex-col gap-3">
-              <p className="text-text-2 text-base leading-relaxed">
-                Connect a phone that isn't on your Wi-Fi. Aura gives you a
-                short code. Share the link and your phone reaches this
-                computer over the internet.
+          <TabsContent value="wifi" className="ui-remote-phone-panel">
+            {wifiOn ? (
+              <Live
+                qr={qr}
+                url={status.url}
+                codeLabel="PIN"
+                code={status.pin}
+                note="The PIN keeps other devices on your Wi-Fi from connecting by accident. It doesn't scramble the connection, though. Only share this link on a network you trust."
+              />
+            ) : (
+              <p className="ui-remote-phone-off">
+                Turn this on and a phone on the same Wi-Fi can open Aura from
+                its browser.
               </p>
-              <Button
-                variant="default"
-                size="default"
-                onClick={relayStart}
-                disabled={relayBusy}
-                className="self-start"
-              >
-                {relayBusy ? "Connecting…" : "Turn on internet access"}
-              </Button>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center gap-3">
-                <div className="flex-1 min-w-0">
-                  <div className="section-label mb-0.5">
-                    Open on phone
-                  </div>
-                  <div className="text-text-1 text-base font-mono break-all">
-                    {relay.public_url}
-                  </div>
-                  <div className="text-text-4 text-xs mt-1">
-                    Code <span className="font-mono text-text-2 tracking-[0.2em]">{relay.code}</span>
-                  </div>
-                </div>
-                {relayQr && (
-                  <img
-                    src={relayQr}
-                    alt="QR"
-                    width={104}
-                    height={104}
-                    className="rounded bg-white p-1"
-                  />
-                )}
-              </div>
+            )}
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+          </TabsContent>
 
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="secondary"
-                  size="default"
-                  onClick={relayStop}
-                  disabled={relayBusy}
-                >
-                  Disconnect
+          <TabsContent value="internet" className="ui-remote-phone-panel">
+            {netOn ? (
+              <Live
+                qr={relayQr}
+                url={relay.public_url}
+                codeLabel="Code"
+                code={relay.code}
+                note="The code changes every time you reconnect. Aura's cloud only passes the connection between your phone and this computer. It doesn't read your code or your agents' work."
+              />
+            ) : (
+              <p className="ui-remote-phone-off">
+                Connect a phone that isn't on your Wi-Fi. Aura gives you a
+                short code; share the link and your phone reaches this
+                computer over the internet, through auravcs.com.
+              </p>
+            )}
+            {relayError && (
+              <Alert variant="destructive">
+                <AlertDescription>{relayError}</AlertDescription>
+              </Alert>
+            )}
+          </TabsContent>
+        </Tabs>
+
+        <DialogFooter>
+          {reach === "wifi" ? (
+            <>
+              <span className="ui-pair-phone-expiry">
+                {wifiOn
+                  ? `${status.clients} ${status.clients === 1 ? "phone" : "phones"} connected`
+                  : ""}
+              </span>
+              {wifiOn ? (
+                <Button variant="outline" size="sm" onClick={stop} disabled={busy}>
+                  {busy ? "Turning off…" : "Turn off"}
                 </Button>
-                {relay.public_url && (
-                  <Button
-                    variant="secondary"
-                    size="default"
-                    onClick={() => {
-                      if (relay.public_url)
-                        navigator.clipboard.writeText(relay.public_url);
-                    }}
-                  >
-                    Copy URL
-                  </Button>
-                )}
-              </div>
-
-              <div className="text-text-4 text-xs leading-relaxed">
-                The code changes every time you reconnect. Aura's cloud
-                only passes the connection between your phone and this
-                computer. It doesn't read your code or your agents' work.
-              </div>
-            </div>
+              ) : (
+                <Button size="sm" onClick={start} disabled={busy}>
+                  {busy ? "Turning on…" : "Turn on"}
+                </Button>
+              )}
+            </>
+          ) : (
+            <>
+              <span className="ui-pair-phone-expiry" />
+              {netOn ? (
+                <Button variant="outline" size="sm" onClick={relayStop} disabled={relayBusy}>
+                  {relayBusy ? "Disconnecting…" : "Disconnect"}
+                </Button>
+              ) : (
+                <Button size="sm" onClick={relayStart} disabled={relayBusy}>
+                  {relayBusy ? "Connecting…" : "Turn on"}
+                </Button>
+              )}
+            </>
           )}
-
-          {relayError && (
-            <div className="text-sm text-red">
-              {relayError}
-            </div>
-          )}
-        </div>
-      </div>
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
+  );
+}
+
+/** A live link: the QR on its white ground, the link with a copy button, the
+ *  code to type if the camera won't scan, and what the code does and doesn't
+ *  protect. */
+function Live({
+  qr,
+  url,
+  codeLabel,
+  code,
+  note,
+}: {
+  qr: string | null;
+  url: string | null;
+  codeLabel: string;
+  code: string | null;
+  note: string;
+}) {
+  return (
+    <>
+      <div className="ui-pair-phone-code">
+        <div className="ui-pair-phone-qr ui-remote-phone-qr">
+          {qr ? <img src={qr} alt="QR code for the phone link" /> : <span>No link yet</span>}
+        </div>
+        {url && (
+          <div className="ui-remote-phone-url">
+            <code>{url}</code>
+            <CopyLink url={url} />
+          </div>
+        )}
+        {code && (
+          <p className="ui-pair-phone-typed">
+            {codeLabel} <code>{code}</code>
+          </p>
+        )}
+      </div>
+      <p className="ui-pair-phone-note">{note}</p>
+    </>
+  );
+}
+
+function CopyLink({ url }: { url: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(t);
+  }, [copied]);
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      title={copied ? "Copied" : "Copy link"}
+      aria-label={copied ? "Copied" : "Copy link"}
+      onClick={() => {
+        void navigator.clipboard.writeText(url).then(() => setCopied(true), () => {});
+      }}
+    >
+      {copied ? <Check /> : <Copy />}
+    </Button>
   );
 }

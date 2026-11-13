@@ -2,9 +2,9 @@
 //
 // AURA-265, both halves. The count line and its note pin the copy that stops
 // `6` here and `9` in the Console reading as a contradiction; the source scan
-// at the bottom pins the other half of the same report — the selected sub-tab
-// looked exactly like the one under the pointer, so "Usage highlights but
-// Members is still on screen" was a hover being mistaken for a selection.
+// at the bottom pins the other half of the same report — "Usage highlights but
+// Members is still on screen" was a hover being mistaken for a selection, and
+// the page now has no sub-tabs to mistake.
 
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -42,9 +42,9 @@ describe("rosterSourceNote", () => {
 
   it("falls back to a sentence that still works with no project name", () => {
     expect(rosterSourceNote(null)).toBe(
-      "Everyone who has worked in this project, from its own history.",
+      "Everyone who has worked in this repository, from its own history.",
     );
-    expect(rosterSourceNote("   ")).toContain("in this project");
+    expect(rosterSourceNote("   ")).toContain("in this repository");
   });
 
   it("explains the other number only when the reader can see one", () => {
@@ -66,32 +66,25 @@ describe("rosterSourceNote", () => {
   });
 });
 
-describe("the Team sub-tabs", () => {
+describe("the Team page", () => {
   // The audit reported: "Selecting Usage highlights the Usage tab, but after
-  // 5+ seconds the full Members UI remains on screen." Switching sub-tab is a
-  // single `setSub` — it cannot take five seconds. What it can do is look
-  // switched: selected was `bg-bg-2 text-text-1 font-medium` and hover was
-  // `hover:bg-state-hover hover:text-text-1`, near-identical, so a pointer
-  // resting on Usage read as Usage being open.
+  // 5+ seconds the full Members UI remains on screen" — a pointer resting on
+  // a sub-tab read as that tab being open. The page no longer has sub-tabs:
+  // members, activity and usage sit one under another, every section on
+  // screen at once, so there is no selection for a hover to be mistaken for.
   const src = readFileSync(join(import.meta.dir, "TeamTab.tsx"), "utf8");
-  const button = src.slice(
-    src.indexOf("function SubTabButton"),
-    src.indexOf("function SubTabButton") + 1400,
-  );
 
-  it("marks the selected tab with something hover cannot produce", () => {
-    // An underline drawn from the accent. Hover may tint; only selection
-    // draws a rule under the tab.
-    expect(button).toContain("borderBottom");
-    expect(button).toContain("var(--color-accent)");
+  it("is one page with no sub-tab strip", () => {
+    expect(src).not.toContain("<TabsList");
+    expect(src).not.toContain("<TabsContent");
   });
 
-  it("tells assistive tech which tab is open, not just which is warm", () => {
-    expect(button).toContain("aria-selected");
-    expect(button).toContain('role="tab"');
-  });
-
-  it("keeps the row a tablist, so the tabs are navigable as a set", () => {
-    expect(src).toContain('role="tablist"');
+  it("shows members, then activity, then usage", () => {
+    const members = src.indexOf("<MembersPane");
+    const activity = src.indexOf('<SettingsSection title="Activity">');
+    const usage = src.indexOf('<SettingsSection title="Usage">');
+    expect(members).toBeGreaterThan(-1);
+    expect(activity).toBeGreaterThan(members);
+    expect(usage).toBeGreaterThan(activity);
   });
 });

@@ -5,9 +5,16 @@
 // the chosen body and stamps the row resolved_at + resolved_in_commit.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Check } from "lucide-react";
 import { Dialog } from "../Dialog";
+import { Alert, AlertDescription } from "../ui/alert";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
+import { Code } from "../ui/code";
+import { Textarea } from "../ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "../ui/toggle-group";
+import "../ui/conflicts.css";
 import { api, type ConflictedNode } from "../../lib/api";
 import { fetchAstConflicts, resolveAstConflict } from "../../lib/ambientCache";
 
@@ -105,134 +112,120 @@ export function ConflictsDialog({ open, repoRoot, onClose }: ConflictsDialogProp
       width={780}
       footer={
         <>
-          <label className="flex items-center gap-1.5 text-text-4 text-xs mr-auto select-none cursor-pointer">
-            <input
-              type="checkbox"
+          <label className="ui-check-label ui-conflicts-show-resolved">
+            <Checkbox
               checked={showResolved}
-              onChange={(e) => setShowResolved(e.target.checked)}
+              onCheckedChange={(next) => setShowResolved(next === true)}
             />
             Show resolved
           </label>
-          <Button variant="ghost" size="xs" onClick={onClose}>
+          <Button variant="outline" onClick={onClose}>
             Close
           </Button>
           <Button
-            variant="default"
-            size="xs"
             onClick={resolve}
             disabled={busy || !target}
             title={target ? strategyVerb(strategy) : "Pick a clash first"}
           >
-            {busy ? "saving…" : target ? strategyVerb(strategy) : "Keep one"}
+            {busy ? "Saving…" : target ? strategyVerb(strategy) : "Keep one"}
           </Button>
         </>
       }
     >
-      <div className="space-y-2 text-sm">
-        {err && <div role="alert" className="text-red text-xs">{err}</div>}
-        {loading && rows.length === 0 && (
-          <div className="flex items-center gap-1.5 text-text-4 text-xs">
-            <AsciiSpinner className="text-xs leading-none" /> Looking for clashes…
-          </div>
-        )}
-        {!loading && visibleRows.length === 0 && (
-          <div className="text-text-4 text-xs">
-            {showResolved ? "Nothing clashes." : "Nothing clashes right now."}
-          </div>
-        )}
-        <div className="grid grid-cols-[260px_1fr] gap-2 max-h-[60vh]">
-          <div className="overflow-y-auto border border-line-soft rounded">
+      {err && (
+        <Alert variant="destructive" className="ui-conflicts-alert">
+          <AlertDescription>{err}</AlertDescription>
+        </Alert>
+      )}
+      {loading && rows.length === 0 ? (
+        <p className="ui-conflicts-state" role="status">
+          <AsciiSpinner /> Looking for clashes…
+        </p>
+      ) : visibleRows.length === 0 ? (
+        <p className="ui-conflicts-state">
+          {showResolved ? "Nothing clashes." : "Nothing clashes right now."}
+        </p>
+      ) : (
+        <div className="ui-conflicts">
+          <ul className="ui-conflicts-list" aria-label="Clashes">
             {visibleRows.map((row) => {
               const isSel = selected === row.id;
               const resolved = row.resolved_at !== null;
               return (
-                <button
-                  key={row.id}
-                  type="button"
-                  onClick={() => setSelected(isSel ? null : row.id)}
-                  className={[
-                    "w-full text-left px-2.5 py-1.5 border-b border-line-soft last:border-b-0 transition-colors",
-                    isSel ? "bg-bg-3" : "hover:bg-state-hover",
-                  ].join(" ")}
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-text-1 text-sm font-medium truncate flex-1">
-                      {row.identifier}
+                <li key={row.id}>
+                  <button
+                    type="button"
+                    className="ui-conflicts-row"
+                    aria-pressed={isSel}
+                    onClick={() => setSelected(isSel ? null : row.id)}
+                  >
+                    <span className="ui-conflicts-row-title">
+                      <strong>{row.identifier}</strong>
+                      {resolved && <Check aria-label="Settled" />}
                     </span>
-                    {resolved && (
-                      <span className="text-accent-green text-2xs">
-                        ✓
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-text-4 text-2xs truncate">{row.file}</div>
-                  <div className="text-text-4 text-2xs truncate">
-                    {row.ours_agent} vs {row.theirs_agent}
-                  </div>
-                </button>
+                    <small>{row.file}</small>
+                    <small>
+                      {row.ours_agent} vs {row.theirs_agent}
+                    </small>
+                  </button>
+                </li>
               );
             })}
-          </div>
-          <div className="overflow-y-auto">
+          </ul>
+          <div className="ui-conflicts-detail">
             {!target ? (
-              <div className="text-text-4 text-xs p-2">
-                Pick a clash on the left to sort out.
-              </div>
+              <p className="ui-conflicts-state">Pick a clash on the left to sort out.</p>
             ) : (
-              <div className="space-y-2">
-                <div className="flex items-center gap-1.5">
-                  <StrategyButton
-                    cur={strategy}
-                    val="ours"
-                    label={`This one (${target.ours_agent})`}
-                    onPick={setStrategy}
-                  />
-                  <StrategyButton
-                    cur={strategy}
-                    val="theirs"
-                    label={`The other (${target.theirs_agent})`}
-                    onPick={setStrategy}
-                  />
-                  <StrategyButton
-                    cur={strategy}
-                    val="custom"
-                    label="Write my own"
-                    onPick={setStrategy}
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-2">
+              <>
+                <ToggleGroup
+                  type="single"
+                  variant="outline"
+                  size="sm"
+                  aria-label="Which version to keep"
+                  value={strategy}
+                  // A single group reports "" when the pressed choice is
+                  // pressed again; one version is always chosen.
+                  onValueChange={(next) => {
+                    if (next === "ours" || next === "theirs" || next === "custom") {
+                      setStrategy(next);
+                    }
+                  }}
+                >
+                  <ToggleGroupItem value="ours">This one ({target.ours_agent})</ToggleGroupItem>
+                  <ToggleGroupItem value="theirs">
+                    The other ({target.theirs_agent})
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="custom">Write my own</ToggleGroupItem>
+                </ToggleGroup>
+                <div className="ui-conflicts-sides">
                   <Side label={`This one · ${target.ours_agent}`} body={target.ours} />
                   <Side label={`The other · ${target.theirs_agent}`} body={target.theirs} />
                 </div>
                 {strategy === "custom" && (
-                  <div className="space-y-1">
-                    <div className="section-label">
-                      Your combined version
-                    </div>
-                    <textarea
+                  <label className="ui-form-field">
+                    Your combined version
+                    <Textarea
+                      className="ui-conflicts-custom"
                       value={customBody}
                       onChange={(e) => setCustomBody(e.target.value)}
                       rows={10}
-                      className="w-full bg-bg-1 border border-line rounded px-2 py-1.5 text-text-1 text-xs font-mono outline-none focus:border-text-4 resize-y"
                     />
-                  </div>
+                  </label>
                 )}
-                <div className="text-text-4 text-2xs">
-                  based on: <span className="font-mono">{target.base_hash || "(none)"}</span>
+                <p className="ui-conflicts-meta">
+                  Based on <Code size="sm">{target.base_hash || "(none)"}</Code>
                   {target.resolved_in_commit && (
                     <>
-                      {" · settled in: "}
-                      <span className="font-mono">
-                        {target.resolved_in_commit.slice(0, 8)}
-                      </span>
+                      {" · settled in "}
+                      <Code size="sm">{target.resolved_in_commit.slice(0, 8)}</Code>
                     </>
                   )}
-                </div>
-              </div>
+                </p>
+              </>
             )}
           </div>
         </div>
-      </div>
+      )}
     </Dialog>
   );
 }
@@ -245,41 +238,11 @@ function strategyVerb(s: Strategy): string {
   return "Use my version";
 }
 
-function StrategyButton({
-  cur,
-  val,
-  label,
-  onPick,
-}: {
-  cur: Strategy;
-  val: Strategy;
-  label: string;
-  onPick: (s: Strategy) => void;
-}) {
-  const active = cur === val;
-  return (
-    <button
-      type="button"
-      onClick={() => onPick(val)}
-      className={[
-        "px-2 py-1 text-xs rounded border transition-colors",
-        active
-          ? "bg-bg-3 border-line text-text-1"
-          : "bg-bg-1 border-line-soft text-text-3 hover:bg-state-hover",
-      ].join(" ")}
-    >
-      {label}
-    </button>
-  );
-}
-
 function Side({ label, body }: { label: string; body: string }) {
   return (
-    <div className="space-y-1">
-      <div className="section-label">{label}</div>
-      <pre className="bg-bg-1 border border-line-soft rounded p-1.5 max-h-48 overflow-auto text-xs font-mono text-text-3 whitespace-pre-wrap break-all">
-        {body || "(empty)"}
-      </pre>
-    </div>
+    <section className="ui-conflicts-side">
+      <h3>{label}</h3>
+      <pre>{body || "(empty)"}</pre>
+    </section>
   );
 }

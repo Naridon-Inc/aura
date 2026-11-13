@@ -1,55 +1,38 @@
-import * as React from "react";
-import { Input as MedusaInput } from "@medusajs/ui";
-
+import { forwardRef, type InputHTMLAttributes, type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 
-type MedusaInputProps = React.ComponentPropsWithoutRef<typeof MedusaInput>;
-
-export interface InputProps extends Omit<MedusaInputProps, "prefix" | "size"> {
-  prefix?: React.ReactNode;
-  suffix?: React.ReactNode;
+export interface InputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "prefix" | "size"> {
+  prefix?: ReactNode;
+  suffix?: ReactNode;
   invalid?: boolean;
-  size?: MedusaInputProps["size"];
+  size?: "small" | "base";
 }
 
-export const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ className, prefix, suffix, invalid, size = "base", ...props }, ref) => {
-    if (prefix == null && suffix == null) {
-      return (
-        <MedusaInput
-          ref={ref}
-          size={size}
-          aria-invalid={invalid || undefined}
-          className={cn(invalid && "shadow-[var(--shadow-field-error)]", className)}
-          {...props}
-        />
-      );
-    }
-
-    // With a prefix or suffix the FIELD is this row: it owns the background,
-    // the border and the focus ring, and the control inside owns nothing but
-    // the text. Composing Medusa's `Input` here drew a second field inside the
-    // first — its own border at rest, its own ring on focus, its own red on
-    // invalid — so a focused search box showed two stacked outlines. It also
-    // wraps the element in a `div` we can't reach, which swallowed `flex-1`
-    // and left the text control refusing to fill the row.
+export const Input = forwardRef<HTMLInputElement, InputProps>(
+  ({ className, prefix, suffix, invalid, size = "base", disabled, ...props }, ref) => {
+    const input = (
+      <input
+        ref={ref}
+        disabled={disabled}
+        aria-invalid={invalid || undefined}
+        className={
+          prefix != null || suffix != null
+            ? "ui-input-inner"
+            : cn("ui-input", size === "small" && "ui-input-small", className)
+        }
+        {...props}
+      />
+    );
+    if (prefix == null && suffix == null) return input;
     return (
       <div
-        className={cn(
-          "flex w-full items-center gap-1.5 rounded-md bg-state-hover px-2 shadow-borders-base transition-fg focus-within:shadow-borders-interactive-with-active",
-          size === "small" ? "h-7" : "h-8",
-          invalid && "shadow-[var(--shadow-field-error)]",
-          className,
-        )}
+        className={cn("ui-input ui-input-group", size === "small" && "ui-input-small", className)}
+        data-disabled={disabled || undefined}
+        data-invalid={invalid || undefined}
       >
-        {prefix != null && <span className="shrink-0 select-none text-text-3">{prefix}</span>}
-        <input
-          ref={ref}
-          aria-invalid={invalid || undefined}
-          className="txt-compact-small h-full min-w-0 flex-1 appearance-none bg-transparent p-0 text-ui-fg-base caret-ui-fg-base outline-none placeholder-ui-fg-muted disabled:cursor-not-allowed disabled:text-ui-fg-disabled"
-          {...props}
-        />
-        {suffix != null && <span className="shrink-0 select-none text-text-3">{suffix}</span>}
+        {prefix != null && <span className="ui-input-adornment">{prefix}</span>}
+        {input}
+        {suffix != null && <span className="ui-input-adornment">{suffix}</span>}
       </div>
     );
   },

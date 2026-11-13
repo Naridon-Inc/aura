@@ -4,8 +4,8 @@
 // ID …" or "HTTP 401: Bad credentials" — and the UI must never show that
 // verbatim. Map the raw string to one known mode and give the next action.
 //
-// Used by both PR surfaces (PrRailPanel list, PRDetailPane center) via the
-// shared GhErrorNotice so the banner reads the same everywhere.
+// Used by the PR surfaces (the Dashboard's pull request list, the PRDetailPane
+// tab) via the shared GhErrorNotice so the banner reads the same everywhere.
 
 export type GhErrorKind =
   | "rate_limit"

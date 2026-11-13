@@ -6,16 +6,16 @@
 //! edit/write tool calls, extracts their old/new content straight from the
 //! tool input, and mounts the same Monaco `DiffEditor` engine the ChangesView
 //! and PR diff use (via the shared `monacoTheme` / `monacoLanguage` /
-//! `monacoEnv` helpers — no diff logic duplicated). It's collapsed by default
-//! to a compact header so a burst of edits doesn't flood the timeline; one
-//! click expands the side-by-side (folding to inline on a narrow pane).
+//! `monacoEnv` helpers — no diff logic duplicated). It is a step row,
+//! closed by default so a burst of edits doesn't flood the timeline; opening
+//! it shows the side-by-side (folding to inline on a narrow pane).
 //!
 //! A write with no prior content renders as a "new file" — the left pane is
 //! empty, the right is the full body. When old/new can't be extracted at all
-//! the caller falls back to the generic `ToolCard`, so this is only ever
+//! the caller falls back to the plain `ToolCard`, so this is only ever
 //! mounted when there's a real diff to show.
 
-import { Suspense, lazy, useMemo, useState } from "react";
+import { Suspense, lazy, useMemo } from "react";
 import { AsciiSpinner } from "../../ui/ascii-spinner";
 
 import { languageSlugForPath } from "../../../lib/monacoLanguage";
@@ -23,7 +23,9 @@ import { configureMonacoDiagnostics } from "../../../lib/monacoDiagnostics";
 import { auraThemeName, ensureAuraThemes } from "../../../lib/monacoTheme";
 import { installMonacoEnvironment } from "../../../lib/monacoEnv";
 import { useResolvedTheme } from "../../../lib/themeStore";
-import { StatusPip } from "./StatusLine";
+import { ToolCall } from "../../ui/message";
+import { toolCallStatus } from "./ToolDetail";
+import "../../ui/chat-tool-detail.css";
 import { toolStatus, type ToolResult } from "./types";
 import { basename } from "../../../lib/paths";
 
@@ -90,8 +92,9 @@ export function isFileDiffTool(name: string, input: unknown): boolean {
   return fileDiffData(name, input) !== null;
 }
 
-/** One edit/write tool call as an inline before/after diff. Collapsed to a
- *  header by default; expands to the Monaco side-by-side. */
+/** One edit/write tool call as a step row whose content is the before/after
+ *  diff. The Monaco editor only mounts while the row is open, so a burst of
+ *  edits costs nothing until one is read. */
 export function FileDiffTool({
   name,
   input,
@@ -101,25 +104,7 @@ export function FileDiffTool({
   input: unknown;
   result?: ToolResult;
 }) {
-  const [open, setOpen] = useState(false);
-  const resolvedTheme = useResolvedTheme();
-  const isDark = resolvedTheme !== "light";
-
   const data = useMemo(() => fileDiffData(name, input), [name, input]);
-  // languageSlugForPath already resolves to a Monaco language id (full grammar
-  // coverage), falling back to plaintext.
-  const language = useMemo(
-    () => languageSlugForPath(data?.path ?? ""),
-    [data?.path],
-  );
-  const stats = useMemo(
-    () =>
-      data
-        ? quickLineDelta(data.oldContent, data.newContent)
-        : { added: 0, removed: 0 },
-    [data],
-  );
-
   if (!data) return null;
   const status = toolStatus(result);
   const verb =
@@ -137,113 +122,37 @@ export function FileDiffTool({
             ? "No result"
             : "Failed";
   const label = basename(data.path) || data.path || "file";
-
-  // Collapsed — a flat uniform row matching the read/edit tool lines: a fixed
-  // leading column (status pip), the verb, the mono path, a "new" tag for a
-  // fresh write, then the +/− diffstat and chevron pushed right. Same
-  // `.aura-tool-row`/`.aura-tool-glyph` skeleton so an inline diff sits in the
-  // same vertical list as every other step, not as a taller card.
-  if (!open) {
-    return (
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="aura-tool-row"
-        title={data.path}
-      >
-        <span className="aura-tool-glyph">
-          <StatusPip status={status} />
-        </span>
-        <span className="aura-tool-chip-verb">{verb}</span>
-        <span className="aura-tool-chip-subject font-mono" title={data.path}>
-          {label}
-        </span>
-        {data.isNew && (
-          <span
-            className="shrink-0 t-2xs px-1 rounded"
-            style={{
-              background:
-                "color-mix(in srgb, var(--color-accent) 14%, transparent)",
-              color: "var(--color-accent)",
-            }}
-          >
-            new
-          </span>
-        )}
-        <span
-          className="shrink-0 tabular-nums text-xs flex items-center gap-1.5"
-          style={{ fontFamily: "var(--font-mono)" }}
-        >
-          {stats.added > 0 && (
-            <span style={{ color: "var(--color-accent-green)" }}>
-              +{stats.added}
-            </span>
-          )}
-          {stats.removed > 0 && (
-            <span style={{ color: "var(--color-red)" }}>−{stats.removed}</span>
-          )}
-          <Chevron dir="down" />
-        </span>
-      </button>
-    );
-  }
-
-  // Expanded — the bordered card carrying the same one-line header (now
-  // collapsible) above the Monaco side-by-side panel.
   return (
-    <div
-      className="group overflow-hidden text-sm"
-      style={{
-        background: "var(--color-bg-1)",
-        border: "1px solid var(--color-line)",
-        borderRadius: "var(--radius-md)",
-      }}
-    >
-      <button
-        type="button"
-        onClick={() => setOpen(false)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 text-left min-w-0 transition-colors hover:bg-[color-mix(in_srgb,var(--color-text-3)_6%,transparent)]"
-        title={data.path}
-      >
-        <StatusPip status={status} />
-        <span className="aura-block-label shrink-0">{verb}</span>
-        <span
-          className="min-w-0 truncate font-mono text-xs"
-          style={{ color: "var(--color-text-1)" }}
-        >
-          {label}
-        </span>
-        {data.isNew && (
-          <span
-            className="shrink-0 t-2xs px-1 rounded"
-            style={{
-              background:
-                "color-mix(in srgb, var(--color-accent) 14%, transparent)",
-              color: "var(--color-accent)",
-            }}
-          >
-            new
+    <ToolCall title={`${verb} ${label}`} status={toolCallStatus(status)}>
+      <FileDiffBody data={data} />
+    </ToolCall>
+  );
+}
+
+/** The open row: the full path with the line counts, then the diff. */
+function FileDiffBody({ data }: { data: FileDiffData }) {
+  const resolvedTheme = useResolvedTheme();
+  const isDark = resolvedTheme !== "light";
+  // languageSlugForPath already resolves to a Monaco language id (full grammar
+  // coverage), falling back to plaintext.
+  const language = useMemo(() => languageSlugForPath(data.path), [data.path]);
+  const stats = useMemo(
+    () => quickLineDelta(data.oldContent, data.newContent),
+    [data.oldContent, data.newContent],
+  );
+  return (
+    <>
+      <p className="ui-tool-meta">
+        <span title={data.path}>{data.path || "file"}</span>
+        {data.isNew && <span>New file</span>}
+        {(stats.added > 0 || stats.removed > 0) && (
+          <span className="ui-diff-count">
+            <span>+{stats.added}</span>
+            <span>−{stats.removed}</span>
           </span>
         )}
-        <span
-          className="ml-auto shrink-0 tabular-nums text-xs flex items-center gap-1.5"
-          style={{ fontFamily: "var(--font-mono)" }}
-        >
-          {stats.added > 0 && (
-            <span style={{ color: "var(--color-accent-green)" }}>
-              +{stats.added}
-            </span>
-          )}
-          {stats.removed > 0 && (
-            <span style={{ color: "var(--color-red)" }}>−{stats.removed}</span>
-          )}
-          <Chevron dir="up" />
-        </span>
-      </button>
-      <div
-        className="border-t"
-        style={{ borderColor: "var(--color-line-soft)", height: 280 }}
-      >
+      </p>
+      <section className="ui-file-diff ui-file-diff-editor">
         <Suspense fallback={<DiffLoading />}>
           <DiffEditor
             original={data.oldContent}
@@ -278,22 +187,22 @@ export function FileDiffTool({
             }}
           />
         </Suspense>
-      </div>
-    </div>
+      </section>
+    </>
   );
 }
 
 function DiffLoading() {
   return (
-    <div className="h-full w-full flex items-center justify-center gap-1.5 text-xs text-text-4">
+    <p className="ui-file-diff-loading">
       <AsciiSpinner />
       Loading the changes…
-    </div>
+    </p>
   );
 }
 
 // Cheap +/- line counter — shared-prefix/suffix walk, good enough for the
-// header chip (mirrors DiffView's quickLineDelta; not worth a Myers pass).
+// line counts (mirrors DiffView's quickLineDelta; not worth a Myers pass).
 function quickLineDelta(a: string, b: string): { added: number; removed: number } {
   if (a === b) return { added: 0, removed: 0 };
   const la = a.split("\n");
@@ -310,27 +219,4 @@ function quickLineDelta(a: string, b: string): { added: number; removed: number 
     removed: Math.max(0, ja - i + 1),
     added: Math.max(0, jb - i + 1),
   };
-}
-
-function Chevron({ dir }: { dir: "up" | "down" }) {
-  return (
-    <svg
-      width={11}
-      height={11}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      style={{
-        transform: dir === "up" ? "rotate(180deg)" : undefined,
-        transition: "transform var(--motion-fast)",
-        color: "var(--color-text-3)",
-      }}
-      aria-hidden
-    >
-      <path d="M4 6l4 4 4-4" />
-    </svg>
-  );
 }

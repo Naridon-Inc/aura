@@ -1,0 +1,84 @@
+/* A browser tab in a work pane. The buttons are the library's ghost icon
+   buttons and the address field borrows the library input's border, radius
+   and focus ring; this lays out the bar, the hole the native page pins to,
+   and the blank face shown before the first address. */
+.ui-browser-tab {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-browser-bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  height: 40px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-browser-address {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 28px;
+  margin: 0 4px;
+  padding: 0 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-input-bg, transparent);
+  color: var(--ui-muted-fg);
+}
+.ui-browser-address:focus-within {
+  border-color: var(--ui-ring);
+  box-shadow: 0 0 0 1px var(--ui-ring);
+}
+.ui-browser-address > svg {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+}
+.ui-browser-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ui-fg);
+  font: 13px/20px var(--font-sans);
+  outline: none;
+}
+.ui-browser-input::placeholder {
+  color: var(--ui-muted-fg);
+}
+.ui-browser-hole {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.ui-browser-start {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  cursor: text;
+  user-select: none;
+}
+.ui-browser-start > svg {
+  width: 24px;
+  height: 24px;
+  opacity: 0.5;
+}

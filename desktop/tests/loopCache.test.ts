@@ -1,8 +1,7 @@
-// Five surfaces asked the crew graph the same question on five cadences.
+// Several surfaces ask the crew graph the same question on their own cadences.
 //
 // `loop_ready_view` re-arms any node an app left `working` when it died, so it
-// writes before it answers. BuildNav polls it every 10s, the work rail every
-// 30s, the crew board every 4s while an agent is running — and those cadences
+// writes before it answers. The work rail polls it every 30s, the crew board every 4s while an agent is running — and those cadences
 // are not aligned, so the overlaps land exactly when somebody is watching their
 // crew work.
 //
@@ -14,16 +13,13 @@
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { readSrc, stripComments } from "./support/code";
+import { readSrc, stripComments, strippedSrcTree } from "./support/code";
 
 describe("who reads the crew graph", () => {
   it("is only the cache module. Everyone else goes through it", async () => {
-    const glob = new Bun.Glob("**/*.{ts,tsx}");
-    const root = `${import.meta.dir}/../src/`;
     const offenders: string[] = [];
-    for await (const rel of glob.scan(root)) {
+    for (const [rel, body] of await strippedSrcTree()) {
       if (rel === "lib/api.ts" || rel === "lib/loopCache.ts") continue;
-      const body = stripComments(await Bun.file(root + rel).text());
       if (body.includes("api.loopReadyView(")) offenders.push(rel);
     }
     expect(offenders).toEqual([]);

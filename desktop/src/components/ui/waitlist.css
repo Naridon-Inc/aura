@@ -1,0 +1,15 @@
+/* The phone waitlist form, in a dialog or on its settings page: the shared
+   fields stacked on the form rhythm, and the privacy line under them. */
+
+.ui-waitlist {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 460px;
+}
+.ui-waitlist-note {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 18px;
+}

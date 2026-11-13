@@ -50,6 +50,22 @@ describe("the composer's steering prefix", () => {
   });
 });
 
+describe("a turn made of several queued messages", () => {
+  // Messages sent while the agent was busy go to it as one turn, each with its
+  // own directive in front. The shared log kept that turn as one message, and
+  // every teammate saw the autopilot instruction between the person's lines.
+  test("loses every directive that opens a line, keeping the person's lines", () => {
+    const auto = buildSteeringText("auto");
+    const raw = `@sam hello\nhi\n\nHello\n${auto}Hello\nhi\n${auto}hi`;
+    expect(stripSteeringDirective(raw)).toBe("@sam hello\nhi\n\nHello\nHello\nhi\nhi");
+  });
+
+  test("a turn that opens with a directive loses that one too", () => {
+    const auto = buildSteeringText("auto");
+    expect(stripSteeringDirective(`${auto}first\n${auto}second`)).toBe("first\nsecond");
+  });
+});
+
 describe("what the stripper must leave alone", () => {
   test("a message that merely opens with a bracket survives", () => {
     expect(stripSteeringDirective("[urgent] please refactor the parser")).toBe(

@@ -1,0 +1,83 @@
+/* A connected service is a settings row like any other; the only extras
+   are the service's mark beside its name, a status badge after it, and
+   notices under the description that have to read as notices. */
+
+.ui-settings-service-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The same 16px the agent tabs give a provider's icon. */
+.ui-settings-service-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+.ui-settings-service-mark > img,
+.ui-settings-service-mark > svg {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
+
+/* An error or a link under a row sits flush in the help line rather than
+   carrying the page-level spacing it has on its own. */
+.ui-settings-help .ui-settings-error {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+}
+.ui-settings-help > p {
+  margin-top: 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+.ui-settings-help > p + p {
+  margin-top: 4px;
+}
+.ui-settings-help a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ui-fg);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.ui-settings-help a svg {
+  width: 12px;
+  height: 12px;
+}
+
+.ui-settings-service-list {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  line-height: 18px;
+}
+.ui-settings-service-list > li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-settings-row a.ui-settings-service-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* The way back from the list of services you could add. Sits above the
+   first section so the step reads as part of the page, not a new dialog. */
+.ui-settings-services-back {
+  /* Pull the ghost button left by its own padding so its arrow lines up
+     with the section titles below. */
+  margin: 0 0 8px -10px;
+}

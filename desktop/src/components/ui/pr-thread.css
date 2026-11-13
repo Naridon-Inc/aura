@@ -1,0 +1,163 @@
+/* A review thread beside a diff line. The card, avatar, buttons, popover,
+   textarea and message markdown are the shared parts; a comment's body
+   reads the way it does in the pull request's activity list. */
+
+.ui-pr-thread {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: opacity 120ms ease;
+}
+.ui-pr-thread[data-resolved] {
+  opacity: 0.6;
+}
+
+/* ── one comment ───────────────────────────────────────────────────── */
+
+.ui-pr-thread-comment {
+  padding: 10px 12px;
+  font-size: 13px;
+}
+.ui-pr-thread-comment + .ui-pr-thread-comment,
+.ui-pr-thread-toggle + .ui-pr-thread-comment {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-pr-thread-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-pr-thread-head .ui-avatar {
+  width: 20px;
+  height: 20px;
+}
+.ui-pr-thread-head .ui-avatar-fallback {
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.ui-pr-thread-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.ui-pr-thread-head time {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+}
+.ui-pr-thread-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  margin: -2px -4px -2px auto;
+}
+.ui-pr-thread-actions .ui-button[aria-pressed="true"] {
+  color: var(--ui-green);
+}
+.ui-pr-thread-comment .ui-pr-activity-body {
+  padding-left: 28px;
+  overflow-wrap: anywhere;
+}
+
+/* ── reactions ─────────────────────────────────────────────────────── */
+
+.ui-pr-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+  padding-left: 28px;
+}
+.ui-pr-reactions .ui-button {
+  gap: 4px;
+  border-radius: 999px;
+}
+.ui-pr-reactions .ui-button[aria-pressed="true"] {
+  border-color: var(--ui-link);
+  background: var(--ui-highlight);
+  color: var(--ui-highlight-fg);
+}
+.ui-pr-reaction-emoji {
+  font-size: 14px;
+  line-height: 1;
+}
+.ui-pr-reaction-count {
+  font-variant-numeric: tabular-nums;
+}
+.ui-pr-reaction-picker {
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+}
+
+/* ── replies ───────────────────────────────────────────────────────── */
+
+.ui-pr-thread-toggle {
+  justify-content: flex-start;
+  width: 100%;
+  border-top: 1px solid var(--ui-border);
+  border-radius: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-pr-thread-reply {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--ui-border);
+}
+.ui-pr-thread-reply .ui-textarea {
+  min-height: 64px;
+  font-size: 13px;
+}
+.ui-pr-thread-reply-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ── where threads sit ─────────────────────────────────────────────── */
+
+/* The side column: each thread at its line's height, the one being read
+   lifted over its neighbours. */
+.ui-pr-thread-slots {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.ui-pr-thread-slot {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  pointer-events: auto;
+  opacity: 0.8;
+  transition: opacity 120ms ease;
+}
+.ui-pr-thread-slot:hover,
+.ui-pr-thread-slot[data-active] {
+  opacity: 1;
+}
+.ui-pr-thread-slot[data-active] {
+  z-index: 10;
+}
+.ui-pr-thread-slot[data-active] .ui-pr-thread {
+  border-color: var(--ui-ring);
+  box-shadow: 0 10px 28px rgb(0 0 0 / 0.45);
+}
+
+/* Beside a diff that carries its own threads, one under another. */
+.ui-pr-thread-inline {
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-pr-thread-inline:last-child {
+  border-bottom: 0;
+}
+.ui-pr-thread-inline .ui-pr-thread {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}

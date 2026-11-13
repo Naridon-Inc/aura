@@ -720,8 +720,8 @@ export function HudPublisher({ projectRoot }: { projectRoot: string | null }): n
   }, []);
 
   // The HUD is summon-only: it appears solely when the user calls it up
-  // (⌘⇧A global shortcut, the tray icon, or Settings → Show HUD) and stays put
-  // until they dismiss it (Esc / ⌘⇧A). It deliberately does NOT pop itself open
+  // (⌃⌘A global shortcut, the tray icon, or Settings → Show HUD) and stays put
+  // until they dismiss it (Esc / ⌃⌘A). It deliberately does NOT pop itself open
   // on agent activity, nor tuck itself away while an agent works — that
   // unsummoned motion was jarring (the bar appearing on its own). Visibility is
   // the user's to drive; this publisher only keeps the glance content current.

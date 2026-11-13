@@ -1,0 +1,167 @@
+/* A file tab: the shared file view with the editor, the diff or the rendered
+   document in its body. The view, the message typography and the tabs are
+   the shared parts; this is only how they sit together. */
+
+.ui-file-view {
+  min-height: 0;
+}
+.ui-file-view > header > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.ui-file-view-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+}
+/* The diff's header tools: muted 28px ghost icons, filled while pressed. */
+.ui-file-view-tool {
+  color: var(--ui-muted-fg);
+}
+.ui-file-view-tool[aria-pressed="true"] {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+/* The Unified / Split view switch: the same icons in a muted well. */
+.ui-file-view-switch {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  height: 32px;
+  gap: 0;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--ui-muted);
+}
+/* The Preview / Edit / Split switch: small ghost toggles in a muted well,
+   the chosen one lifted. */
+.ui-toggle-group.ui-file-mode-switch {
+  display: flex;
+  flex-shrink: 0;
+  height: 32px;
+  gap: 0;
+  padding: 2px;
+  border-radius: 6px;
+  background: var(--ui-muted);
+}
+.ui-file-mode-switch > .ui-toggle {
+  height: 28px;
+  border-radius: 4px;
+  color: color-mix(in srgb, var(--ui-fg) 90%, transparent);
+  font-weight: 500;
+}
+.ui-file-mode-switch > .ui-toggle[data-state="on"] {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-file-tab-body {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+/* Code and Preview side by side, half each. */
+.ui-file-split {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.ui-file-split > * {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.ui-file-split > * + * {
+  border-left: 1px solid var(--ui-border);
+}
+.ui-file-media {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+}
+
+/* A markdown file read as a page: the reply typography at a reading width. */
+.ui-file-markdown {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow: auto;
+  padding: 24px 32px 48px;
+}
+.ui-file-markdown > .ui-message-markdown {
+  max-width: 760px;
+  margin: 0 auto;
+}
+.ui-markdown-inline {
+  min-width: 0;
+}
+.ui-markdown-inline > .ui-message-markdown {
+  font-size: inherit;
+  line-height: 1.55;
+}
+/* A checklist drops the bullet; its box sits beside the line. */
+.ui-message-markdown .contains-task-list {
+  padding-left: 4px;
+  list-style: none;
+}
+.ui-message-markdown .task-list-item > input {
+  margin-right: 8px;
+  vertical-align: -1px;
+  accent-color: var(--ui-primary, currentColor);
+}
+
+/* A plan file: its items are checkable and tick the task they name. */
+.ui-plan-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 4px;
+  margin-inline: -4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ui-plan-item:hover {
+  background: var(--ui-hover);
+}
+.ui-plan-item .ui-checkbox {
+  transform: translateY(2px);
+}
+.ui-plan-item[data-done] > span {
+  color: var(--ui-muted-fg);
+  text-decoration: line-through;
+}
+
+/* The rail's Artifacts tab: the shared artifact cards, scrolling in the rail. */
+.ui-artifacts-panel {
+  height: 100%;
+  overflow-y: auto;
+}
+.ui-workspace-artifact-preview > img {
+  max-width: 100%;
+  max-height: 160px;
+  object-fit: contain;
+}
+.ui-workspace-artifact-preview > svg {
+  color: var(--ui-muted-fg);
+}
+/* A diff in a file view's body fills it; the inline one scrolls itself. */
+.ui-file-diff {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.ui-file-diff[data-scroll] {
+  display: block;
+  overflow: auto;
+}

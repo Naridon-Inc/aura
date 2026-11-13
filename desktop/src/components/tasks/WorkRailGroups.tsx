@@ -49,7 +49,8 @@ import { CREW_GRAPH_LENS_ENABLED } from "../../lib/featureFlags";
 import { goToWork } from "../../lib/workRoute";
 import { relativeAgeAuto } from "../../lib/relativeTime";
 import { PlaceRailGroup, PlaceRailRow } from "../places/PlaceRail";
-import { StateGlyph } from "./StatePill";
+import { WorkspaceStageIcon } from "../ui/workspace-preview-card";
+import { stageForGroup } from "./taskGlyphs";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 
@@ -69,7 +70,7 @@ const RUN_LIMIT = 8;
 export function WorkRailGroups({
   repoRoot,
 }: {
-  /** The one project these goals belong to, or null under All projects — a
+  /** The one project these goals belong to, or null under All repositories — a
    *  loop graph is per-repo, and two projects can each be running a goal of
    *  the same name. */
   repoRoot: string | null;
@@ -89,7 +90,7 @@ export function WorkRailGroups({
       setView(null);
       setCrews([]);
       setRuns([]);
-      // Under All projects there is no one graph to read, so nothing can be
+      // Under All repositories there is no one graph to read, so nothing can be
       // tagged with a goal. Say so, rather than leaving the last project's
       // answer on rows that belong to seven others.
       setTasksGoalIndex({});
@@ -214,8 +215,8 @@ export function WorkRailGroups({
   return (
     <>
       {/* Goals — what the crew is working through, and the one control that
-          starts it. The group stands down entirely under All projects rather
-          than merging several projects' goals into a list where two can share
+          starts it. The group stands down entirely under All repositories
+          rather than merging several repositories' goals into a list where two can share
           a name and neither can be run. */}
       <PlaceRailGroup
         title="Goals"
@@ -223,7 +224,7 @@ export function WorkRailGroups({
         empty={
           repoRoot
             ? "No goals yet. Ask Aura chat for one, and the crew works the tasks in order."
-            : "Goals belong to one project. Pick a project to see them."
+            : "Goals belong to one repository. Pick a repository to see them."
         }
         actions={
           // A second door to the map, beside the goals it draws — the strip in
@@ -257,7 +258,7 @@ export function WorkRailGroups({
               label={humanizeGoal(g.goal)}
               count={g.total}
               title={`${humanizeGoal(g.goal)} · ${tail.text}`}
-              glyph={<StateGlyph group={glyph.group} color={glyph.color} size={9} />}
+              glyph={<WorkspaceStageIcon stage={stageForGroup(glyph.group)} />}
               active={shared.goal?.id === g.goal}
               onClick={() => selectGoal(g.goal)}
               actions={

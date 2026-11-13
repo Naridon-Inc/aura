@@ -1,0 +1,44 @@
+/* A pull request's safety-check findings, in the PR's side column. The
+   verdict, section heads and boxed rows are the check report's; added here
+   are the column's inset and the parts of a finding a row says beneath its
+   title: what to do, and where. */
+
+.ui-pr-findings {
+  padding: 0 8px 12px;
+  font-size: 13px;
+}
+.ui-pr-findings-summary {
+  margin: 0;
+  color: var(--ui-fg);
+  font-size: 13px;
+  line-height: 20px;
+}
+.ui-pr-findings .ui-check-runs > div {
+  align-items: flex-start;
+}
+.ui-pr-findings .ui-check-runs > div > svg {
+  margin-top: 1px;
+}
+.ui-pr-findings .ui-check-runs > div > .ui-button {
+  flex-shrink: 0;
+  margin: -3px -4px -3px 0;
+}
+.ui-pr-findings .ui-check-runs small {
+  line-height: 1.5;
+}
+.ui-pr-findings .ui-check-runs small[data-fix] {
+  color: var(--ui-fg);
+}
+.ui-pr-findings .ui-check-runs [data-loc] {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.ui-pr-findings .ui-check-box-rows[data-prose] {
+  font-family: inherit;
+  font-size: 12px;
+  white-space: normal;
+}
+.ui-pr-findings .ui-check-box-rows li + li {
+  margin-top: 2px;
+}

@@ -246,7 +246,7 @@ describe("the panel draws the verdict the fold computed", () => {
     code(await Bun.file(`${import.meta.dir}/../src/${rel}`).text());
 
   test("the findings panel is the fold, in the app's own primitives", async () => {
-    const src = await read("components/workpanes/PRDetailPane.tsx");
+    const src = await read("components/pr/findings/PrFindingsPanel.tsx");
     expect(src).toContain("prReviewState({");
     expect(src).toContain("reviewError: detail.aura_review_error");
     expect(src).toContain("prReviewTotal(state)");
@@ -261,7 +261,7 @@ describe("the panel draws the verdict the fold computed", () => {
   test("the risk chip can't sit beside a list we didn't draw", async () => {
     // `risk_score` counts findings — including the stream the bridge dropped.
     // A score next to an empty panel was the visible half of the bug.
-    const src = (await read("components/workpanes/PRDetailPane.tsx")).replace(
+    const src = (await read("components/pr/findings/PrFindingsPanel.tsx")).replace(
       /\s+/g,
       "",
     );
@@ -271,7 +271,7 @@ describe("the panel draws the verdict the fold computed", () => {
   });
 
   test("the empty-findings line has exactly one implementation", async () => {
-    const src = await read("components/workpanes/PRDetailPane.tsx");
+    const src = await read("components/pr/findings/PrFindingsPanel.tsx");
     expect(src).toContain("noFindingsLine(unverified)");
     expect((src.match(/function NoFindingsLine/g) ?? []).length).toBe(1);
     expect(src).toContain("unverified={state.unverified}");
@@ -395,8 +395,17 @@ describe("the badge on a file row", () => {
   });
 
   test("the PR surface holds no second copy of this fold", async () => {
+    // The PR surface: the page, its findings panel and the rows it folds.
     const src = code(
-      await Bun.file("src/components/pr/PrFilesSection.tsx").text(),
+      (
+        await Promise.all(
+          [
+            "src/components/workpanes/PRDetailPane.tsx",
+            "src/components/pr/findings/PrFindingsPanel.tsx",
+            "src/components/pr/findings/prFindingGroups.ts",
+          ].map((p) => Bun.file(p).text()),
+        )
+      ).join("\n"),
     );
     expect(src).not.toContain("function deriveAuraByPath");
     expect(src).toContain("findingsByPath(");

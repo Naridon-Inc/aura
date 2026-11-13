@@ -1,28 +1,43 @@
-// Source Control Changes panel — Superset-style three-section layout:
-// staged / unstaged / untracked, each collapsible with a count chip and
-// hover-only "stage all / unstage all" actions. Per-row controls live
-// in FileRow. Mounted in the Source Control sidebar; Comms owns the
-// right rail so git review is not duplicated.
+// The Changes tab, read like a diff: one row naming how many files changed
+// with the lines added and removed (and a menu to widen the scope to the whole
+// branch or narrow it to one commit), then every changed file once, by path,
+// with generated files folded away at the end and each file's actions in its
+// context menu. A folder in the project that is a git repository of its own
+// lists its files in the same list, tagged with that repository; its row menu
+// commits and pushes, or opens a pull request for, that repository.
+//
+// The header row's one "Commit and push" hands the project's commit to an
+// agent chat, the same action as the git status row above the rail — which
+// offers Push first while the branch is ahead, so this is the commit that is
+// always there. The Git view draws this list with `staging`: Staged / Changes
+// groups with their bulk actions, each nested repository under its own
+// heading, and the Git view's own commit box under it all.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 // Through the place seam: a workspace standing in a machine stages and
 // discards on the box's checkout, not the laptop's copy (AURA-1306).
 import { gitDiscard, gitStage, gitUnstage } from "../../lib/place/workApi";
-import { useGitChanges, type ChangedFile } from "../../lib/useGitChanges";
-import { isNoisePath } from "@shared/categorizeChange";
-import { AURA_SYNC_ENABLED, AURA_RADAR_ENABLED } from "../../lib/featureFlags";
-import { useVerticalSplit } from "../../lib/useVerticalSplit";
-import { CategorySection } from "./CategorySection";
-import { CommitInput } from "./CommitInput";
-import { FileRow } from "./FileRow";
-import { Tooltip, TooltipTrigger, TooltipContent } from "../ui/tooltip";
-import { AsciiSpinner } from "../ui/ascii-spinner";
-import { ErrorState } from "../ui/state";
+import { nestedRepoOf } from "../../lib/nestedRepos";
+import { AURA_SYNC_ENABLED } from "../../lib/featureFlags";
+import { runGitChat, useGitChats } from "../../lib/gitChat";
+import { GitFork } from "lucide-react";
+import { Button } from "../ui/button";
+import { DiffCount } from "../ui/sidebar";
+import { GitChangeScope } from "../ui/git-workflow";
+import { DetailsCaption, DetailsChangeScope } from "../ui/details-panel";
+import { ChangesTree, type OpenKeys } from "./ChangesTree";
+import { ScopedChanges } from "./ScopedChanges";
+import { nodeId, totals } from "./changeNodes";
+import { buildChangeGroups, flatChangeGroups, selectedModeFor } from "./changeGroups";
+import { changedFileCount, listedFiles, useChangeList } from "./useChangeList";
+import { NestedRepoChanges } from "./NestedRepoChanges";
+import { useRailFilter } from "./railFilter";
+import { UNCOMMITTED, useChangeScope } from "./useChangeScope";
+import { ErrorState, LoadingState } from "../ui/state";
 import { useLiveSync } from "./sync/useLiveSync";
 import { GoLiveControl } from "./sync/GoLiveControl";
 import { IncomingSection } from "./sync/IncomingSection";
 import { ConflictsSection } from "./sync/ConflictsSection";
-import { TeamRadarSection } from "./radar/TeamRadarSection";
 import { resolveAstConflict } from "../../lib/ambientCache";
 
 // "Go live" (real-time co-editing) is hidden from Changes for now — the
@@ -55,6 +70,8 @@ function loadSectionsOpen(): SectionsOpen {
   }
 }
 
+const filesChanged = (n: number) => `${n} ${n === 1 ? "file" : "files"} changed`;
+
 type OpenMode = "diff" | "diff-new-tab" | "edit";
 
 type Props = {
@@ -64,11 +81,18 @@ type Props = {
    *  Shift → "diff-new-tab", Cmd/Ctrl → "edit". App.tsx routes each
    *  mode through the existing editor open path. */
   onOpenFile?: (path: string, mode: OpenMode) => void;
-  /** Optional strict-mode gate before commit actions. */
+  /** A file picked while the scope is one commit: open that commit's diff on
+   *  it. Without it the file opens as it is now. */
+  onOpenCommitFile?: (sha: string, path: string) => void;
+  /** The Git view: Staged / Changes groups with Stage all and Unstage all,
+   *  and each nested repository under its own heading with its own commit
+   *  box. Left out, every changed file is one list. */
+  staging?: boolean;
+  /** The Git view's strict-mode gate before a nested repository's commit. */
   onBeforeCommit?: () => Promise<boolean>;
 };
 
-function openModeFor(e: React.MouseEvent): OpenMode {
+function openModeFor(e: OpenKeys): OpenMode {
   if (e.shiftKey) return "diff-new-tab";
   if (e.metaKey || e.ctrlKey) return "edit";
   return "diff";
@@ -136,13 +160,24 @@ export function changesReadout(s: {
   return { headerNote: null, body: null, tone: "known" };
 }
 
-export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
-  const changes = useGitChanges(repoRoot);
+export function ChangesPanel({
+  repoRoot,
+  onOpenFile,
+  onOpenCommitFile,
+  staging = false,
+  onBeforeCommit,
+}: Props) {
+  // One list, read the way the tab's badge reads it (`useChangeList`): the
+  // project's own files, every nested repository's files with paths from the
+  // project root, generated files folded at the end. The Git view keeps nested
+  // repositories under their own headings instead.
+  const { changes, nested, listed, parts } = useChangeList(repoRoot, { withNested: !staging });
+  const repoOf = useCallback((path: string) => nestedRepoOf(path, nested), [nested]);
   const [open, setOpen] = useState<SectionsOpen>(loadSectionsOpen);
-  const [busyPath, setBusyPath] = useState<string | null>(null);
+  const [, setBusyPath] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Bumped after any mutation so CommitInput re-polls ahead/behind.
+  // Bumped after any mutation so the scope row re-reads its branch and commits.
   const [refreshTick, setRefreshTick] = useState(0);
 
   // Live sync layer (folded into this panel, gated by AURA_SYNC_ENABLED).
@@ -150,18 +185,6 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
   const sync = useLiveSync(repoRoot, AURA_SYNC_ENABLED);
   const [liveOpen, setLiveOpen] = useState({ incoming: true, conflicts: true });
   const [resolvingId, setResolvingId] = useState<string | null>(null);
-
-  // Team Radar rides a resizable bottom dock — the same split primitive the
-  // Checks tab uses to dock the PR list. `radarNeedsHeight` (reported by the
-  // band) gates whether the dock claims any of the split: a quiet radar still
-  // draws its one-line "nothing happening here" row, but sizes itself, so the
-  // file list keeps the panel exactly as a solo developer had it.
-  const { ratio, containerRef, onPointerDown } = useVerticalSplit(
-    "aura.changes.split",
-    0.62,
-  );
-  const [radarNeedsHeight, setRadarNeedsHeight] = useState(false);
-  const radarDocked = AURA_RADAR_ENABLED && radarNeedsHeight;
 
   const openLiveFile = useCallback(
     (path: string) => {
@@ -192,45 +215,6 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
 
   const liveActive = AURA_SYNC_ENABLED && sync.live;
 
-  // Split each git-state bucket into the files the user cares about
-  // (signal — real edits) and machine churn (noise — .aura/** snapshots,
-  // build output, editor cruft). Noise is clubbed into one collapsed
-  // "Generated & ignored" group so it stops drowning the real changes.
-  const parts = useMemo(() => {
-    const sigStaged = changes.staged.filter((f) => !isNoisePath(f.path));
-    const sigUnstaged = changes.unstaged.filter((f) => !isNoisePath(f.path));
-    const sigUntracked = changes.untracked.filter((f) => !isNoisePath(f.path));
-    // Carry each noise file's git-state so its row keeps the right
-    // stage/unstage/discard affordances even inside the merged group.
-    const noise: { file: ChangedFile; mode: SectionKey }[] = [];
-    const seen = new Set<string>();
-    const collect = (list: ChangedFile[], mode: SectionKey) => {
-      for (const f of list) {
-        if (!isNoisePath(f.path)) continue;
-        const key = `${mode}:${f.path}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        noise.push({ file: f, mode });
-      }
-    };
-    collect(changes.staged, "staged");
-    collect(changes.unstaged, "unstaged");
-    collect(changes.untracked, "untracked");
-    const signalPaths = new Set<string>();
-    for (const f of [...sigStaged, ...sigUnstaged, ...sigUntracked]) {
-      signalPaths.add(f.path);
-    }
-    const noisePaths = new Set(noise.map((n) => n.file.path));
-    return {
-      sigStaged,
-      sigUnstaged,
-      sigUntracked,
-      noise,
-      signalCount: signalPaths.size,
-      noiseCount: noisePaths.size,
-    };
-  }, [changes.staged, changes.unstaged, changes.untracked]);
-
   useEffect(() => {
     localStorage.setItem(SECTIONS_OPEN_KEY, JSON.stringify(open));
   }, [open]);
@@ -245,16 +229,16 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
         parts.sigUnstaged[0] ??
         parts.sigStaged[0] ??
         parts.sigUntracked[0] ??
-        changes.unstaged[0] ??
-        changes.staged[0] ??
-        changes.untracked[0];
+        listed.unstaged[0] ??
+        listed.staged[0] ??
+        listed.untracked[0];
       if (!first) return;
       setSelected(first.path);
       onOpenFile?.(first.path, "diff");
     }
     window.addEventListener("aura:focus-changes", onFocus);
     return () => window.removeEventListener("aura:focus-changes", onFocus);
-  }, [parts, changes.unstaged, changes.staged, changes.untracked, onOpenFile]);
+  }, [parts, listed, onOpenFile]);
 
   const refreshAll = useCallback(async () => {
     await changes.refresh();
@@ -273,13 +257,24 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
     setOpen((prev) => ({ ...prev, [key]: !prev[key] }));
   }
 
+  // A nested repository's list is its own store, which re-reads on the app's
+  // git-changed broadcast; the project's re-read alone would leave it a poll
+  // behind the click.
+  const afterMutation = useCallback(
+    async (paths: string[]) => {
+      await refreshAll();
+      if (paths.some((p) => repoOf(p))) window.dispatchEvent(new CustomEvent("aura:git-changed"));
+    },
+    [refreshAll, repoOf],
+  );
+
   const stagePaths = useCallback(
     async (paths: string[]) => {
       if (paths.length === 0) return;
       setBusyPath(paths.join(","));
       try {
         await gitStage(repoRoot, paths);
-        await refreshAll();
+        await afterMutation(paths);
         setError(null);
       } catch (e) {
         setError(String(e));
@@ -287,7 +282,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
         setBusyPath(null);
       }
     },
-    [repoRoot, refreshAll],
+    [repoRoot, afterMutation],
   );
 
   const unstagePaths = useCallback(
@@ -296,7 +291,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
       setBusyPath(paths.join(","));
       try {
         await gitUnstage(repoRoot, paths);
-        await refreshAll();
+        await afterMutation(paths);
         setError(null);
       } catch (e) {
         setError(String(e));
@@ -304,7 +299,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
         setBusyPath(null);
       }
     },
-    [repoRoot, refreshAll],
+    [repoRoot, afterMutation],
   );
 
   const discardPath = useCallback(
@@ -312,7 +307,7 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
       setBusyPath(path);
       try {
         await gitDiscard(repoRoot, [path]);
-        await refreshAll();
+        await afterMutation([path]);
         setError(null);
       } catch (e) {
         setError(String(e));
@@ -320,106 +315,88 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
         setBusyPath(null);
       }
     },
-    [repoRoot, refreshAll],
+    [repoRoot, afterMutation],
   );
 
-  function rowProps(file: ChangedFile, mode: SectionKey) {
-    return {
-      file,
-      isSelected: selected === file.path,
-      onClick: (e: React.MouseEvent) => {
-        setSelected(file.path);
-        onOpenFile?.(file.path, openModeFor(e));
-      },
-      onSelect: () => setSelected(file.path),
-      onStage: mode !== "staged" ? () => stagePaths([file.path]) : undefined,
-      onUnstage: mode === "staged" ? () => unstagePaths([file.path]) : undefined,
-      onDiscard:
-        mode !== "staged" ? () => discardPath(file.path) : undefined,
-      isBusy: busyPath === file.path,
-      repoRoot,
-    };
-  }
+  const filter = useRailFilter();
+  const scope = useChangeScope(repoRoot, refreshTick);
+  const changeGroups = useMemo(
+    () =>
+      staging
+        ? buildChangeGroups(parts, {
+            stage: (paths) => void stagePaths(paths),
+            unstage: (paths) => void unstagePaths(paths),
+            generatedOpen: open.generated,
+            toggleGenerated: () => toggle("generated"),
+          })
+        : flatChangeGroups(parts, {
+            generatedOpen: open.generated,
+            toggleGenerated: () => toggle("generated"),
+          }),
+    [staging, parts, open.generated, stagePaths, unstagePaths],
+  );
+  const selectedMode = selectedModeFor(selected, listed.staged, listed.unstaged, listed.untracked);
+  // Every listed file once, generated ones included: the header's count and
+  // its +/− are the list's, the same count the tab's badge shows.
+  const changedFiles = useMemo(() => listedFiles(parts), [parts]);
+  const shownTotals =
+    scope.scope === UNCOMMITTED ? totals(changedFiles) : totals(scope.files ?? []);
+  // The project's own commit carries only its own files: a change inside a
+  // nested repository commits from that file's menu.
+  const ownChanged = changedFiles.some((f) => !repoOf(f.path));
+  const chatting = useGitChats(repoRoot);
 
-  const totalChanged = changes.changedCount + changes.untracked.length;
+  const totalChanged = changedFileCount(parts);
   const readout = changesReadout({
     loading: changes.loading,
     failed: changes.error !== null,
     total: totalChanged,
     liveActive,
   });
+  // The row reads like a diff's header: how many files changed. One commit
+  // keeps its message; the whole branch keeps "All changes".
+  const scopeLabel =
+    scope.scope === UNCOMMITTED
+      ? (readout.headerNote ?? filesChanged(totalChanged))
+      : undefined;
 
   return (
-    <div
-      ref={containerRef}
-      className="h-full flex flex-col overflow-hidden min-w-0"
-    >
-      {/* TOP pane — change list + commit box. Fills the panel when the radar
-          is quiet; yields the split ratio to the dock when it's live. */}
-      <div
-        className="min-h-0 flex flex-col overflow-hidden"
-        style={
-          radarDocked ? { flexGrow: ratio, flexBasis: 0 } : { flex: "1 1 0%" }
-        }
-      >
-      <header className="flex items-center gap-2 h-8 px-3 border-b border-line-soft shrink-0 bg-bg-1/40 min-w-0">
-        <span className="section-label truncate shrink-0">
-          Source Control
-        </span>
-        <span className="text-text-4 text-xs tabular-nums truncate min-w-0 flex-1">
-          {readout.headerNote ??
-            (parts.noiseCount > 0
-              ? `${parts.signalCount} changed · ${parts.noiseCount} generated`
-              : `${parts.signalCount} changed`)}
-        </span>
-        <div className="flex items-center gap-0.5 shrink-0">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={() =>
-                  window.dispatchEvent(new CustomEvent("aura:open-branch-graph"))
-                }
-                className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
-              >
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-                  <circle cx="4" cy="3.5" r="1.7" stroke="currentColor" strokeWidth="1.3" />
-                  <circle cx="4" cy="12.5" r="1.7" stroke="currentColor" strokeWidth="1.3" />
-                  <circle cx="11.5" cy="8" r="1.7" stroke="currentColor" strokeWidth="1.3" />
-                  <path
-                    d="M4 5.2v5.6M4 8h3a2 2 0 0 1 2-1.8"
-                    stroke="currentColor"
-                    strokeWidth="1.3"
-                    fill="none"
-                    strokeLinecap="round"
-                  />
-                </svg>
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">Branch graph</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={() => changes.refresh()}
-                className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors"
-              >
-                <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-                  <path
-                    d="M14 8a6 6 0 1 1-1.7-4.2M14 2v4h-4"
-                    stroke="currentColor"
-                    strokeWidth="1.4"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">Refresh</TooltipContent>
-          </Tooltip>
+    <div className="h-full flex flex-col overflow-hidden min-w-0">
+      <DetailsChangeScope>
+        <GitChangeScope
+          label={scopeLabel}
+          branch={scope.branch || "HEAD"}
+          targetBranch={scope.targetBranch}
+          branches={scope.branches}
+          scope={scope.scope}
+          onScopeChange={scope.setScope}
+          onTargetBranchChange={scope.setTargetBranch}
+          changedFiles={totalChanged}
+          commits={scope.commits}
+        />
+        <div className="ui-details-change-scope-tools">
+          <DiffCount added={shownTotals.added} removed={shownTotals.removed} />
+          {!staging && scope.scope === UNCOMMITTED && ownChanged && (
+            <Button
+              size="xs"
+              variant="secondary"
+              disabled={chatting("commit-push")}
+              onClick={() => void runGitChat(repoRoot, "commit-push", { action: "commit-push" })}
+            >
+              Commit and push
+            </Button>
+          )}
+          <Button
+            size="iconXs"
+            variant="ghost"
+            aria-label="Branch graph"
+            title="Branch graph"
+            onClick={() => window.dispatchEvent(new CustomEvent("aura:open-branch-graph"))}
+          >
+            <GitFork />
+          </Button>
         </div>
-      </header>
+      </DetailsChangeScope>
 
       {AURA_SYNC_ENABLED && SHOW_GO_LIVE && (
         <GoLiveControl
@@ -463,11 +440,23 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
             />
           </>
         )}
-        {readout.tone === "waiting" ? (
-          <div className="flex items-center gap-1.5 text-text-4 text-xs px-3 py-3">
-            <AsciiSpinner className="text-2xs" />
-            <span>{readout.body}</span>
-          </div>
+        {/* The Git view lists nested repositories under their own headings,
+            so its own list says whose it is. */}
+        {staging && nested.length > 0 && <DetailsCaption>This project</DetailsCaption>}
+        {scope.scope !== UNCOMMITTED ? (
+          <ScopedChanges
+            files={scope.files}
+            error={scope.error}
+            filter={filter}
+            selected={selected}
+            onOpen={(path) => {
+              setSelected(path);
+              if (scope.commitSha && onOpenCommitFile) onOpenCommitFile(scope.commitSha, path);
+              else onOpenFile?.(path, "edit");
+            }}
+          />
+        ) : readout.tone === "waiting" ? (
+          <LoadingState label={readout.body ?? "Looking at what you’ve changed…"} />
         ) : readout.tone === "failed" && readout.body ? (
           <div className="px-3 py-5">
             <ErrorState
@@ -478,182 +467,36 @@ export function ChangesPanel({ repoRoot, onOpenFile, onBeforeCommit }: Props) {
             />
           </div>
         ) : readout.body ? (
-          <div className="text-text-4 text-xs px-3 py-6 text-center">
-            {readout.body}
-          </div>
+          <DetailsCaption>{readout.body}</DetailsCaption>
         ) : (
-          <>
-            <CategorySection
-              title="Staged"
-              count={parts.sigStaged.length}
-              isOpen={open.staged}
-              onToggle={() => toggle("staged")}
-              actions={
-                parts.sigStaged.length > 0 ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          unstagePaths(parts.sigStaged.map((f) => f.path))
-                        }
-                        className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-state-hover"
-                      >
-                        <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
-                          <path
-                            d="M3 8h10"
-                            stroke="currentColor"
-                            strokeWidth="1.5"
-                            strokeLinecap="round"
-                          />
-                        </svg>
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom">Unstage all</TooltipContent>
-                  </Tooltip>
-                ) : null
-              }
-            >
-              {parts.sigStaged.map((f) => (
-                <FileRow key={`s-${f.path}`} {...rowProps(f, "staged")} />
-              ))}
-            </CategorySection>
-
-            <CategorySection
-              title="Modified"
-              count={parts.sigUnstaged.length}
-              isOpen={open.unstaged}
-              onToggle={() => toggle("unstaged")}
-              actions={
-                parts.sigUnstaged.length > 0 ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          stagePaths(parts.sigUnstaged.map((f) => f.path))
-                        }
-                        className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-state-hover"
-                      >
-                        <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
-                          <path
-                            d="M8 3v10M3 8h10"
-                            stroke="currentColor"
-                            strokeWidth="1.5"
-                            strokeLinecap="round"
-                          />
-                        </svg>
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom">Stage all</TooltipContent>
-                  </Tooltip>
-                ) : null
-              }
-            >
-              {parts.sigUnstaged.map((f) => (
-                <FileRow key={`u-${f.path}`} {...rowProps(f, "unstaged")} />
-              ))}
-            </CategorySection>
-
-            <CategorySection
-              title="New files"
-              count={parts.sigUntracked.length}
-              isOpen={open.untracked}
-              onToggle={() => toggle("untracked")}
-              actions={
-                parts.sigUntracked.length > 0 ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          stagePaths(parts.sigUntracked.map((f) => f.path))
-                        }
-                        className="size-5 rounded flex items-center justify-center text-text-3 hover:text-text-1 hover:bg-state-hover"
-                      >
-                        <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
-                          <path
-                            d="M8 3v10M3 8h10"
-                            stroke="currentColor"
-                            strokeWidth="1.5"
-                            strokeLinecap="round"
-                          />
-                        </svg>
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom">Stage all</TooltipContent>
-                  </Tooltip>
-                ) : null
-              }
-            >
-              {parts.sigUntracked.map((f) => (
-                <FileRow key={`?-${f.path}`} {...rowProps(f, "untracked")} />
-              ))}
-            </CategorySection>
-
-            {/* Machine churn clubbed together: .aura/** snapshots, build
-                output, editor cruft. Collapsed by default, no "stage all"
-                — staging these is deliberate, per-row only. */}
-            <CategorySection
-              title="Generated & ignored"
-              count={parts.noiseCount}
-              isOpen={open.generated}
-              onToggle={() => toggle("generated")}
-            >
-              {parts.noise.map(({ file, mode }) => (
-                <FileRow
-                  key={`n-${mode}-${file.path}`}
-                  {...rowProps(file, mode)}
-                />
-              ))}
-            </CategorySection>
-          </>
-        )}
-      </div>
-
-      <CommitInput
-        repoRoot={repoRoot}
-        hasStagedChanges={changes.staged.length > 0}
-        refreshTick={refreshTick}
-        onBeforeCommit={onBeforeCommit}
-        onAfterMutation={() => {
-          void refreshAll();
-        }}
-        liveActive={liveActive}
-      />
-      </div>
-
-      {/* Draggable divider — shown only while the dock has something to show. */}
-      {radarDocked && (
-        <div
-          role="separator"
-          aria-orientation="horizontal"
-          onPointerDown={onPointerDown}
-          title="Drag to resize"
-          className="group relative h-1.5 shrink-0 cursor-row-resize border-t border-line-soft"
-        >
-          <div
-            className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-            style={{ background: "var(--color-accent)" }}
+          <ChangesTree
+            repoRoot={repoRoot}
+            groups={changeGroups}
+            filter={filter}
+            selected={selected ? nodeId(selectedMode, selected) : null}
+            onOpen={(path, keys) => {
+              setSelected(path);
+              onOpenFile?.(path, openModeFor(keys));
+            }}
+            onStage={(path) => void stagePaths([path])}
+            onUnstage={(path) => void unstagePaths([path])}
+            onDiscard={(path) => void discardPath(path)}
+            repoOf={staging ? undefined : repoOf}
           />
-        </div>
-      )}
-
-      {/* BOTTOM dock — Team Radar. Always mounted so its poll keeps running and
-          can report when team activity appears. While it's quiet it draws one
-          fixed row saying so and the wrapper stays shrink-0, so the file list
-          still owns the panel; it takes its share of the split (radarDocked)
-          only once there's a feed, a clash or a zone to scroll. */}
-      <div
-        className={radarDocked ? "min-h-0 overflow-y-auto" : "shrink-0"}
-        style={radarDocked ? { flexGrow: 1 - ratio, flexBasis: 0 } : undefined}
-      >
-        <TeamRadarSection
-          repoRoot={repoRoot}
-          enabled={AURA_RADAR_ENABLED}
-          onOpenFile={openLiveFile}
-          onNeedsHeight={setRadarNeedsHeight}
-        />
+        )}
+        {staging &&
+          nested.map((repo) => (
+            <NestedRepoChanges
+              key={repo.root}
+              projectRoot={repoRoot}
+              repo={repo}
+              filter={filter}
+              selected={selected}
+              onSelect={setSelected}
+              onOpen={(path, keys) => onOpenFile?.(path, openModeFor(keys))}
+              onBeforeCommit={onBeforeCommit}
+            />
+          ))}
       </div>
     </div>
   );

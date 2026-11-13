@@ -60,7 +60,7 @@ export function BoardListGroup({
           className="flex min-w-0 flex-1 items-center gap-2.5 transition-opacity hover:opacity-80"
         >
           <ChevronDown
-            className={`h-3 w-3 flex-shrink-0 text-text-5 transition-transform ${
+            className={`h-3 w-3 flex-shrink-0 text-text-5 ${
               expanded ? "" : "-rotate-90"
             }`}
             strokeWidth={1.75}

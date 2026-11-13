@@ -1,0 +1,43 @@
+/* A new workspace coming up: one page in the cloud setup's own rules (its
+   small line over the heading, its heading), with the library timeline as
+   the list of steps. Added here are the page sitting in the middle of the
+   pane, narrower than a setup page, and the tick a finished step wears. */
+
+.ui-setup-feed {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 0 32px;
+  overflow: auto;
+  background: var(--ui-bg);
+}
+.ui-setup-feed > .ui-cloud-setup-page {
+  max-width: 440px;
+  gap: 20px;
+  padding-bottom: 0;
+}
+.ui-setup-feed > .ui-cloud-setup-page > header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ui-setup-feed > .ui-cloud-setup-page > .ui-error-note {
+  align-self: stretch;
+}
+.ui-setup-feed .ui-timeline {
+  align-self: stretch;
+  margin: 0;
+  padding: 0;
+}
+.ui-setup-feed .ui-timeline-marker:has(> svg) {
+  display: grid;
+  place-items: center;
+  border-color: var(--ui-green);
+  color: var(--ui-green);
+}
+.ui-setup-feed .ui-timeline-marker > svg {
+  width: 8px;
+  height: 8px;
+  stroke-width: 3;
+}

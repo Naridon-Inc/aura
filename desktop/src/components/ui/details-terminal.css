@@ -1,0 +1,293 @@
+/* The workspace's terminal panel, under the git panel in the right column. */
+.ui-details-terminal {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+}
+.ui-details-terminal-tabs {
+  flex-shrink: 0;
+}
+/* The header: 32px, a bottom rule, and nothing that scrolls the panel
+   sideways — a tab row too long for the column scrolls inside itself. */
+.ui-details-terminal-toolbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 32px;
+  gap: 4px;
+  padding-right: 8px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--ui-border);
+  container-type: inline-size;
+}
+.ui-details-terminal-toggle {
+  margin-left: 4px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-details-terminal-toggle svg {
+  width: 16px;
+  height: 16px;
+}
+.ui-details-terminal-tablist.ui-tabs-list {
+  display: flex;
+  flex: 1;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 8px;
+  height: 32px;
+  min-width: 88px;
+  max-width: fit-content;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ui-details-terminal-tablist::-webkit-scrollbar {
+  display: none;
+}
+.ui-details-terminal-tab.ui-tabs-trigger {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0;
+  gap: 0;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-details-terminal-tab[data-closable] {
+  min-width: 64px;
+}
+.ui-details-terminal-tab.ui-tabs-trigger[data-state="active"] {
+  background: none;
+  color: var(--ui-fg);
+  border-bottom-color: var(--ui-link);
+}
+.ui-details-terminal-tab-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-inline: 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.ui-details-terminal-dot {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: var(--ui-green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-green) 22%, transparent);
+  transform: scale(0.6);
+}
+.ui-details-terminal-tab-close {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 4px;
+  border-radius: 4px;
+  color: var(--ui-muted-fg);
+  opacity: 0;
+}
+.ui-details-terminal-tab:hover .ui-details-terminal-tab-close,
+.ui-details-terminal-tab[data-state="active"] .ui-details-terminal-tab-close {
+  opacity: 1;
+}
+.ui-details-terminal-tab-close:hover {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-details-terminal-tab-close svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-details-terminal-new {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.ui-details-terminal-new .ui-button svg {
+  width: 12px;
+  height: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-details-terminal-new .ui-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.ui-details-terminal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+  padding-left: 8px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-details-terminal-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+.ui-details-terminal-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex: 1;
+  height: 100%;
+  padding: 16px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  text-align: center;
+}
+.ui-details-terminal-empty > svg.ui-details-terminal-empty-icon {
+  width: 48px;
+  height: 48px;
+  color: var(--ui-faint);
+}
+/* "Add setup script" / "Run tests or a development server…": a dashed card
+   near the top of the tab. */
+.ui-details-terminal-card-wrap {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  height: 100%;
+  padding: 32px;
+  overflow: auto;
+}
+.ui-details-terminal-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  max-width: 28rem;
+  padding: 40px;
+  border: 1px dashed var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-bg);
+  text-align: center;
+}
+.ui-details-terminal-card h3 {
+  margin: 0;
+  color: var(--ui-fg);
+  font-size: 14px;
+  font-weight: 500;
+}
+.ui-details-terminal-card p {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 18px;
+}
+.ui-details-terminal-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-details-terminal-card-actions > .ui-button {
+  width: 128px;
+}
+.ui-details-terminal-card-or {
+  color: var(--ui-faint);
+  font-size: 12px;
+}
+/* The setup output's own control, over its bottom-right corner. */
+.ui-details-terminal-corner {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 10;
+  background: color-mix(in srgb, var(--ui-bg) 80%, transparent);
+}
+/* The Run controls at the header's right end. */
+.ui-run-controls {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.ui-run-controls .ui-run-main {
+  min-width: 0;
+  max-width: 10rem;
+  justify-content: flex-start;
+  overflow: hidden;
+  padding-inline: 8px;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.ui-run-controls .ui-run-main > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-run-controls .ui-run-more {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--ui-input);
+  border-left: 0;
+  border-top-right-radius: 4px;
+  border-bottom-right-radius: 4px;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+  cursor: pointer;
+}
+.ui-run-controls .ui-run-more:hover {
+  background: var(--ui-hover);
+}
+.ui-run-controls .ui-run-more svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-run-controls .ui-kbd {
+  margin-left: 2px;
+}
+/* A narrow column drops the labels before it drops the controls. */
+@container (max-width: 300px) {
+  .ui-run-controls .ui-run-label,
+  .ui-run-controls .ui-kbd {
+    display: none;
+  }
+}
+
+/* The Setup tab while there is setup output: the read-only log fills the
+   body and its Stop / Rerun control sits over the bottom-right corner. */
+.ui-setup-tab {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
+.ui-setup-log {
+  position: absolute;
+  inset: 0;
+  padding: 4px 0 0 8px;
+  background: var(--term-bg, var(--ui-bg));
+}
+.ui-setup-log .xterm {
+  height: 100%;
+}
+.ui-setup-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+  font-weight: 500;
+}

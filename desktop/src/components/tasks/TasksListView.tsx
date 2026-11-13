@@ -1,31 +1,10 @@
-// The Tasks list — THE drawing of the work, now that the kanban, the plan and
-// the four-cell strip that chose between them are gone.
-//
-// It absorbed what each of them carried rather than just outliving them:
-//
-//   From the kanban, the verb. Its lanes said the status and let you drag a
-//   card to change it. A row says its status on a tag — always, even under a
-//   heading that says the same thing, because a row you can act on has to state
-//   what it is — and that tag opens and sets.
-//
-//   From the plan, the goal. The plan drew goals with their tasks underneath;
-//   a row wears the goal it belongs to as a tag, the rail narrows to one, and
-//   Display's group-by cuts the list by goal. Same content, no second page.
-//
-// The file stays thin: the group header, the row and every chip come from
-// `components/board`, and the only thing said here is which task field goes in
-// which slot.
+// The list lens of the Dashboard: collapsible sections of 44px rows, each
+// row leading with its status glyph (a menu that changes it) and ending with
+// how long ago it last moved.
 
-import { useCallback, useEffect, useMemo, useState, type JSX, type ReactNode } from "react";
-import { Bot, Clock, GitBranch, Inbox, Link2, ListChecks, Target, Users } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type JSX } from "react";
+import { Target } from "lucide-react";
 
-import {
-  BoardCardLabels,
-  BoardCardMeta,
-  BoardEmpty,
-  BoardListGroup,
-  BoardListRow,
-} from "../board";
 import type {
   Task,
   TaskLabel,
@@ -35,15 +14,16 @@ import type {
   TaskViewGroupBy,
   TeamMember,
 } from "../../lib/api";
+import { formatAgo } from "../../lib/freshness";
 import { AssigneeStack } from "../AssigneePicker";
 import { MentionedText } from "../Mentions";
 import { AsciiSpinner } from "../ui/ascii-spinner";
-import { TaskIdChip } from "./TaskIdChip";
-import { stepProgress } from "../../lib/taskSteps";
-import { formatDueDate, isOverdue } from "./taskColumns";
+import { TaskFact } from "../ui/tasks-board";
+import { TaskHandle, TaskListGroup, TaskListItem } from "../ui/tasks-list";
 import { groupTasks } from "./taskGrouping";
-import { TaskPriorityBars, TaskStatusTag } from "./taskGlyphs";
+import { TaskPriorityBars, TaskStateChip, TaskStatusTag, shouldShowStateChip } from "./taskGlyphs";
 import { DEFAULT_DISPLAY_PROPS } from "./TasksFilterBar";
+import { TaskMenuItems, cardFacts } from "./taskFacts";
 import { budgetGroups, rowCap } from "./rowBudget";
 import { RevealFoot } from "./RevealFoot";
 
@@ -57,6 +37,7 @@ export function TasksListView({
   displayProps,
   goalOfTask,
   selectedId,
+  multiSelectedIds,
   onSelect,
   onStatus,
   onAddInStatus,
@@ -66,28 +47,18 @@ export function TasksListView({
   members: TeamMember[];
   taskStates: TaskState[];
   taskLabels: TaskLabel[];
-  /** Which dimension the sections are cut on — the same choice the board
-   *  honours, from the same Display menu. */
   groupBy: TaskViewGroupBy;
-  /** Which properties a row shows. The list used to ignore this entirely, so
-   *  the Display menu's property toggles worked on the board and silently did
-   *  nothing here. */
   displayProps: TaskViewDisplayProp[];
-  /** Card id → the goal it belongs to, resolved by the rail off the loop graph
-   *  (lib/tasksFilterStore). Empty for a project with no goals planned, which
-   *  is a list with no goal tags rather than a missing one. */
+  /** Card id → the goal it belongs to, resolved by the rail off the loop
+   *  graph. Empty for a project with no goals planned. */
   goalOfTask?: Record<string, string>;
   selectedId: string | null;
-  onSelect: (id: string) => void;
-  /** Set a task's status straight from its tag — what dragging a card between
-   *  kanban lanes used to do. */
+  multiSelectedIds: string[];
+  onSelect: (id: string, e?: { shiftKey: boolean; metaKey?: boolean; ctrlKey?: boolean }) => void;
   onStatus?: (id: string, status: TaskStatus) => void;
   onAddInStatus: (status: TaskStatus) => void;
 }): JSX.Element {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-
-  // Direct sub-task count per task id — the same derivation the board view
-  // does, so the sub-item chip appears on the same tasks in both layouts.
   const childCounts = useMemo(() => {
     const out = new Map<string, number>();
     for (const t of tasks) {
@@ -96,39 +67,27 @@ export function TasksListView({
     }
     return out;
   }, [tasks]);
-
   const groups = useMemo(
     () => groupTasks(tasks, groupBy, { members, taskLabels, goalOfTask }),
     [tasks, groupBy, members, taskLabels, goalOfTask],
   );
 
-  // How much of a long list is drawn — see ./rowBudget. This view used to
-  // render every row it had; on a board of a thousand-odd that is one render
-  // the webview's single thread sits inside for five seconds or more, which is
-  // what AURA-263 saw as the tab underline moving while the old view stayed on
-  // screen, and AURA-269 as a control that "needed a second click".
+  // Draw a first slice and reveal more as the reader scrolls (./rowBudget).
+  // A collapsed section costs nothing, so it does not spend the budget.
   const [reveals, setReveals] = useState(0);
-  // A new task set, or a different way of cutting it, is a new list: start it
-  // at the top of the budget rather than carrying the old scroll's allowance.
   useEffect(() => {
     setReveals(0);
   }, [tasks, groupBy]);
-
   const { groups: drawn, hidden } = useMemo(
     () =>
       budgetGroups(
-        // A collapsed group draws nothing, so it must cost nothing — otherwise
-        // collapsing Backlog would spend the whole budget on rows nobody can
-        // see. Its true size rides along so the heading still says it.
-        groups.map((g) =>
-          collapsed.has(g.key) ? { ...g, tasks: [], total: g.tasks.length } : g,
-        ),
+        groups.map((g) => (collapsed.has(g.key) ? { ...g, tasks: [], total: g.tasks.length } : g)),
         rowCap(reveals),
       ),
     [groups, collapsed, reveals],
   );
-
   const reveal = useCallback(() => setReveals((r) => r + 1), []);
+  const selectedSet = new Set(multiSelectedIds);
 
   function toggle(id: string): void {
     setCollapsed((prev) => {
@@ -139,92 +98,76 @@ export function TasksListView({
     });
   }
 
-  return (
-    <div className="h-full w-full overflow-y-auto bg-bg-content px-4 sm:px-6">
-      {loading && tasks.length === 0 && (
-        <div className="flex items-center gap-2 py-6 text-sm text-text-4">
+  if (loading && tasks.length === 0) {
+    return (
+      <div className="ui-tasks-list">
+        <div className="ui-tasks-loading">
           <AsciiSpinner />
-          Loading…
+          Loading tasks…
         </div>
-      )}
-      {/* The board's own empty hero handles a genuinely empty repo, so by the
-          time this renders the list is empty for a reason the list itself
-          can't know. One quiet line, no competing call to action. */}
-      {!loading && tasks.length === 0 && (
-        <BoardEmpty
-          icon={Inbox}
-          title="Nothing to show here"
-          body="Tasks you and your agents add will appear in this list, grouped by where they've got to."
-          size="sm"
-        />
-      )}
-      {tasks.length > 0 &&
-        drawn.map((g) => {
-          // Empty "In Review" and "Done" groups are hidden to keep the surface
-          // on active work; Backlog and In Progress stay even when empty so the
-          // canonical pipeline is always visible at the top of the view. The
-          // board keeps all four lanes instead — a lane carries the shape of
-          // the process, whereas a heading with nothing under it is pure scroll
-          // cost. Non-status groupings never arrive empty at all.
-          if (
-            g.total === 0 &&
-            (g.status === "in_review" || g.status === "done")
-          ) {
-            return null;
-          }
-          return (
-            <BoardListGroup
-              key={g.key}
-              title={g.label}
-              titleHint={g.hint}
-              // The group's real size, not the number of rows drawn — a
-              // heading reading 40 over a group of 900 would be a worse bug
-              // than the slow render the budget exists to fix.
-              count={g.total}
-              glyph={g.glyph}
-              expanded={!collapsed.has(g.key)}
-              onToggle={() => toggle(g.key)}
-              // Same rule as the board's quick-add: only a status group knows
-              // what a new task created inside it should be.
-              onAdd={g.status ? () => onAddInStatus(g.status!) : undefined}
-            >
-              {g.tasks.map((t) => (
-                <TaskListRow
-                  key={t.id}
-                  task={t}
-                  selected={t.id === selectedId}
-                  members={members}
-                  taskStates={taskStates}
-                  taskLabels={taskLabels}
-                  groupBy={groupBy}
-                  displayProps={displayProps}
-                  goal={goalOfTask?.[t.id] ?? null}
-                  childCount={childCounts.get(t.id) ?? 0}
-                  onSelect={() => onSelect(t.id)}
-                  onStatus={
-                    onStatus ? (next) => onStatus(t.id, next) : undefined
-                  }
-                />
-              ))}
-            </BoardListGroup>
-          );
-        })}
+      </div>
+    );
+  }
+  if (tasks.length === 0) {
+    return (
+      <div className="ui-tasks-list">
+        <div className="ui-tasks-empty">
+          <p>No tasks</p>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="ui-tasks-list" role="region" aria-label="Tasks">
+      {drawn.map((g) => {
+        // An empty review or done section says nothing a reader needs.
+        if (g.total === 0 && (g.status === "in_review" || g.status === "done")) return null;
+        return (
+          <TaskListGroup
+            key={g.key}
+            label={g.label}
+            hint={g.hint}
+            count={g.total}
+            icon={g.glyph}
+            open={!collapsed.has(g.key)}
+            onToggle={() => toggle(g.key)}
+            onAdd={g.status ? () => onAddInStatus(g.status!) : undefined}
+          >
+            {g.tasks.map((t) => (
+              <TaskRow
+                key={t.id}
+                task={t}
+                selected={t.id === selectedId || selectedSet.has(t.id)}
+                members={members}
+                taskStates={taskStates}
+                taskLabels={taskLabels}
+                groupBy={groupBy}
+                displayProps={displayProps}
+                goal={goalOfTask?.[t.id] ?? null}
+                childCount={childCounts.get(t.id) ?? 0}
+                onOpen={(e) => onSelect(t.id, e)}
+                onStatus={onStatus ? (next) => onStatus(t.id, next) : undefined}
+              />
+            ))}
+          </TaskListGroup>
+        );
+      })}
       <RevealFoot hidden={hidden} onReveal={reveal} />
     </div>
   );
 }
 
-export function TaskListRow({
+function TaskRow({
   task,
   selected,
   members,
   taskStates,
   taskLabels,
-  groupBy = "none",
+  groupBy,
   displayProps,
-  goal = null,
-  childCount = 0,
-  onSelect,
+  goal,
+  childCount,
+  onOpen,
   onStatus,
 }: {
   task: Task;
@@ -232,172 +175,59 @@ export function TaskListRow({
   members: TeamMember[];
   taskStates: TaskState[];
   taskLabels: TaskLabel[];
-  /** What the surrounding sections are cut on. Kept because the goal tag reads
-   *  it: under "group by goal" the heading already says which goal, and a tag
-   *  repeating it is noise. The STATUS tag no longer consults it — see below. */
-  groupBy?: TaskViewGroupBy;
-  /** Which properties to show. Falls back to the default set for callers that
-   *  don't plumb it. */
-  displayProps?: TaskViewDisplayProp[];
-  /** The goal this task belongs to, if the crew has one planned over it. */
-  goal?: string | null;
-  /** Direct sub-task count — same chip the board card shows, so a task looks
-   *  the same in both layouts. */
-  childCount?: number;
-  onSelect: () => void;
-  /** Set the status from the tag. Omitted where the row is read-only. */
+  groupBy: TaskViewGroupBy;
+  displayProps: TaskViewDisplayProp[];
+  goal: string | null;
+  childCount: number;
+  onOpen: (e: { shiftKey: boolean; metaKey?: boolean; ctrlKey?: boolean }) => void;
   onStatus?: (status: TaskStatus) => void;
 }): JSX.Element {
-  const props = useMemo(
-    () => new Set<TaskViewDisplayProp>(displayProps ?? DEFAULT_DISPLAY_PROPS),
-    [displayProps],
-  );
-
-  const state = task.state_id
-    ? (taskStates.find((s) => s.id === task.state_id) ?? null)
-    : null;
-
-  // One chip grammar, in one order, so a due date reads the same everywhere.
-  const chips: ReactNode[] = [];
-  // The status tag, ALWAYS. It used to hide itself under a status grouping,
-  // on the argument that the sticky heading a few pixels up already said it —
-  // which is true of a heading you can see and false the moment you have
-  // scrolled a hundred rows into "Backlog", and false in principle now that
-  // the tag is also the control that changes the status. A row you can act on
-  // has to state what it is.
-  chips.push(
-    <TaskStatusTag
-      key="state"
-      state={state}
-      status={task.status}
-      onStatus={onStatus}
-      dense
-    />,
-  );
-  // Which goal the crew has this under — the Plan view, said on the row. Not
-  // when the list is already cut by goal: then the heading says it, and unlike
-  // the status this tag isn't a control, so a repeat is only a repeat.
-  if (goal && groupBy !== "goal") {
-    chips.push(
-      <BoardCardMeta key="goal" icon={Target} title={`Goal: ${goal}`}>
+  const props = new Set<TaskViewDisplayProp>(displayProps ?? DEFAULT_DISPLAY_PROPS);
+  const state = task.state_id ? (taskStates.find((s) => s.id === task.state_id) ?? null) : null;
+  const updated = Date.parse(task.updated_at);
+  const trailing = [
+    shouldShowStateChip(state, groupBy) ? (
+      <TaskStateChip key="state" state={state} status={task.status} />
+    ) : null,
+    goal && groupBy !== "goal" ? (
+      <TaskFact key="goal" icon={<Target />} title={`Goal: ${goal}`}>
         {goal}
-      </BoardCardMeta>,
-    );
-  }
-  if (props.has("due") && task.due_date) {
-    chips.push(
-      <BoardCardMeta
-        key="due"
-        icon={Clock}
-        tone={isOverdue(task.due_date) ? "alert" : undefined}
-        title={`Due ${task.due_date}`}
-      >
-        {formatDueDate(task.due_date)}
-      </BoardCardMeta>,
-    );
-  }
-  if (props.has("estimate") && task.estimate != null) {
-    chips.push(
-      <BoardCardMeta key="est" title="Estimate">
-        {task.estimate} pts
-      </BoardCardMeta>,
-    );
-  }
-  if (props.has("agent") && task.agent_assignee) {
-    chips.push(
-      <BoardCardMeta key="agent" icon={Bot} title={`Agent: ${task.agent_assignee}`}>
-        {task.agent_assignee}
-      </BoardCardMeta>,
-    );
-  }
-  if (props.has("pr") && task.linked_pr) {
-    chips.push(
-      <BoardCardMeta key="pr" icon={Link2} mono title={task.linked_pr.url}>
+      </TaskFact>
+    ) : null,
+    ...cardFacts(task, props, taskLabels, childCount),
+    props.has("pr") && task.linked_pr ? (
+      <TaskFact key="pr" title={task.linked_pr.url}>
         #{task.linked_pr.number}
-      </BoardCardMeta>,
-    );
-  }
-  if (childCount > 0) {
-    chips.push(
-      <BoardCardMeta
-        key="children"
-        icon={GitBranch}
-        title={`${childCount} sub-task${childCount === 1 ? "" : "s"}`}
-      >
-        {childCount}
-      </BoardCardMeta>,
-    );
-  }
-  // The crew this task belongs to — so a crew-filed row wears its home on the
-  // row. Hidden for the default (no crew set).
-  if (task.crew_id) {
-    chips.push(
-      <BoardCardMeta key="crew" icon={Users} title={`Crew: ${task.crew_id}`}>
-        {task.crew_id}
-      </BoardCardMeta>,
-    );
-  }
-  // Plan progress — "3 of 7". Only when the task carries a plan; a task with
-  // no steps has no progress to report and "0 of 0" would be a lie.
-  const planProgress = stepProgress(task);
-  if (planProgress) {
-    chips.push(
-      <BoardCardMeta
-        key="plan"
-        icon={ListChecks}
-        title={`Plan: ${planProgress.done} of ${planProgress.total} steps done`}
-      >
-        {planProgress.done} of {planProgress.total}
-      </BoardCardMeta>,
-    );
-  }
-  if (props.has("labels") && task.labels.length > 0) {
-    chips.push(
-      <BoardCardLabels
-        key="labels"
-        labels={task.labels.map((l) => {
-          const entry = taskLabels.find((cl) => cl.name === l || cl.id === l);
-          return { key: l, name: entry?.name ?? l, color: entry?.color };
-        })}
-      />,
-    );
-  }
-  if (props.has("assignee") && task.assignee_ids.length > 0) {
-    chips.push(
+      </TaskFact>
+    ) : null,
+    props.has("assignee") && task.assignee_ids.length > 0 ? (
       <span key="assignees" title={task.assignee_ids.join(", ")}>
-        <AssigneeStack
-          handles={task.assignee_ids}
-          members={members}
-          dense
-          maxAvatars={3}
-        />
-      </span>,
-    );
-  }
+        <AssigneeStack handles={task.assignee_ids} members={members} dense maxAvatars={3} />
+      </span>
+    ) : null,
+  ].filter(Boolean);
 
   return (
-    <BoardListRow
+    <TaskListItem
+      taskId={task.id}
+      label={task.title || "(untitled)"}
       selected={selected}
-      onSelect={onSelect}
-      dataAttrs={{ "data-task-id": task.id }}
-      tooltip={task.title}
+      onOpen={onOpen}
+      menu={<TaskMenuItems task={task} onStatus={onStatus} onOpen={onOpen} />}
       leading={
         <>
+          <TaskStatusTag state={state} status={task.status} onStatus={onStatus} />
           {props.has("priority") && <TaskPriorityBars priority={task.priority} />}
-          {/* No status ring here. A row used to lead with one, then wear a
-              chip carrying the same ring and the word, all under a sticky
-              header already saying it — the same fact three times across one
-              row. The row states its status once, as the chip, and only when
-              the header isn't already saying it. */}
-          {props.has("id") && (
-            <span className="w-20 flex-shrink-0">
-              <TaskIdChip sequenceId={task.sequence_id} />
-            </span>
-          )}
+          {props.has("id") && <TaskHandle>AURA-{task.sequence_id}</TaskHandle>}
         </>
       }
       title={<MentionedText text={task.title || "(untitled)"} members={members} />}
-      trailing={chips}
+      trailing={trailing.length > 0 ? trailing : undefined}
+      time={
+        Number.isFinite(updated)
+          ? { label: formatAgo(updated).replace(/ ago$/, ""), title: `Updated ${task.updated_at}` }
+          : undefined
+      }
     />
   );
 }

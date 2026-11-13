@@ -24,7 +24,7 @@ import { describe, expect, test } from "bun:test";
 import { driftFromAlignments } from "../src/lib/useFeatureDrift";
 import type { IntentBanner } from "../src/lib/useIntentMatch";
 import type { IntentBasis } from "../src/lib/intentBasis";
-import { stripComments } from "./support/code";
+import { strippedSrcTree } from "./support/code";
 
 type A = { banner: IntentBanner; score: number; basis?: IntentBasis };
 
@@ -159,10 +159,8 @@ describe("the gate the surfaces render is the one computed here", () => {
   test("no surface folds banners into a drift verdict of its own", async () => {
     // Four components show this gate. If one starts counting `aligned` itself
     // the disclosure above stops travelling with the number.
-    const SRC = `${import.meta.dir}/../src`;
     const offenders: string[] = [];
-    for await (const rel of new Bun.Glob("components/**/*.tsx").scan({ cwd: SRC })) {
-      const src = stripComments(await Bun.file(`${SRC}/${rel}`).text());
+    for (const [rel, src] of await strippedSrcTree("components/**/*.tsx")) {
       if (/key:\s*"drift"/.test(src)) offenders.push(rel);
     }
     expect(offenders).toEqual([]);

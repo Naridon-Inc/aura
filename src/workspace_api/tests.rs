@@ -241,6 +241,24 @@ fn messages_rendering_is_one_line_per_turn_with_continuations_indented() {
 }
 
 #[test]
+fn a_model_says_which_agent_runs_it_and_whether_you_can_start_it() {
+    let models = json!({
+        "models": [
+            { "id": "claude-opus-5-5", "label": "Opus 5.5", "provider": "anthropic", "agent": "claude", "available": true, "is_new": true },
+            { "id": "gpt-5.5", "label": "GPT-5.5", "provider": "openai", "agent": "codex", "available": false, "is_new": false }
+        ],
+        "default_agent": "claude",
+        "catalog_url": "https://auravcs.com/models/catalog.json"
+    });
+    let out = output::render_models(&models);
+    let opus = out.lines().find(|l| l.contains("claude-opus-5-5")).unwrap();
+    assert!(opus.contains("Opus 5.5") && opus.contains("signed in · new") && !opus.contains("not signed"));
+    let gpt = out.lines().find(|l| l.contains("gpt-5.5")).unwrap();
+    assert!(gpt.contains("not signed in to codex"));
+    assert!(out.contains("default agent: claude") && !out.contains("key"));
+}
+
+#[test]
 fn models_and_whoami_render_plainly() {
     let models = json!({
         "models": [

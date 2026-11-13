@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KgFlow } from "../../lib/api";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Minus, Plus } from "lucide-react";
 import { Button } from "../ui/button";
 import { StatusChip } from "../ui/statusChip";
 import { layoutFlow, layoutTree, type FlowGeom } from "./featureMap/layout";
@@ -167,15 +168,15 @@ export function FeatureMapView({ repoRoot, rebuildSignal, onDrillDown }: Props) 
     };
   }, [sel.step, diagram, tree?.diagramAt, vp.view]);
 
-  const projectName = repoRoot.replace(/\/$/, "").split("/").pop() || "This project";
+  const projectName = repoRoot.replace(/\/$/, "").split("/").pop() || "This repository";
 
   if (loading && !features) {
     return (
-      <div className="flex-1 min-h-0 flex items-center justify-center text-text-4 text-sm gap-2">
+      <div className="ui-graph-message">
         <AsciiSpinner />
         <span>
           {building
-            ? "Reading the whole project for the first time — this takes a minute…"
+            ? "Reading the whole repository for the first time — this takes a minute…"
             : "Reading the code map…"}
         </span>
       </div>
@@ -183,8 +184,8 @@ export function FeatureMapView({ repoRoot, rebuildSignal, onDrillDown }: Props) 
   }
   if (error && !features) {
     return (
-      <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
-        <span className="text-red text-sm max-w-md">{error}</span>
+      <div className="ui-graph-message" data-tone="danger">
+        <span>{error}</span>
         <Button variant="secondary" size="sm" onClick={reload}>
           Try again
         </Button>
@@ -193,26 +194,26 @@ export function FeatureMapView({ repoRoot, rebuildSignal, onDrillDown }: Props) 
   }
   if (!features || !model || !tree) {
     return (
-      <div className="flex-1 min-h-0 flex items-center justify-center text-text-4 text-sm">
+      <div className="ui-graph-message">
         Nothing to map here yet.
       </div>
     );
   }
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col">
-      <div className="h-8 shrink-0 flex items-center gap-2 px-3 border-b border-line-soft text-xs">
+    <div className="ui-graph-features">
+      <div className="ui-graph-bar">
         {chips.map((c) => (
           <StatusChip key={c.key} tone={c.tone} dot={c.tone !== "neutral"} dense>
             {c.label}
           </StatusChip>
         ))}
-        <span className="text-text-4 truncate">
+        <span className="ui-graph-bar-meta">
           {features.features.length} features · {features.stats.symbols.toLocaleString()} pieces ·
           read {relativeTime(features.built_at, now)}
           {flows && flows.tally.seen === 0 && flows.flows.length > 0 ? " · every flow traced from the code" : ""}
         </span>
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ui-graph-bar-end">
           {flows && (
             <NeedsALookMenu
               items={look}
@@ -221,19 +222,29 @@ export function FeatureMapView({ repoRoot, rebuildSignal, onDrillDown }: Props) 
               onPick={openFlowById}
             />
           )}
-          <span className="w-px h-4 bg-line-soft mx-1" />
-          <Button variant="ghost" size="icon" onClick={() => vp.zoomBy(1 / 1.2)} title="Zoom out">
-            −
+          <span className="ui-graph-zoom-rule" />
+          <Button
+            variant="ghost"
+            size="iconSm"
+            onClick={() => vp.zoomBy(1 / 1.2)}
+            title="Zoom out"
+            aria-label="Zoom out"
+          >
+            <Minus />
           </Button>
-          <span className="text-text-4 tabular-nums w-9 text-center">
-            {Math.round(vp.view.s * 100)}%
-          </span>
-          <Button variant="ghost" size="icon" onClick={() => vp.zoomBy(1.2)} title="Zoom in">
-            +
+          <span className="ui-graph-zoom-scale">{Math.round(vp.view.s * 100)}%</span>
+          <Button
+            variant="ghost"
+            size="iconSm"
+            onClick={() => vp.zoomBy(1.2)}
+            title="Zoom in"
+            aria-label="Zoom in"
+          >
+            <Plus />
           </Button>
           <Button
             variant="ghost"
-            size="xs"
+            size="sm"
             onClick={() => vp.fit(tree.width, tree.height)}
             title="Fit the whole map"
           >
@@ -244,7 +255,7 @@ export function FeatureMapView({ repoRoot, rebuildSignal, onDrillDown }: Props) 
 
       <div
         ref={host}
-        className="relative flex-1 min-h-0 overflow-hidden bg-bg-0 select-none"
+        className="ui-graph-map select-none"
         style={{ cursor: vp.dragging ? "grabbing" : "grab" }}
       >
         <svg
@@ -287,7 +298,7 @@ export function FeatureMapView({ repoRoot, rebuildSignal, onDrillDown }: Props) 
           />
         )}
 
-        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 pointer-events-none text-2xs text-text-4 bg-bg-1/85 border border-line-soft rounded px-2 py-0.5 whitespace-nowrap">
+        <div className="ui-graph-hint">
           {sel.flowId
             ? "Click a step to read it · ← → to move along · Esc to step back out"
             : sel.featureId

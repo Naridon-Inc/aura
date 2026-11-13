@@ -1,6 +1,6 @@
 [package]
 name = "aura-shell"
-version = "0.19.58"
+version = "0.20.11"
 description = "Aura desktop shell — Tauri 2 binary backed by every aura-* Rust crate."
 authors = ["Aura"]
 edition = "2021"
@@ -62,6 +62,7 @@ tauri-plugin-deep-link = "2"
 # Aura engine — every Rust crate in the workspace is reachable from the
 # shell via tauri commands. Path deps share Cargo.lock so signing/CRDT/
 # policy code is byte-identical to what aura-term ships.
+aura-acp           = { path = "../../crates/aura-acp" }
 aura-agents        = { path = "../../crates/aura-agents" }
 aura-attestation   = { path = "../../crates/aura-attestation" }
 aura-blocks        = { path = "../../crates/aura-blocks" }
@@ -208,6 +209,9 @@ flate2     = "1"
 # language-configuration, snippets, grammars. We never run extension code.
 # deflate-only keeps the build lean; .vsix archives use standard deflate.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Settings → Import: one editor keeps its agent threads zstd-compressed in
+# SQLite. Pure Rust (no C build), decode only, checksum feature off.
+ruzstd = { version = "0.7", default-features = false, features = ["std"] }
 # Wave C — random bytes for OAuth PKCE code_verifier + state nonce.
 rand       = "0.8"
 
@@ -283,7 +287,7 @@ glib   = "0.18"
 # ship. Default set is every provider whose streaming is real, which is
 # the condition the flags were introduced to wait on.
 [features]
-default = ["brain_anthropic_native", "brain_acp", "brain_pi", "brain_cli_wrapper", "brain_gemini_native", "brain_openai_compat", "brain_aura_pro", "brain_bedrock", "brain_vertex"]
+default = ["brain_anthropic_native", "brain_acp", "brain_pi", "brain_cli_wrapper", "brain_gemini_native", "brain_openai_compat", "brain_bedrock", "brain_vertex"]
 brain_anthropic_native = []
 # Agents that speak the Agent Client Protocol — a live session rather than
 # a one-shot process, and, because ACP agents ask the *client* to touch the
@@ -305,10 +309,6 @@ brain_cli_wrapper      = []
 brain_gemini_native    = []
 brain_openai_native    = []
 brain_openai_compat    = []
-# v0.2.31 task #352 — managed/subscription brain that proxies through
-# aura-cloud using the user's existing cloud auth token. Default-on
-# alongside the other production brains.
-brain_aura_pro         = []
 # Cloud-hosted Claude via the hyperscaler control planes. Bedrock signs a
 # single `/invoke` POST with SigV4; Vertex mints a GCP OAuth2 token from a
 # service-account JSON and streams Anthropic-native SSE. Both are default-on

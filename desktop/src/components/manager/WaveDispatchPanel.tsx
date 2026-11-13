@@ -12,7 +12,7 @@
 // Dispatching the wave fires `orchestrator_dispatch_wave` and subscribes
 // to `orchestrator-wave:<wave_id>` for live updates. The parent manager
 // only ever sees each lane's summary (NOT the full transcript) — that's
-// how kilo.ai's Orchestrator Mode preserves the parent's context budget.
+// how the fan-out preserves the parent's context budget.
 //
 // The composed change-set surfaces at the bottom of the panel as a
 // unified diff so the user can inspect every lane's output in one place
@@ -33,9 +33,17 @@ import {
   type WavePlan,
   type ZoneConflict,
 } from "../../lib/api";
+import { Play } from "lucide-react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Button } from "../ui/button";
 import { Select } from "../ui/select";
+import { ErrorNote } from "../ui/state";
+import { StatusChip, type ChipTone } from "../ui/statusChip";
+import { Switch } from "../ui/switch";
 import { compactNumber } from "../../lib/compactNumber";
-import { WORK_STATE, laneState } from "../../lib/workState";
+import { WORK_STATE, laneState, type WorkState } from "../../lib/workState";
+import "../ui/log-note.css";
+import "../ui/wave-dispatch.css";
 
 // This panel printed the runner's enum in the runner's case — QUEUED, RUNNING,
 // CONFLICT — to someone who asked for a feature, and it reserved amber for a
@@ -43,6 +51,20 @@ import { WORK_STATE, laneState } from "../../lib/workState";
 // lane. The concern behind that choice still holds and is still met: a running
 // lane and a collided one must not look alike. They don't — running is amber
 // and a collision is red, with the failures, because both mean "look here".
+/** The app's word for a lane's state, as the shared chip's tone. Severity, as
+ *  in WORK_STATE: a collision and a failure share red, running is amber. */
+const LANE_TONE: Record<WorkState, ChipTone> = {
+  queued: "neutral",
+  ready: "neutral",
+  working: "amber",
+  blocked: "neutral",
+  paused: "neutral",
+  conflict: "red",
+  done: "green",
+  failed: "red",
+  cancelled: "neutral",
+};
+
 type Props = {
   plan: PendingPlan;
   /** Optional repo root — wired into lane zones so the conflict
@@ -196,103 +218,54 @@ export function WaveDispatchPanel({ plan, repoRoot: _repoRoot, onWaveComplete }:
   const hasDispatched = lanes.length > 0;
 
   return (
-    <div
-      className="aura-block w-full flex flex-col overflow-hidden mt-2 mb-2"
-      data-testid="wave-dispatch-panel"
-    >
-      <div
-        className="flex items-center justify-between gap-2 px-3 py-2 border-b"
-        style={{ borderColor: "var(--color-line-soft)" }}
-      >
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="aura-block-label">ORCHESTRATOR</span>
-          <span style={{ color: "var(--color-text-3)" }}>·</span>
-          <span
-            className="truncate"
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: "11px",
-              color: "var(--color-text-2)",
-            }}
-            title={waveId}
-          >
+    <section className="ui-wave" data-testid="wave-dispatch-panel" aria-label="Orchestrator">
+      <header className="ui-wave-head">
+        <span className="ui-wave-title" title={waveId}>
+          Orchestrator
+          <small>
             {plan.todos.length} lane{plan.todos.length === 1 ? "" : "s"}
-          </span>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            onClick={toggleAutoRoute}
-            className="aura-block-link"
-            style={{
-              color: autoRoute ? "var(--color-accent)" : "var(--color-text-3)",
-              fontFamily: "var(--font-mono)",
-              fontSize: "10px",
-              letterSpacing: "0.04em",
-            }}
-            title={
-              autoRoute
-                ? "Aura is picking the brain for each lane you haven't set yourself, going by which one has done this kind of work best before. Click to turn off."
-                : "Off. Every lane you haven't set yourself uses the brain you have selected. Click to let Aura pick instead."
-            }
-          >
-            {autoRoute ? "● AUTO-ROUTE ON" : "○ AUTO-ROUTE OFF"}
-          </button>
-          {!hasDispatched && (
-            <button
-              type="button"
-              onClick={dispatchWave}
-              disabled={dispatching || plan.todos.length === 0}
-              className="aura-block-link"
-              style={{
-                opacity: dispatching || plan.todos.length === 0 ? 0.5 : 1,
-              }}
-              title="Start every step of the plan at once, each on its own brain"
-            >
-              {dispatching ? "DISPATCHING…" : "DISPATCH WAVE"}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {error && (
-        <div
-          className="px-3 py-2 t-sm"
-          style={{
-            background: "color-mix(in srgb, var(--color-red) 8%, transparent)",
-            color: "var(--color-red)",
-            borderBottom: "1px solid var(--color-line-soft)",
-          }}
+          </small>
+        </span>
+        <label
+          className="ui-wave-auto"
+          title={
+            autoRoute
+              ? "Aura is picking the brain for each lane you haven't set yourself, going by which one has done this kind of work best before. Click to turn off."
+              : "Off. Every lane you haven't set yourself uses the brain you have selected. Click to let Aura pick instead."
+          }
         >
-          {error}
-        </div>
-      )}
+          <Switch
+            checked={autoRoute}
+            onCheckedChange={() => void toggleAutoRoute()}
+            aria-label="Auto-route: let Aura pick the brain for each lane"
+          />
+          Auto-route
+        </label>
+        {!hasDispatched && (
+          <Button
+            type="button"
+            size="xs"
+            onClick={dispatchWave}
+            disabled={dispatching || plan.todos.length === 0}
+            title="Start every step of the plan at once, each on its own brain"
+          >
+            {dispatching ? <AsciiSpinner size={12} /> : <Play />}
+            {dispatching ? "Dispatching…" : "Dispatch wave"}
+          </Button>
+        )}
+      </header>
+
+      {error && <ErrorNote>{error}</ErrorNote>}
 
       {!hasDispatched && (
-        <div className="flex flex-col">
+        <ol className="ui-wave-lanes">
           {plan.todos.map((todo, idx) => (
-            <div
-              key={idx}
-              className="flex items-start gap-2.5 px-3 py-2 border-b"
-              style={{ borderColor: "var(--color-line-soft)" }}
-            >
-              <span className="aura-block-index shrink-0 mt-[2px]">
-                {String(idx + 1).padStart(2, " ")}
-              </span>
-              <div className="flex-1 min-w-0">
-                <div
-                  className="t-sm leading-snug"
-                  style={{ color: "var(--color-text-1)" }}
-                >
-                  {todo.description}
-                </div>
+            <li key={idx} className="ui-wave-lane">
+              <span className="ui-wave-index">{idx + 1}</span>
+              <div className="ui-wave-lane-body">
+                <p>{todo.description}</p>
                 {todo.file_refs && todo.file_refs.length > 0 && (
-                  <div
-                    className="t-xs mt-1 truncate"
-                    style={{ color: "var(--color-text-3)" }}
-                  >
-                    zones: {todo.file_refs.join(", ")}
-                  </div>
+                  <small className="ui-wave-zones">zones: {todo.file_refs.join(", ")}</small>
                 )}
               </div>
               <BrainPicker
@@ -303,13 +276,13 @@ export function WaveDispatchPanel({ plan, repoRoot: _repoRoot, onWaveComplete }:
                   setOverrides((prev) => ({ ...prev, [idx]: v }))
                 }
               />
-            </div>
+            </li>
           ))}
-        </div>
+        </ol>
       )}
 
       {hasDispatched && (
-        <div className="flex flex-col">
+        <ol className="ui-wave-lanes">
           {lanes.map((lane, idx) => (
             <LaneRow
               key={lane.lane_id}
@@ -320,7 +293,7 @@ export function WaveDispatchPanel({ plan, repoRoot: _repoRoot, onWaveComplete }:
               onCancel={() => cancelLane(lane.lane_id)}
             />
           ))}
-        </div>
+        </ol>
       )}
 
       {outcome && outcome.unified_changes.length > 0 && (
@@ -330,12 +303,12 @@ export function WaveDispatchPanel({ plan, repoRoot: _repoRoot, onWaveComplete }:
       {outcome?.tokens && outcome.tokens.done_lanes > 0 && (
         <WaveTokenMeter ledger={outcome.tokens} />
       )}
-    </div>
+    </section>
   );
 }
 
 /** The honest Orchestrator token meter. Shows both sides a user cares
- *  about after a "is Conductor costing me more?" worry: what fan-out
+ *  about after a "is this costing me more?" worry: what fan-out
  *  compression SAVED the coordinator's context, and the fan-out OVERHEAD
  *  it added vs. a linear run. Every figure is a heuristic estimate — the
  *  "~" is load-bearing honesty, not decoration. */
@@ -343,13 +316,7 @@ function WaveTokenMeter({ ledger }: { ledger: TokenLedger }) {
   const { transcript_tokens, summary_tokens, saved_tokens, overhead_tokens, done_lanes } = ledger;
   return (
     <div
-      className="mx-3 mb-3 mt-1 px-3 py-1.5 flex items-center gap-x-3 gap-y-1 flex-wrap"
-      style={{
-        border: "1px solid var(--color-line-soft)",
-        borderRadius: 2,
-        fontFamily: "var(--font-mono)",
-        fontSize: "11px",
-      }}
+      className="ui-wave-meter"
       title={
         "Heuristic ~3.5-chars/token estimates, not provider-billed counts.\n" +
         `${done_lanes} lane${done_lanes === 1 ? "" : "s"} produced ~${compactNumber(transcript_tokens)} tokens of transcript; ` +
@@ -358,22 +325,12 @@ function WaveTokenMeter({ ledger }: { ledger: TokenLedger }) {
         `Fan-out overhead ~${compactNumber(overhead_tokens)} is the per-lane coordination prompt a single linear run would not pay.`
       }
     >
-      <span className="aura-block-label" style={{ color: "var(--color-text-3)" }}>
-        COORDINATOR CONTEXT
-      </span>
-      <span style={{ color: "var(--color-text-3)" }}>
-        lanes produced ~{compactNumber(transcript_tokens)}
-      </span>
-      <span style={{ color: "var(--color-text-3)" }}>→</span>
-      <span style={{ color: "var(--color-text-2)" }}>
-        you read ~{compactNumber(summary_tokens)}
-      </span>
-      <span style={{ color: "var(--color-accent)", fontWeight: 600 }}>
-        saved ~{compactNumber(saved_tokens)}
-      </span>
-      <span style={{ color: "var(--color-text-3)", marginLeft: "auto" }}>
-        fan-out overhead ~{compactNumber(overhead_tokens)}
-      </span>
+      <strong>Coordinator context</strong>
+      <span>lanes produced ~{compactNumber(transcript_tokens)}</span>
+      <span aria-hidden>→</span>
+      <span>you read ~{compactNumber(summary_tokens)}</span>
+      <span data-tone="green">saved ~{compactNumber(saved_tokens)}</span>
+      <span className="ui-wave-meter-end">fan-out overhead ~{compactNumber(overhead_tokens)}</span>
     </div>
   );
 }
@@ -393,7 +350,7 @@ function BrainPicker({
     <Select
       value={value}
       onChange={onChange}
-      className="shrink-0 max-w-[160px]"
+      className="ui-wave-brain"
       align="end"
       aria-label={
         autoRoute
@@ -443,175 +400,72 @@ function LaneRow({
     const lines = text.split("\n");
     return lines.slice(Math.max(0, lines.length - 3)).join("\n");
   }, [lane.transcript]);
+  const state = laneState(lane.status);
 
   return (
-    <div
-      className="border-b"
-      style={{ borderColor: "var(--color-line-soft)" }}
-    >
-      <div className="flex items-start gap-2.5 px-3 py-2">
-        <span className="aura-block-index shrink-0 mt-[2px]">
-          {String(idx + 1).padStart(2, " ")}
-        </span>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span
-              className="t-xs"
-              style={{
-                fontFamily: "var(--font-mono)",
-                color: WORK_STATE[laneState(lane.status)].color,
-                fontWeight: 600,
-                letterSpacing: "0.04em",
-              }}
+    <li className="ui-wave-lane">
+      <span className="ui-wave-index">{idx + 1}</span>
+      <div className="ui-wave-lane-body">
+        <div className="ui-wave-lane-meta">
+          {/* Reads from the same entry as the conflict line below, so the
+              mark that flags a collision and the line explaining it agree. */}
+          <StatusChip tone={LANE_TONE[state]} dense title={WORK_STATE[state].hint}>
+            {lane.status === "running" && <AsciiSpinner size={10} />}
+            {WORK_STATE[state].label}
+          </StatusChip>
+          {lane.provider_id && <small className="ui-wave-mono">{lane.provider_id}</small>}
+          {wasAutoRouted && lane.provider_id && (
+            <small
+              className="ui-wave-picked"
+              title="Aura chose this brain because it has done best on this kind of work before."
             >
-              {WORK_STATE[laneState(lane.status)].label}
-            </span>
-            {lane.provider_id && (
-              <span
-                className="t-xs"
-                style={{
-                  color: "var(--color-text-3)",
-                  fontFamily: "var(--font-mono)",
-                }}
-              >
-                {lane.provider_id}
-              </span>
-            )}
-            {wasAutoRouted && lane.provider_id && (
-              <span
-                className="t-xs"
-                style={{
-                  color: "var(--color-accent)",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: "10px",
-                }}
-                title="Aura chose this brain because it has done best on this kind of work before."
-              >
-                ● Aura picked this one
-              </span>
-            )}
-          </div>
-          <div
-            className="t-sm leading-snug mt-1"
-            style={{ color: "var(--color-text-1)" }}
-          >
-            {lane.spec.label ?? lane.spec.objective}
-          </div>
-          {conflict && (
-            <div
-              className="t-xs mt-1"
-              // Reads from the same entry as the chip above, so the line that
-              // explains the collision and the mark that flags it stay in step.
-              style={{ color: WORK_STATE.conflict.color }}
-            >
-              zone conflict on <code>{conflict.zone}</code> with sibling lane
-            </div>
-          )}
-          {lane.error && (
-            <div
-              className="t-xs mt-1"
-              style={{ color: "var(--color-red)" }}
-            >
-              {lane.error}
-            </div>
-          )}
-          {tail && lane.status === "running" && (
-            <pre
-              className="t-xs mt-1 whitespace-pre-wrap break-words"
-              style={{
-                fontFamily: "var(--font-mono)",
-                color: "var(--color-text-3)",
-                background: "var(--color-bg-2)",
-                padding: "4px 6px",
-                borderRadius: 2,
-                maxHeight: 72,
-                overflow: "hidden",
-              }}
-            >
-              {tail}
-            </pre>
-          )}
-          {lane.summary && lane.status === "done" && (
-            <div
-              className="t-xs mt-1"
-              style={{ color: "var(--color-text-2)" }}
-            >
-              summary: {lane.summary}
-            </div>
+              Aura picked this one
+            </small>
           )}
         </div>
-        {!isTerminal && (
-          <button
-            type="button"
-            onClick={onCancel}
-            className="aura-block-link shrink-0 mt-[2px]"
-            style={{ color: "var(--color-text-3)" }}
-            title="Stop this lane. Ends its brain's session and releases the files it had claimed"
-          >
-            CANCEL
-          </button>
+        <p>{lane.spec.label ?? lane.spec.objective}</p>
+        {conflict && (
+          <small className="ui-wave-problem">
+            zone conflict on <code>{conflict.zone}</code> with sibling lane
+          </small>
+        )}
+        {lane.error && <small className="ui-wave-problem">{lane.error}</small>}
+        {tail && lane.status === "running" && <pre className="ui-wave-tail">{tail}</pre>}
+        {lane.summary && lane.status === "done" && (
+          <small className="ui-wave-summary">summary: {lane.summary}</small>
         )}
       </div>
-    </div>
+      {!isTerminal && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          onClick={onCancel}
+          title="Stop this lane. Ends its brain's session and releases the files it had claimed"
+        >
+          Cancel
+        </Button>
+      )}
+    </li>
   );
 }
 
 function UnifiedChangeset({ changes }: { changes: UnifiedChange[] }) {
   return (
-    <div
-      className="aura-block-soft mx-3 mb-3 mt-1 overflow-hidden"
-      style={{ border: "1px solid var(--color-line-soft)", borderRadius: 2 }}
-    >
-      <div
-        className="px-3 py-1.5 border-b"
-        style={{ borderColor: "var(--color-line-soft)" }}
-      >
-        <span className="aura-block-label">
-          UNIFIED CHANGES · {changes.length}
-        </span>
+    <section className="ui-wave-changes" aria-label="Unified changes">
+      <div className="ui-log-note-files-head">
+        <span>Unified changes</span>
+        <span className="ui-log-note-count">{changes.length}</span>
       </div>
-      <div className="flex flex-col">
-        {changes.map((c, idx) => (
-          <div
-            key={`${c.lane_id}:${c.path}:${idx}`}
-            className="px-3 py-1.5 border-b"
-            style={{ borderColor: "var(--color-line-soft)" }}
-          >
-            <div className="flex items-center gap-2 mb-1">
-              <span
-                className="t-xs"
-                style={{
-                  fontFamily: "var(--font-mono)",
-                  color: "var(--color-text-2)",
-                  fontWeight: 600,
-                }}
-              >
-                {c.path}
-              </span>
-              <span
-                className="t-xs"
-                style={{ color: "var(--color-text-3)" }}
-              >
-                lane {c.lane_id.slice(0, 8)}
-              </span>
-            </div>
-            <pre
-              className="t-xs whitespace-pre-wrap break-words"
-              style={{
-                fontFamily: "var(--font-mono)",
-                color: "var(--color-text-2)",
-                background: "var(--color-bg-2)",
-                padding: "6px 8px",
-                borderRadius: 2,
-                maxHeight: 240,
-                overflow: "auto",
-              }}
-            >
-              {c.body}
-            </pre>
+      {changes.map((c, idx) => (
+        <div key={`${c.lane_id}:${c.path}:${idx}`} className="ui-wave-change">
+          <div className="ui-wave-change-head">
+            <strong className="ui-wave-mono">{c.path}</strong>
+            <small>lane {c.lane_id.slice(0, 8)}</small>
           </div>
-        ))}
-      </div>
-    </div>
+          <pre>{c.body}</pre>
+        </div>
+      ))}
+    </section>
   );
 }

@@ -22,7 +22,7 @@ import { getWorkspaceName } from "./workspaceCustomization";
 const WORKTREE_PATH_RE = /^(.*?)\/\.(?:claude|gemini|aura)\/worktrees\/([^/]+)\/?$/;
 
 // The bundled sample ("Recipe Box") is seeded at ~/AuraProjects/recipe-box and
-// surfaced as the always-present "Get Started" project (Conductor's Quickstart
+// surfaced as the always-present "Get Started" project (the quickstart
 // idea) the app boots onto on first run — so its switcher/roster label reads
 // "Get Started", not the raw folder name.
 const SAMPLE_ROOT_SUFFIX = "/AuraProjects/recipe-box";
@@ -37,7 +37,7 @@ export function isSampleRoot(root: string): boolean {
 const MACHINE_LEAF_RE = /^(?:worktree-)?(?:agent|lane|work|p)[-_]?[0-9a-f]{6,}$|^[0-9a-f]{8,}$/i;
 
 // A calm list of place names. An agent's parallel copy earns a memorable handle
-// ("New Git · Austin") instead of a hash — the same idea Conductor uses for its
+// ("New Git · Austin") instead of a hash — the same idea behind named
 // chats. Deterministic: a given worktree always maps to the same name, so the
 // label stays stable across restarts. Recognizable, soothing places.
 const COPY_NAMES = [

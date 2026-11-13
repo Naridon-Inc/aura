@@ -1,4 +1,4 @@
-// Aura Manager landing — chat-first, Codex-style.
+// The workspace's home: the chat before there is a chat.
 //
 // Workspace-open should land you IN a chat, not at an empty splash. So this
 // surface is ambient-session-aware:
@@ -7,28 +7,31 @@
 //     validated against `manager_status` so a stale/cross-workspace sid is
 //     dropped). When one exists we render the live <ManagerSurface> — you
 //     resume your chat the moment the workspace opens.
-//   • Otherwise the launcher splash shows. The first send converts it in
-//     place into the live chat (via `sendToAmbientManager`, which both
-//     starts the session AND fires the brain's first turn). We never eagerly
-//     mint an empty session, so there's no empty-thread sprawl.
-//   • "New thread" clears the ambient pointer and drops back to the splash.
+//   • Otherwise the home shows. The first send converts it in place into the
+//     live chat (via `sendToAmbientManager`, which both starts the session
+//     AND fires the brain's first turn). We never eagerly mint an empty
+//     session, so there's no empty-thread sprawl.
+//   • "New thread" clears the ambient pointer and drops back to the home.
 //
 // The Manager plans the objective, fans it out across Claude Code / Gemini /
 // Codex / Cursor, keeps every step audited, and surfaces the result
 // like a chat (what each agent said + what it edited).
 //
-// Layout (matches the Codex web reference):
-//   • centered "What should we build in <project>?" headline
-//   • big rounded composer whose bar holds the one control that works here:
-//       send. Permissions, model, effort and mode are per-TURN knobs; they
-//       live on the chat composer this converts into on the first send.
-//   • context chips row directly below — project / scope / branch
-//   • one-tap suggestion rows with thin dividers (no pills)
-//   • Resume-recent rows in the same divider-list pattern when present
+// It is drawn as the empty conversation it turns into: the chat's own empty
+// state (headline, starters, the line naming where the work happens) in the
+// conversation column, the same composer band under it, and the
+// conversations you could pick back up beneath the starters. It used to be a
+// page of its own — its own headline, its own text box, three context chips
+// drawn with carets that opened nothing — so the first thing a workspace
+// showed you was a screen that changed shape the moment you used it.
 //
-// Strict no-emoji policy: every glyph is an inline SVG.
+// The box keeps what was typed in it: Up at the start of an empty field walks
+// back through the prompts sent from here, and the prompt that opens a
+// conversation is that conversation's first entry, so Up in the chat it
+// becomes recalls it. Neither used to happen — the home had no recall, and the
+// chat it opened started with an empty ring.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ambientKey as ambientKeyFor } from "../../lib/ambientSession";
 import { api, type ClaudeSession } from "../../lib/api";
 import { fetchManagerList } from "../../lib/managerCache";
@@ -39,8 +42,17 @@ import {
   type FocusManagerDetail,
   sendToAmbientManager,
 } from "../../lib/focusManager";
+import { AgentIcon } from "../agent/AgentIcon";
+import { composerKey, MANAGER_HISTORY_PREFIX, rememberSent } from "../composer/composerDrafts";
+import { usePromptRecall } from "../composer/usePromptRecall";
+import { ChatComposerArea, ChatTranscript } from "../ui/chat-surface";
+import { Composer } from "../ui/composer";
+import { ErrorNote, LoadingState } from "../ui/state";
+import { ChatEmptyState } from "./chat/ChatEmptyState";
+import { ChatStarters } from "./chat/ChatStarters";
 import { ManagerSurface } from "./ManagerSurface";
-import { truncate } from "../../lib/truncate";
+import "../ui/log-note.css";
+import "../ui/chat-home.css";
 
 type Props = {
   repoRoot: string;
@@ -52,6 +64,11 @@ type Props = {
  *  a machine's copy belongs to that machine's workspace and has its own. */
 const ambientKey = (repoRoot: string) => ambientKeyFor(repoRoot, null);
 
+/** The home's own recall ring: the prompts sent from this workspace's home,
+ *  filed beside the chat rings under the same prefix. */
+const homeRecallKey = (repoRoot: string) =>
+  composerKey(MANAGER_HISTORY_PREFIX, `home:${repoRoot}`);
+
 /** Trailing-slash-tolerant root compare — same guard AuraRailPanel applies
  *  before trusting a persisted ambient sid. A pointer written for another
  *  project (or before sessions were workspace-scoped) must never resolve
@@ -60,36 +77,22 @@ function sameRoot(a: string, b: string): boolean {
   return a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
 }
 
-type Suggestion = {
-  glyph: SuggestionGlyphKind;
-  text: string;
-};
-
-type SuggestionGlyphKind =
-  | "wrench"
-  | "bug"
-  | "package"
-  | "check"
-  | "note";
-
-const SUGGESTIONS: ReadonlyArray<Suggestion> = [
-  { glyph: "wrench",  text: "Add a dark mode toggle to Settings" },
-  { glyph: "bug",     text: "Fix the flaky test in the auth suite" },
-  { glyph: "package", text: "Refactor the API client into a typed module" },
-  { glyph: "check",   text: "Add tests for the recently changed files" },
-  { glyph: "note",    text: "Write a release note for the last 10 commits" },
-];
-
 export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ClaudeSession[]>([]);
-  const [branch, setBranch] = useState<string>("");
   // Ambient-session state. `ready=false` guards the first paint so we don't
-  // flash the launcher splash before we know a live chat exists to resume.
+  // flash the home before we know a live chat exists to resume.
   const [sid, setSid] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const fieldRef = useRef<HTMLTextAreaElement | null>(null);
+  const recall = usePromptRecall({
+    storageKey: homeRecallKey(repoRoot),
+    value: prompt,
+    setValue: setPrompt,
+    fieldRef,
+  });
 
   // Resolve which chat to land on when the workspace opens. Two-step, so a
   // workspace that HAS chats never dumps you at the empty launcher:
@@ -193,8 +196,9 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
     return () => window.removeEventListener(FOCUS_MANAGER_EVENT, onFocus);
   }, [repoRoot]);
 
-  // The launcher's resume-recent list + branch chip only matter while the
-  // splash is showing — load them lazily once we know there's no live chat.
+  // The resume-recent list only matters while the home is showing — load it
+  // lazily once we know there's no live chat. (The branch is the empty
+  // state's to read: it names the working copy from real git data.)
   useEffect(() => {
     if (sid || !ready) return;
     let cancelled = false;
@@ -204,16 +208,17 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
         setSessions(list.slice(0, 4));
       })
       .catch(() => {});
-    api
-      .gitBranch(repoRoot)
-      .then((b) => {
-        if (!cancelled) setBranch(b);
-      })
-      .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [repoRoot, sid, ready]);
+
+  // The home is where a workspace opens, so its box takes the keyboard — as
+  // the text box it replaces did.
+  const showingHome = ready && !sid;
+  useEffect(() => {
+    if (showingHome) fieldRef.current?.focus();
+  }, [showingHome]);
 
   async function dispatch(text: string) {
     const trimmed = text.trim();
@@ -224,8 +229,12 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
       // sendToAmbientManager does the proven two-step (start the session AND
       // fire the brain's first turn) + persists the ambient pointer + focuses
       // the rail. We adopt the returned sid so the center converts in place
-      // into the live chat instead of leaving the user staring at the splash.
+      // into the live chat instead of leaving the user staring at the home.
       const sessionId = await sendToAmbientManager(repoRoot, trimmed);
+      // The opening prompt is the conversation's first message: file it where
+      // the chat's composer looks, before that composer mounts and reads it.
+      rememberSent(composerKey(MANAGER_HISTORY_PREFIX, sessionId), trimmed);
+      recall.remember(trimmed);
       setSid(sessionId);
       setPrompt("");
     } catch (e) {
@@ -247,11 +256,15 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
     setError(null);
   }
 
-  function onKey(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+  /** Enter sends (the composer's own key, as in the chat); ⌘↵ still does,
+   *  as it always has here; Up/Down at the field's edge walk the recall. */
+  function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      dispatch(prompt);
+      void dispatch(prompt);
+      return;
     }
+    recall.onKeyDown(e);
   }
 
   function resume(s: ClaudeSession) {
@@ -262,8 +275,8 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
 
   if (!ready) {
     return (
-      <div className="h-full w-full flex items-center justify-center bg-bg-content text-text-3 text-xs">
-        Loading Aura…
+      <div className="ui-chat-home" data-state="loading">
+        <LoadingState size="md" label="Loading Aura…" />
       </div>
     );
   }
@@ -274,302 +287,55 @@ export function ManagerDashboardSurface({ repoRoot, projectName }: Props) {
     return <ManagerSurface sessionId={sid} onNewThread={newThread} />;
   }
 
-  const branchShort = shortenBranch(branch);
+  const recent = sessions.slice(0, 3);
 
   return (
-    <div className="h-full w-full overflow-y-auto bg-bg-content">
-      <div className="flex justify-center px-6 pt-16 pb-10">
-        <div className="w-full max-w-[600px] flex flex-col items-stretch gap-3">
-          <h1 className="text-xl font-medium text-text-1 text-center leading-snug">
-            What should we build in {projectName}?
-          </h1>
-
-          <div className="flex flex-col gap-1.5">
-            <div className="rounded-[14px] border border-line-soft bg-bg-card focus-within:border-line transition-colors">
-              <textarea
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                onKeyDown={onKey}
-                placeholder="Ask Aura anything. @ to mention files"
-                rows={1}
-                disabled={busy}
-                autoFocus
-                className="w-full bg-transparent px-3.5 pt-2.5 pb-1 text-base text-text-1 placeholder:text-text-4 focus:outline-none resize-none disabled:opacity-50 no-scrollbar leading-relaxed"
-                style={{ minHeight: 30 }}
-              />
-              {/* Only what works. This bar used to draw an attach button, a
-                  permissions chip, a model chip and a mic — four affordances
-                  with carets and hover states and no handlers behind any of
-                  them, on the first screen of an opened workspace. The real
-                  ones live on the chat composer this converts into on the
-                  first send, where a per-turn knob can actually mean
-                  something. */}
-              <div className="flex items-center gap-1 px-2 pb-1.5 pt-0.5">
-                <span className="flex-1" />
+    <div className="ui-chat-home">
+      <ChatTranscript>
+        <ChatEmptyState projectLabel={projectName} repoRoot={repoRoot} />
+        {recent.length > 0 && (
+          <section className="ui-chat-home-recent" aria-label="Resume recent">
+            <div className="ui-log-note-files-head">
+              <span>Resume recent</span>
+              <span className="ui-log-note-count">{recent.length}</span>
+            </div>
+            {recent.map((s) => {
+              const preview = s.last_prompt || s.first_prompt || "(no prompt recorded)";
+              const turns = `${s.turn_count} turn${s.turn_count === 1 ? "" : "s"}`;
+              return (
                 <button
+                  key={s.session_id}
                   type="button"
-                  onClick={() => dispatch(prompt)}
-                  disabled={busy || !prompt.trim()}
-                  title={busy ? "Dispatching…" : "Dispatch ⌘↵"}
-                  className="flex items-center justify-center rounded-full transition-opacity disabled:opacity-30 disabled:cursor-not-allowed hover:opacity-90"
-                  style={{
-                    width: 22,
-                    height: 22,
-                    background: "var(--color-text-1)",
-                    color: "var(--color-bg-1)",
-                  }}
+                  className="ui-menu-row"
+                  onClick={() => resume(s)}
+                  title={`Resume Claude session. ${turns}`}
                 >
-                  <ArrowUpGlyph />
+                  <AgentIcon agentId="claude" label="Claude" size={14} />
+                  <span className="ui-chat-home-recent-text">
+                    <span>{preview}</span>
+                    <small>{`Claude · ${turns} · ${formatAge(s.mtime)}`}</small>
+                  </span>
                 </button>
-              </div>
-            </div>
-
-            <div className="flex items-center flex-wrap gap-1 pl-0.5">
-              <ContextChip glyph={<FolderChipGlyph />} text={projectName} />
-              <ContextChip glyph={<LaptopGlyph />} text="Work locally" />
-              <ContextChip
-                glyph={<BranchGlyph />}
-                text={branchShort || "no branch"}
-              />
-            </div>
-
-            {error ? (
-              <div className="text-xs text-caret-orange px-1">
-                Failed: {error}
-              </div>
-            ) : null}
-          </div>
-
-          <DividerList>
-            {SUGGESTIONS.map((s, i) => (
-              <DividerRow
-                key={s.text}
-                first={i === 0}
-                onClick={() => dispatch(s.text)}
-                disabled={busy}
-                glyph={<SuggestionGlyph kind={s.glyph} />}
-                text={s.text}
-              />
-            ))}
-          </DividerList>
-
-          {sessions.length > 0 && (
-            <DividerList header="Resume recent">
-              {sessions.slice(0, 3).map((s, i) => {
-                const preview =
-                  s.last_prompt || s.first_prompt || "(no prompt recorded)";
-                return (
-                  <DividerRow
-                    key={s.session_id}
-                    first={i === 0}
-                    onClick={() => resume(s)}
-                    glyph={<ResumeGlyph />}
-                    text={preview}
-                    meta={`Claude · ${s.turn_count} turn${s.turn_count === 1 ? "" : "s"} · ${formatAge(s.mtime)}`}
-                    title={`Resume Claude session. ${s.turn_count} turn${s.turn_count === 1 ? "" : "s"}`}
-                  />
-                );
-              })}
-            </DividerList>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function shortenBranch(b: string): string {
-  return truncate(b, 30);
-}
-
-function ContextChip({
-  glyph,
-  text,
-}: {
-  glyph: React.ReactNode;
-  text: string;
-}) {
-  return (
-    <span
-      className="flex items-center gap-1 text-xs text-text-3 hover:text-text-2 hover:bg-state-hover rounded px-1.5 transition-colors cursor-default"
-      style={{ height: 22 }}
-    >
-      <span className="text-text-4 flex items-center justify-center" style={{ width: 11, height: 11 }}>
-        {glyph}
-      </span>
-      <span className="truncate max-w-[160px]">{text}</span>
-      <span className="text-text-4">
-        <CaretGlyph />
-      </span>
-    </span>
-  );
-}
-
-function DividerList({
-  header,
-  children,
-}: {
-  header?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col">
-      {header && (
-        <div className="section-label px-1 pb-1">
-          {header}
-        </div>
-      )}
-      <div className="flex flex-col">{children}</div>
-    </div>
-  );
-}
-
-function DividerRow({
-  first,
-  onClick,
-  disabled,
-  glyph,
-  text,
-  meta,
-  title,
-}: {
-  first?: boolean;
-  onClick: () => void;
-  disabled?: boolean;
-  glyph: React.ReactNode;
-  text: string;
-  meta?: string;
-  title?: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      className={`group w-full text-left flex items-center gap-2.5 px-2 transition-colors disabled:opacity-50 hover:bg-state-hover ${first ? "" : "border-t border-line-soft"}`}
-      style={{ minHeight: 32, paddingTop: meta ? 6 : 0, paddingBottom: meta ? 6 : 0 }}
-    >
-      <span
-        className="text-text-4 group-hover:text-text-2 flex items-center justify-center flex-shrink-0"
-        style={{ width: 14, height: 14 }}
-      >
-        {glyph}
-      </span>
-      <span className="flex-1 min-w-0">
-        <span className="text-sm text-text-2 group-hover:text-text-1 block truncate">
-          {text}
-        </span>
-        {meta && (
-          <span className="text-2xs text-text-4 block truncate mt-0.5">
-            {meta}
-          </span>
+              );
+            })}
+          </section>
         )}
-      </span>
-    </button>
-  );
-}
-
-function CaretGlyph() {
-  return (
-    <svg width="9" height="9" viewBox="0 0 10 10" fill="none">
-      <path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function ArrowUpGlyph() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-      <path d="M8 12V4M4.5 7.5L8 4l3.5 3.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function FolderChipGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-      <path d="M1.5 3.5h3l1 1h4.5a.5.5 0 0 1 .5.5v3.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function LaptopGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-      <rect x="2" y="3" width="8" height="5" rx="0.7" stroke="currentColor" strokeWidth="1.1" />
-      <path d="M1 9h10" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function BranchGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-      <circle cx="3" cy="3" r="1.2" stroke="currentColor" strokeWidth="1.1" />
-      <circle cx="3" cy="9" r="1.2" stroke="currentColor" strokeWidth="1.1" />
-      <circle cx="9" cy="4.5" r="1.2" stroke="currentColor" strokeWidth="1.1" />
-      <path d="M3 4.2v3.6M3 5.5C5 5.5 7.6 5.5 7.6 4.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function SuggestionGlyph({ kind }: { kind: SuggestionGlyphKind }) {
-  switch (kind) {
-    case "wrench":
-      return (
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-          <path d="M11 2.5a3 3 0 1 0 2.5 4.5L9.5 11l-3-3 4-4-1-1.5z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-          <path d="M9.5 11l-5 5-2-2 5-5" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-        </svg>
-      );
-    case "bug":
-      return (
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-          <rect x="5" y="4" width="6" height="8" rx="3" stroke="currentColor" strokeWidth="1.2" />
-          <path d="M2 6h2M2 10h2M12 6h2M12 10h2M5.5 4.5l-1-1.5M10.5 4.5l1-1.5M5.5 12l-1 1.5M10.5 12l1 1.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-        </svg>
-      );
-    case "package":
-      return (
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-          <path d="M2.5 4.5l5.5-2.5 5.5 2.5v7l-5.5 2.5L2.5 11.5z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-          <path d="M2.5 4.5L8 7l5.5-2.5M8 7v7" stroke="currentColor" strokeWidth="1.2" />
-        </svg>
-      );
-    case "check":
-      return (
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-          <path d="M3 8.5l3 3 7-7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      );
-    case "note":
-      return (
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-          <path d="M3 2.5h7L13 5.5V13a1 1 0 0 1-1 1H3z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-          <path d="M5 7h6M5 9.5h6M5 12h4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-        </svg>
-      );
-  }
-}
-
-function ResumeGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M3 8a5 5 0 1 1 1.5 3.5"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-      />
-      <path
-        d="M2 6.5l1 2 2-1"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
+      </ChatTranscript>
+      <ChatComposerArea>
+        {error && <ErrorNote>Didn’t send: {error}</ErrorNote>}
+        {!busy && <ChatStarters repoRoot={repoRoot} onPick={(p) => void dispatch(p)} />}
+        <Composer
+          value={prompt}
+          onChange={setPrompt}
+          onSend={() => void dispatch(prompt)}
+          disabled={busy}
+          placeholder="Ask Aura anything"
+          ariaLabel="Message Aura"
+          textareaRef={fieldRef}
+          onKeyDown={onKey}
+        />
+      </ChatComposerArea>
+    </div>
   );
 }
 

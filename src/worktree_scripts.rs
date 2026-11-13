@@ -53,8 +53,8 @@ pub fn spec(repo_root: &Path) -> aura_env::EnvSpec {
 /// stdout/stderr are suppressed (used under `--json`, where stray output would
 /// corrupt the machine-readable stream); otherwise they stream through so the
 /// human watches the warm-up live. `env` pairs are exported into the command's
-/// environment (e.g. `AURA_WORK_PORT`, the Conductor-`CONDUCTOR_PORT` analogue
-/// that lets parallel worktrees run their dev servers on distinct ports).
+/// environment (e.g. `AURA_WORK_PORT`, the injected port that lets parallel
+/// worktrees run their dev servers on distinct ports).
 pub fn run_phase(dir: &Path, cmd: Option<&str>, quiet: bool, env: &[(&str, &str)]) -> bool {
     let Some(cmd) = cmd else { return true };
     let cmd = cmd.trim();

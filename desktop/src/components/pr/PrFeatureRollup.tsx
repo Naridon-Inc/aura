@@ -80,23 +80,21 @@ export function PrFeatureRollup({
   if (!agg || !agg.signals.rated) return null;
 
   return (
-    <section className="rounded-lg border border-line-soft bg-bg-1 px-4 py-3.5">
-      <div className="mb-2.5 flex items-baseline gap-2">
-        <h3 className="section-label">
-          Is this PR&apos;s feature finished?
-        </h3>
-        <span className="text-xs text-text-4">
+    <section className="ui-pr-section" aria-label="Feature">
+      <header>
+        <h2>Is this PR&apos;s feature finished?</h2>
+        <span>
           {agg.goalsReached}/{agg.goalsTotal} goal{agg.goalsTotal === 1 ? "" : "s"} reached · across
           the commits on this PR
         </span>
-      </div>
+      </header>
       <FeatureGates signals={agg.signals} driftOverride={driftReal} />
       {agg.runs.length > 0 ? (
-        <div className="mt-3 border-t border-line-soft pt-3">
+        <div className="ui-pr-section-part">
           <FeatureHistory runs={agg.runs} />
         </div>
       ) : null}
-      <FeatureRoles runs={agg.runs} className="mt-3 border-t border-line-soft pt-3" />
+      <FeatureRoles runs={agg.runs} className="ui-pr-section-part" />
     </section>
   );
 }

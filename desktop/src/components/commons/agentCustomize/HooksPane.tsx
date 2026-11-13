@@ -9,6 +9,9 @@ import { ShieldCheck } from "lucide-react";
 
 import { api, type CaptureStatus } from "../../../lib/api";
 import { AsciiSpinner } from "../../ui/ascii-spinner";
+import { SettingsError } from "../../ui/settings-blocks";
+import { SettingsRow } from "../../ui/settings-row";
+import { SettingsServiceTitle } from "../../ui/settings-services-row";
 import { Switch } from "../../ui/switch";
 import { Card, EmptyHint, PaneIntro, PaneScroll, PaneSpinner } from "./customizeShared";
 
@@ -62,64 +65,60 @@ export function HooksPane({
       ) : !capture?.is_git ? (
         <EmptyHint
           icon={ShieldCheck}
-          title="Open a project first"
-          body="The safety net attaches to a project's history. Open a folder that's under version control and the switch turns on here."
+          title="Open a repository first"
+          body="The safety net attaches to a repository's history. Open a folder that's under version control and the switch turns on here."
         />
       ) : (
-        <Card className="p-3">
-          <div className="flex items-center gap-3">
-            <div
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
-              style={{
-                background: capture.enabled
-                  ? "color-mix(in srgb, var(--color-accent) 16%, transparent)"
-                  : "var(--color-bg-2)",
-                color: capture.unreadable
-                  ? "var(--color-caret-orange)"
-                  : capture.enabled
-                    ? "var(--color-accent)"
-                    : "var(--color-text-4)",
-              }}
-            >
-              <ShieldCheck size={18} />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-base font-medium text-text-1">
+        <Card>
+          <SettingsRow
+            title={
+              <SettingsServiceTitle
+                mark={
+                  // The library's 16px mark square, toned by the state.
+                  <span
+                    className="ui-settings-service-mark ui-customize-mark"
+                    data-tone={
+                      capture.unreadable ? "attention" : capture.enabled ? "on" : undefined
+                    }
+                    aria-hidden
+                  >
+                    <ShieldCheck />
+                  </span>
+                }
+              >
                 {/* Off and can't-tell are different answers. Telling someone
                     their safety net is off when it is very likely on is the
                     worse of the two mistakes to make. */}
                 {capture.unreadable
-                  ? "Aura can't check this project"
+                  ? "Aura can't check this repository"
                   : capture.enabled
                     ? "Safety net is on"
                     : "Safety net is off"}
-              </div>
-              <div className="text-sm text-text-4">
-                {capture.unreadable
-                  ? capture.unreadable
-                  : capture.enabled
-                    ? "Every commit is recorded with its reason, and can be undone."
-                    : "Commits aren't being recorded. Turn this on and Aura starts at your next one."}
-              </div>
-            </div>
-            {busy ? (
-              <AsciiSpinner className="shrink-0 text-md" />
-            ) : (
-              <Switch
-                checked={capture.enabled}
-                disabled={capture.unreadable !== null}
-                onCheckedChange={toggle}
-                aria-label={
-                  capture.enabled ? "Turn the safety net off" : "Turn the safety net on"
-                }
-              />
-            )}
-          </div>
-          {error ? (
-            <div className="mt-3 rounded-md bg-bg-2 px-3 py-2 text-sm text-red">
-              {error}
-            </div>
-          ) : null}
+              </SettingsServiceTitle>
+            }
+            description={
+              capture.unreadable
+                ? capture.unreadable
+                : capture.enabled
+                  ? "Every commit is recorded with its reason, and can be undone."
+                  : "Commits aren't being recorded. Turn this on and Aura starts at your next one."
+            }
+            help={error ? <SettingsError>{error}</SettingsError> : undefined}
+            control={
+              busy ? (
+                <AsciiSpinner />
+              ) : (
+                <Switch
+                  checked={capture.enabled}
+                  disabled={capture.unreadable !== null}
+                  onCheckedChange={toggle}
+                  aria-label={
+                    capture.enabled ? "Turn the safety net off" : "Turn the safety net on"
+                  }
+                />
+              )
+            }
+          />
         </Card>
       )}
     </PaneScroll>

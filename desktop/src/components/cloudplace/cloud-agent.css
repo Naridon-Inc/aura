@@ -1,0 +1,209 @@
+/* The per-agent cloud sign-in: one column of library rows and fields. */
+.ui-cloud-agent-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(440px, calc(100vw - 32px));
+}
+.ui-cloud-agent-dialog > p,
+.ui-cloud-agent-dialog small {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-cloud-agent-key {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-cloud-agent-key label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.ui-cloud-agent-key > label:first-of-type:has(> button) {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.ui-cloud-agent-key label > span {
+  color: var(--ui-muted-fg);
+}
+.ui-cloud-agent-key [role="alert"] {
+  color: #e18d82;
+  font-size: 12px;
+}
+.ui-cloud-agent-key > button[type="submit"] {
+  align-self: flex-end;
+}
+.ui-cloud-agent-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ui-cloud-agent-dialog .ui-cloud-row {
+  padding: 8px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.ui-cloud-agent-providers > button.ui-cloud-row {
+  background: transparent;
+  color: var(--ui-fg);
+  text-align: left;
+  cursor: pointer;
+}
+.ui-cloud-agent-providers > button.ui-cloud-row:hover {
+  background: var(--ui-hover);
+}
+.ui-cloud-agent-providers small {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.ui-cloud-agent-manual {
+  flex-wrap: wrap;
+}
+.ui-cloud-agent-manual > small {
+  order: 3;
+  flex-basis: 100%;
+}
+/* A saved key, masked: its last four characters, or "Saved". */
+.ui-cloud-agent-mask {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-cloud-agent-saved > svg,
+.ui-cloud-agent-saved > button {
+  flex: none;
+}
+.ui-cloud-agent-saved-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+.ui-cloud-agent-saved-text > span {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+/* A long account name gives way to the buttons beside it. */
+.ui-cloud-agent-saved-text .ui-cloud-agent-mask {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-cloud-agent-saved-text > small {
+  color: var(--ui-muted-fg);
+}
+.ui-cloud-agent-quiet {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ui-muted-fg);
+}
+/* One-click sign-in: the Connect button, a running sign-in on one line, a
+   device code to enter, and the quiet way to a key instead. */
+.ui-cloud-agent-connect {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ui-cloud-agent-signin {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+.ui-cloud-agent-signin-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+.ui-cloud-agent-signin-line > .ui-activity-loader,
+.ui-cloud-agent-signin-line > button {
+  flex: none;
+}
+.ui-cloud-agent-signin small {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.ui-cloud-agent-device {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ui-cloud-agent-device > code {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  letter-spacing: 0.08em;
+  padding: 4px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  user-select: all;
+}
+.ui-cloud-agent-device-open {
+  align-self: flex-start;
+}
+.ui-cloud-agent-code-row {
+  display: flex;
+  gap: 6px;
+}
+.ui-cloud-agent-code-row > input {
+  flex: 1;
+  min-width: 0;
+}
+.ui-cloud-agent-error {
+  margin: 0;
+  color: #e18d82;
+  font-size: 12px;
+}
+.ui-cloud-agent-actions {
+  display: flex;
+  gap: 6px;
+}
+.ui-cloud-agent-uses {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-cloud-agent-uses > .ui-cloud-segments {
+  margin: 0;
+  border-bottom: 0;
+}
+.ui-cloud-agent-uses > .ui-cloud-segments button {
+  padding: 4px 8px;
+}
+.ui-cloud-agent-disclosure {
+  align-self: flex-start;
+  color: var(--ui-muted-fg);
+}
+.ui-cloud-agent-disclosure > svg {
+  transition: transform 120ms ease;
+}
+.ui-cloud-agent-disclosure[aria-expanded="true"] > svg {
+  transform: rotate(90deg);
+}
+.ui-cloud-agent-keys {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ui-cloud-agent-keys > .ui-cloud-segments {
+  margin-bottom: 0;
+}
+.ui-cloud-agent-signin-text {
+  flex: 1;
+  min-width: 0;
+}

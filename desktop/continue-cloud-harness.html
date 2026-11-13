@@ -1,0 +1,21 @@
+<!doctype html>
+<!--
+  Visual harness for Continue in cloud: the real dialog on a stand-in for the
+  desktop's git, machine and cloud commands.
+
+  Dev-server only: Vite's build input is index.html, so this page never
+  reaches a bundle. `bun run dev` serves it at
+  /continue-cloud-harness.html?scene=<name>; the scenes are listed in
+  src/components/cloudplace/__harness__/continue.tsx.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Continue in cloud harness</title>
+  </head>
+  <body>
+    <div id="continue-cloud-harness"></div>
+    <script type="module" src="/src/components/cloudplace/__harness__/continue.tsx"></script>
+  </body>
+</html>

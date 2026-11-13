@@ -398,6 +398,7 @@ mod tests {
                 title: None,
                 branch: None,
                 prompt: None,
+                run: None,
             })
             .await
             .unwrap_err();
@@ -415,6 +416,7 @@ mod tests {
                 title: None,
                 branch: Some("../../etc".into()),
                 prompt: None,
+                run: None,
             })
             .await
             .unwrap_err();

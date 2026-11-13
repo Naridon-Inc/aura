@@ -35,3 +35,21 @@ export function modelSlotFromActionId(id: string): number | null {
   const m = /^pick_model_([1-9])$/.exec(id);
   return m ? Number(m[1]) : null;
 }
+
+/** What to CALL the composer's modifier key on screen.
+ *
+ *  Every chord in here is handled as `metaKey || ctrlKey`, so the key that
+ *  works is ⌘ on a Mac and Ctrl everywhere else. The composer now prints one
+ *  of these chords in its own corner ("⌘L to focus"), and a hint that names
+ *  the wrong key is worse than no hint — it teaches a keystroke that does
+ *  nothing on that machine.
+ *
+ *  Pure and parameterised so it can be asserted without a browser; the
+ *  no-argument form reads the real navigator. Unknown platform falls to
+ *  "Ctrl" rather than ⌘, because ⌘ is the narrower claim: it only exists on
+ *  Apple hardware, while Ctrl is on every keyboard including Apple's. */
+export function modKeyLabel(platform?: string, userAgent?: string): string {
+  const p = platform ?? (typeof navigator === "undefined" ? "" : navigator.platform || "");
+  const ua = userAgent ?? (typeof navigator === "undefined" ? "" : navigator.userAgent || "");
+  return /Mac|iPhone|iPad|iPod/i.test(p) || /Macintosh/i.test(ua) ? "⌘" : "Ctrl+";
+}

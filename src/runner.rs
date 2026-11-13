@@ -161,8 +161,19 @@ const AUTH_NOTE_LEAD: &str = "Needs sign-in";
 /// stdout/stderr so the runner's log carries the agent transcript. Failures
 /// are logged, never fatal — one bad cycle shouldn't kill the supervisor.
 fn run_sub(bin: &Path, cwd: &Path, args: &[&str]) {
+    run_sub_with(bin, cwd, args, None);
+}
+
+/// [`run_sub`], with the acting member's agent sign-in set on this one child
+/// and nowhere else.
+fn run_sub_with(bin: &Path, cwd: &Path, args: &[&str], agent_env: Option<&crate::agent_env::AgentEnv>) {
     eprintln!("{} aura {}", "[runner]".dimmed(), args.join(" "));
-    match Command::new(bin).args(args).current_dir(cwd).status() {
+    let mut cmd = Command::new(bin);
+    cmd.args(args).current_dir(cwd);
+    if let Some(answer) = agent_env {
+        answer.apply(&mut cmd);
+    }
+    match cmd.status() {
         Ok(s) if s.success() => {}
         Ok(s) => eprintln!(
             "{} `aura {}` exited with {} — continuing",
@@ -179,19 +190,41 @@ fn run_sub(bin: &Path, cwd: &Path, args: &[&str]) {
     }
 }
 
-/// One work cycle: pull cloud tasks → drain the ready set → push status back →
-/// push commits. Each leg is the existing, battle-tested `aura crew` command.
+/// One work cycle: start from the remote's latest → pull cloud tasks → drain
+/// the ready set → push commits → report status. Each leg is the existing
+/// `aura crew` command, except git delivery (`runner_git`).
+///
+/// Status goes up only after the commits do. It used to go first, so a push
+/// the remote rejected left the board saying `completed` about a commit that
+/// existed only on this computer.
 fn work_cycle(bin: &Path, repo_root: &Path, opts: &ServeOpts) {
     let lease = opts.lease_secs.to_string();
     let git = opts.git_sync && git_has_remote(repo_root);
 
-    // 0. Git delivery plane (opt-in): pull peers'/laptop's task-graph updates
-    //    before draining, without pushing mid-cycle.
+    // 0. Start from the remote's latest, so this box builds on what a laptop
+    //    or another box pushed since the last cycle. A remote that can't be
+    //    read skips the cycle with nothing claimed; one this computer can't
+    //    move onto fails the work it would have run, with the reason.
+    let stuck = match crate::runner_git::start_from_latest(repo_root) {
+        Ok(crate::runner_git::Start::Caught) => {
+            eprintln!("{} moved onto the remote's latest before working", "[runner]".dimmed());
+            None
+        }
+        Ok(_) => None,
+        Err(crate::runner_git::NotStarted::Unreachable(why)) => {
+            eprintln!("{} skipping this cycle, nothing taken: {why}", "[runner]".yellow());
+            return;
+        }
+        Err(crate::runner_git::NotStarted::Stuck(why)) => Some(why),
+    };
+
+    // 0b. Git delivery plane (opt-in): pull peers'/laptop's task-graph updates
+    //     before draining, without pushing mid-cycle.
     if git {
         run_sub(bin, repo_root, &["crew", "sync", "--pull-only"]);
     }
 
-    // 1. Pull ready cloud a2a tasks into the local graph (and claim them).
+    // 1. Pull ready cloud tasks into the local graph (and claim them).
     let mut pull: Vec<&str> = vec!["crew", "cloud-sync", "--pull", "--agent", &opts.agent];
     if let Some(repo) = &opts.repo {
         pull.push("--repo");
@@ -199,53 +232,132 @@ fn work_cycle(bin: &Path, repo_root: &Path, opts: &ServeOpts) {
     }
     run_sub(bin, repo_root, &pull);
 
-    // 2. Drain the whole ready set (executes the agent, commits its work).
+    // 2. Drain the ready set (executes the agent, commits its work).
     //    `--place cloud` is this box declaring what it is: it takes the nodes
     //    marked for a machine in the cloud plus every unplaced one, and leaves
     //    anything pinned `local` for the laptop that pinned it. Without the
     //    flag a runner would happily claim work someone kept back because it
     //    needs their keychain or their eyes.
+    //
+    //    A box acting for a member runs each board task on the sign-in of the
+    //    member who started it, one run per task; see `drain_as_members`.
+    if let Some(why) = &stuck {
+        let failed = crate::runner_git::fail_ready(&aura_loop::LoopGraph::at(repo_root), why);
+        eprintln!("{} not working this cycle ({failed} task(s) failed): {why}", "[runner]".yellow());
+    } else if push_credential::acting_member().is_some() {
+        drain_as_members(bin, repo_root, opts, &lease);
+    } else {
+        run_sub(
+            bin,
+            repo_root,
+            &[
+                "crew", "run", "--agent", &opts.agent, "--lease-secs", &lease, "--max", "0",
+                "--place", "cloud",
+            ],
+        );
+    }
+
+    // 3. Push the commits, then settle each finished task against what the
+    //    remote actually has. With git-sync on, `crew sync --push-only` first
+    //    commits the task graph and pushes it alongside the branch; delivery
+    //    then retries whatever that push could not land.
+    if git {
+        run_sub(bin, repo_root, &["crew", "sync", "--push-only"]);
+    }
+    for line in crate::runner_git::finish_cycle(repo_root, &aura_loop::LoopGraph::at(repo_root)) {
+        eprintln!("{} {line}", "[runner]".dimmed());
+    }
+
+    // 4. Report status so the cloud graph (and the phone) reflect it.
+    run_sub(bin, repo_root, &["crew", "cloud-sync", "--push"]);
+}
+
+/// Drain as a box acting for a member.
+///
+/// The cloud hands out a member's agent sign-in only for one live task that
+/// member started and sent to this box, and that this box has claimed, because
+/// the box's token is readable by anyone with a shell on it. So each ready
+/// board task gets its own `crew run --cloud-task <id> --max 1`, with that
+/// task's answer set on that child alone. A task the cloud refuses is skipped
+/// this cycle, never run on the box's own keys in the member's name. Nodes that
+/// never came from the board have no task to bind to and run on the box's own
+/// setup.
+fn drain_as_members(bin: &Path, repo_root: &Path, opts: &ServeOpts, lease: &str) {
+    let tasks = crate::aura_loop_run::board_tasks_ready(repo_root, aura_loop::PLACE_CLOUD, &opts.agent);
+    for (task, agent) in tasks {
+        let answer = match sign_in_for(&agent, &task) {
+            Ok(answer) => answer,
+            Err(why) => {
+                eprintln!(
+                    "{} not running board task {task} this cycle — no sign-in for the member it acts for: {why}",
+                    "[runner]".yellow()
+                );
+                continue;
+            }
+        };
+        run_sub_with(
+            bin,
+            repo_root,
+            &[
+                "crew", "run", "--agent", &opts.agent, "--lease-secs", lease, "--max", "1",
+                "--place", "cloud", "--cloud-task", &task,
+            ],
+            answer.as_ref(),
+        );
+    }
     run_sub(
         bin,
         repo_root,
         &[
-            "crew", "run", "--agent", &opts.agent, "--lease-secs", &lease, "--max", "0",
-            "--place", "cloud",
+            "crew", "run", "--agent", &opts.agent, "--lease-secs", lease, "--max", "0",
+            "--place", "cloud", "--cloud-task", "none",
         ],
     );
+}
 
-    // 3. Push task status back up so the cloud graph (and the phone) reflect it.
-    run_sub(bin, repo_root, &["crew", "cloud-sync", "--push"]);
-
-    // 4. Push the branch so the agent's commits are durable + visible off-box.
-    //    With git-sync on, `crew sync --push-only` commits the task graph and
-    //    pushes it alongside the branch; otherwise a plain best-effort push.
-    //    Only when a remote exists — a local-only runner keeps work local
-    //    without git's noisy fatal.
-    if git {
-        run_sub(bin, repo_root, &["crew", "sync", "--push-only"]);
-    } else if git_has_remote(repo_root) {
-        // Report git's own reason. This used to print "skipped (no
-        // upstream/creds)" for *every* non-zero exit, which is a guess — and on
-        // the runner box it was the wrong one: the push was rejected as
-        // non-fast-forward, and the log sent whoever read it off to check
-        // credentials that were fine. A push that didn't happen is worth a line;
-        // a line naming the wrong cause is worse than none.
-        match Command::new("git").args(["push"]).current_dir(repo_root).output() {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                let why = String::from_utf8_lossy(&o.stderr);
-                let line = why
-                    .lines()
-                    .map(str::trim)
-                    .find(|l| {
-                        !l.is_empty() && !l.starts_with("hint:") && !l.starts_with("To ")
-                    })
-                    .unwrap_or("git push failed");
-                eprintln!("{} git push failed: {}", "[runner]".dimmed(), line.dimmed());
-            }
-            Err(e) => eprintln!("{} couldn't run git push: {e}", "[runner]".dimmed()),
+/// The sign-in to run board task `task` under. `Ok(None)` runs it on the box's
+/// own setup: the agent is not one a member signs in to, or the cloud predates
+/// member sign-ins. A task the member sent to this box that the box has not
+/// claimed yet is claimed once, then asked about again; one sent elsewhere, or
+/// nowhere, is skipped.
+fn sign_in_for(agent: &str, task: &str) -> Result<Option<crate::agent_env::AgentEnv>, String> {
+    use crate::agent_env::{claim_if_sent_here, fetch, NotApplied};
+    let asked = match fetch(agent, task) {
+        Err(NotApplied::NotLive(_)) => {
+            claim_if_sent_here(task)?;
+            fetch(agent, task)
         }
+        other => other,
+    };
+    match asked {
+        Ok(mut answer) => {
+            eprintln!("{} {}", "[runner]".dimmed(), answer.describe(agent).dimmed());
+            if let Some(member) = crate::push_credential::acting_member() {
+                match answer.seed_codex_home(&member)? {
+                    Some(crate::codex_member_home::Seeded::Written) => eprintln!(
+                        "{} {}",
+                        "[runner]".dimmed(),
+                        "wrote the member's ChatGPT sign-in into their own Codex home".dimmed()
+                    ),
+                    Some(crate::codex_member_home::Seeded::Kept) => eprintln!(
+                        "{} {}",
+                        "[runner]".dimmed(),
+                        "the member's Codex home already has this sign-in; kept Codex's refreshed copy".dimmed()
+                    ),
+                    None => {}
+                }
+            }
+            Ok(Some(answer))
+        }
+        Err(NotApplied::NotNeeded) => Ok(None),
+        Err(NotApplied::NotOffered) => {
+            eprintln!(
+                "{} the cloud does not hand out member sign-ins yet — {agent} runs on this box's own setup",
+                "[runner]".dimmed()
+            );
+            Ok(None)
+        }
+        Err(NotApplied::NotLive(why)) | Err(NotApplied::Refused(why)) => Err(why),
     }
 }
 
@@ -324,10 +436,35 @@ fn pending_project_slugs(
 /// this workspace carry intent + provenance, exactly like the single-repo box.
 /// Returns `None` if the clone fails (a transient network/auth blip shouldn't
 /// kill the whole multi-project cycle — the next cycle retries).
-fn ensure_workspace(bin: &Path, root: &Path, full_name: &str) -> Option<PathBuf> {
+pub(crate) fn ensure_workspace(bin: &Path, root: &Path, full_name: &str) -> Option<PathBuf> {
+    ensure_workspace_or_why(bin, root, full_name).ok().map(|c| c.dir)
+}
+
+/// A project's checkout on this computer.
+pub(crate) struct Checkout {
+    pub dir: PathBuf,
+    /// Why the latest couldn't be fetched, when it couldn't. The checkout is
+    /// then the copy this computer already had, and whoever relies on it has
+    /// to be told: silently answering from old code reads as answering from
+    /// new code.
+    pub stale: Option<String>,
+}
+
+/// [`ensure_workspace`], keeping why a clone failed: the cloud's refusal when
+/// the member's credential was refused, otherwise git's own complaint. `None`
+/// when git said nothing a person could act on.
+///
+/// A chat answer needs the reason. Without it every failure read "check the
+/// project is in the GitHub install", including a full disk.
+pub(crate) fn ensure_workspace_or_why(
+    bin: &Path,
+    root: &Path,
+    full_name: &str,
+) -> Result<Checkout, Option<String>> {
     let dir = root.join(full_name.replace('/', "__"));
     let url = format!("https://github.com/{full_name}.git");
 
+    let mut stale = None;
     if !dir.join(".git").exists() {
         // A leftover dir from a half-finished clone would make `git clone` fail
         // ("already exists and is not empty") on every future cycle — clear it.
@@ -347,28 +484,54 @@ fn ensure_workspace(bin: &Path, root: &Path, full_name: &str) -> Option<PathBuf>
         // be the one git call that named none at all — inheriting whatever the
         // box happened to have. When this box knows which member it is acting
         // for, the clone spends that member's own short-lived token.
-        let ok = Command::new("git")
+        // stderr is kept to read the reason from, then still written to the
+        // log. git shows no progress when stderr is not a terminal, so the log
+        // loses nothing.
+        let cloned = Command::new("git")
             .args(member_git_args(bin))
             .args(["clone", &url])
             .arg(&dir)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !ok {
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::piped())
+            .output();
+        let why = match cloned {
+            Ok(o) if o.status.success() => None,
+            Ok(o) => {
+                let said = String::from_utf8_lossy(&o.stderr);
+                eprint!("{said}");
+                Some(crate::runner_git::clone_reason(&said))
+            }
+            Err(e) => Some(Some(format!("git could not be started: {e}"))),
+        };
+        if let Some(why) = why {
             eprintln!(
                 "{} clone of {full_name} failed — skipping this cycle, will retry",
                 "[runner]".yellow()
             );
-            return None;
+            return Err(why);
         }
     } else {
-        // Best-effort refresh of remote refs; the crew run checks out / creates
-        // its own branch, so we never force the working tree here.
-        let _ = Command::new("git")
+        // Refresh the remote refs; the crew run checks out / creates its own
+        // branch, so we never force the working tree here. A refresh that
+        // fails still leaves a usable copy, so it is not a failure — but the
+        // reason is kept, so a chat can say it ran on the copy it had.
+        let fetched = Command::new("git")
             .args(member_git_args(bin))
             .args(["fetch", "--all", "--prune"])
             .current_dir(&dir)
-            .status();
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::piped())
+            .output();
+        stale = match fetched {
+            Ok(o) if o.status.success() => None,
+            Ok(o) => {
+                let said = String::from_utf8_lossy(&o.stderr);
+                eprint!("{said}");
+                eprintln!("{} fetch of {full_name} failed — using the copy already here", "[runner]".yellow());
+                Some(fetch_reason(&said))
+            }
+            Err(e) => Some(format!("git could not be started: {e}")),
+        };
     }
 
     // Idempotent: identity, credential and hooks. `git config` is a no-op if
@@ -376,7 +539,12 @@ fn ensure_workspace(bin: &Path, root: &Path, full_name: &str) -> Option<PathBuf>
     attach_member_identity(&dir, bin, &url);
     let _ = Command::new(bin).args(["enable"]).current_dir(&dir).status();
 
-    Some(dir)
+    Ok(Checkout { dir, stale })
+}
+
+/// Why a fetch failed, as one line a person can act on.
+pub(crate) fn fetch_reason(said: &str) -> String {
+    crate::runner_git::clone_reason(said).unwrap_or_else(|| "git couldn't reach the remote and said nothing more".into())
 }
 
 /// The `-c` arguments that make one git invocation spend the acting member's
@@ -548,6 +716,9 @@ fn default_workspaces_root(repo_root: &Path) -> PathBuf {
 }
 
 pub fn serve(repo_root: &Path, opts: &ServeOpts) -> Result<(), Box<dyn std::error::Error>> {
+    // The serving process holds the runner token for its whole life; nothing
+    // it starts should be able to read it back out of /proc.
+    crate::runner_guard::seal_process();
     let client = cloud_http_client();
     let base = cloud_base();
     let bin = std::env::current_exe()?;
@@ -556,13 +727,16 @@ pub fn serve(repo_root: &Path, opts: &ServeOpts) -> Result<(), Box<dyn std::erro
     // workspace. An explicit `--repo` always wins (pins the box to one project),
     // so `all_projects` only engages when no repo filter is set.
     let multi = opts.all_projects && opts.repo.is_none();
+    // Where per-project checkouts live — the multi-project drain's, and the
+    // chats this machine answers by itself, whichever mode the drain is in.
+    let projects_root: PathBuf = opts
+        .workspaces_root
+        .clone()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("AURA_RUNNER_WORKSPACES").ok().map(PathBuf::from))
+        .unwrap_or_else(|| default_workspaces_root(repo_root));
     let workspaces_root: PathBuf = if multi {
-        let root = opts
-            .workspaces_root
-            .clone()
-            .map(PathBuf::from)
-            .or_else(|| std::env::var("AURA_RUNNER_WORKSPACES").ok().map(PathBuf::from))
-            .unwrap_or_else(|| default_workspaces_root(repo_root));
+        let root = projects_root.clone();
         // Naming the directory matters more than the errno: a runner that can't
         // create this fails every clone afterwards with "could not create
         // leading directories", which reads like a git problem.
@@ -708,6 +882,17 @@ pub fn serve(repo_root: &Path, opts: &ServeOpts) -> Result<(), Box<dyn std::erro
             r.store(false, Ordering::SeqCst);
         });
     }
+    // Cloud workspaces given to this machine are answered beside the drain, on
+    // their own thread, so a long crew task never holds up a member's prompt.
+    let _chats = if opts.once {
+        None
+    } else {
+        let _ = std::fs::create_dir_all(&projects_root);
+        crate::runner_chat::spawn(bin.clone(), projects_root.clone(), running.clone())
+    };
+    // Agent sign-ins members start from the web console run here too, on a
+    // thread of their own, so a member with no Aura app can still connect.
+    let _signins = if opts.once { None } else { crate::runner_signin::spawn(running.clone()) };
 
     loop {
         // A machine that can't authenticate says so on every idle beat rather

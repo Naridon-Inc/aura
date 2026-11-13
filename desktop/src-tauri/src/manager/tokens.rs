@@ -229,6 +229,8 @@ mod tests {
             model: None,
             cost_usd: None,
             cost_estimated: None,
+            cloud_key: None,
+            cloud_id: None,
         }
     }
 

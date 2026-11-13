@@ -1,92 +1,51 @@
 // Per-kind result rows for the ⌘K palette.
 //
-// Each result kind carries different information, so each gets its own row IA
-// instead of the old one-size badge+label+hint line:
+// Each result kind carries different information, so each gets its own row
+// content inside the shared command item:
 //
-//   • Action          — icon · what it does · keyboard shortcut pill
+//   • Action          — icon · what it does · keyboard shortcut
 //   • Command (slash)  — /name in mono · one-line description
-//   • Extension cmd    — puzzle icon · title · which extension it came from
-//   • File             — file glyph · filename (bold) · dimmed folder path
+//   • File             — file glyph · filename · dimmed folder path
 //   • Definition       — kind glyph (ƒ / {} / =) · name · kind · where it lives
-//   • In your code     — file:line header · the matching line, match highlighted
+//   • In your code     — the matching line, match highlighted · file:line under it
 //   • Agent            — agent logo · name · "→ prompt" preview / focus hint
 //
-// Rows share one selectable shell (keyboard + hover + click + auto-scroll);
-// only the inner content differs.
+// Selection, hover, Enter and scrolling the selected row into view all come
+// from the shared command list; only the content differs per kind.
 
-import { useEffect, useRef } from "react";
 import {
   Braces,
   CornerDownLeft,
   Equal,
   FileText,
-  FolderGit2,
   FunctionSquare,
   Hash,
   History,
   MessageSquareText,
+  TextSearch,
   Zap,
 } from "lucide-react";
 
 import type { PaletteEntry } from "../CommandPalette";
+import { ProjectAvatar } from "../ProjectAvatar";
 import { AgentIcon } from "../agent/AgentIcon";
-import { Kbd } from "../ui/kbd";
+import { Badge } from "../ui/badge";
+import { CommandItem, CommandShortcut } from "../ui/command";
 
-// Accelerator hints ("⌘K", "⌘⇧I") render as a kbd pill; descriptions stay text.
+// Accelerator hints ("⌘K", "⌘⇧I") render as the item's shortcut; descriptions
+// stay text.
 function looksLikeAccelerator(s: string): boolean {
   return /^[⌘⌃⌥⇧]+/.test(s.trim());
 }
 
-// ── selectable shell ──────────────────────────────────────────────────────
-function Row({
-  active,
-  onHover,
-  onPick,
-  children,
-}: {
-  active: boolean;
-  onHover: () => void;
-  onPick: () => void;
-  children: React.ReactNode;
-}) {
-  const ref = useRef<HTMLLIElement>(null);
-  useEffect(() => {
-    if (active) ref.current?.scrollIntoView({ block: "nearest" });
-  }, [active]);
-  return (
-    <li
-      ref={ref}
-      onMouseEnter={onHover}
-      onMouseDown={(e) => {
-        e.preventDefault();
-        onPick();
-      }}
-      className={`mx-1.5 flex items-center gap-2.5 rounded-md px-2.5 py-1.5 cursor-pointer ${
-        active ? "bg-accent/12 text-text-1" : "text-text-2 hover:bg-state-hover"
-      }`}
-    >
-      {children}
-    </li>
-  );
+/** The command-list value of one row. Unique per row, so the list's selection
+ *  and the palette's Tab handling address the same thing. */
+export function paletteKey(entry: PaletteEntry): string {
+  return `${entry.kind}:${entry.id}`;
 }
 
-// Leading icon tile — keeps every row's glyph on the same optical column.
-function Lead({
-  children,
-  active,
-}: {
-  children: React.ReactNode;
-  active: boolean;
-}) {
-  return (
-    <span
-      className={`grid h-6 w-6 shrink-0 place-items-center rounded-md ${
-        active ? "text-accent" : "text-text-4"
-      } [&_svg]:h-[15px] [&_svg]:w-[15px]`}
-    >
-      {children}
-    </span>
-  );
+function Detail({ children }: { children: React.ReactNode }) {
+  return <span className="ui-command-palette-detail">{children}</span>;
 }
 
 // ── definitions: a glyph per symbol kind ──────────────────────────────────
@@ -100,7 +59,7 @@ function SymbolGlyph({ kind }: { kind: string }) {
 }
 
 // Highlight the matched substring inside a longer line of text.
-function Highlighted({ text, query }: { text: string; query: string }) {
+export function Highlighted({ text, query }: { text: string; query: string }) {
   const q = query.trim();
   if (!q) return <>{text}</>;
   const lower = text.toLowerCase();
@@ -110,9 +69,7 @@ function Highlighted({ text, query }: { text: string; query: string }) {
   return (
     <>
       {text.slice(0, at)}
-      <span className="rounded-[3px] bg-accent/20 px-0.5 text-accent">
-        {text.slice(at, at + q.length)}
-      </span>
+      <mark className="ui-command-palette-hit">{text.slice(at, at + q.length)}</mark>
       {text.slice(at + q.length)}
     </>
   );
@@ -128,178 +85,138 @@ function splitPath(p: string): { dir: string; base: string } {
 export function PaletteResultRow({
   entry,
   query,
-  active,
-  onHover,
   onPick,
 }: {
   entry: PaletteEntry;
   query: string;
-  active: boolean;
-  onHover: () => void;
   onPick: () => void;
 }) {
-  const shell = (children: React.ReactNode) => (
-    <Row active={active} onHover={onHover} onPick={onPick}>
-      {children}
-    </Row>
+  const content = rowContent(entry, query);
+  if (!content) return null;
+  return (
+    <CommandItem value={paletteKey(entry)} onSelect={onPick}>
+      {content}
+    </CommandItem>
   );
+}
 
+function Label({ children, mono }: { children: React.ReactNode; mono?: boolean }) {
+  return (
+    <span className={mono ? "ui-command-palette-label ui-command-palette-mono" : "ui-command-palette-label"}>
+      {children}
+    </span>
+  );
+}
+
+function rowContent(entry: PaletteEntry, query: string): React.ReactNode {
   switch (entry.kind) {
     case "action":
-      return shell(
+      return (
         <>
-          <Lead active={active}>
-            <Zap />
-          </Lead>
-          <span className="truncate text-base font-medium">{entry.label}</span>
-          {entry.hint && (
-            <span className="ml-auto shrink-0 text-xs text-text-4">
-              {looksLikeAccelerator(entry.hint) ? (
-                <Kbd>{entry.hint}</Kbd>
-              ) : (
-                entry.hint
-              )}
-            </span>
-          )}
-        </>,
+          <Zap />
+          <Label>{entry.label}</Label>
+          {entry.hint &&
+            (looksLikeAccelerator(entry.hint) ? (
+              <CommandShortcut>{entry.hint}</CommandShortcut>
+            ) : (
+              <Detail>{entry.hint}</Detail>
+            ))}
+        </>
       );
 
     case "slash":
-      return shell(
+      return (
         <>
-          <Lead active={active}>
-            <span className="font-mono text-md leading-none">/</span>
-          </Lead>
-          <span className="truncate font-mono text-base text-text-1">
-            {entry.label}
+          <span className="ui-command-palette-glyph" aria-hidden>
+            /
           </span>
-          {entry.hint && (
-            <span className="ml-auto truncate text-sm text-text-4" style={{ maxWidth: 320 }}>
-              {entry.hint}
-            </span>
-          )}
-        </>,
+          <Label mono>{entry.label}</Label>
+          {entry.hint && <Detail>{entry.hint}</Detail>}
+        </>
       );
 
     case "file": {
       const rel = entry.hint ?? entry.label;
       const { dir, base } = splitPath(rel);
-      return shell(
+      return (
         <>
-          <Lead active={active}>
-            <FileText />
-          </Lead>
-          <span className="truncate text-base text-text-1">{base}</span>
-          {dir && (
-            <span className="ml-auto truncate text-xs text-text-4" style={{ maxWidth: 320 }}>
-              {dir}
-            </span>
-          )}
-        </>,
+          <FileText />
+          <Label>{base}</Label>
+          {dir && <Detail>{dir}</Detail>}
+        </>
       );
     }
 
     case "symbol": {
       const loc = entry.hint?.split("·").pop()?.trim() ?? "";
-      return shell(
+      return (
         <>
-          <Lead active={active}>
-            <SymbolGlyph kind={entry.symbolKind} />
-          </Lead>
-          <span className="truncate font-mono text-base text-text-1">
-            {entry.label}
-          </span>
-          <span className="meta-tag">
-            {entry.symbolKind}
-          </span>
-          {loc && (
-            <span className="ml-auto truncate text-xs text-text-4" style={{ maxWidth: 260 }}>
-              {loc}
-            </span>
-          )}
-        </>,
+          <SymbolGlyph kind={entry.symbolKind} />
+          <Label mono>{entry.label}</Label>
+          <Badge variant="secondary">{entry.symbolKind}</Badge>
+          {loc && <Detail>{loc}</Detail>}
+        </>
       );
     }
 
     case "match": {
       const where = entry.hint ?? `${entry.path}:${entry.line}`;
-      return shell(
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="truncate text-xs text-text-4">{where}</span>
-          <span className="truncate font-mono text-sm text-text-2">
+      return (
+        <>
+          <TextSearch />
+          <span className="ui-command-palette-label ui-command-palette-mono">
             <Highlighted text={entry.label} query={query} />
+            <small>{where}</small>
           </span>
-        </div>,
+        </>
       );
     }
 
     case "intent":
-      return shell(
+      return (
         <>
-          <Lead active={active}>
-            <History />
-          </Lead>
-          <span className="truncate text-base text-text-1">
+          <History />
+          <Label>
             <Highlighted text={entry.label} query={query} />
-          </span>
-          {entry.hint && (
-            <span className="ml-auto shrink-0 truncate text-xs text-text-4" style={{ maxWidth: 220 }}>
-              {entry.hint}
-            </span>
-          )}
-        </>,
+          </Label>
+          {entry.hint && <Detail>{entry.hint}</Detail>}
+        </>
       );
 
     case "workspace":
-      return shell(
+      return (
         <>
-          <Lead active={active}>
-            <FolderGit2 />
-          </Lead>
-          <span className="truncate text-base text-text-1">
+          <ProjectAvatar root={entry.root} name={entry.label} />
+          <Label>
             <Highlighted text={entry.label} query={query} />
-          </span>
-          {entry.hint && (
-            <span className="ml-auto shrink-0 text-xs text-text-4">
-              {entry.hint}
-            </span>
-          )}
-        </>,
+          </Label>
+          {entry.hint && <Detail>{entry.hint}</Detail>}
+        </>
       );
 
     case "chat":
-      return shell(
+      return (
         <>
-          <Lead active={active}>
-            <MessageSquareText />
-          </Lead>
-          <span className="truncate text-base text-text-1">
+          <MessageSquareText />
+          <Label>
             <Highlighted text={entry.label} query={query} />
-          </span>
-          {entry.hint && (
-            <span className="ml-auto shrink-0 truncate text-xs text-text-4" style={{ maxWidth: 240 }}>
-              {entry.hint}
-            </span>
-          )}
-        </>,
+          </Label>
+          {entry.hint && <Detail>{entry.hint}</Detail>}
+        </>
       );
 
     case "agent":
-      return shell(
+      return (
         <>
-          <span className="grid h-6 w-6 shrink-0 place-items-center">
-            <AgentIcon agentId={entry.id} size={16} />
-          </span>
-          <span className="truncate text-base text-text-1">{entry.label}</span>
+          <AgentIcon agentId={entry.id} size={16} />
+          <Label>{entry.label}</Label>
           {entry.hint && (
-            <span className="ml-auto flex shrink-0 items-center gap-1 text-xs text-text-4">
+            <Detail>
               {entry.prompt ? <CornerDownLeft size={11} /> : null}
-              <span className="truncate" style={{ maxWidth: 260 }}>
-                {entry.hint}
-              </span>
-            </span>
+              {entry.hint}
+            </Detail>
           )}
-        </>,
+        </>
       );
 
     default:

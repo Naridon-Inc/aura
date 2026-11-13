@@ -72,6 +72,19 @@ describe("the chords that stand down for a text cursor", () => {
     expect(resolveShortcut(chord("b", { editable: true }))).toBeNull();
   });
 
+  test("⌘⇧H goes Home and plain ⌘H is left to the system", () => {
+    expect(resolveShortcut(chord("h", { shift: true }))).toBe("go_home");
+    expect(resolveShortcut(chord("h"))).toBeNull();
+    expect(resolveShortcut(chord("h", { shift: true, alt: true }))).toBeNull();
+  });
+
+  test("⌘⌥B is the right sidebar, from a text box too, and ⌘⇧B is left to the browser tab", () => {
+    expect(resolveShortcut(chord("b", { alt: true }))).toBe("toggle_review");
+    expect(resolveShortcut(chord("b", { alt: true, editable: true }))).toBe("toggle_review");
+    expect(resolveShortcut(chord("b", { shift: true }))).toBeNull();
+    expect(resolveShortcut(chord("b", { shift: true, alt: true }))).toBeNull();
+  });
+
   test("Z is text undo while you are typing, engine undo when you are not", () => {
     expect(resolveShortcut(chord("z"))).toBe("aura_undo");
     expect(resolveShortcut(chord("z", { editable: true }))).toBeNull();
@@ -129,5 +142,49 @@ describe("what we never claim", () => {
   test("the key arrives however the OS spells its case", () => {
     expect(resolveShortcut(chord("S"))).toBe("save");
     expect(resolveShortcut(chord("I", { shift: true }))).toBe("aura_log_intent");
+  });
+});
+
+describe("copying a chat's transcript", () => {
+  test("⌘⌥C copies the chat in front, matched on the physical key", () => {
+    expect(resolveShortcut(chord("c", { alt: true }))).toBe("copy_chat_transcript");
+    expect(resolveShortcut(chord("C", { alt: true }))).toBe("copy_chat_transcript");
+  });
+
+  test("plain ⌘C stays copy, and ⌘⇧⌥C is nobody's", () => {
+    expect(resolveShortcut(chord("c"))).toBeNull();
+    expect(resolveShortcut(chord("c", { shift: true, alt: true }))).toBeNull();
+  });
+});
+
+describe("the A chords", () => {
+  test("⌘⇧A archives the workspace, from a text box too", () => {
+    expect(resolveShortcut(chord("A", { shift: true }))).toBe("archive_workspace");
+    expect(resolveShortcut(chord("a", { shift: true, editable: true }))).toBe("archive_workspace");
+  });
+
+  test("⌥⌘A adds a project, matched on the physical key, but not while typing", () => {
+    expect(resolveShortcut(chord("A", { alt: true }))).toBe("add_project");
+    expect(resolveShortcut(chord("a", { alt: true }))).toBe("add_project");
+    expect(resolveShortcut(chord("A", { alt: true, editable: true }))).toBeNull();
+  });
+
+  test("plain ⌘A stays Select All", () => {
+    expect(resolveShortcut(chord("a"))).toBeNull();
+    expect(resolveShortcut(chord("a", { editable: true }))).toBeNull();
+  });
+
+  test("⌥⇧⌘A toggles Aura's panel, from a text box too", () => {
+    expect(resolveShortcut(chord("a", { shift: true, alt: true }))).toBe("toggle_aura_panel");
+    expect(resolveShortcut(chord("A", { shift: true, alt: true, editable: true }))).toBe(
+      "toggle_aura_panel",
+    );
+  });
+
+  test("neither chord asks Aura any more", () => {
+    for (const c of [chord("a", { shift: true }), chord("a", { alt: true })]) {
+      expect(resolveShortcut(c)).not.toBe("aura_ask");
+      expect(resolveShortcut(c)).not.toBe("open_aura");
+    }
   });
 });

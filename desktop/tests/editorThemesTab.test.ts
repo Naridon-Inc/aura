@@ -23,11 +23,11 @@ import { describe, expect, test } from "bun:test";
 
 import { readSrc } from "./support/code";
 
-const DIALOG = "components/dialogs/SettingsDialog.tsx";
+const PAGE = "components/settings/pages/EditorThemesPage.tsx";
 
 async function themesTab(): Promise<string> {
-  const src = await readSrc(DIALOG);
-  const start = src.indexOf("function EditorThemesTab()");
+  const src = await readSrc(PAGE);
+  const start = src.indexOf("export function EditorThemesPage()");
   expect(start).toBeGreaterThan(0);
   return src.slice(start, src.indexOf("\nfunction ", start + 10));
 }
@@ -35,12 +35,12 @@ async function themesTab(): Promise<string> {
 describe("editor themes — the library is named for what it holds", () => {
   test("the section over every theme is not called Active theme", async () => {
     const tab = await themesTab();
-    expect(tab).not.toContain('<Section title="Active theme">');
-    expect(tab).toContain('<Section title="Your themes">');
+    expect(tab).not.toContain('title="Active theme"');
+    expect(tab).toContain('<SettingsSection title="Your themes">');
   });
 
   test("exactly one row in it can say Active", async () => {
-    const src = await readSrc(DIALOG);
+    const src = await readSrc(PAGE);
     const row = src.slice(src.indexOf("function ThemeChoiceRow("));
     // The row renders Active or an Activate button off the same boolean, so
     // the count follows from the single `active` prop rather than from the
@@ -60,18 +60,18 @@ describe("editor themes — the marketplace pointer is a real link", () => {
   });
 
   test("the URL lands on themes, not on every extension", async () => {
-    const src = await readSrc(DIALOG);
+    const src = await readSrc(PAGE);
     const url = src.slice(src.indexOf("const MARKETPLACE_THEMES_URL"));
     expect(url.slice(0, 200)).toContain("marketplace.visualstudio.com");
     expect(url.slice(0, 200)).toContain("category=Themes");
   });
 
-  test("the dialog imports the opener helper", async () => {
-    const src = await readSrc(DIALOG);
+  test("the page imports the opener helper", async () => {
+    const src = await readSrc(PAGE);
     // A bare target="_blank" is silently dropped in the webview; anything
     // leaving the app goes through lib/openExternal.
     expect(src).toContain(
-      'import { onExternalAnchorClick } from "../../lib/openExternal"',
+      'import { onExternalAnchorClick } from "../../../lib/openExternal"',
     );
   });
 });

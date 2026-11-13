@@ -1,0 +1,104 @@
+/* The four states a list, pane or surface can be in (loading, empty,
+   filtered-empty, broken), one anatomy. `sm` sits in a rail or a section:
+   one 10px gap between everything. `md` owns a surface: 20px between blocks,
+   6px between heading and body. Colour is spent only on a failure’s icon. */
+.ui-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  color: var(--ui-muted-fg);
+  text-align: center;
+}
+.ui-state[data-size="sm"] {
+  gap: 10px;
+  padding: 24px 16px;
+}
+.ui-state[data-size="md"] {
+  gap: 20px;
+  padding: 40px 20px;
+}
+.ui-state-icon {
+  width: 32px;
+  height: 32px;
+  color: var(--ui-faint);
+}
+.ui-state[data-size="sm"] .ui-state-icon {
+  width: 24px;
+  height: 24px;
+}
+.ui-state[data-tone="error"] .ui-state-icon {
+  color: var(--ui-yellow);
+}
+.ui-state-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ui-state[data-size="sm"] .ui-state-copy {
+  gap: 10px;
+}
+.ui-state-copy > strong {
+  color: var(--ui-fg);
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.ui-state[data-size="sm"] .ui-state-copy > strong {
+  font-size: 14px;
+}
+/* Alone, the heading is a caption: smaller and quieter. */
+.ui-state-copy > strong[data-alone] {
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+}
+.ui-state-copy > p {
+  max-width: 420px;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.ui-state[data-size="sm"] .ui-state-copy > p {
+  font-size: 13px;
+}
+.ui-state-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.ui-state-action > small {
+  color: var(--ui-faint);
+  font-size: 12px;
+}
+/* Try again and a second way out, side by side. */
+.ui-state-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+/* A raw reason (a backend message, a path) can run long and unbroken. */
+.ui-state-action > small {
+  max-width: 420px;
+  overflow-wrap: anywhere;
+}
+.ui-state[data-size="md"] > p {
+  margin: 0;
+  font-size: 14px;
+}
+/* The inline loading row a section header or a settings pane wants. */
+.ui-state-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 12px;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+/* A failure that belongs to one field or one section. */
+.ui-error-note {
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}

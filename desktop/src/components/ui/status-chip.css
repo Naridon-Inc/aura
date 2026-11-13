@@ -1,0 +1,48 @@
+/* The status pill is the outline badge. Added here: the tone on the label,
+   the optional dot in the same tone, a quieter neutral, the dense cut for
+   table cells, and icons sized to the text. */
+
+.ui-status-chip {
+  width: fit-content;
+  white-space: nowrap;
+  user-select: none;
+}
+.ui-status-chip svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+.ui-status-chip[data-dense] {
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
+}
+.ui-status-chip[data-dense] svg {
+  width: 10px;
+  height: 10px;
+}
+.ui-status-chip-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: currentColor;
+}
+.ui-status-chip[data-tone="neutral"] {
+  color: var(--ui-muted-fg);
+}
+.ui-status-chip[data-tone="green"] {
+  color: var(--ui-green);
+}
+.ui-status-chip[data-tone="red"] {
+  color: var(--ui-red);
+}
+.ui-status-chip[data-tone="amber"] {
+  color: var(--ui-yellow);
+}
+.ui-status-chip[data-tone="blue"] {
+  color: var(--ui-blue);
+}
+.ui-status-chip[data-tone="violet"] {
+  color: #a855f7;
+}

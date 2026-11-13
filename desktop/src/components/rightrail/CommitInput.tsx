@@ -1,5 +1,5 @@
-// Commit + sync surface mounted at the bottom of the Source Control
-// Changes panel. Single textarea + a morphing primary button:
+// Commit + sync surface at the foot of the details panel's Changes tab. One
+// message box and one button that does what the branch needs next:
 //
 //   staged + msg     → "Commit"
 //   ahead && behind  → "Sync"
@@ -7,10 +7,11 @@
 //   behind only      → "Pull"
 //   no upstream      → "Publish branch"
 //
-// Chevron next to the primary button drops a menu with every variant
-// (Commit, Commit & Push, Push, Pull, Sync, Fetch). ⌘+Enter triggers
-// the current primary action — same shortcut Superset uses, no learning
-// cost for users coming from there.
+// The chevron beside it lists every variant (Commit, Commit and push, Push,
+// Pull, Sync, Fetch). ⌘↩ runs the current primary action.
+//
+// Where the branch stands (name, ahead/behind, unpublished) is the panel
+// toolbar's job, one row up, so this box doesn't repeat it.
 //
 // Polls `git_ahead_behind` on a 6s timer + every time the parent's
 // `refreshTick` increments (after a commit/stage round-trip), so the
@@ -30,14 +31,11 @@ import {
 } from "../../lib/place/workApi";
 import { useDocumentVisibility } from "../../lib/useDocumentVisibility";
 import { usePanelActive } from "../../lib/panelActive";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "../ui/dropdown-menu";
-import { actorShort, agoFromMs, severityMeta } from "./radar/radarFormat";
+import { ShellNotice } from "../ui/shell-notice";
+import { Textarea } from "../ui/textarea";
+import "../ui/details-commit.css";
+import { CommitActionButton } from "./commit/CommitActionButton";
+import { CommitRadarNotice } from "./commit/CommitRadarNotice";
 import { getPrimaryAction, type PrimaryActionType } from "./getPrimaryAction";
 import { ShipReadyPill } from "./ShipReadyPill";
 
@@ -348,375 +346,61 @@ export function CommitInput({
   }, [primary.action, doCommit, doPush, doPull, doSync]);
 
   return (
-    <div className="border-t border-line-soft bg-bg-1/30 shrink-0 min-w-0 overflow-hidden">
+    <div className="ui-details-commit">
       {liveActive && (
-        <div className="px-3 py-1.5 flex items-center gap-1.5 text-2xs text-text-4 border-b border-line-soft">
-          <span
-            className="h-[6px] w-[6px] rounded-full bg-accent-green shrink-0"
-            aria-hidden
-          />
-          <span className="truncate">
-            Live. Changes sync automatically. Commit publishes a snapshot.
-          </span>
+        <div className="ui-details-commit-live">
+          <span>Live. Changes sync automatically. Commit publishes a snapshot.</span>
         </div>
       )}
-      {/* Branch chip + ahead/behind glyphs */}
-      <div className="px-3 py-1.5 flex items-center gap-2 text-xs text-text-3 min-w-0">
-        <BranchGlyph />
-        <span className="font-mono text-text-2 truncate min-w-0">
-          {ahead.branch ?? "no branch"}
-        </span>
-        {!aheadRead ? (
-          <span className="text-text-4">checking…</span>
-        ) : ahead.has_upstream ? (
-          <>
-            {ahead.ahead > 0 && (
-              <span className="flex items-center gap-0.5 text-text-2 tabular-nums">
-                <ArrowUpGlyph />
-                {ahead.ahead}
-              </span>
-            )}
-            {ahead.behind > 0 && (
-              <span className="flex items-center gap-0.5 text-text-2 tabular-nums">
-                <ArrowDownGlyph />
-                {ahead.behind}
-              </span>
-            )}
-            {ahead.ahead === 0 && ahead.behind === 0 && (
-              <span className="text-text-4">in sync</span>
-            )}
-          </>
-        ) : (
-          <span
-            className="text-amber"
-            title="This branch only lives on your machine. Publish it to share."
-          >
-            unpublished
-          </span>
-        )}
-        <div className="ml-auto flex items-center gap-2.5 shrink-0">
-          {/* Ambient ship-readiness — live fast-gate status right where you
-              commit. Click opens the full detail (ChecksPane). */}
-          <ShipReadyPill repoRoot={repoRoot} />
-          <button
-            type="button"
-            onClick={doFetch}
-            disabled={isPending}
-            className="text-text-3 hover:text-text-1 transition-colors disabled:opacity-50"
-            title="Check for new commits from teammates"
-          >
-            check
-          </button>
-        </div>
-      </div>
 
       {(info || error) && (
-        <div
-          title={error ?? info ?? undefined}
-          className={`px-3 py-1 text-xs border-t border-line-soft truncate ${
-            error ? "bg-red/10 text-red" : "bg-green/10 text-green"
-          }`}
-        >
-          {error ?? info}
-        </div>
+        <ShellNotice tone={error ? "error" : "ok"}>{error ?? info}</ShellNotice>
       )}
 
-      {/* AURA-19 — awareness card: teammates/agents are in-flight on what
-          you're about to commit. Informational, never blocking — "Commit
-          anyway" resumes the interrupted action. */}
       {radarWarnings && radarWarnings.length > 0 && (
-        <div className="mx-2 mt-2 rounded border border-line-soft bg-bg-0 overflow-hidden">
-          <div className="px-2.5 py-1.5 flex items-center gap-1.5 text-xs text-text-2 border-b border-line-soft">
-            <span className="font-medium">
-              {radarWarnings.length === 1
-                ? "A teammate is on this code"
-                : `${radarWarnings.length} teammates are on this code`}
-            </span>
-            <button
-              type="button"
-              onClick={dismissRadar}
-              className="ml-auto w-4 h-4 flex items-center justify-center rounded text-text-4 hover:text-text-1 hover:bg-state-hover"
-              title="Dismiss"
-            >
-              ×
-            </button>
-          </div>
-          {radarWarnings.slice(0, 3).map((c) => {
-            const meta = severityMeta(c.severity);
-            return (
-              <div
-                key={c.event_id}
-                className="px-2.5 py-1.5 flex items-start gap-1.5 text-xs text-text-3"
-                title={[c.reason, c.their_intent].filter(Boolean).join("\n")}
-              >
-                <span
-                  className="mt-1 block w-1.5 h-1.5 rounded-full flex-shrink-0"
-                  style={{ background: meta.color }}
-                />
-                <span className="flex-1 min-w-0">
-                  <span className="text-text-1">{actorShort(c.peer)}</span>
-                  {c.peer_is_agent ? " (agent)" : ""} · {meta.disposition} ·{" "}
-                  <span className="font-mono text-text-2">
-                    {c.their_symbol || c.their_file || "your in-flight files"}
-                  </span>{" "}
-                  · {agoFromMs(c.age_ms)}
-                  {!c.same_branch && c.their_branch
-                    ? ` on ${c.their_branch}`
-                    : ""}
-                </span>
-              </div>
-            );
-          })}
-          {radarWarnings.length > 3 && (
-            <div className="px-2.5 pb-1.5 text-2xs text-text-4">
-              +{radarWarnings.length - 3} more in the Team Radar panel
-            </div>
-          )}
-          <div className="px-2.5 py-1.5 flex items-center gap-1.5 border-t border-line-soft">
-            <button
-              type="button"
-              onClick={resumeAfterRadar}
-              className="h-6 px-2 rounded bg-bg-2 hover:bg-bg-3 text-text-1 text-xs font-medium border border-line-soft transition-colors"
-            >
-              Commit anyway
-            </button>
-            <button
-              type="button"
-              onClick={dismissRadar}
-              className="h-6 px-2 rounded text-text-3 hover:text-text-1 text-xs transition-colors"
-            >
-              Review first
-            </button>
-          </div>
-        </div>
+        <CommitRadarNotice
+          warnings={radarWarnings}
+          onCommitAnyway={resumeAfterRadar}
+          onReviewFirst={dismissRadar}
+        />
       )}
 
-      <div className="p-2 flex flex-col gap-1.5">
-        <textarea
-          ref={taRef}
-          value={msg}
-          onChange={(e) => setMsg(e.target.value)}
-          placeholder={
-            hasStagedChanges
-              ? "Commit message (⌘↩ to commit)"
-              : "Stage changes to commit"
+      <Textarea
+        ref={taRef}
+        value={msg}
+        onChange={(e) => setMsg(e.target.value)}
+        placeholder={
+          hasStagedChanges ? "Commit message (⌘↩ to commit)" : "Stage changes to commit"
+        }
+        aria-label="Commit message"
+        disabled={isPending}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !primary.disabled) {
+            e.preventDefault();
+            handlePrimary();
           }
-          disabled={isPending}
-          className="w-full min-h-[52px] resize-y bg-bg-0 border border-line-soft rounded px-2 py-1.5 text-sm text-text-1 placeholder:text-text-4 focus:outline-none focus:border-text-3 transition-colors"
-          onKeyDown={(e) => {
-            if (
-              e.key === "Enter" &&
-              (e.metaKey || e.ctrlKey) &&
-              !primary.disabled
-            ) {
-              e.preventDefault();
-              handlePrimary();
-            }
-          }}
+        }}
+      />
+
+      <div className="ui-details-commit-actions">
+        <CommitActionButton
+          primary={primary}
+          ahead={ahead}
+          aheadRead={aheadRead}
+          canCommit={canCommit}
+          busy={isPending}
+          onPrimary={handlePrimary}
+          onCommit={doCommit}
+          onCommitAndPush={doCommitAndPush}
+          onPush={() => doPush(false)}
+          onPull={doPull}
+          onSync={doSync}
+          onFetch={doFetch}
         />
-
-        <div className="flex items-stretch gap-px min-w-0">
-          <button
-            type="button"
-            onClick={handlePrimary}
-            disabled={primary.disabled}
-            title={primary.tooltip}
-            className="flex-1 min-w-0 h-7 rounded-l bg-bg-2 hover:bg-bg-3 active:bg-bg-2 disabled:opacity-50 disabled:cursor-not-allowed text-text-1 text-xs font-medium flex items-center justify-center gap-1.5 transition-colors border border-line-soft border-r-0"
-          >
-            <ActionGlyph action={primary.action} />
-            <span className="truncate">{primary.label}</span>
-            {primary.action !== "commit" && primary.action !== "publish" && (
-              <span className="text-2xs text-text-3 tabular-nums">
-                {primary.action === "push"
-                  ? ahead.ahead
-                  : primary.action === "pull"
-                    ? ahead.behind
-                    : `${ahead.behind}/${ahead.ahead}`}
-              </span>
-            )}
-          </button>
-
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                disabled={isPending}
-                className="h-7 px-2 shrink-0 rounded-r bg-bg-2 hover:bg-bg-3 disabled:opacity-50 text-text-2 border border-line-soft transition-colors"
-                aria-label="More commit actions"
-              >
-                <ChevronDownGlyph />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56 text-sm">
-              <DropdownMenuItem
-                onSelect={doCommit}
-                disabled={!canCommit}
-                className="text-sm"
-              >
-                <CheckGlyph />
-                Commit
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onSelect={doCommitAndPush}
-                disabled={!canCommit}
-                className="text-sm"
-              >
-                <ArrowUpGlyph />
-                Commit & Push
-              </DropdownMenuItem>
-
-              <DropdownMenuSeparator />
-
-              <DropdownMenuItem
-                onSelect={() => doPush(false)}
-                disabled={!aheadRead || (ahead.ahead === 0 && ahead.has_upstream)}
-                className="text-sm"
-              >
-                <ArrowUpGlyph />
-                <span className="flex-1">
-                  {!aheadRead
-                    ? "Push"
-                    : ahead.has_upstream
-                      ? "Push"
-                      : "Publish branch"}
-                </span>
-                {ahead.ahead > 0 && (
-                  <span className="text-2xs text-text-3 tabular-nums">
-                    {ahead.ahead}
-                  </span>
-                )}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onSelect={doPull}
-                disabled={ahead.behind === 0}
-                className="text-sm"
-              >
-                <ArrowDownGlyph />
-                <span className="flex-1">Pull</span>
-                {ahead.behind > 0 && (
-                  <span className="text-2xs text-text-3 tabular-nums">
-                    {ahead.behind}
-                  </span>
-                )}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onSelect={doSync}
-                disabled={ahead.ahead === 0 && ahead.behind === 0}
-                className="text-sm"
-              >
-                <SyncGlyph />
-                Sync
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={doFetch} className="text-sm">
-                <RefreshGlyph />
-                Fetch
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+        {/* Ambient ship-readiness — live fast-gate status right where you
+            commit. Click opens the full detail on Checks. */}
+        <ShipReadyPill repoRoot={repoRoot} />
       </div>
     </div>
-  );
-}
-
-function ActionGlyph({ action }: { action: PrimaryActionType }) {
-  if (action === "commit") return <CheckGlyph />;
-  if (action === "pull") return <ArrowDownGlyph />;
-  if (action === "sync") return <SyncGlyph />;
-  return <ArrowUpGlyph />;
-}
-
-function CheckGlyph() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M3 8.5l3 3 7-7"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ArrowUpGlyph() {
-  return (
-    <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M8 13V3M3.5 7.5L8 3l4.5 4.5"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ArrowDownGlyph() {
-  return (
-    <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M8 3v10M3.5 8.5L8 13l4.5-4.5"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function SyncGlyph() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M2 8a6 6 0 0 1 10.2-4.2M14 8a6 6 0 0 1-10.2 4.2M14 2v4h-4M2 14v-4h4"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function RefreshGlyph() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M14 8a6 6 0 1 1-1.7-4.2M14 2v4h-4"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ChevronDownGlyph() {
-  return (
-    <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M4 6l4 4 4-4"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function BranchGlyph() {
-  return (
-    <svg width="10" height="10" viewBox="0 0 16 16" fill="none" className="shrink-0 text-text-3">
-      <circle cx="4" cy="3" r="1.5" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="4" cy="13" r="1.5" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="12" cy="6" r="1.5" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M4 4.5v7M4 8c0-2 2-3.5 4-3.5h2.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-    </svg>
   );
 }

@@ -1,22 +1,18 @@
-// ChangesView — the references-grade "Changes" surface for a Trace session.
+// ChangesView — the "Changes" surface for a Trace session.
 //
-// Replaces the old flat list of expand-in-place file rows with the two-pane
-// shape the reference diff tools use: a folder-grouped CHANGE TREE on the left
-// (single-child directory chains collapsed into one row, per-file +/−, summed
-// per folder) and a rendered DIFF on the right with a syntax-highlighted
-// side-by-side (Monaco) ↔ unified (dependency-free) toggle.
+// Two columns: the changed files in the shared file tree on the left (single-
+// child directory chains folded into one row, each file with its +/−), and
+// the file's change on the right — its plain-words meaning first, the code
+// second. The pieces live in ../trace/changes/.
 //
-// Responsive: a ResizeObserver collapses the two panes into one column when the
-// surface is narrow — the tree shows first, picking a file slides to the diff
-// with a back affordance (no CSS media queries, matching the app's JS-driven
+// Responsive: a ResizeObserver collapses the two columns into one when the
+// surface is narrow — the list shows first, picking a file slides to its
+// change with a way back (no CSS media queries, matching the app's JS-driven
 // breakpoint precedent).
 //
 // HONESTY RULE (inherited from SessionDetailPane): the diff body is a real git
-// diff and nothing else. A live/manual claim shows `git diff HEAD -- <path>`
-// (the working tree). A back-filled run stamps each file with the commit that
-// landed it, so we show that commit's real patch (`git show <sha> -- <path>`)
-// — the run's actual change — instead of an empty working-tree diff. The
-// tree's +/− come straight from the changeset row's recorded counts.
+// diff and nothing else, and the list's +/− come straight from the changeset
+// row's recorded counts. See useChangeDiff for which diff each file reads.
 
 import {
   useCallback,
@@ -27,1091 +23,29 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { ChevronsUpDown } from "lucide-react";
-import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
-import { FinderMenu } from "@shared/ui/FinderList";
-import { Churn } from "../diff/Churn";
-import {
-  api,
-  type FileChangeNote,
-  type IntentChangesetFile,
-} from "../../lib/api";
-import { loadFileDiff } from "../../lib/sessionDataCache";
-import { fetchChangeNoteReport } from "../../lib/changeNoteCache";
-import { UnifiedDiff } from "../diff/UnifiedDiff";
-import { SplitDiff } from "../diff/SplitDiff";
-import { useEditableDiff } from "../diff/useEditableDiff";
-import { DiskChangedNotice, EditToggle, UnsavedMark } from "../diff/DiffSaveState";
-import { materializeSides, symbolSpan, type DiffFocus } from "../../lib/diffSides";
-import { reverseApplyDiff } from "../../lib/reverseApplyDiff";
-import { ChangeNoteCard } from "./ChangeNoteCard";
-import { SplitDiffHeader, SPLIT_INLINE_PX, type FocusPick } from "./SplitDiffHeader";
-import {
-  getDiffView,
-  getEditableDiffs,
-  setDiffView,
-  setEditableDiffs,
-  subscribeDiffView,
-  subscribeEditableDiffs,
-  type DiffView,
-} from "../../lib/diffViewPref";
-import {
-  getIgnoreWhitespace,
-  setIgnoreWhitespace,
-  subscribeIgnoreWhitespace,
-} from "../../lib/ignoreWhitespacePref";
+import { FileDiff as FileDiffIcon } from "lucide-react";
+import { api, type IntentChangesetFile } from "../../lib/api";
 import { isWorktreeRoot } from "../../lib/workspaceLabel";
+import { EmptyState } from "../ui/state";
+import { ToggleGroup, ToggleGroupItem } from "../ui/toggle-group";
+import { ChangeDiffPane } from "../trace/changes/ChangeDiffPane";
+import { ChangeFileList } from "../trace/changes/ChangeFileList";
+import { buildChangeTree, type ChangeSort } from "../trace/changes/changeTree";
+import "../trace/changes/changes.css";
 
-// Monaco folds its side-by-side panes into one inline column below this pane
-// width (matching `renderSideBySideInlineBreakpoint` on the DiffEditor). When
-// that happens the two side-headers can't align to left/right, so they stack.
-// Owned by SplitDiffHeader — it is that header's constraint, and the PR Files
-// tab mounts the same header, so both measure against one number.
+export { CHANGE_SORTS, type ChangeSort } from "../trace/changes/changeTree";
 
-// Below this surface width the two panes stack into one column.
+// Below this surface width the two columns stack into one.
 const NARROW_PX = 560;
 
-// ── status glyph ─────────────────────────────────────────────────────
-// Matches SessionDetailPane's mapping. There is no text-accent-red utility,
-// so deletions fall back to text-text-3 (the established decision).
-function statusGlyph(status: string | undefined): {
-  letter: "A" | "M" | "D" | "R";
-  tone: string;
-  word: string;
-} {
-  const s = (status ?? "").trim().toLowerCase();
-  if (s === "added" || s === "a" || s === "new") {
-    return { letter: "A", tone: "text-accent-green", word: "added" };
-  }
-  if (s === "deleted" || s === "d" || s === "removed") {
-    return { letter: "D", tone: "text-text-3", word: "deleted" };
-  }
-  if (s === "renamed" || s === "r") {
-    return { letter: "R", tone: "text-text-2", word: "renamed" };
-  }
-  return { letter: "M", tone: "text-text-2", word: "modified" };
-}
-
-// ── tree model ───────────────────────────────────────────────────────
-
-type FileLeaf = {
-  kind: "file";
-  name: string;
-  path: string;
-  status: string | undefined;
-  adds: number;
-  dels: number;
-  /** When this file last changed, in millis, or null when unknown. */
-  at: number | null;
-};
-
-type FolderNode = {
-  kind: "folder";
-  name: string;
-  /** Synthetic id (the folder's full slash-joined path) for collapse state. */
-  path: string;
-  children: TreeNode[];
-  adds: number;
-  dels: number;
-  fileCount: number;
-  /** The newest stamp anywhere beneath it, so a folder sorts where its most
-   *  recent file would. */
-  at: number | null;
-};
-
-type TreeNode = FileLeaf | FolderNode;
-
-/** Internal mutable folder used while building, before we freeze sums. */
-type RawFolder = {
-  name: string;
-  path: string;
-  folders: Map<string, RawFolder>;
-  files: FileLeaf[];
-};
-
-// ── ordering ─────────────────────────────────────────────────────────
-// A changeset of a dozen files reads fine alphabetically. One of forty does
-// not: the file that carries the change is somewhere in the middle of it, and
-// the only way to find it is to read every name. So the list can also be
-// ordered by how much a file changed, and by which change is newest — the two
-// questions people actually arrive with.
-//
-// Folders are ordered by the same rule as the files inside them (summed churn,
-// newest descendant), so a re-order moves the whole branch rather than
-// shuffling leaves inside a tree that still reads alphabetically.
-
-export type ChangeSort = "path" | "churn" | "recent";
-
-export const CHANGE_SORTS: { id: ChangeSort; label: string; hint: string }[] = [
-  { id: "path", label: "Name", hint: "Folders and files A–Z" },
-  { id: "churn", label: "Most changed", hint: "Largest +/− first" },
-  { id: "recent", label: "Newest", hint: "Most recently changed first" },
+const SCOPES: { value: "all" | "uncommitted"; label: string; title: string }[] = [
+  {
+    value: "all",
+    label: "All changes",
+    title: "Everything this copy changed since it branched off. Committed and not yet committed",
+  },
+  { value: "uncommitted", label: "Uncommitted only", title: "Only what hasn't been committed yet" },
 ];
-
-/** Millis for ordering, or `null` when the file carries no stamp — a working
- *  copy edit that was never committed has nothing to be newer than. */
-function changedAt(iso: string | null | undefined): number | null {
-  if (!iso) return null;
-  const ms = Date.parse(iso);
-  return Number.isNaN(ms) ? null : ms;
-}
-
-/** Build a folder hierarchy from the flat changeset, then collapse any
- *  single-child directory chain into one row (so `a/b/c/file.ts` reads as a
- *  single `a/b/c` folder) and sum +/− bottom-up. */
-function buildChangeTree(
-  files: IntentChangesetFile[],
-  sort: ChangeSort = "path",
-): {
-  nodes: TreeNode[];
-  fileOrder: string[];
-} {
-  const root: RawFolder = {
-    name: "",
-    path: "",
-    folders: new Map(),
-    files: [],
-  };
-
-  for (const f of files) {
-    const segs = f.path.split("/").filter(Boolean);
-    const fileName = segs.length > 0 ? segs[segs.length - 1] : f.path;
-    const dirs = segs.slice(0, -1);
-    let cur = root;
-    let acc = "";
-    for (const d of dirs) {
-      acc = acc ? `${acc}/${d}` : d;
-      let next = cur.folders.get(d);
-      if (!next) {
-        next = { name: d, path: acc, folders: new Map(), files: [] };
-        cur.folders.set(d, next);
-      }
-      cur = next;
-    }
-    cur.files.push({
-      kind: "file",
-      name: fileName,
-      path: f.path,
-      status: f.status,
-      adds: typeof f.additions === "number" ? f.additions : 0,
-      dels: typeof f.deletions === "number" ? f.deletions : 0,
-      at: changedAt(f.changed_at),
-    });
-  }
-
-  const fileOrder: string[] = [];
-
-  // One comparator for both folders and files, so a branch and its leaves are
-  // never ordered by different rules. Files with nothing to compare on — no
-  // churn recorded, no stamp — fall to the end rather than to the top, where a
-  // zero would otherwise outrank a real number, and settle alphabetically
-  // among themselves so the order is stable between renders.
-  function compare(a: TreeNode, b: TreeNode): number {
-    if (sort === "churn") {
-      const d = b.adds + b.dels - (a.adds + a.dels);
-      if (d !== 0) return d;
-    } else if (sort === "recent") {
-      if (a.at !== b.at) {
-        if (a.at === null) return 1;
-        if (b.at === null) return -1;
-        return b.at - a.at;
-      }
-    }
-    return a.name.localeCompare(b.name);
-  }
-
-  function freeze(raw: RawFolder): TreeNode[] {
-    const folderNodes: FolderNode[] = [];
-    for (const sub of raw.folders.values()) {
-      folderNodes.push(collapseFolder(sub));
-    }
-    folderNodes.sort(compare);
-    const fileNodes = [...raw.files].sort(compare);
-    // Record file render order (folders first, depth-first) for auto-select.
-    const out: TreeNode[] = [...folderNodes, ...fileNodes];
-    for (const n of out) {
-      if (n.kind === "file") fileOrder.push(n.path);
-    }
-    return out;
-  }
-
-  function collapseFolder(raw: RawFolder): FolderNode {
-    let name = raw.name;
-    let path = raw.path;
-    let work = raw;
-    // Collapse while this folder holds exactly one child that is itself a
-    // folder (and no files of its own) — the classic a/b/c chain.
-    while (work.files.length === 0 && work.folders.size === 1) {
-      const only = work.folders.values().next().value as RawFolder;
-      name = `${name}/${only.name}`;
-      path = only.path;
-      work = only;
-    }
-    const children = freeze(work);
-    let adds = 0;
-    let dels = 0;
-    let fileCount = 0;
-    let at: number | null = null;
-    for (const c of children) {
-      adds += c.adds;
-      dels += c.dels;
-      fileCount += c.kind === "file" ? 1 : c.fileCount;
-      if (c.at !== null && (at === null || c.at > at)) at = c.at;
-    }
-    return { kind: "folder", name, path, children, adds, dels, fileCount, at };
-  }
-
-  // freeze() pushes file order as it goes; call on root last so order is the
-  // natural top-down walk.
-  const nodes = freeze(root);
-  return { nodes, fileOrder };
-}
-
-/** Flatten the tree into render rows honoring collapse state. */
-type Row =
-  | { kind: "folder"; node: FolderNode; depth: number }
-  | { kind: "file"; node: FileLeaf; depth: number };
-
-function flatten(
-  nodes: TreeNode[],
-  collapsed: Set<string>,
-  depth = 0,
-  out: Row[] = [],
-): Row[] {
-  for (const n of nodes) {
-    if (n.kind === "folder") {
-      out.push({ kind: "folder", node: n, depth });
-      if (!collapsed.has(n.path)) flatten(n.children, collapsed, depth + 1, out);
-    } else {
-      out.push({ kind: "file", node: n, depth });
-    }
-  }
-  return out;
-}
-
-function Chevron({ open }: { open: boolean }) {
-  return (
-    <svg
-      width="10"
-      height="10"
-      viewBox="0 0 10 10"
-      className={`shrink-0 transition-transform ${open ? "" : "-rotate-90"}`}
-      aria-hidden="true"
-    >
-      <path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.4" fill="none" />
-    </svg>
-  );
-}
-
-function FolderGlyph({ open }: { open: boolean }) {
-  return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
-      {open ? (
-        <>
-          <path
-            d="M2 5.25V12.5a1 1 0 0 0 1 1h10.2a1 1 0 0 0 .96-.72l1.3-4.43A.6.6 0 0 0 14.88 7.5H4.5L3 8.7"
-            stroke="currentColor"
-            strokeWidth="1.2"
-            strokeLinejoin="round"
-          />
-          <path
-            d="M2 5.25V4a1 1 0 0 1 1-1h2.5L7 4.5h5.5a1 1 0 0 1 1 1V7.5"
-            stroke="currentColor"
-            strokeWidth="1.2"
-            strokeLinejoin="round"
-          />
-        </>
-      ) : (
-        <path
-          d="M2 4.5v8a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V5.5a1 1 0 0 0-1-1H7L5.5 3H3a1 1 0 0 0-1 1.5z"
-          stroke="currentColor"
-          strokeWidth="1.2"
-          strokeLinejoin="round"
-        />
-      )}
-    </svg>
-  );
-}
-
-function BackIcon() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M15 18l-6-6 6-6" />
-    </svg>
-  );
-}
-
-// ── change tree (left pane) ──────────────────────────────────────────
-
-/** How the file list is ordered.
- *
- *  A `<select>` sat here until 2026-08-31, and it was the one native control
- *  left in this pane. That was survivable while the pane only ever rendered
- *  inside the desktop app, where a native menu is the platform's own; it stops
- *  being survivable now the same pane is what the web console shows, because
- *  a browser draws its own select chrome and the control reads as borrowed
- *  from another product. `menuSurface.ts` exists precisely so every dropdown
- *  in both surfaces is one look by construction, so this is that look. */
-function SortMenu({
-  sort,
-  onSort,
-}: {
-  sort: ChangeSort;
-  onSort: (s: ChangeSort) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const chosen = CHANGE_SORTS.find((o) => o.id === sort);
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          aria-label="Order the file list"
-          title={chosen?.hint}
-          className="flex cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-xs text-text-4 hover:bg-state-hover hover:text-text-2 focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-        >
-          {chosen?.label ?? "Name"}
-          <ChevronsUpDown size={11} className="shrink-0" aria-hidden />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-[200px] p-0">
-        <FinderMenu
-          groups={[
-            {
-              items: CHANGE_SORTS.map((o) => ({
-                id: o.id,
-                label: o.label,
-                hint: o.hint,
-                selected: o.id === sort,
-                onSelect: () => onSort(o.id),
-              })),
-            },
-          ]}
-          onClose={() => setOpen(false)}
-        />
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function ChangeTree({
-  files,
-  fileOrder,
-  nodes,
-  selected,
-  onSelect,
-  sort,
-  onSort,
-  sortable,
-}: {
-  files: IntentChangesetFile[];
-  fileOrder: string[];
-  nodes: TreeNode[];
-  selected: string | null;
-  onSelect: (path: string) => void;
-  sort: ChangeSort;
-  onSort: (s: ChangeSort) => void;
-  /** False when nothing in the changeset carries churn or a stamp — offering
-   *  an ordering the data cannot honour is a control that does nothing. */
-  sortable: boolean;
-}) {
-  // Default: everything expanded (empty collapsed set). Folder paths toggle.
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const rows = useMemo(() => flatten(nodes, collapsed), [nodes, collapsed]);
-
-  const totals = useMemo(() => {
-    let adds = 0;
-    let dels = 0;
-    for (const f of files) {
-      if (typeof f.additions === "number") adds += f.additions;
-      if (typeof f.deletions === "number") dels += f.deletions;
-    }
-    return { adds, dels };
-  }, [files]);
-
-  const allCollapsed = collapsed.size > 0;
-  const collapseAll = () => {
-    if (allCollapsed) {
-      setCollapsed(new Set());
-      return;
-    }
-    const all = new Set<string>();
-    const walk = (ns: TreeNode[]) => {
-      for (const n of ns) {
-        if (n.kind === "folder") {
-          all.add(n.path);
-          walk(n.children);
-        }
-      }
-    };
-    walk(nodes);
-    setCollapsed(all);
-  };
-
-  function toggle(path: string) {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  }
-
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line-soft px-3 py-2">
-        <span className="section-label">
-          {fileOrder.length} {fileOrder.length === 1 ? "file" : "files"}
-          {/* The headline figure for the change being read: one on screen, not
-              a repeating row, and it counts exactly the diff this pane holds —
-              so it takes the same green/red as the file rows below it. Off the
-              shared badge, which also puts it on the diff-add/diff-remove
-              tokens; the old hand-rolled pair used the success-green (the
-              "verified / passing" colour), which meant the wrong thing and
-              didn't match the greens beneath it. */}
-          <Churn
-            additions={totals.adds}
-            deletions={totals.dels}
-            tone="diff"
-            className="ml-1.5 normal-case tracking-normal"
-          />
-        </span>
-        <div className="flex shrink-0 items-center gap-0.5">
-          {sortable && <SortMenu sort={sort} onSort={onSort} />}
-          <button
-            type="button"
-            onClick={collapseAll}
-            className="rounded px-1.5 py-0.5 text-xs text-text-4 hover:bg-state-hover hover:text-text-2"
-            title={allCollapsed ? "Expand all folders" : "Collapse all folders"}
-          >
-            {allCollapsed ? "Expand" : "Collapse"}
-          </button>
-        </div>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto py-1">
-        {rows.map((r) => {
-          const indent = 8 + r.depth * 12;
-          if (r.kind === "folder") {
-            const open = !collapsed.has(r.node.path);
-            return (
-              <button
-                key={`d:${r.node.path}`}
-                type="button"
-                onClick={() => toggle(r.node.path)}
-                className="flex w-full items-center gap-1.5 py-1 pr-2.5 text-left hover:bg-state-hover"
-                style={{ paddingLeft: indent }}
-                title={r.node.path}
-              >
-                <span className="text-text-4">
-                  <Chevron open={open} />
-                </span>
-                <span className="text-text-3">
-                  <FolderGlyph open={open} />
-                </span>
-                <span className="min-w-0 flex-1 truncate text-sm text-text-2">
-                  {r.node.name}
-                </span>
-                {/* A folder is not a change — this number is a roll-up of the
-                    files under it, and those files each show their own. Left
-                    neutral so the colour in this tree marks exactly one thing:
-                    a file that actually changed. */}
-                <Churn additions={r.node.adds} deletions={r.node.dels} />
-              </button>
-            );
-          }
-          const g = statusGlyph(r.node.status);
-          const isSel = selected === r.node.path;
-          return (
-            <button
-              key={`f:${r.node.path}`}
-              type="button"
-              onClick={() => onSelect(r.node.path)}
-              className={
-                "flex w-full items-center gap-1.5 py-1 pr-2.5 text-left " +
-                (isSel ? "bg-bg-card" : "hover:bg-state-hover")
-              }
-              style={{ paddingLeft: indent + 16 }}
-              title={r.node.path}
-            >
-              <span
-                className={"w-3 shrink-0 text-center font-mono text-xs " + g.tone}
-                title={g.word}
-              >
-                {g.letter}
-              </span>
-              <span
-                className={
-                  "min-w-0 flex-1 truncate text-sm " +
-                  (isSel ? "font-medium text-text-1" : "text-text-2")
-                }
-              >
-                {r.node.name}
-              </span>
-              {/* Diff surface, not a nav list: every row here is one file of
-                  the ONE changeset being read, and the number is that file's
-                  actual added/removed lines — the change itself. Green/red. */}
-              <Churn
-                additions={r.node.adds}
-                deletions={r.node.dels}
-                tone="diff"
-              />
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// ── demoted raw code ─────────────────────────────────────────────────
-// The syntax-highlighted diff is the ENGINEER's view. It sits BELOW the
-// plain-language meaning and stays collapsed by default, so a non-engineer
-// meets "what changed and why" first — not a wall of source. The reveal is
-// deliberately quiet (muted text, never the arctic-blue primary accent): the
-// meaning is the headline; the exact lines are one calm click away for whoever
-// wants them. `adds`/`dels` give a sense of scale on the closed toggle without
-// showing a single line of code.
-function CodeReveal({
-  show,
-  onToggle,
-  adds,
-  dels,
-  keepMounted = false,
-  children,
-}: {
-  show: boolean;
-  onToggle: () => void;
-  adds: number;
-  dels: number;
-  /** Hide rather than unmount when closed — an editable diff with unsaved
-   *  edits must not lose them to a "Hide the code" click. */
-  keepMounted?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={show}
-        className="flex shrink-0 items-center gap-1.5 border-t border-line-soft px-3 py-1.5 text-left text-xs text-text-4 hover:bg-state-hover hover:text-text-2"
-        title={
-          show
-            ? "Hide the exact code lines"
-            : "Show the exact code lines that changed. The engineer's view"
-        }
-      >
-        <Chevron open={show} />
-        <span>{show ? "Hide the code" : "See the actual code"}</span>
-        {!show && (adds > 0 || dels > 0) ? (
-          <span className="font-mono text-2xs tabular-nums text-text-5">
-            {adds > 0 ? <span className="text-accent-green">+{adds}</span> : null}
-            {adds > 0 && dels > 0 ? " " : null}
-            {dels > 0 ? <span className="text-text-3">−{dels}</span> : null}
-          </span>
-        ) : null}
-      </button>
-      {show ? (
-        <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
-      ) : keepMounted ? (
-        <div hidden className="min-h-0 flex-1 overflow-hidden">
-          {children}
-        </div>
-      ) : null}
-    </>
-  );
-}
-
-/** What a teammate's file changed, when the patch isn't in this clone.
- *
- *  The team plane records which file a person touched and which pieces of it
- *  they moved, but not the lines — their commit may be on a branch nobody here
- *  has fetched, and `.aura/` is gitignored on most repos so the ledger can't
- *  arrive by git either. That's a real and useful amount to know, and it is the
- *  difference between "Sam reworked the retry policy — `backoff`, `send`" and a
- *  Changes tab that has been empty for every one of Sam's sessions.
- *
- *  It deliberately does NOT offer to fetch. We know the file and the person;
- *  we don't know the branch, and guessing one would send someone chasing the
- *  wrong ref. */
-function RemoteChangeSummary({ file }: { file: IntentChangesetFile }) {
-  const symbols = file.symbols ?? [];
-  const word = statusGlyph(file.status).word;
-  return (
-    <div className="shrink-0 px-3 py-2.5 text-xs">
-      <div className="text-text-3">
-        A teammate {word} this file. Their code isn&rsquo;t on this machine, so
-        there are no lines to show — pull their branch to read the change
-        itself.
-      </div>
-      {symbols.length > 0 ? (
-        <div className="mt-2">
-          <div className="text-2xs uppercase tracking-wide text-text-4">
-            What they changed in it
-          </div>
-          <ul className="mt-1 flex flex-wrap gap-1">
-            {symbols.map((s) => (
-              <li
-                key={`${s.identifier}:${s.change}`}
-                className="rounded border border-line-soft px-1.5 py-px font-mono text-xs text-text-2"
-                title={
-                  s.kind ? `${s.kind} — ${s.change || "changed"}` : s.change
-                }
-              >
-                {s.identifier}
-                {s.change ? (
-                  <span className="ml-1 font-sans text-2xs text-text-4">
-                    {s.change}
-                  </span>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-// ── diff pane (right pane) ───────────────────────────────────────────
-// The split-diff renderer lives in ../diff/SplitDiff and the rebuild it needs
-// in ../../lib/diffSides, so the working-file pane uses the identical view and
-// the same piece→lines mapping.
-
-function DiffPane({
-  repoRoot,
-  file,
-  narrow,
-  sinceBase,
-  onBack,
-  onBringBack,
-  busySymbol,
-  renderReasons,
-  onDirtyChange,
-}: {
-  repoRoot: string;
-  file: IntentChangesetFile;
-  /** Tells the host when this pane holds unsaved edits, so switching files
-   *  can ask before dropping them. */
-  onDirtyChange?: (dirty: boolean) => void;
-  /** Leads the pane with whatever the host can say about *why* this file
-   *  changed, when the recorded change-note below cannot be computed here.
-   *  The desktop leaves it unset — it has a checkout and derives the richer
-   *  before/after itself; the console passes the sentences their authors
-   *  actually wrote, which is the half that was never derived from a diff. */
-  renderReasons?: (file: IntentChangesetFile) => ReactNode;
-  /** When narrow we render single-column with a back affordance. */
-  narrow: boolean;
-  /** "All changes" mode (worktrees): a working-tree file's diff spans the
-   *  worktree's fork base → working tree (committed + uncommitted), not just
-   *  vs HEAD. A committed-sha file always shows that commit's patch regardless. */
-  sinceBase: boolean;
-  onBack: () => void;
-  /** When set, the split header offers per-piece "Bring this back" (surgical
-   *  undo) right beside each changed symbol. */
-  onBringBack?: (symbol: string, relFile: string) => void;
-  busySymbol?: string | null;
-}) {
-  // The split/unified choice is the one shared, persisted preference (so it
-  // matches the working-file pane and survives reloads). Read it on mount and
-  // re-read whenever any pane flips the toggle.
-  const [mode, setMode] = useState<DiffView>(getDiffView);
-  useEffect(() => subscribeDiffView(setMode), []);
-  // Whitespace-hiding is the same shared, persisted toggle across every pane.
-  const [ignoreWs, setIgnoreWs] = useState(getIgnoreWhitespace);
-  useEffect(() => subscribeIgnoreWhitespace(setIgnoreWs), []);
-  // "Edit in diff" / "Read only" — shared and persisted like the two above.
-  const [editPref, setEditPref] = useState(getEditableDiffs);
-  useEffect(() => subscribeEditableDiffs(setEditPref), []);
-  const [diff, setDiff] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // The whole working-tree file as last read from disk — the current side of
-  // an editable diff. Null for a committed or teammate's file, which has no
-  // file here to write back to.
-  const [diskText, setDiskText] = useState<string | null>(null);
-  // Bumped to re-read the diff and file in place (after a save, or when the
-  // file changes on disk) without the blank-then-load flash a file switch has.
-  const [refreshTick, setRefreshTick] = useState(0);
-  const refresh = useCallback(() => setRefreshTick((t) => t + 1), []);
-  const isWorkingTree = !file.commit && !file.remote_only;
-  const absPath = isWorkingTree
-    ? file.path.startsWith("/")
-      ? file.path
-      : `${repoRoot.replace(/\/$/, "")}/${file.path}`
-    : null;
-  // The per-file change-note for THIS file in THIS commit, used to populate the
-  // split diff's three-block header (merged summary + previous/new side
-  // columns). Same shared (repo, commit) cache the unified path's
-  // ChangeNoteCard reads, so it costs no extra engine round-trip.
-  const [note, setNote] = useState<FileChangeNote | null>(null);
-  // The commit's real when/who, carried from the same change-note report so the
-  // split header can show "the reality" (when it landed, who made it) in plain
-  // words. Null until the report resolves, or when there's no commit sha.
-  const [when, setWhen] = useState<number | null>(null);
-  const [author, setAuthor] = useState<string | null>(null);
-  // Track the diff body width: below SPLIT_INLINE_PX Monaco folds its split
-  // into one inline column, so the side-headers must stack to stay honest.
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-  const [bodyNarrow, setBodyNarrow] = useState(false);
-  // The plain-words summary leads, but the actual code is shown by default so
-  // it's right there to read — the "Hide the code" toggle demotes it for anyone
-  // who wants only the meaning. Reset on every file switch so each file starts
-  // open, not on the previous file's manual choice.
-  const [showCode, setShowCode] = useState(true);
-  useEffect(() => {
-    setShowCode(true);
-  }, [file.path, file.commit]);
-
-  // The piece the reader clicked in the header above. Held here rather than in
-  // the header because BOTH the header and the diff body have to agree on it:
-  // one shows it selected, the other highlights its lines and captions them.
-  const [pick, setPick] = useState<FocusPick | null>(null);
-  const onFocusPiece = useCallback((p: FocusPick | null) => {
-    setPick(p);
-    // Picking a piece is asking to see code, so reveal it — the click is
-    // otherwise silent when the diff is collapsed.
-    if (p) setShowCode(true);
-  }, []);
-  // A different file is a different set of pieces.
-  useEffect(() => {
-    setPick(null);
-  }, [file.path, file.commit]);
-
-  useLayoutEffect(() => {
-    const el = bodyRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      for (const e of entries) {
-        setBodyNarrow(e.contentRect.width < SPLIT_INLINE_PX);
-      }
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  // Pull the change-note for the committed file so the split header has real
-  // data. A live/manual change has no commit sha → no note (header is skipped).
-  useEffect(() => {
-    setNote(null);
-    setWhen(null);
-    setAuthor(null);
-    if (!repoRoot || !file.commit) return;
-    let alive = true;
-    fetchChangeNoteReport(repoRoot, file.commit)
-      .then((report) => {
-        if (!alive) return;
-        setNote(report.files.find((f) => f.file === file.path) ?? null);
-        setWhen(report.commit_time ?? null);
-        setAuthor(report.author?.trim() || null);
-      })
-      .catch(() => {
-        /* header stays hidden on a miss — the diff is still the star */
-      });
-    return () => {
-      alive = false;
-    };
-  }, [repoRoot, file.commit, file.path]);
-
-  // A different file (or scope) starts from blank. Declared before the fetch
-  // below so it runs first in the same commit; a plain refresh (the tick)
-  // skips this and re-reads quietly behind whatever is already on screen.
-  useEffect(() => {
-    setLoading(true);
-    setError(null);
-    setDiff(null);
-    setDiskText(null);
-  }, [repoRoot, file.path, file.commit, file.remote_only, sinceBase]);
-
-  useEffect(() => {
-    if (!repoRoot) return;
-    // A teammate's file, carried over the team plane. There is no patch here
-    // to fetch — see the panel below, which shows what we do know.
-    if (file.remote_only) {
-      setLoading(false);
-      setError(null);
-      setDiff(null);
-      return;
-    }
-    let alive = true;
-    setError(null);
-    // A back-filled changeset stamps each file with the commit that landed it;
-    // once a run is committed `git diff HEAD` is empty, so we show that commit's
-    // real patch (`git show <sha> -- <path>`). A live/manual claim has no commit
-    // sha — its change is still in the working tree, so fall back to git diff.
-    // Routed through the per-session diff cache so re-selecting a file (or
-    // reopening the whole session) is instant instead of re-shelling git.
-    //
-    // A working-tree file is also read whole, in the same round, so the
-    // editable view has the real file to type into and the patch and the file
-    // describe the same moment.
-    const fileRead: Promise<string | null> = absPath
-      ? api
-          .readFile(absPath)
-          .then((c) => (c.status === "ok" ? c.text : null))
-          .catch(() => null)
-      : Promise.resolve(null);
-    Promise.all([loadFileDiff(repoRoot, file, sinceBase), fileRead])
-      .then(([d, text]) => {
-        if (!alive) return;
-        setDiff(d ?? "");
-        setDiskText(text);
-      })
-      .catch((e) => {
-        if (alive) setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [repoRoot, file.path, file.commit, file.remote_only, sinceBase, absPath, refreshTick]);
-
-  // The original side of an editable diff, rebuilt by walking the patch
-  // backwards over the file on disk. Null when there is nothing to edit, or
-  // when the two no longer describe each other (the file moved between the
-  // reads) — the pane then shows the plain read-only diff, and the next
-  // refresh brings the editable one back.
-  const editOriginal = useMemo(
-    () => (diskText != null && diff != null ? reverseApplyDiff(diff, diskText) : null),
-    [diskText, diff],
-  );
-  const edit = useEditableDiff({
-    absPath,
-    diskText,
-    onSaved: refresh,
-    onDiskChanged: refresh,
-  });
-  useEffect(() => {
-    onDirtyChange?.(edit.dirty);
-  }, [edit.dirty, onDirtyChange]);
-  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
-
-  const g = statusGlyph(file.status);
-  const adds = typeof file.additions === "number" ? file.additions : 0;
-  const dels = typeof file.deletions === "number" ? file.deletions : 0;
-  const hasDiff = !!diff && diff.trim().length > 0;
-  // Split needs two sides; a one-sided (new/deleted) file falls back to
-  // unified so the toggle never lands on a visually-broken split.
-  const sidesPreview = useMemo(
-    () => (hasDiff ? materializeSides(diff as string) : null),
-    [hasDiff, diff],
-  );
-  const splitDisabled = narrow || (sidesPreview?.oneSided ?? false);
-  const effectiveMode: DiffView = splitDisabled ? "unified" : mode;
-  // Editable needs the whole file on both sides. Once there are unsaved edits
-  // the Monaco view stays up even if the reader flips to "Read only" — the
-  // switch locks the text, it never discards it.
-  const canEdit = hasDiff && editOriginal != null;
-  const useEditor = canEdit && (editPref || edit.dirty);
-
-  // Resolve the picked piece to the lines it occupies on its side of THIS diff.
-  // A null span is a real answer — the piece's lines were trimmed out of the
-  // patch — and the diff bodies say so instead of highlighting a neighbour.
-  const focus: DiffFocus | null = useMemo(() => {
-    if (!pick || !sidesPreview) return null;
-    const side = pick.side === "previous" ? "original" : "modified";
-    return {
-      span: symbolSpan(sidesPreview, pick.symbol, side),
-      title: pick.title,
-      identifier: pick.symbol.identifier,
-      meaning: pick.meaning,
-    };
-  }, [pick, sidesPreview]);
-
-  return (
-    <div className="flex h-full min-h-0 flex-col bg-bg-content">
-      {/* file header strip */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-line-soft px-2.5 py-1.5">
-        {narrow ? (
-          <button
-            type="button"
-            onClick={onBack}
-            className="-ml-1 flex items-center gap-0.5 rounded px-1 py-0.5 text-xs text-text-3 hover:bg-state-hover hover:text-text-1"
-          >
-            <BackIcon />
-            <span>Files</span>
-          </button>
-        ) : null}
-        <span
-          className={"w-3 shrink-0 text-center font-mono text-xs " + g.tone}
-          title={g.word}
-        >
-          {g.letter}
-        </span>
-        <span
-          className="min-w-0 flex-1 truncate font-mono text-sm text-text-2"
-          dir="rtl"
-          title={file.path}
-        >
-          {file.path}
-        </span>
-        {/* Unsaved dot / saving spinner, right beside the name it belongs to. */}
-        <UnsavedMark edit={edit} />
-        {/* Sits directly above the lines it counts — the number IS what's on
-            screen, so it carries the same green/red as the diff below it. */}
-        <Churn additions={adds} deletions={dels} tone="diff" />
-        <DiskChangedNotice edit={edit} />
-        {/* Code-display controls (side-by-side vs inline, hide-whitespace) only
-            matter when the raw code is actually revealed — keep them out of the
-            way while the plain-language view is the star. */}
-        {showCode ? (
-          <>
-            {canEdit ? (
-              <span className="ml-1 inline-flex shrink-0">
-                <EditToggle on={editPref} onChange={setEditableDiffs} />
-              </span>
-            ) : null}
-            {!splitDisabled ? (
-              <span className="ml-1 inline-flex shrink-0 items-center overflow-hidden rounded border border-line-soft">
-                <button
-                  type="button"
-                  onClick={() => setDiffView("split")}
-                  className={
-                    "h-5 px-1.5 text-xs " +
-                    (effectiveMode === "split"
-                      ? "bg-bg-2 text-text-1"
-                      : "text-text-3 hover:text-text-1")
-                  }
-                  title="Side-by-side diff"
-                >
-                  Split
-                </button>
-                <span className="h-3 w-px bg-line-soft" />
-                <button
-                  type="button"
-                  onClick={() => setDiffView("unified")}
-                  className={
-                    "h-5 px-1.5 text-xs " +
-                    (effectiveMode === "unified"
-                      ? "bg-bg-2 text-text-1"
-                      : "text-text-3 hover:text-text-1")
-                  }
-                  title="Unified (inline) diff"
-                >
-                  Unified
-                </button>
-              </span>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => setIgnoreWhitespace(!ignoreWs)}
-              aria-pressed={ignoreWs}
-              title={ignoreWs ? "Whitespace-only changes hidden" : "Hide whitespace-only changes"}
-              className={
-                "ml-1 h-5 shrink-0 rounded border px-1.5 text-xs " +
-                (ignoreWs
-                  ? "border-[var(--color-accent)] bg-bg-2 text-[var(--color-accent)]"
-                  : "border-line-soft text-text-3 hover:text-text-1")
-              }
-            >
-              WS
-            </button>
-          </>
-        ) : null}
-      </div>
-
-      {/* MEANING FIRST, code second. The plain-language "what changed & why"
-          leads; the syntax-highlighted diff is demoted below it, collapsed by
-          default (see CodeReveal). A non-engineer meets the value of the change,
-          not a wall of source. */}
-      <div ref={bodyRef} className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        {/* PRIMARY — the meaning, shown the instant it's known and independent
-            of the code diff's own load state. SplitDiffHeader is the richest
-            plain-words before/after (from the recorded change-note); the
-            commit's ChangeNoteCard is the fallback lead. A live working-tree
-            edit has no recorded note, so it leads straight to the code below. */}
-        {renderReasons?.(file)}
-        {note ? (
-          <SplitDiffHeader
-            note={note}
-            when={when}
-            author={author}
-            repoRoot={repoRoot}
-            commit={file.commit}
-            stacked={bodyNarrow}
-            onBringBack={onBringBack}
-            busySymbol={busySymbol}
-            onFocusPiece={onFocusPiece}
-          />
-        ) : file.commit ? (
-          <ChangeNoteCard repoRoot={repoRoot} commit={file.commit} path={file.path} />
-        ) : null}
-
-        {/* SECONDARY — the raw code. Its own load / empty state lives here so
-            the meaning above never waits on it. */}
-        {file.remote_only ? (
-          <RemoteChangeSummary file={file} />
-        ) : loading ? (
-          <div className="shrink-0 px-3 py-2 text-xs text-text-4">
-            Loading the code…
-          </div>
-        ) : error ? (
-          <div className="shrink-0 px-3 py-2 text-xs text-text-3">
-            Couldn&rsquo;t load the code.
-            <span className="mt-1 block font-mono text-xs text-text-4">
-              {error}
-            </span>
-          </div>
-        ) : !hasDiff ? (
-          <div className="shrink-0 px-3 py-2 text-xs text-text-4">
-            {file.commit
-              ? "This change didn't alter any text in this file. It was a rename, or a settings-only change."
-              : "Nothing to show here. This file already matches the last saved version."}
-          </div>
-        ) : (
-          <CodeReveal
-            show={showCode}
-            onToggle={() => setShowCode((v) => !v)}
-            adds={adds}
-            dels={dels}
-            keepMounted={edit.dirty}
-          >
-            {useEditor ? (
-              // The working-tree file, whole, with the current side open to
-              // typing; ⌘S saves. Inline when the reader prefers unified —
-              // it has to stay a Monaco editor to be editable.
-              <SplitDiff
-                diff={diff as string}
-                path={file.path}
-                focus={focus}
-                onClearFocus={() => setPick(null)}
-                sides={{ original: editOriginal as string, modified: edit.modified }}
-                inline={effectiveMode === "unified"}
-                edit={{ readOnly: !editPref, attach: edit.attach }}
-              />
-            ) : effectiveMode === "split" ? (
-              <SplitDiff
-                diff={diff as string}
-                path={file.path}
-                focus={focus}
-                onClearFocus={() => setPick(null)}
-              />
-            ) : (
-              <div className="h-full overflow-y-auto">
-                <UnifiedDiff diff={diff as string} focus={focus} />
-              </div>
-            )}
-          </CodeReveal>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── top-level two-pane container ─────────────────────────────────────
 
 export function ChangesView({
   repoRoot,
@@ -1127,17 +61,15 @@ export function ChangesView({
    *  re-mounts ChangesView on entry, so seeding the initial selection is
    *  enough — no live sync needed. */
   initialSelected?: string | null;
-  /** When set, each changed piece in the diff offers a surgical "Bring this
-   *  back" (one-piece undo). Wired from a session's Changes tab so recovery
-   *  lives where you see the change — the Time machine's job, folded in. */
+  /** When set, each changed piece offers a surgical "Bring this back"
+   *  (one-piece undo), so recovery lives where you see the change. */
   onBringBack?: (symbol: string, relFile: string) => void;
   busySymbol?: string | null;
-  /** Host-supplied "why did this file change" band, shown above the diff. See
-   *  {@link DiffPane}'s own prop for who sets it and why. */
+  /** Host-supplied "why did this file change" band, shown above the diff. */
   renderReasons?: (file: IntentChangesetFile) => ReactNode;
 }) {
   const [sort, setSort] = useState<ChangeSort>("path");
-  const { nodes, fileOrder } = useMemo(
+  const { nodes, fileOrder, folderIds } = useMemo(
     () => buildChangeTree(files, sort),
     [files, sort],
   );
@@ -1154,9 +86,7 @@ export function ChangesView({
       ),
     [files],
   );
-  const [selected, setSelected] = useState<string | null>(
-    initialSelected ?? null,
-  );
+  const [selected, setSelected] = useState<string | null>(initialSelected ?? null);
   const [narrow, setNarrow] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -1182,15 +112,12 @@ export function ChangesView({
   }, []);
 
   // An agent worktree forked from a base, so "all the work done here" =
-  // committed + uncommitted since that fork. The toggle lets the user narrow
-  // back to just the uncommitted edits. Default "All changes" (true). The main
-  // checkout has no fork base, so the toggle is hidden there and this stays the
-  // harmless default (the Rust side falls back to vs-HEAD when no base exists).
+  // committed + uncommitted since that fork; the toggle narrows back to just
+  // the uncommitted edits. The main checkout has no fork base, so the toggle
+  // is hidden there and this stays the harmless default.
   const isWorktree = isWorktreeRoot(repoRoot);
   const [sinceBase, setSinceBase] = useState(true);
 
-  // ResizeObserver → narrow switch (no CSS media queries; matches the app's
-  // JS breakpoint precedent).
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -1201,7 +128,7 @@ export function ChangesView({
     return () => ro.disconnect();
   }, []);
 
-  // Wide layout auto-selects the first file so the diff pane is never blank.
+  // Wide layout auto-selects the first file so the diff side is never blank.
   // Narrow layout intentionally starts on the list.
   useEffect(() => {
     if (narrow) return;
@@ -1215,15 +142,11 @@ export function ChangesView({
   );
 
   // Start writing the plain-language account of EVERY commit in this changeset
-  // the moment the tab opens — all of them, in parallel, rather than the file
-  // you happen to click first and then the next one and the next one. The words
-  // for a file you haven't reached yet are being written while you read the one
-  // you're on, so by the time you get there it's already filled in instead of
-  // showing "A new piece." for the better part of a minute.
-  //
-  // Fire-and-forget on purpose: nothing here is awaited or rendered. The jobs
-  // land in the shared cache, and the surfaces that read it (this file's header,
-  // and later the same change in a pull request) simply find it warm.
+  // the moment the tab opens, in parallel — so the words for a file you haven't
+  // reached yet are being written while you read the one you're on.
+  // Fire-and-forget: the jobs land in the shared cache, and the surfaces that
+  // read it (this file's header, later the same change in a pull request)
+  // simply find it warm.
   const commits = useMemo(() => {
     const seen = new Set<string>();
     for (const f of files) if (f.commit) seen.add(f.commit);
@@ -1236,11 +159,12 @@ export function ChangesView({
     }
   }, [repoRoot, commits]);
 
-  const tree = (
-    <ChangeTree
+  const list = (
+    <ChangeFileList
       files={files}
-      fileOrder={fileOrder}
       nodes={nodes}
+      fileOrder={fileOrder}
+      folderIds={folderIds}
       selected={selected}
       onSelect={select}
       sort={sort}
@@ -1248,90 +172,64 @@ export function ChangesView({
       sortable={sortable}
     />
   );
+  const pane = (file: IntentChangesetFile) => (
+    <ChangeDiffPane
+      repoRoot={repoRoot}
+      file={file}
+      narrow={narrow}
+      sinceBase={isWorktree && sinceBase}
+      onBack={() => select(null)}
+      onBringBack={onBringBack}
+      busySymbol={busySymbol}
+      renderReasons={renderReasons}
+      onDirtyChange={onDirtyChange}
+    />
+  );
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col">
-      {/* Scope toggle — worktrees only. The main checkout has no fork base, so
-          "All changes" would equal "Uncommitted only"; we hide it there to keep
-          the chrome quiet. Plain words over git jargon (the audience is
-          non-engineers). Active segment uses the arctic-blue accent. */}
+    <div className="ui-changes-view">
+      {/* Worktrees only: the main checkout has no fork base, so "All changes"
+          would equal "Uncommitted only". Plain words over git jargon. */}
       {isWorktree ? (
-        <div className="flex shrink-0 items-center gap-2 border-b border-line-soft px-2.5 py-1.5">
-          <span className="text-xs text-text-3">Showing</span>
-          <span className="inline-flex shrink-0 items-center overflow-hidden rounded border border-line-soft">
-            <button
-              type="button"
-              onClick={() => setSinceBase(true)}
-              className={
-                "h-5 px-2 text-xs " +
-                (sinceBase
-                  ? "bg-accent/15 font-medium text-accent"
-                  : "text-text-3 hover:text-text-1")
-              }
-              title="Everything this copy changed since it branched off. Committed and not yet committed"
-            >
-              All changes
-            </button>
-            <span className="h-3 w-px bg-line-soft" />
-            <button
-              type="button"
-              onClick={() => setSinceBase(false)}
-              className={
-                "h-5 px-2 text-xs " +
-                (!sinceBase
-                  ? "bg-accent/15 font-medium text-accent"
-                  : "text-text-3 hover:text-text-1")
-              }
-              title="Only what hasn't been committed yet"
-            >
-              Uncommitted only
-            </button>
-          </span>
+        <div className="ui-changes-scope">
+          <span>Showing</span>
+          <ToggleGroup
+            type="single"
+            size="sm"
+            aria-label="Which changes to show"
+            value={sinceBase ? "all" : "uncommitted"}
+            onValueChange={(v) => v && setSinceBase(v === "all")}
+          >
+            {SCOPES.map((o) => (
+              <ToggleGroupItem key={o.value} value={o.value} title={o.title}>
+                {o.label}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
         </div>
       ) : null}
-      <div ref={containerRef} className="flex min-h-0 w-full flex-1">
+      <div ref={containerRef} className="ui-changes">
         {narrow ? (
           selectedFile ? (
-            <div className="h-full min-h-0 w-full">
-              <DiffPane
-                repoRoot={repoRoot}
-                file={selectedFile}
-                narrow
-                sinceBase={isWorktree && sinceBase}
-                onBack={() => select(null)}
-                onBringBack={onBringBack}
-                busySymbol={busySymbol}
-                renderReasons={renderReasons}
-                onDirtyChange={onDirtyChange}
-              />
-            </div>
+            pane(selectedFile)
           ) : (
-            <div className="h-full min-h-0 w-full">{tree}</div>
+            list
           )
         ) : (
           <>
-            <div className="h-full min-h-0 w-[248px] shrink-0 border-r border-line-soft">
-              {tree}
-            </div>
-            {/* min-w-0 lets this flex child shrink below Monaco's content width;
-                without it the editor can't relayout on shrink and overflows. */}
-            <div className="h-full min-h-0 min-w-0 flex-1">
+            <div className="ui-changes-list">{list}</div>
+            {/* min-width 0 lets this column shrink below the editor's content
+                width; without it the editor can't relayout on shrink. */}
+            <div className="ui-changes-main">
               {selectedFile ? (
-                <DiffPane
-                  repoRoot={repoRoot}
-                  file={selectedFile}
-                  narrow={false}
-                  sinceBase={isWorktree && sinceBase}
-                  onBack={() => select(null)}
-                  onBringBack={onBringBack}
-                  busySymbol={busySymbol}
-                  renderReasons={renderReasons}
-                  onDirtyChange={onDirtyChange}
-                />
+                pane(selectedFile)
               ) : (
-                <div className="flex h-full items-center justify-center text-sm text-text-4">
-                  Select a file to view its diff.
-                </div>
+                <EmptyState
+                  icon={FileDiffIcon}
+                  title="Select a file to view its diff."
+                  size="sm"
+                  className="ui-changes-empty"
+                />
               )}
             </div>
           </>

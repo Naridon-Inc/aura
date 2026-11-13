@@ -210,6 +210,17 @@ export function loadInstallHealth(force = false): Promise<void> {
   return inFlight;
 }
 
+/** Every agent's install health, raw, for Settings → Agents. Shares the probe
+ *  and its answer with the nudges, so opening the pane does not spawn every
+ *  copy of every agent binary again within TTL_MS. */
+export function useInstallRows(): AgentInstallHealth[] {
+  const { rows } = useSyncExternalStore(subscribe, snapshot, snapshot);
+  useEffect(() => {
+    void loadInstallHealth();
+  }, []);
+  return rows;
+}
+
 /** Every install worth a row, for a surface that shows all agents at once. */
 export function useInstallNudges(): InstallNudge[] {
   const { rows, dismissed } = useSyncExternalStore(subscribe, snapshot, snapshot);

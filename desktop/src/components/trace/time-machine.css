@@ -1,0 +1,155 @@
+/* The Time machine: the moments down the left, the one you are on to the right. */
+
+.ui-tm {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-trace-toolbar-meta.ui-tm-lede {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-tm-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+/* 280px holds a two-line reason beside the marker column and still leaves the
+   moment itself 440px in a 1000px window. */
+.ui-tm-rail {
+  width: 280px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--ui-border);
+}
+.ui-tm-detail {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The moment you are on: how far back, when, who. */
+.ui-tm-moment-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ui-tm-moment-step {
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--ui-muted-fg);
+}
+.ui-tm-moment-when {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 28px;
+}
+.ui-tm-moment-when small {
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--ui-muted-fg);
+}
+.ui-tm-moment-marks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+
+/* One changed file. Its body indents to the path, past the chevron and the
+   file glyph: 14 + 8 + 14 + 8px, less the row's own 8px bleed. */
+.ui-tm-files {
+  display: flex;
+  flex-direction: column;
+}
+.ui-tm-file-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0 12px 36px;
+}
+.ui-tm-piece {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-tm-piece-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ui-tm-piece-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-tm-code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ui-tm-piece-title .ui-tm-code {
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--ui-fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-tm-by-name {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-tm-by-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-tm-by-name-row input {
+  height: 32px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ui-tm-diff {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.ui-tm-diff .ui-file-diff {
+  width: 100%;
+}
+/* The piece's name is what you are deciding about, so its kind gives way first
+   when the column narrows. */
+.ui-tm-piece-title .ui-tm-code {
+  flex-shrink: 0;
+  max-width: 100%;
+}
+.ui-tm-piece-title .ui-trace-mark {
+  display: block;
+  flex-shrink: 100;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Below 1100px the moment needs the width more than the rail: 240px still
+   holds a two-line reason. */
+@media (max-width: 1100px) {
+  .ui-tm-rail {
+    width: 240px;
+  }
+}

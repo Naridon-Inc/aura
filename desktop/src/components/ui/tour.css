@@ -1,0 +1,66 @@
+/* The get-started tour. A step that names a place in the app dims the rest
+   of the window and rings that place; its words sit in the shared popover
+   beside it. Steps with no place to point at use the shared dialog. */
+
+.ui-tour-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  pointer-events: none;
+}
+/* The ring around the place the step names. The scrim is the same black the
+   dialogs lay over the app, cut away around the ring by a wide spread. */
+.ui-tour-ring {
+  position: fixed;
+  border-radius: 8px;
+  box-shadow:
+    0 0 0 9999px rgb(0 0 0 / 0.55),
+    0 0 0 2px var(--ui-ring);
+  transition:
+    top 0.2s cubic-bezier(0.23, 1, 0.32, 1),
+    left 0.2s cubic-bezier(0.23, 1, 0.32, 1),
+    width 0.2s cubic-bezier(0.23, 1, 0.32, 1),
+    height 0.2s cubic-bezier(0.23, 1, 0.32, 1);
+}
+.ui-tour-anchor {
+  position: fixed;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-tour-ring {
+    transition: none;
+  }
+}
+
+/* The step's words, laid out the way the composer's popovers lay theirs. */
+.ui-tour-popover {
+  width: 320px;
+  padding: 12px;
+}
+.ui-tour-popover > strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+}
+.ui-tour-popover > p {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ui-muted-fg);
+  margin-block: 8px 12px;
+}
+
+/* Where the reader is, and the way on. */
+.ui-tour-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-tour-count {
+  margin-right: auto;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-dialog-footer.ui-tour-footer {
+  justify-content: flex-start;
+}

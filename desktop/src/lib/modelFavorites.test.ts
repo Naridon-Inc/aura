@@ -55,6 +55,21 @@ describe("model favorites", () => {
     expect(loadModelFavorites()).toEqual(["ok"]);
   });
 
+  test("a star on a retired brain is left out, the rest keep their order", () => {
+    store.set(
+      MODEL_FAVORITES_KEY,
+      JSON.stringify([
+        "cli_wrapper:codex::gpt",
+        "aura_pro::claude-opus-5",
+        "anthropic_native::claude-opus-5",
+      ]),
+    );
+    expect(loadModelFavorites()).toEqual([
+      "cli_wrapper:codex::gpt",
+      "anthropic_native::claude-opus-5",
+    ]);
+  });
+
   test("survives storage that throws", () => {
     (globalThis as { localStorage?: unknown }).localStorage = {
       getItem: () => {

@@ -1,0 +1,237 @@
+/* A run, opened: main column + details column, at the workspace's sizes. */
+
+.ui-trace-detail {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-trace-detail-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.ui-trace-detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ui-trace-detail-tabs {
+  flex-shrink: 0;
+  padding-left: 4px;
+}
+.ui-trace-tab-count {
+  color: var(--ui-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-trace-detail-tabs-trailing {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 0 8px;
+}
+
+/* Details column. */
+.ui-trace-aside {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.ui-trace-aside-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding-inline: 12px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.ui-trace-aside-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.ui-trace-aside-toolbar {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  gap: 4px;
+  border-bottom: 1px solid var(--ui-border);
+  padding: 0 6px;
+  flex-shrink: 0;
+}
+.ui-trace-aside-tabs {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ui-trace-aside-tabs::-webkit-scrollbar {
+  display: none;
+}
+.ui-trace-aside-tabs button {
+  padding: 4px 8px;
+  height: 28px;
+  color: var(--ui-muted-fg);
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ui-trace-aside-tabs button[aria-selected="true"] {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-trace-aside-tabs button small {
+  margin-left: 4px;
+  color: var(--ui-faint);
+  font-size: 11px;
+}
+.ui-trace-aside-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.ui-trace-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--ui-muted-fg);
+}
+
+.ui-trace-fact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+.ui-trace-fact-label {
+  width: 88px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-trace-fact-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-fg);
+}
+.ui-trace-fact-value svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.ui-trace-note {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+}
+.ui-trace-note strong {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ui-fg);
+}
+.ui-trace-note p {
+  max-width: 340px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ui-muted-fg);
+}
+.ui-trace-aside-where {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* As a page, an opened run takes the page's place: the page header and view
+   strip above it step aside, so the run's own header is the only one. */
+.ui-trace-detail-page {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+:has(> .ui-trace-strip):has(.ui-trace-detail-page) > :is(.ui-trace-header, .ui-trace-strip) {
+  display: none;
+}
+
+.ui-trace-detail-crumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 14px;
+}
+.ui-trace-detail-crumb > .ui-trace-crumb {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-trace-detail-crumb > .ui-trace-crumb:hover {
+  color: var(--ui-fg);
+}
+.ui-trace-detail-crumb > .ui-trace-crumb:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.ui-trace-detail-crumb > svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-trace-detail-crumb > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-fg);
+}
+
+.ui-trace-detail-changes {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.ui-trace-detail-changes-view {
+  flex: 1;
+  min-height: 0;
+}
+.ui-trace-detail-changes-result {
+  flex-shrink: 0;
+  border-top: 1px solid var(--ui-border);
+  padding: 0 12px 12px;
+}

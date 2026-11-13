@@ -52,7 +52,7 @@ export function AccountMenu({
   onOpenProfile?: () => void;
   /** Sidebar row variant — a full-width identity row (avatar + name +
    *  org subtitle) instead of the bare titlebar avatar. Used at the top
-   *  of the left sidebar (Conductor-style), where the name should be
+   *  of the left sidebar, where the name should be
    *  visible without opening the popover. */
   wide?: boolean;
   /** Compact-trigger variant — a small neutral rounded-square chip instead
@@ -188,7 +188,7 @@ export function AccountMenu({
           trigger
         ) : wide ? (
           // Subtle single-line identity row — deliberately quiet, matching the
-          // weight of the nav rows below it (Conductor's Workspaces / Mission
+          // weight of the nav rows below it (Workspaces / Mission
           // Control), not a bordered account card. Small avatar + muted name +
           // a faint chevron; the org + actions live in the popover.
           <button

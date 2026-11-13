@@ -18,6 +18,7 @@ import type { Participant } from "../../lib/sessionLive";
 import { hhmm } from "../team/domain/labels";
 import { ParticipantFace } from "./ParticipantsStrip";
 import { participantLabel, participantName } from "./collabPresence";
+import "../ui/session-room.css";
 
 export type AgentStandDownNoticeProps = {
   /** The agent that would otherwise have picked this up. */
@@ -40,19 +41,14 @@ export function AgentStandDownNotice({
   const agentLabel = participantLabel(agent, participants, youId);
   const toLabel = participantName(addressee, participants);
   return (
-    <div className="flex items-start gap-2 pl-4 pr-6 py-1 text-text-3">
-      <CornerDownRight size={12} className="mt-[3px] flex-shrink-0 text-text-5" aria-hidden />
+    <div className="ui-session-standdown" role="note">
+      <CornerDownRight aria-hidden />
       <ParticipantFace p={agent} size={16} />
-      <div className="min-w-0 text-xs leading-[17px]">
-        <span className="text-text-2">{agentLabel}</span>{" "}
-        <span>is leaving this one to {toLabel}.</span>{" "}
-        <span className="text-text-5">It won't act on this message.</span>
-      </div>
-      {at ? (
-        <time className="ml-auto flex-shrink-0 text-2xs text-text-5 tabular-nums">
-          {hhmm(at)}
-        </time>
-      ) : null}
+      <p>
+        <strong>{agentLabel}</strong> is leaving this one to {toLabel}.{" "}
+        <small>It won't act on this message.</small>
+      </p>
+      {at ? <time>{hhmm(at)}</time> : null}
     </div>
   );
 }

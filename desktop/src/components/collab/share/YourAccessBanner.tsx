@@ -16,6 +16,7 @@ import { Button } from "../../ui/button";
 import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { AccessGlyph } from "./AccessLevelMenu";
 import { ACCESS_META, type AccessLevel } from "./shareTypes";
+import "../../ui/session-room.css";
 
 export type YourAccessBannerProps = {
   level: AccessLevel;
@@ -61,64 +62,55 @@ export function YourAccessBanner({
   }
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex items-start gap-2.5 border-t border-line-soft pt-2.5">
-        <AccessGlyph
-          level={level}
-          size={14}
-          className={`mt-0.5 shrink-0 ${
-            level === "drive" ? "text-accent" : "text-text-3"
-          }`}
-        />
+    <div className="ui-session-access" role="note" data-level={level}>
+      <AccessGlyph level={level} size={14} />
 
-        <div className="min-w-0 flex-1 text-sm leading-snug text-text-3">
-          <span className="font-medium text-text-2">{meta.label}.</span>{" "}
-          {meta.guestBlurb}
-        </div>
+      <div>
+        <p>
+          <strong>{meta.label}.</strong> {meta.guestBlurb}
+        </p>
 
-        {level === "watch" && onRequestDrive && (
-          <Button
-            variant="subtle"
-            size="xs"
-            className="shrink-0"
-            onClick={() => void ask()}
-            disabled={asking || driveRequested}
-          >
-            {asking ? <AsciiSpinner size={11} /> : <Hand size={12} />}
-            {driveRequested ? "Asked" : "Ask to drive"}
-          </Button>
+        {/* Where the words actually go. A guest who can drive is typing into
+            someone else's computer, and that should never be a surprise. */}
+        {level === "drive" && (
+          <small>
+            <MonitorSmartphone aria-hidden />
+            What you send runs on {hostName}&apos;s machine ({hostMachine}), not on yours.
+          </small>
+        )}
+
+        {!hostOnline && (
+          <small data-tone="warning">
+            <CircleAlert aria-hidden />
+            {hostName} has stepped away, so nothing is running right now. Anything you send is
+            kept and handed over the moment they&apos;re back.
+          </small>
+        )}
+
+        {driveRequested && level === "watch" && !askError && (
+          <small>
+            {hostName} has been asked. This line changes on its own if they say yes. Nothing to
+            refresh.
+          </small>
+        )}
+
+        {askError && (
+          <small role="alert" data-tone="error">
+            Couldn&apos;t pass that on: {askError}
+          </small>
         )}
       </div>
 
-      {/* Where the words actually go. A guest who can drive is typing into
-          someone else's computer, and that should never be a surprise. */}
-      {level === "drive" && (
-        <p className="flex items-start gap-1.5 pl-[26px] text-xs leading-snug text-text-4">
-          <MonitorSmartphone size={12} className="mt-0.5 shrink-0" aria-hidden />
-          What you send runs on {hostName}&apos;s machine ({hostMachine}), not
-          on yours.
-        </p>
-      )}
-
-      {!hostOnline && (
-        <p className="flex items-start gap-1.5 pl-[26px] text-xs leading-snug text-amber">
-          <CircleAlert size={12} className="mt-0.5 shrink-0" aria-hidden />
-          {hostName} has stepped away, so nothing is running right now. Anything
-          you send is kept and handed over the moment they&apos;re back.
-        </p>
-      )}
-
-      {driveRequested && level === "watch" && !askError && (
-        <p className="pl-[26px] text-xs leading-snug text-text-4">
-          {hostName} has been asked. This line changes on its own if they say
-          yes. Nothing to refresh.
-        </p>
-      )}
-
-      {askError && (
-        <p role="alert" className="pl-[26px] text-xs leading-snug text-red">
-          Couldn&apos;t pass that on: {askError}
-        </p>
+      {level === "watch" && onRequestDrive && (
+        <Button
+          variant="outline"
+          size="xs"
+          onClick={() => void ask()}
+          disabled={asking || driveRequested}
+        >
+          {asking ? <AsciiSpinner size={11} /> : <Hand />}
+          {driveRequested ? "Asked" : "Ask to drive"}
+        </Button>
       )}
     </div>
   );

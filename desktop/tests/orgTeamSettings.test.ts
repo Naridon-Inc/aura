@@ -30,61 +30,121 @@
 import { describe, expect, test } from "bun:test";
 
 import { readSrc } from "./support/code";
+import {
+  FOLDED_PAGES,
+  PAGE_GROUPS,
+  advancedOpens,
+  foldOfLink,
+  navigationGroups,
+  resolvePageLink,
+  visiblePages,
+} from "../src/components/settings/nav";
 
-const DIALOG = "components/dialogs/SettingsDialog.tsx";
-const TEAM = "components/settings/TeamTab.tsx";
+const NOTE = "components/settings/team/WhoAmINote.tsx";
+const MEMBERS = "components/settings/team/MembersPane.tsx";
 
 describe("settings sidebar — a group label names what is under it", () => {
-  test("Team and the about-Aura panes are no longer one group", async () => {
-    const src = await readSrc(DIALOG);
-    expect(src).not.toContain('label: "Team & advanced"');
-    expect(src).toContain('label: "Team"');
-    expect(src).toContain('label: "About Aura"');
+  const groupOf = (id: string) =>
+    PAGE_GROUPS.find((group) => group.items.some((item) => item.id === id))?.label;
+  const foldedInto = (id: string) => FOLDED_PAGES.find((fold) => fold.id === id)?.into;
+
+  test("one list, in the library's groups, with the repositories after the organization pages", () => {
+    const labels = navigationGroups(["/work/aura"], "").map((group) => group.label);
+    expect(labels).not.toContain("Team & advanced");
+    expect(labels).toEqual(["Personal", "Agents & environment", "Organization", "Services", "Repositories", "More"]);
   });
 
-  test("the Team group holds the one org-scoped pane and nothing else", async () => {
-    const src = await readSrc(DIALOG);
-    const start = src.indexOf('label: "Team",');
-    const group = src.slice(start, src.indexOf('label: "About Aura"'));
-    expect(group).toContain('id: "team"');
-    // The three that used to ride along under a heading that named neither.
-    expect(group).not.toContain('id: "experimental"');
-    expect(group).not.toContain('id: "telemetry"');
-    expect(group).not.toContain('id: "help"');
+  test("Members sits with the organization's pages, and nothing general rides along", () => {
+    expect(groupOf("team")).toBe("Organization");
+    expect(groupOf("organization")).toBe("Organization");
+    expect(groupOf("billing")).toBe("Organization");
+    expect(groupOf("api")).toBe("Services");
+    expect(groupOf("experimental")).not.toBe("Organization");
+    expect(foldedInto("telemetry")).toBe("account");
+    expect(foldedInto("help")).toBe("advanced");
   });
 
-  test("and they land under About Aura instead", async () => {
-    const src = await readSrc(DIALOG);
-    const group = src.slice(src.indexOf('label: "About Aura"'));
-    const body = group.slice(0, 1400);
-    expect(body).toContain('id: "experimental"');
-    expect(body).toContain('id: "telemetry"');
-    expect(body).toContain('id: "help"');
+  test("MCP and the cloud computer sit with the agents", () => {
+    expect(groupOf("mcp")).toBe("Agents & environment");
+    expect(groupOf("computer")).toBe("Agents & environment");
+    expect(foldedInto("cloud")).toBe("computer");
+    expect(foldedInto("mobile")).toBe("account");
   });
 
-  test("a heading that only repeats its single row isn't drawn", async () => {
-    const src = await readSrc(DIALOG);
-    // Decided per render, not per group: scope and search both thin a group
-    // down to one item, and Organization thins this one to "Team" over Team.
-    expect(src).toContain(
-      "!(group.items.length === 1 && group.items[0]!.label === group.label)",
-    );
+  test("and the rest of them land under More", () => {
+    expect(groupOf("experimental")).toBe("More");
+    expect(groupOf("advanced")).toBe("More");
+    expect(groupOf("terminal")).toBe("More");
+  });
+
+  test("a repository opens to Scripts, Actions and Misc", () => {
+    const repos = navigationGroups(["/work/aura"], "").find((group) => group.label === "Repositories");
+    expect(repos?.items[0]?.children?.map((child) => child.label)).toEqual(["Scripts", "Actions", "Misc"]);
+    expect(visiblePages(navigationGroups(["/work/aura"], ""))).toContain("repo-misc:/work/aura");
+  });
+
+  test("no heading only repeats its single row", () => {
+    // Search thins a group down to one item; its heading must still say
+    // something the row doesn't. Repositories sit under their own heading.
+    for (const query of ["", "team", "help", "terminal", "agents"]) {
+      for (const group of navigationGroups(["/work/aura"], query)) {
+        const only = group.items.length === 1 ? group.items[0]!.label : null;
+        expect(only).not.toBe(group.label);
+      }
+    }
+  });
+});
+
+describe("settings links — every old page name still lands", () => {
+  const LINKS: Record<string, string> = {
+    agents: "agents",
+    capture: "repo-misc:/work/aura",
+    policy: "repo-misc:/work/aura",
+    aurawatch: "repo-misc:/work/aura",
+    copies: "repo:/work/aura",
+    identity: "account",
+    profiles: "account",
+    mcp: "mcp",
+    terminal: "terminal",
+    cloud: "computer",
+    computer: "computer",
+    team: "team",
+    mobile: "account",
+    models: "models",
+    "local-models": "models",
+    hud: "general",
+    themes: "appearance",
+    help: "advanced",
+    behavior: "general",
+    vault: "environment",
+  };
+  test("each link resolves to the page that holds it now", () => {
+    for (const [link, page] of Object.entries(LINKS)) {
+      expect(resolvePageLink(link, "/work/aura")).toBe(page);
+    }
+  });
+
+  test("a link to a folded part opens that page's Advanced", () => {
+    for (const link of ["capture", "identity", "mobile", "cloud", "hud", "themes", "local-models", "plugins"]) {
+      const fold = foldOfLink(link);
+      expect(fold).not.toBeNull();
+      expect(advancedOpens(resolvePageLink(link, "/work/aura")!, fold, "")).toBe(true);
+    }
+    expect(advancedOpens("general", null, "")).toBe(false);
+    expect(advancedOpens("general", null, "vim")).toBe(true);
   });
 });
 
 describe("team panes — 'we don't know who you are' is its own sentence", () => {
   test("the note gates on in_team, not on admin", async () => {
-    const src = await readSrc(TEAM);
+    const src = await readSrc(NOTE);
     const note = src.slice(src.indexOf("function WhoAmINote("));
     expect(note.slice(0, 400)).toContain("if (identity?.in_team) return null");
   });
 
   test("it distinguishes no-git-identity from not-on-this-roster", async () => {
-    const src = await readSrc(TEAM);
-    const note = src.slice(
-      src.indexOf("function WhoAmINote("),
-      src.indexOf("// Team roles admin panel"),
-    );
+    const src = await readSrc(NOTE);
+    const note = src.slice(src.indexOf("function WhoAmINote("));
     // Nothing resolved at all.
     expect(note).toContain("Aura couldn’t work out who you are");
     // Resolved to an address nobody on the roster commits under.
@@ -94,17 +154,15 @@ describe("team panes — 'we don't know who you are' is its own sentence", () =>
   });
 
   test("and it hands the reader the pane that fixes it", async () => {
-    const src = await readSrc(TEAM);
-    const note = src.slice(
-      src.indexOf("function WhoAmINote("),
-      src.indexOf("// Team roles admin panel"),
-    );
+    const src = await readSrc(NOTE);
+    const note = src.slice(src.indexOf("function WhoAmINote("));
     expect(note).toContain('new CustomEvent("aura:open-settings"');
     expect(note).toContain('detail: { pane: "identity" }');
   });
 
   test("the roster pane says it", async () => {
-    const src = await readSrc(TEAM);
+    const src = await readSrc(MEMBERS);
+    expect(src).toContain('from "./WhoAmINote"');
     // One mount, on the roster. The second used to sit above the channel
     // member list, which left with the messaging surface.
     expect(src.split("<WhoAmINote identity={identity} />").length - 1).toBe(1);

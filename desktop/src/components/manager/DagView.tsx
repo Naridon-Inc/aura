@@ -20,9 +20,14 @@ import {
   useState,
 } from "react";
 import { api, type ManagerTask, type ManagerTaskStatus } from "../../lib/api";
-import { Button } from "../ui/button";
 import { plainPreview } from "../../lib/plainPreview";
 import { truncate } from "../../lib/truncate";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../ui/dialog";
+import { ErrorNote, LoadingState } from "../ui/state";
+import { TaskDetailNote } from "../ui/tasks-detail";
+import { CodeMessage } from "../ui/transcript-content";
+import "../ui/log-note.css";
+import "../ui/dag-view.css";
 
 type DagViewProps = {
   tasks: ManagerTask[];
@@ -111,17 +116,12 @@ export function DagView({
   }, [recompute, tasks.length]);
 
   if (tasks.length === 0) {
-    return <div className="text-text-3 text-sm">No tasks staged.</div>;
+    return <TaskDetailNote>No tasks staged.</TaskDetailNote>;
   }
 
   return (
-    <div ref={containerRef} className="relative">
-      <svg
-        className="absolute inset-0 pointer-events-none"
-        width="100%"
-        height="100%"
-        style={{ overflow: "visible" }}
-      >
+    <div ref={containerRef} className="ui-dag">
+      <svg className="ui-dag-edges" width="100%" height="100%">
         {edges.map((e) => (
           <Edge
             key={`${e.parentId}-${e.childId}`}
@@ -133,16 +133,17 @@ export function DagView({
           />
         ))}
       </svg>
-      <div className="flex flex-col gap-3 relative">
+      <div className="ui-dag-waves">
         {waves.map((wave, idx) => (
-          <div key={idx}>
-            <div className="section-label mb-1">
-              Wave {idx + 1}
+          <section key={idx} className="ui-dag-wave" aria-label={`Wave ${idx + 1}`}>
+            <div className="ui-log-note-files-head">
+              <span>Wave {idx + 1}</span>
+              <span className="ui-log-note-count">{wave.length}</span>
             </div>
-            <div className="flex flex-wrap gap-x-12 gap-y-2">
+            <div className="ui-dag-wave-cards">
               {wave.map((t) => renderCard(t, setCardRef(t.id)))}
             </div>
-          </div>
+          </section>
         ))}
       </div>
       {hoverEdge && !expandedEdge && (
@@ -183,9 +184,9 @@ function Edge({
   const cx = edge.x1 + dx / 2;
   const cy = edge.y1 + dy / 2 + Math.min(40, Math.abs(dx) * 0.18);
   const path = `M ${edge.x1} ${edge.y1} Q ${cx} ${cy} ${edge.x2} ${edge.y2}`;
-  const stroke = STATUS_STROKE[edge.parentStatus] ?? "var(--color-line)";
+  const stroke = STATUS_STROKE[edge.parentStatus] ?? "var(--ui-border)";
   return (
-    <g style={{ pointerEvents: "auto", cursor: "pointer" }}>
+    <g className="ui-dag-edge">
       {/* Wide invisible hit-target so hover is forgiving. */}
       <path
         d={path}
@@ -236,24 +237,23 @@ function EdgeTooltip({ edge, tasks }: { edge: EdgeGeom; tasks: ManagerTask[] }) 
   const y = (edge.y1 + edge.y2) / 2 + 14;
   return (
     <div
-      className="absolute z-20 pointer-events-none bg-bg-1 border border-line rounded shadow-lg px-2 py-1.5 text-xs max-w-xs"
-      style={{ left: x, top: y, transform: "translateX(-50%)" }}
+      className="ui-tooltip ui-dag-tooltip"
+      role="tooltip"
+      style={{ left: x, top: y }}
     >
-      <div className="section-label mb-0.5">
+      <strong>
         #{edge.parentId} → #{edge.childId} handover
-      </div>
+      </strong>
       {summary ? (
-        <div className="text-text-1 whitespace-pre-wrap line-clamp-4">
-          {truncate(plainSummary, 240)}
-        </div>
+        <p>{truncate(plainSummary, 240)}</p>
       ) : (
-        <div className="text-text-3 italic">
+        <p className="ui-dag-tooltip-quiet">
           {parent.status === "done"
             ? "(no summary captured)"
             : "Waiting on the task this one depends on."}
-        </div>
+        </p>
       )}
-      <div className="text-text-3 text-2xs mt-1">click for full prompt →</div>
+      <small>click for full prompt →</small>
     </div>
   );
 }
@@ -287,50 +287,33 @@ function PromptPreviewModal({
   }, [sessionId, childId]);
 
   return (
-    <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40"
-      onClick={onClose}
-    >
-      <div
-        className="bg-bg-1 border border-line rounded-lg shadow-xl w-[640px] max-h-[80vh] flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-3 py-2 border-b border-line-soft">
-          <div className="section-label">
+    <Dialog open onOpenChange={(next) => !next && onClose()}>
+      <DialogContent className="ui-dag-prompt">
+        <DialogHeader>
+          <DialogTitle>
             Handover #{parentId} → #{childId}
-          </div>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="text-text-3 hover:text-text-1 text-xs"
-            onClick={onClose}
-          >
-            ✕
-          </Button>
+          </DialogTitle>
+          <DialogDescription>
+            The prompt task #{childId} receives, with what #{parentId} handed over inlined.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="ui-dag-prompt-body">
+          {text === null && !error && <LoadingState label="Building prompt…" />}
+          {error && <ErrorNote>{error}</ErrorNote>}
+          {text && <CodeMessage language="Prompt">{text}</CodeMessage>}
         </div>
-        <div className="flex-1 min-h-0 overflow-auto p-3">
-          {text === null && !error && (
-            <div className="text-text-3 text-xs">Building prompt…</div>
-          )}
-          {error && <div className="text-red text-xs">{error}</div>}
-          {text && (
-            <pre className="text-sm text-text-1 whitespace-pre-wrap font-mono">
-              {text}
-            </pre>
-          )}
-        </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 const STATUS_STROKE: Record<ManagerTaskStatus, string> = {
-  pending: "var(--color-line)",
-  running: "var(--color-blue)",
-  done: "var(--color-green)",
-  failed: "var(--color-red)",
-  manual_pending: "var(--color-amber)",
-  skipped: "var(--color-line)",
+  pending: "var(--ui-border)",
+  running: "var(--ui-blue)",
+  done: "var(--ui-green)",
+  failed: "var(--ui-red)",
+  manual_pending: "var(--ui-yellow)",
+  skipped: "var(--ui-border)",
 };
 
 function groupByDepth(tasks: ManagerTask[]): ManagerTask[][] {

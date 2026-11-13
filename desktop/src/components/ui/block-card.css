@@ -1,0 +1,79 @@
+/* A terminal session's block in the Blocks side panel, on the chat's step
+   row: the row's trigger, then the state chip, the block id, the time and
+   the hover actions on one line, and the prompt, output listing or exit
+   under the row's ruled content. */
+
+.ui-block {
+  margin: 0;
+}
+.ui-block-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  min-width: 0;
+}
+.ui-block-head > .ui-tool-trigger {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 72px;
+}
+.ui-block-head > .ui-tool-trigger > svg {
+  flex-shrink: 0;
+}
+.ui-block[data-focused] .ui-block-head > .ui-tool-trigger {
+  color: var(--ui-fg);
+}
+.ui-block[data-status="running"] .ui-block-head > .ui-tool-trigger > svg:not(.lucide-chevron-right) {
+  color: var(--ui-yellow);
+}
+.ui-block[data-status="done"] .ui-block-head > .ui-tool-trigger > .lucide-check {
+  color: var(--ui-green);
+}
+.ui-block[data-status="error"] .ui-block-head > .ui-tool-trigger > .lucide-circle-alert {
+  color: var(--ui-red);
+}
+.ui-block-meta {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+}
+.ui-block-time {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.ui-block-id {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+}
+.ui-block-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.ui-block:hover .ui-block-actions,
+.ui-block-actions:focus-within {
+  opacity: 1;
+}
+.ui-block-prompt {
+  margin: 0;
+  color: var(--ui-fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ui-block-exit {
+  margin: 0;
+  color: var(--ui-red);
+}
+.ui-block-exit[data-ok] {
+  color: var(--ui-muted-fg);
+}
+.ui-block .ui-tool-quiet {
+  margin: 0;
+}
+.ui-block .ui-code-message pre {
+  max-height: 420px;
+}

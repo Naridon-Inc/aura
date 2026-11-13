@@ -60,7 +60,7 @@ pub const PLACE_ID_ENV: &str = "AURA_PLACE_ID";
 const RUNNER_TOKEN_ENV: &str = "AURA_RUNNER_TOKEN";
 
 /// The header the cloud reads to learn who the box is acting for.
-const ACTING_MEMBER_HEADER: &str = "X-Aura-Acting-Member";
+pub(crate) const ACTING_MEMBER_HEADER: &str = "X-Aura-Acting-Member";
 
 /// A credential for one remote, good until [`Self::refresh_after`].
 #[derive(Debug, Clone)]
@@ -101,7 +101,7 @@ pub fn acting_member() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn runner_token() -> Option<String> {
+pub(crate) fn runner_token() -> Option<String> {
     std::env::var(RUNNER_TOKEN_ENV)
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -115,7 +115,7 @@ fn runner_token() -> Option<String> {
 /// it lets the box act for somebody without holding anything of theirs. A
 /// human cloud login is the fallback, for a member running this from their own
 /// laptop against a place.
-fn cloud_credentials() -> Result<(String, String), String> {
+pub(crate) fn cloud_credentials() -> Result<(String, String), String> {
     if let Some(token) = runner_token() {
         // A runner has its own token, so `recall_cloud_creds` failing for want
         // of a human one must not send it to production by default.
@@ -131,7 +131,7 @@ fn cloud_credentials() -> Result<(String, String), String> {
 
 /// The place this box is. `AURA_PLACE_ID` when it has been told, otherwise the
 /// registry's own answer for the token we hold.
-fn place_id(client: &reqwest::blocking::Client, base: &str, token: &str) -> Result<String, String> {
+pub(crate) fn place_id(client: &reqwest::blocking::Client, base: &str, token: &str) -> Result<String, String> {
     if let Ok(id) = std::env::var(PLACE_ID_ENV) {
         let id = id.trim();
         if !id.is_empty() {

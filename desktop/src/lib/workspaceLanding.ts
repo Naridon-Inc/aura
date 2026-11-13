@@ -39,6 +39,7 @@ import { letterMark } from "./monogram";
 import type { SelectedModel } from "./modelCatalog";
 import { getSettings } from "./settingsStore";
 import { openWorktreeAuraChat } from "./workspaceChatLaunch";
+import { installedAgentIds } from "./agentsListCache";
 
 /** Land in the copy and open nothing. */
 export const LANDING_CODE = "code";
@@ -54,7 +55,7 @@ export type WorkspaceLanding =
  * Read the stored `open_in` string as a landing.
  *
  * Pure, and the only place the string is interpreted. `installedAgentIds` is
- * what `api.agentsList()` reports as *available* — an id outside that set
+ * what the shared agent list (lib/agentsListCache) reports as *available* — an id outside that set
  * resolves to `"code"` rather than spawning a CLI that isn't there, because
  * "the setting names an agent you uninstalled" and "the setting is from a
  * newer build" are the same failure from here, and both want the same
@@ -83,9 +84,7 @@ export async function currentWorkspaceLanding(): Promise<WorkspaceLanding> {
   }
   let installed: string[] = [];
   try {
-    installed = (await api.agentsList())
-      .filter((a) => a.available)
-      .map((a) => a.id);
+    installed = await installedAgentIds();
   } catch (e) {
     console.warn("[workspace] could not list agents for the landing:", e);
   }

@@ -6,14 +6,21 @@
 // user claim new ones, flip warn ⇄ block, and release stale ones — all
 // advisory-plane metadata, never code bytes.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
+import { X } from "lucide-react";
 import { api, type ZoneRule } from "../../../lib/api";
 import { useDocumentVisibility } from "../../../lib/useDocumentVisibility";
 import { peekCache, writeCache } from "../../../lib/resourceCache";
+import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
+import { ErrorNote } from "../../ui/state";
+import { StatusChip } from "../../ui/statusChip";
+import { ToggleGroup, ToggleGroupItem } from "../../ui/toggle-group";
 import { CategorySection } from "../CategorySection";
 import { agoFromTs, nameLooksLikeAgent } from "./radarFormat";
 import { ActorMark } from "./ActorMark";
+import "../../ui/details-pulls.css";
+import "../../ui/zones.css";
 
 const POLL_MS = 10000;
 
@@ -27,10 +34,6 @@ function zonesCacheKey(repoRoot: string): string {
  *  same constant Tabs.tsx uses to decide a zone is self-owned. */
 const SELF_SESSION = "aura-shell";
 
-// Status hues only — warn shares the "likely" amber, block the "direct"
-// red, so severity reads identically across collisions and zones.
-const WARN_COLOR = "var(--color-amber)";
-const BLOCK_COLOR = "var(--color-red)";
 
 /** Shared zone poll for the radar band. Lives here (not useTeamRadar) so
  *  the zone list refreshes immediately after claim/release mutations
@@ -153,11 +156,7 @@ export function ZonesSection({
           onCancel={onCloseClaim}
         />
       )}
-      {error && (
-        <div className="px-3 py-1 text-xs bg-red/10 text-red border-b border-line-soft">
-          {error}
-        </div>
-      )}
+      {error && <ErrorNote className="ui-zones-error">{error}</ErrorNote>}
       <CategorySection
         title="Zones"
         count={zones.length}
@@ -168,47 +167,43 @@ export function ZonesSection({
           const block = isBlock(z);
           const mine = z.session_id === SELF_SESSION;
           return (
+            // The details panel's two-line row: what is claimed and how hard
+            // on the first line, who and why under it. Warn reads in the
+            // "likely" amber and block in the "direct" red, so severity
+            // reads the same across collisions and zones.
             <div
               key={z.zone_id}
-              className="group/zone w-full flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-state-hover transition-colors min-w-0"
+              className="ui-details-pull ui-zone-row"
               title={`${z.zone_id} · claimed by ${
                 mine ? "this desktop" : z.session_id
               }\n${z.patterns.join("\n")}`}
             >
-              <ActorMark
-                actor={z.session_id}
-                isAgent={nameLooksLikeAgent(z.session_id)}
-                size={18}
-              />
-              <span className="flex-1 min-w-0">
-                <span className="flex items-center gap-1.5 min-w-0">
-                  <span className="text-xs text-text-1 font-mono truncate">
-                    {z.patterns.join(", ")}
-                  </span>
-                  <span
-                    className="shrink-0 text-2xs font-medium px-1 rounded"
-                    style={{
-                      color: block ? BLOCK_COLOR : WARN_COLOR,
-                      background: `color-mix(in oklab, ${
-                        block ? BLOCK_COLOR : WARN_COLOR
-                      } 14%, transparent)`,
-                    }}
-                  >
-                    {block ? "locked" : "announced"}
-                  </span>
+              <div>
+                <ActorMark
+                  actor={z.session_id}
+                  isAgent={nameLooksLikeAgent(z.session_id)}
+                  size={16}
+                />
+                <span className="ui-details-pull-title ui-zone-patterns">
+                  {z.patterns.join(", ")}
                 </span>
-                <span className="block text-2xs text-text-4 truncate">
+                <StatusChip tone={block ? "red" : "amber"} dense>
+                  {block ? "locked" : "announced"}
+                </StatusChip>
+              </div>
+              <div className="ui-details-pull-meta ui-zone-meta">
+                <span>
                   {ownerLabel(z)}
                   {z.label ? ` · ${z.label}` : ""}
                   {z.mtime > 0 ? ` · ${agoFromTs(z.mtime * 1000)}` : ""}
                 </span>
-              </span>
-              <span className="shrink-0 flex items-center gap-0.5 opacity-0 group-hover/zone:opacity-100 transition-opacity">
-                <button
-                  type="button"
+              </div>
+              <span className="ui-zone-actions">
+                <Button
+                  variant="ghost"
+                  size="xs"
                   disabled={busy}
                   onClick={() => changeMode(z, block ? "warn" : "block")}
-                  className="h-5 px-1.5 rounded text-2xs text-text-3 hover:text-text-1 hover:bg-state-hover disabled:opacity-50 transition-colors"
                   title={
                     block
                       ? "Unlock. Back to announced; colliding edits get flagged, not rejected"
@@ -216,16 +211,17 @@ export function ZonesSection({
                   }
                 >
                   {block ? "unlock" : "lock"}
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="iconXs"
                   disabled={busy}
                   onClick={() => release(z)}
-                  className="w-5 h-5 flex items-center justify-center rounded text-text-4 hover:text-text-1 hover:bg-state-hover disabled:opacity-50"
+                  aria-label="Release zone"
                   title={`Release zone${mine ? "" : ` (claimed by ${z.session_id})`}`}
                 >
-                  ×
-                </button>
+                  <X />
+                </Button>
               </span>
             </div>
           );
@@ -262,72 +258,67 @@ function ZoneClaimComposer({
     onClaim(parsed, mode, label.trim() || undefined);
   };
 
+  const keys = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") submit();
+    if (e.key === "Escape") onCancel();
+  };
+
   return (
-    <div className="px-3 py-2 border-b border-line-soft flex flex-col gap-1.5 bg-bg-1/30">
+    <div className="ui-zones-claim">
       <Input
+        size="small"
         value={patterns}
         onChange={(e) => setPatterns(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") submit();
-          if (e.key === "Escape") onCancel();
-        }}
+        onKeyDown={keys}
         placeholder="src/auth/, src/middleware/auth.ts"
+        aria-label="Files or folders to claim, comma-separated"
         autoFocus
-        className="h-6 text-xs font-mono"
+        className="ui-zones-claim-patterns"
       />
       <Input
+        size="small"
         value={label}
         onChange={(e) => setLabel(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") submit();
-          if (e.key === "Escape") onCancel();
-        }}
+        onKeyDown={keys}
         placeholder="why (optional). Auth refactor"
-        className="h-6 text-xs"
+        aria-label="Why you're claiming them"
       />
-      <div className="flex items-center gap-1.5">
-        <div className="flex items-center rounded border border-line-soft overflow-hidden">
-          <button
-            type="button"
-            onClick={() => setMode("warn")}
-            className={`h-5 px-2 text-2xs transition-colors ${
-              mode === "warn"
-                ? "bg-bg-2 text-text-1 font-medium"
-                : "text-text-4 hover:text-text-2"
-            }`}
+      <div className="ui-zones-claim-bar">
+        <ToggleGroup
+          type="single"
+          size="sm"
+          variant="outline"
+          aria-label="How hard the claim is"
+          value={mode}
+          onValueChange={(v) => {
+            if (v === "warn" || v === "block") setMode(v);
+          }}
+        >
+          <ToggleGroupItem
+            value="warn"
             title="Announce. A heads-up; colliding edits get flagged"
           >
             announced
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode("block")}
-            className={`h-5 px-2 text-2xs transition-colors ${
-              mode === "block"
-                ? "bg-bg-2 font-medium"
-                : "text-text-4 hover:text-text-2"
-            }`}
-            style={mode === "block" ? { color: BLOCK_COLOR } : undefined}
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="block"
+            data-tone="block"
             title="Lock. Colliding edits are rejected"
           >
             locked
-          </button>
-        </div>
-        <button
-          type="button"
+          </ToggleGroupItem>
+        </ToggleGroup>
+        <Button
+          size="xs"
           onClick={submit}
           disabled={parsed.length === 0 || busy}
-          className="ml-auto h-5 px-2 rounded bg-bg-2 hover:bg-bg-3 text-text-1 text-2xs font-medium border border-line-soft disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="ui-zones-claim-submit"
         >
           Claim
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="h-5 px-2 rounded text-text-3 hover:text-text-1 text-2xs transition-colors"
-        >
+        </Button>
+        <Button size="xs" variant="ghost" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </div>
   );

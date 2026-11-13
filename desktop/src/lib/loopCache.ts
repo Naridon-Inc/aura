@@ -2,11 +2,10 @@
 //
 // `loop_ready_view` opens the loop graph and, before answering, re-arms any
 // node left `working` by an app that died mid-run — a write, on every read.
-// Five surfaces ask for it: BuildNav in the chrome (every 10s), the work rail's
-// groups (every 30s), the crew board (every 4s while an agent is running, 12s
+// Four surfaces ask for it: the work rail's groups (every 30s), the crew board (every 4s while an agent is running, 12s
 // when idle), the task detail pane's crew activity, and the manager's loop
 // panel. Those cadences are not aligned with each other, so the overlaps are
-// not occasional — three of those surfaces are on screen together whenever
+// not occasional — several of those surfaces are on screen together whenever
 // somebody is watching their crew work, which is exactly when the graph is
 // being written to.
 //

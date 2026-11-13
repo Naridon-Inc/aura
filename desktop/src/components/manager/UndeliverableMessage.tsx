@@ -3,13 +3,13 @@
 // When the agent process behind a chat has died, sending fails with an error
 // line and the message is simply gone — the only recovery was to notice,
 // find the text, and paste it again. This keeps the words, says what
-// happened in plain language, and offers "Restart and resend": bring the
-// session back, then send the same message with the same settings.
+// happened in plain language, and offers Retry: bring the session back, then
+// send the same message with the same settings.
 
 import { useState } from "react";
 
-import { AsciiSpinner } from "../ui/ascii-spinner";
-import { Button } from "../ui/button";
+import { ChatRecovery } from "../ui/chat-recovery";
+import "../ui/chat-surface.css";
 
 export type UndeliverableMessageProps = {
   /** What the user tried to send. */
@@ -45,32 +45,30 @@ export function UndeliverableMessage({
 
   const preview = text.length > 160 ? `${text.slice(0, 157)}…` : text;
 
+  // While the restart runs the notice is the reconnecting state: a spinner
+  // and no buttons, so the message cannot be sent twice.
+  if (working) {
+    return (
+      <ChatRecovery
+        kind="reconnecting"
+        detail="Restarting the agent and sending your message again."
+      />
+    );
+  }
   return (
-    <div
-      role="alert"
-      className="mt-2 rounded border border-line-soft bg-bg-1 px-2 py-1.5 text-xs"
-    >
-      <div className="text-text-1">This message didn't get through — the agent had stopped.</div>
-      {preview && (
-        <div className="mt-1 whitespace-pre-wrap text-text-4">{preview}</div>
-      )}
-      {(failed ?? reason) && (
-        <div className="mt-1 font-mono text-[11px] text-text-4">{failed ?? reason}</div>
-      )}
-      <div className="mt-1.5 flex items-center gap-2">
-        <Button size="sm" onClick={() => void restart()} disabled={working}>
-          {working ? (
-            <>
-              <AsciiSpinner className="text-2xs" /> Restarting…
-            </>
-          ) : (
-            "Restart and resend"
+    <ChatRecovery
+      kind="generic"
+      detail={
+        <>
+          This message didn't get through — the agent had stopped.
+          {preview && <span className="ui-chat-undelivered-text">{preview}</span>}
+          {(failed ?? reason) && (
+            <span className="ui-chat-undelivered-reason">{failed ?? reason}</span>
           )}
-        </Button>
-        <Button size="sm" variant="ghost" onClick={onDismiss} disabled={working}>
-          Dismiss
-        </Button>
-      </div>
-    </div>
+        </>
+      }
+      onRetry={() => void restart()}
+      action={{ label: "Dismiss", onClick: onDismiss }}
+    />
   );
 }

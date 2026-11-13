@@ -19,7 +19,7 @@
 
 import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test";
 
-import { readSrc, stripComments } from "./support/code";
+import { readSrc, stripComments, strippedSrcTree } from "./support/code";
 
 let calls = 0;
 let fail: string | null = null;
@@ -219,14 +219,9 @@ describe("wiring", () => {
   });
 
   it("nothing reads the manifest straight from the api", async () => {
-    const glob = new Bun.Glob("**/*.{ts,tsx}");
-    // `import.meta.dir`, not a URL pathname — this repo lives under a path
-    // with a space in it, which a URL would percent-encode into nothing.
-    const root = `${import.meta.dir}/../src/`;
     const offenders: string[] = [];
-    for await (const rel of glob.scan(root)) {
+    for (const [rel, body] of await strippedSrcTree()) {
       if (rel === "lib/api.ts" || rel === "lib/teamCache.ts") continue;
-      const body = stripComments(await Bun.file(root + rel).text());
       if (body.includes("api.teamLoad(")) offenders.push(rel);
     }
     expect(offenders).toEqual([]);
@@ -235,12 +230,9 @@ describe("wiring", () => {
   it("nothing asks the backend who you are, either", async () => {
     // One straggler re-opens the git sync for everyone, and it looks entirely
     // correct on screen — which is why this is scanned rather than listed.
-    const glob = new Bun.Glob("**/*.{ts,tsx}");
-    const root = `${import.meta.dir}/../src/`;
     const offenders: string[] = [];
-    for await (const rel of glob.scan(root)) {
+    for (const [rel, body] of await strippedSrcTree()) {
       if (rel === "lib/api.ts" || rel === "lib/teamCache.ts") continue;
-      const body = stripComments(await Bun.file(root + rel).text());
       if (body.includes("api.teamIdentity(")) offenders.push(rel);
     }
     expect(offenders).toEqual([]);
@@ -260,7 +252,7 @@ describe("wiring", () => {
     // member you were not a moment ago. Re-reading through the window shows
     // the permissions you had before your own action.
     const regaters = [
-      "components/settings/TeamTab.tsx",
+      "components/settings/team/useTeamRoster.ts",
     ];
     for (const rel of regaters) {
       const body = stripComments(await readSrc(rel));
@@ -284,12 +276,9 @@ describe("wiring", () => {
       "api.teamVoiceSet",
       "api.teamSyncCollaborators",
     ];
-    const glob = new Bun.Glob("**/*.{ts,tsx}");
-    const root = `${import.meta.dir}/../src/`;
     const offenders: string[] = [];
-    for await (const rel of glob.scan(root)) {
+    for (const [rel, body] of await strippedSrcTree()) {
       if (rel === "lib/api.ts" || rel === "lib/teamCache.ts") continue;
-      const body = stripComments(await Bun.file(root + rel).text());
       if (!mutators.some((m) => body.includes(m))) continue;
       if (body.includes("fetchTeam(")) offenders.push(rel);
     }

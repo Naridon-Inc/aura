@@ -20,10 +20,12 @@
 //!
 //! A dialect answers three questions: *where does your history live*, *what
 //! sessions are in it*, and *what did the person type*. That is the whole
-//! [`History`] trait. Adding a seventh agent is one file implementing it plus
-//! one line in [`dialects`] — not a patch spread through the CLI. This is the
-//! read half of the agent-plugin contract; the write half (hooks, stamping)
-//! lives in the `aura-hooks` crate. See `docs/AGENT_PLUGINS.md`.
+//! [`History`] trait, and there are three ways to wear it: compiled into this
+//! tree (the four modules beside this one), described by a manifest in
+//! `~/.aura/dialects/` ([`manifest`]), or answered by a program named there
+//! ([`external`]). Only the first needs a release. This is the read half of the
+//! agent-plugin contract; the write half (hooks, stamping) lives in the
+//! `aura-hooks` crate. See `docs/AGENT_PLUGINS.md`.
 //!
 //! # Privacy
 //!
@@ -31,12 +33,16 @@
 //! output, tool results and file contents. Everything here reads locally and
 //! returns owned strings to a caller that decides what to show. Nothing in
 //! this module sends anything anywhere, and `aura import` keeps bodies on
-//! disk unless the operator asks otherwise.
+//! disk unless the operator asks otherwise. The one dialect that runs code we
+//! did not write runs only a program named in a file the user wrote, and says
+//! so where it is defined — see [`external`].
 
 use std::path::{Path, PathBuf};
 
 pub mod claude;
 pub mod codex;
+pub mod discovery;
+pub mod external;
 pub mod kimi;
 pub mod manifest;
 pub mod opencode;
@@ -179,6 +185,41 @@ pub trait History {
     fn display(&self) -> &'static str;
     /// Where this dialect keeps history, or `None` when it is not installed.
     fn root(&self) -> Option<PathBuf>;
+
+    /// Ask this dialect the cheapest real question, and say why it could not
+    /// answer.
+    ///
+    /// Every other method returns a list, which means a dialect that is wired
+    /// up wrong and a dialect that has nothing to report are the same answer.
+    /// For a compiled dialect reading a directory that is fine — [`root`] is
+    /// the whole of "is this usable here". For one that shells out to someone
+    /// else's program it is not: the program can be missing, refuse to run,
+    /// print prose, or hang, and the first person to hit any of that is the
+    /// person who has just written it. This is what `aura dialects` calls so
+    /// they get the reason instead of a silently short list.
+    ///
+    /// Reading a local directory cannot fail in a way worth reporting, so the
+    /// default is `Ok`.
+    ///
+    /// [`root`]: History::root
+    fn probe(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Why the work this dialect was just asked to do came back short, if it
+    /// did.
+    ///
+    /// [`probe`] asks a fresh question; this reports on the calls already
+    /// made. The difference matters to a command that has just finished: an
+    /// import that read nothing because the program fell over must not print
+    /// "no agent history for this repo yet", which is a claim about the repo
+    /// and not about what happened. Cleared by a call that succeeds, so it is
+    /// never a stale complaint.
+    ///
+    /// [`probe`]: History::probe
+    fn last_error(&self) -> Option<String> {
+        None
+    }
     /// Locate sessions matching `scope` without reading their bodies.
     ///
     /// This is the method that has to be cheap. Where a session ran and when it
@@ -253,17 +294,18 @@ pub fn builtin() -> Vec<Box<dyn History>> {
 }
 
 /// Every dialect Aura can read history from: the compiled ones, then whatever
-/// `~/.aura/dialects/` describes.
+/// `~/.aura/dialects/` describes — a manifest Aura reads itself, or a program
+/// Aura asks.
 ///
-/// Built-ins come first and cannot be shadowed — see `manifest::discover`.
-/// A manifest that fails to load is skipped here rather than reported; `aura
+/// Built-ins come first and cannot be shadowed — see [`discovery::discover`].
+/// A file that fails to load is skipped here rather than reported; `aura
 /// dialects` is where the reasons are shown, because a command answering a
 /// different question should not print someone's config errors into its output.
 pub fn dialects() -> Vec<Box<dyn History>> {
     let mut all = builtin();
-    let (extra, _bad) = manifest::discover();
+    let (extra, _bad) = discovery::discover();
     for d in extra {
-        all.push(Box::new(d));
+        all.push(d.dialect);
     }
     all
 }

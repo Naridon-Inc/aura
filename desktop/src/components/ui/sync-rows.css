@@ -1,0 +1,46 @@
+/* A live session's Incoming and Conflicts groups: the details panel's
+   two-line row, the one the radar's clashes and zones use. Added here: the
+   meaning line with the file pushed to its end, and a conflict's "keep mine
+   / keep theirs" showing over the row's end on hover, as a zone's lock and
+   release do. */
+
+.ui-sync-meta {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-sync-meta > .ui-details-pull-branch {
+  flex: none;
+  margin-left: auto;
+}
+
+.ui-sync-row {
+  position: relative;
+  min-width: 0;
+}
+.ui-rail-group-body > .ui-sync-row:last-child > .ui-details-pull {
+  border-bottom: 0;
+}
+/* The row's full height at its end, so both lines' ends (the age, the file)
+   sit under the buttons rather than peeking out round them. */
+.ui-sync-actions {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 1px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 8px 0 8px;
+  /* The hovered row's own colour, made solid so what it sits over doesn't
+     read through the buttons. */
+  background: linear-gradient(var(--ui-hover), var(--ui-hover)), var(--ui-bg);
+  opacity: 0;
+}
+.ui-sync-row:hover .ui-sync-actions,
+.ui-sync-actions:focus-within {
+  opacity: 1;
+}
+.ui-sync-row:hover > .ui-details-pull {
+  background: var(--ui-hover);
+}

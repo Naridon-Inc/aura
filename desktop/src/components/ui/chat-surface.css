@@ -1,0 +1,287 @@
+/* The conversation surface: the scrolling column, its reading measure, the
+   band the composer sits in, the empty state and the line that reports what
+   just happened. Every value is the interface's own — the 896px measure is
+   the composer's width, so prose and input end on the same edge. */
+.ui-chat-transcript {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+.ui-chat-transcript-inner {
+  max-width: 896px;
+  padding: 12px 28px 24px;
+  margin: 0 auto;
+}
+.ui-chat-composer-area {
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.ui-chat-composer-area > * {
+  width: 100%;
+  max-width: 896px;
+}
+.ui-chat-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  margin: 8px auto 0;
+  max-width: 896px;
+}
+.ui-chat-notice button {
+  font-size: 16px;
+}
+.ui-chat-empty {
+  padding: 100px 12px;
+  text-align: center;
+}
+.ui-chat-empty h1 {
+  font-size: 20px;
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+.ui-chat-empty p {
+  color: var(--ui-muted-fg);
+}
+.ui-chat-inline-artifact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(100%, 360px);
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  margin-top: 16px;
+  text-align: left;
+  font-size: 14px;
+  background: var(--ui-muted);
+}
+.ui-chat-inline-artifact > span {
+  flex: 1;
+}
+@media (max-width: 700px) {
+  .ui-chat-transcript-inner {
+    padding-inline: 16px;
+  }
+}
+/* What an empty conversation offers: a row of starters, then the one line
+   saying where the work will happen. */
+.ui-chat-empty-starters {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 20px;
+}
+.ui-chat-empty-place {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 16px;
+  font-size: 12px;
+}
+/* A message you sent: the bubble, any images under it and its actions, kept
+   together on the right at the bubble's own measure. */
+.ui-chat-user-stack {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  min-width: 0;
+  max-width: min(768px, 90%);
+}
+.ui-chat-user-stack > .ui-message-body {
+  max-width: 100%;
+  white-space: pre-wrap;
+}
+/* The actions appear on hover in the space between this message and the
+   next, so a sent message takes only its bubble's height and the reply sits
+   one message gap under it. The 4px top padding keeps the hover area
+   continuous from the bubble down to the buttons. */
+.ui-chat-user-stack > .ui-message-actions {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 1;
+  margin-top: 0;
+  padding-top: 4px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.ui-message:hover .ui-chat-user-stack > .ui-message-actions,
+.ui-chat-user-stack > .ui-message-actions:focus-within {
+  opacity: 1;
+}
+.ui-chat-answered-question {
+  margin-bottom: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  white-space: normal;
+}
+.ui-chat-goal-badge {
+  display: flex;
+  width: fit-content;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+/* Editing a sent message in place: the bubble becomes the field, with the
+   resend choice under it. */
+.ui-chat-user-edit {
+  width: min(768px, 90%);
+}
+.ui-chat-user-edit > .ui-message-body {
+  width: 100%;
+}
+.ui-chat-edit-input {
+  display: block;
+  width: 100%;
+  min-height: 3em;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+.ui-chat-edit-hint {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-chat-edit-choice {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.ui-chat-edit-choice p {
+  margin-bottom: 8px;
+  color: var(--ui-muted-fg);
+}
+.ui-chat-edit-choice .ui-pattern-actions {
+  justify-content: flex-end;
+}
+/* An answer fills the measure so code blocks and tables get its full width. */
+.ui-chat-answer {
+  flex: 1;
+  min-width: 0;
+}
+/* As a flex item the answer is its own formatting context, so a first or last
+   row's margin (a tool call's 8px) would stack on the message's 20px instead
+   of folding into it, opening a wider gap above the agent's reply than above
+   anyone else's. */
+.ui-chat-answer > :first-child {
+  margin-top: 0;
+}
+.ui-chat-answer > :last-child {
+  margin-bottom: 0;
+}
+/* One reply split across several messages names its agent once, above them. */
+.ui-chat-agent-group {
+  margin: 20px 0;
+}
+.ui-chat-agent-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-chat-agent-group .ui-message {
+  margin: 12px 0;
+}
+
+.ui-chat-history-menu {
+  width: 320px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.ui-chat-history-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-chat-history-project {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--ui-muted-fg);
+}
+.ui-chat-history-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+
+.ui-chat-status-elapsed {
+  margin-left: 8px;
+  color: var(--ui-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-chat-turn-changes-files {
+  margin-top: 8px;
+}
+.ui-chat-turn-change {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 13px;
+  color: var(--ui-muted-fg);
+}
+.ui-chat-turn-change > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.ui-chat-undelivered-text,
+.ui-chat-undelivered-reason {
+  display: block;
+  margin-top: 4px;
+  color: var(--ui-faint);
+  white-space: pre-wrap;
+}
+.ui-chat-undelivered-reason {
+  font: 11px var(--font-mono);
+}
+
+.ui-chat-queue .ui-queue-hint {
+  margin-left: 6px;
+  color: var(--ui-faint);
+}
+.ui-chat-queue .ui-queue-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+.ui-chat-queue .ui-queue-badges:empty {
+  display: none;
+}
+.ui-chat-queue-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

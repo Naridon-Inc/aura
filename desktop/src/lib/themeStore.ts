@@ -231,6 +231,9 @@ function applyContrast(root: HTMLElement, low: boolean): void {
   root.classList.toggle("contrast-low", low);
   if (!low) return;
   const live = getComputedStyle(root);
+  // The shared interface defines its low-contrast palette in CSS.
+  // Keep those role aliases intact instead of softening them a second time.
+  if (live.getPropertyValue("--ui-bg").trim()) return;
   const tokens: Record<string, string> = {};
   for (const name of SOFTENED_TOKENS) tokens[name] = live.getPropertyValue(name);
   const soft = softenDarkPalette(tokens);
@@ -296,10 +299,6 @@ function readVariant(): ThemeVariant {
     // An explicit variant pick (from the theme picker) always wins — that's
     // how a user opts into modal/emerald over the amber default.
     const raw = localStorage.getItem(VARIANT_KEY);
-    // `conductor` was this pack's name before it became `amber`. Anyone who
-    // picked it back then still has that string on disk, so read it forward
-    // rather than silently dropping them onto the default.
-    if (raw === "conductor") return "amber";
     if (
       raw === "modal" ||
       raw === "ember" ||
@@ -307,7 +306,8 @@ function readVariant(): ThemeVariant {
       raw === "emerald"
     )
       return raw;
-    // No explicit choice: `amber` is the app's ground. It used to fall back
+    // No recognized choice — absent, or a pack name that has since been
+    // retired: `amber` is the app's ground. It used to fall back
     // to a "default" pack, which was the pre-redesign palette — there is one
     // shell now, so there is no second palette to land on.
     return "amber";

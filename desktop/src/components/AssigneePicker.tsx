@@ -27,6 +27,8 @@ import { createPortal } from "react-dom";
 import type { TeamMember } from "../lib/api";
 import { useDismiss } from "../lib/useDismiss";
 import { monogram } from "../lib/monogram";
+import { Avatar, AvatarFallback } from "./ui/avatar";
+import "./ui/assignee-stack.css";
 
 type SingleProps = {
   value: string | null | undefined;
@@ -444,10 +446,9 @@ function renderMultiTrigger(
   );
 }
 
-/** Standalone read-only avatar stack — used by the card chrome / list
- *  rows / spreadsheet cells where we want to show the assignees but
- *  not open a picker. Mirrors the trigger rendering inside the multi
- *  variant so the visual is identical. */
+/** Read-only assignee stack — the card chrome, list rows and the sub-task
+ *  list show who is on a task this way without opening a picker. The marks
+ *  are the library avatar, overlapped, with "+N" past `maxAvatars`. */
 export function AssigneeStack({
   handles,
   members,
@@ -459,7 +460,6 @@ export function AssigneeStack({
   maxAvatars?: number;
   dense?: boolean;
 }) {
-  const avatarSize = dense ? "w-4 h-4 text-2xs" : "w-5 h-5 text-2xs";
   const resolved = handles.map(
     (h) =>
       members.find((m) => m.handle === h) ??
@@ -469,28 +469,17 @@ export function AssigneeStack({
   const visible = resolved.slice(0, maxAvatars);
   const overflow = resolved.length - visible.length;
   return (
-    <span className="inline-flex items-center -space-x-1.5">
+    <span
+      className="ui-assignee-stack"
+      data-dense={dense ? "" : undefined}
+      title={resolved.map((m) => m.handle).join(", ")}
+    >
       {visible.map((m) => (
-        <span
-          key={m.handle}
-          className={`${avatarSize} rounded-full flex items-center justify-center font-semibold flex-shrink-0 ring-1 ring-bg-content`}
-          style={{
-            background: AVATAR_TINT.background,
-            color: AVATAR_TINT.color,
-          }}
-          title={m.handle}
-        >
-          {initialOf(m)}
-        </span>
+        <Avatar key={m.handle}>
+          <AvatarFallback>{initialOf(m)}</AvatarFallback>
+        </Avatar>
       ))}
-      {overflow > 0 && (
-        <span
-          className={`${avatarSize} rounded-full flex items-center justify-center font-semibold flex-shrink-0 ring-1 ring-bg-content bg-bg-2 text-text-3`}
-          title={`+${overflow} more`}
-        >
-          +{overflow}
-        </span>
-      )}
+      {overflow > 0 && <span className="ui-assignee-stack-more">+{overflow}</span>}
     </span>
   );
 }

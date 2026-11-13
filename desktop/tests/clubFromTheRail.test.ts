@@ -24,6 +24,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import { readSrc } from "./support/code";
+import { readRosterSrc } from "./support/roster";
 
 // These modules write through `localStorage`, which the app has and this
 // process does not. Installed before anything imports them, and complete
@@ -87,8 +88,8 @@ const {
 // A laptop, a second project on it, and two boxes — the shape the acceptance
 // criterion names ("a local checkout and a remote place behaves identically to
 // two locals").
-const BOX_A = "ubuntu@18.196.118.42";
-const BOX_B = "ubuntu@3.122.52.150";
+const BOX_A = "ubuntu@203.0.113.10";
+const BOX_B = "ubuntu@198.51.100.20";
 const LOCAL_ROOT = "/Users/mo/src/aura";
 const OTHER_ROOT = "/Users/mo/src/aura-web";
 
@@ -379,9 +380,9 @@ describe("what a club row says", () => {
   test("a remote place says which computer it is on", () => {
     // The box is the whole reason it is in the club; the `ubuntu@` half is the
     // same on every machine and buys nothing in a 232px rail.
-    expect(placeLabel(ON_A())).toBe("aura on 18.196.118.42");
+    expect(placeLabel(ON_A())).toBe("aura on 203.0.113.10");
     expect(placeLabel(remotePlace({ machineId: BOX_A }))).toBe(
-      "18.196.118.42",
+      "203.0.113.10",
     );
   });
 
@@ -401,14 +402,14 @@ describe("what a club row says", () => {
     expect(clubLabel(three)).toBe("aura · aura-web +1");
     // The tooltip has room for all of them.
     expect(clubMembersLine(three)).toBe(
-      "aura · aura-web · aura on 18.196.118.42",
+      "aura · aura-web · aura on 203.0.113.10",
     );
   });
 });
 
 describe("the rail is wired to it", () => {
   test("every place row in the roster answers the pick", async () => {
-    const src = await readSrc("components/WorkspaceRoster.tsx");
+    const src = await readRosterSrc();
     // One helper, three row types — a row that opted out of the gesture would
     // make it "click two rows, unless one of them is a machine".
     expect(src).toContain("const { picking } = useClubPick();");
@@ -434,7 +435,7 @@ describe("the rail is wired to it", () => {
 
   test("the gesture is discoverable, not a shortcut you have to know", async () => {
     const rail = await readSrc("components/places/ClubRail.tsx");
-    const roster = await readSrc("components/WorkspaceRoster.tsx");
+    const roster = await readRosterSrc();
     // The door is on the project row, where your finger already is. The rail
     // is where the result lands — it is not the advert for it.
     expect(roster).toContain("beginClubPick(localPlace(menu.path))");

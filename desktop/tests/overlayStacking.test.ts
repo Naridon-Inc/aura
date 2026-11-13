@@ -30,6 +30,8 @@
 
 import { describe, expect, test } from "bun:test";
 
+import { srcTree } from "./support/code";
+
 const SRC = `${import.meta.dir}/../src`;
 
 const css = await Bun.file(`${SRC}/styles.css`).text();
@@ -51,9 +53,8 @@ const FOREIGN_DOCUMENT = ["lib/browserEngine.ts"];
 /** Every z-index this app asks for, by hand, in its own document. */
 async function appZIndexes(): Promise<{ value: number; where: string }[]> {
   const found: { value: number; where: string }[] = [];
-  for await (const rel of new Bun.Glob("**/*.{ts,tsx,css}").scan({ cwd: SRC })) {
+  for (const [rel, text] of await srcTree("**/*.{ts,tsx,css}")) {
     if (FOREIGN_DOCUMENT.includes(rel)) continue;
-    const text = await Bun.file(`${SRC}/${rel}`).text();
     // Tailwind's scale (`z-40`) and its arbitrary escape (`z-[60]`), plus raw
     // CSS. `z-index: var(…)` carries no number and is skipped by all three.
     for (const re of [/\bz-\[(\d+)\]/g, /\bz-(\d+)\b/g, /z-index:\s*(\d+)/g]) {
@@ -117,6 +118,30 @@ describe("a menu opens on top of the app", () => {
     const block = anim.slice(0, anim.indexOf("}") + 1);
     expect(block).toContain("animation: none !important");
     expect(block).toContain("opacity: 1 !important");
+  });
+
+  test("library flyouts keep their motion until the clock is parked", () => {
+    // `.ui-flyout-motion` is the interface library's popover/menu/hover-card
+    // entrance: 150ms appear, 100ms disappear. An `!important` opacity outranks
+    // an animation in the cascade, so any clause of the rule above that still
+    // matched a flyout would flatten the fade even with `animation` restored.
+    // Every clause excludes it; one clause puts it back under a parked clock.
+    // The library drawer's vaul slide and overlay fade are treated the same.
+    const anim = css.slice(css.indexOf('#root ~ .animate-in'));
+    const owners = ".ui-flyout-motion, [data-vaul-drawer], [data-vaul-overlay]";
+    const head = anim.slice(0, anim.indexOf("{"));
+    const parked = `:root[data-motion-clock="parked"] :is(${owners})`;
+    expect(head).toContain(parked);
+    const clauses = head.replace(parked, "").split(/,\s*(?![^()]*\))/).map((s) => s.trim()).filter(Boolean);
+    expect(clauses.length).toBe(8);
+    for (const sel of clauses) {
+      expect(sel.endsWith(`:not(${owners})`)).toBe(true);
+    }
+  });
+
+  test("the app watches the clock that decides it", async () => {
+    const main = await Bun.file(`${SRC}/main.tsx`).text();
+    expect(main).toContain("watchMotionClock();");
   });
 });
 

@@ -863,6 +863,10 @@ pub async fn agent_pty_open(
     // laptop's path, because that is the project the tab is filed under and
     // where the record of the work belongs whichever machine holds the code.
     machine_id: Option<String>,
+    // Folders linked to this workspace (the composer's "Link workspaces"
+    // dialog), handed to the CLI through its own extra-directory flag. Paths
+    // on this disk, so only an agent started here gets them.
+    linked_dirs: Option<Vec<String>>,
 ) -> Result<AgentSessionHandle, String> {
     // Reclaim any history ring left behind by a session that vanished
     // without a clean close (open-failure rollback, etc.) so the map
@@ -1049,7 +1053,15 @@ pub async fn agent_pty_open(
     // connection, built by the one place contract rather than a second ssh line
     // written here.
     let (bin, args) = match &place {
-        None => (inv.bin.clone(), inv.args.clone()),
+        None => {
+            let mut args = inv.args.clone();
+            let dirs = crate::manager::brain::linked_dirs::readable(
+                linked_dirs.as_deref().unwrap_or_default(),
+                &repo_root,
+            );
+            crate::manager::brain::linked_dirs::apply(&agent_id, &mut args, &dirs);
+            (inv.bin.clone(), args)
+        }
         Some(p) => {
             if profile_name.is_some() {
                 // An isolated session is a HOME swap on this disk. Over there it

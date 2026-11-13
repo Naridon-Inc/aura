@@ -30,7 +30,7 @@ export function rosterSourceNote(
   projectLabel: string | null | undefined,
   orgName?: string | null,
 ): string {
-  const where = projectLabel?.trim() ? `in ${projectLabel.trim()}` : "in this project";
+  const where = projectLabel?.trim() ? `in ${projectLabel.trim()}` : "in this repository";
   const base = `Everyone who has worked ${where}, from its own history.`;
   const org = orgName?.trim();
   return org

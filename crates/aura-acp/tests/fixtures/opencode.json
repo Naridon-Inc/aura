@@ -1,0 +1,222 @@
+{
+ "initialize": [
+  {
+   "jsonrpc": "2.0",
+   "id": 0,
+   "result": {
+    "protocolVersion": 1,
+    "agentCapabilities": {
+     "loadSession": true,
+     "mcpCapabilities": {
+      "http": true,
+      "sse": true
+     },
+     "promptCapabilities": {
+      "embeddedContext": true,
+      "image": true
+     },
+     "sessionCapabilities": {
+      "close": {},
+      "fork": {},
+      "list": {},
+      "resume": {}
+     }
+    },
+    "authMethods": [
+     {
+      "description": "Run `opencode auth login` in the terminal",
+      "name": "Login with opencode",
+      "id": "opencode-login"
+     }
+    ],
+    "agentInfo": {
+     "name": "OpenCode",
+     "version": "1.18.21"
+    }
+   }
+  }
+ ],
+ "session_new": [
+  {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "result": {
+    "sessionId": "ses_e3a7626b7ffeEmdvrhKAIYjWUs",
+    "configOptions": [
+     {
+      "id": "model",
+      "name": "Model",
+      "category": "model",
+      "type": "select",
+      "currentValue": "opencode/big-pickle",
+      "options": [
+       {
+        "value": "gitlab/duo-chat-fable-5-1",
+        "name": "GitLab Duo/Agentic Chat (Claude Fable 5.1)"
+       },
+       {
+        "value": "gitlab/duo-chat-fable-5",
+        "name": "GitLab Duo/Agentic Chat (Claude Fable 5)"
+       },
+       {
+        "value": "gitlab/duo-chat-haiku-4-5",
+        "name": "GitLab Duo/Agentic Chat (Claude Haiku 4.5)"
+       },
+       {
+        "value": "gitlab/duo-chat-haiku-5-5",
+        "name": "GitLab Duo/Agentic Chat (Claude Haiku 5.5)"
+       },
+       {
+        "value": "gitlab/duo-chat-opus-4-5",
+        "name": "GitLab Duo/Agentic Chat (Claude Opus 4.5)"
+       },
+       {
+        "value": "gitlab/duo-chat-opus-4-6",
+        "name": "GitLab Duo/Agentic Chat (Claude Opus 4.6)"
+       },
+       {
+        "value": "gitlab/duo-chat-opus-4-7",
+        "name": "GitLab Duo/Agentic Chat (Claude Opus 4.7)"
+       },
+       {
+        "value": "gitlab/duo-chat-opus-4-8",
+        "name": "GitLab Duo/Agentic Chat (Claude Opus 4.8)"
+       },
+       {
+        "value": "gitlab/duo-chat-opus-5-5",
+        "name": "GitLab Duo/Agentic Chat (Claude Opus 5.5)"
+       },
+       {
+        "value": "gitlab/duo-chat-opus-5",
+        "name": "GitLab Duo/Agentic Chat (Claude Opus 5)"
+       },
+       {
+        "value": "gitlab/duo-chat-sonnet-4-6",
+        "name": "GitLab Duo/Agentic Chat (Claude Sonnet 4.6)"
+       },
+       {
+        "value": "gitlab/duo-chat-sonnet-5-5",
+        "name": "GitLab Duo/Agentic Chat (Claude Sonnet 5.5)"
+       },
+       {
+        "value": "gitlab/duo-chat-sonnet-5",
+        "name": "GitLab Duo/Agentic Chat (Claude Sonnet 5)"
+       },
+       {
+        "value": "gitlab/duo-chat-gpt-5-2",
+        "name": "GitLab Duo/Agentic Chat (GPT-5.2)"
+       },
+       {
+        "value": "gitlab/duo-chat-gpt-5-4-mini",
+        "name": "GitLab Duo/Agentic Chat (GPT-5.4 Mini)"
+       },
+       {
+        "value": "gitlab/duo-chat-gpt-5-4",
+        "name": "GitLab Duo/Agentic Chat (GPT-5.4)"
+       },
+       {
+        "value": "gitlab/duo-chat-gpt-5-5",
+        "name": "GitLab Duo/Agentic Chat (GPT-5.5)"
+       },
+       {
+        "value": "gitlab/duo-chat-gpt-5-6-luna",
+        "name": "GitLab Duo/Agentic Chat (GPT-5.6 Luna)"
+       },
+       {
+        "value": "gitlab/duo-chat-gpt-5-6-sol",
+        "name": "GitLab Duo/Agentic Chat (GPT-5.6 Sol)"
+       },
+       {
+        "value": "gitlab/duo-chat-gpt-5-6-terra",
+        "name": "GitLab Duo/Agentic Chat (GPT-5.6 Terra)"
+       },
+       {
+        "value": "gitlab/duo-chat-gpt-6-astra",
+        "name": "GitLab Duo/Agentic Chat (GPT-6 Astra)"
+       },
+       {
+        "value": "gitlab/duo-chat-gpt-6-luna",
+        "name": "GitLab Duo/Agentic Chat (GPT-6 Luna)"
+       },
+       {
+        "value": "gitlab/duo-chat-gpt-6-sol",
+        "name": "GitLab Duo/Agentic Chat (GPT-6 Sol)"
+       },
+       {
+        "value": "gitlab/duo-chat-gpt-6-1-sol",
+        "name": "GitLab Duo/Agentic Chat (GPT-6.1 Sol)"
+       },
+       {
+        "value": "opencode/beam-free",
+        "name": "OpenCode/Beam Free"
+       },
+       {
+        "value": "opencode/big-pickle",
+        "name": "OpenCode/Big Pickle"
+       },
+       {
+        "value": "opencode/deepseek-v4.1-flash-free",
+        "name": "OpenCode/DeepSeek V4.1 Flash Free"
+       },
+       {
+        "value": "opencode/flint-40b-free",
+        "name": "OpenCode/Flint 40B Free"
+       },
+       {
+        "value": "opencode/glm-5.3-flash-free",
+        "name": "OpenCode/GLM-5.3-Flash Free"
+       },
+       {
+        "value": "opencode/iceman-free",
+        "name": "OpenCode/Iceman Free"
+       },
+       {
+        "value": "opencode/inkling-2-small-free",
+        "name": "OpenCode/Inkling 2 Small Free"
+       },
+       {
+        "value": "opencode/longcat-2.5-free",
+        "name": "OpenCode/LongCat 2.5 Free"
+       },
+       {
+        "value": "opencode/mimo-v2.6-flash-free",
+        "name": "OpenCode/MiMo-V2.6-Flash Free"
+       },
+       {
+        "value": "opencode/minimax-m3.1-flash-free",
+        "name": "OpenCode/MiniMax M3.1 Flash Free"
+       },
+       {
+        "value": "opencode/nemotron-3.5-lightning-free",
+        "name": "OpenCode/Nemotron 3.5 Lightning Free"
+       },
+       {
+        "value": "opencode/nemotron-3.5-super-vl-free",
+        "name": "OpenCode/Nemotron 3.5 Super VL Free"
+       }
+      ]
+     },
+     {
+      "id": "mode",
+      "name": "Session Mode",
+      "category": "mode",
+      "type": "select",
+      "currentValue": "build",
+      "options": [
+       {
+        "value": "build",
+        "name": "build",
+        "description": "The default agent. Executes tools based on configured permissions."
+       },
+       {
+        "value": "plan",
+        "name": "plan",
+        "description": "Plan mode. Disallows all edit tools."
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

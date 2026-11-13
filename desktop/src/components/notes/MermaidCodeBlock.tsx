@@ -21,14 +21,15 @@ import {
   resolvePrismLanguage,
   LANGUAGE_OPTIONS,
 } from "./tiptap/codeHighlight";
-import { cn } from "../../lib/utils";
+import { Button } from "../ui/button";
 
 // Copy-to-clipboard affordance for the code header bar.
 function CopyButton({ getText }: { getText: () => string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <button
-      type="button"
+    <Button
+      variant="ghost"
+      size="iconXs"
       onMouseDown={(e) => e.preventDefault()}
       onClick={() => {
         void navigator.clipboard.writeText(getText()).then(() => {
@@ -36,16 +37,11 @@ function CopyButton({ getText }: { getText: () => string }) {
           window.setTimeout(() => setCopied(false), 1200);
         });
       }}
-      className="tiptap-codeblock__btn"
       title={copied ? "Copied" : "Copy code"}
       aria-label="Copy code"
     >
-      {copied ? (
-        <Check className="w-3 h-3" strokeWidth={2} />
-      ) : (
-        <Copy className="w-3 h-3" strokeWidth={1.75} />
-      )}
-    </button>
+      {copied ? <Check /> : <Copy />}
+    </Button>
   );
 }
 
@@ -69,19 +65,16 @@ function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
     return (
       <NodeViewWrapper
         as="div"
-        className="tiptap-codeblock"
+        className="ui-code-message ui-rich-editor-code"
         data-language={resolved.id ?? "text"}
       >
-        <div className="tiptap-codeblock__bar" contentEditable={false}>
-          <div className="tiptap-codeblock__lang-wrap">
-            <span className="tiptap-codeblock__lang-label">
+        <header contentEditable={false}>
+          <label className="ui-rich-editor-code-lang">
+            <span>
               {resolved.id ? resolved.label : "Plain text"}
-              {resolved.detected && (
-                <span className="tiptap-codeblock__auto">auto</span>
-              )}
+              {resolved.detected && <small>auto</small>}
             </span>
             <select
-              className="tiptap-codeblock__lang-select"
               value={selectValue}
               aria-label="Code language"
               onChange={(e) =>
@@ -94,10 +87,10 @@ function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
                 </option>
               ))}
             </select>
-          </div>
+          </label>
           <CopyButton getText={() => node.textContent} />
-        </div>
-        <pre className="tiptap-codeblock__pre">
+        </header>
+        <pre>
           <NodeViewContent<"code"> as="code" />
         </pre>
       </NodeViewWrapper>
@@ -107,71 +100,61 @@ function CodeBlockView({ node, updateAttributes }: ReactNodeViewProps) {
   const source = node.textContent;
 
   return (
-    <NodeViewWrapper as="div" className="tiptap-mermaid">
-      <div className="tiptap-codeblock__bar" contentEditable={false}>
-        <div className="flex items-center gap-1.5 text-text-4">
-          <CodeIcon className="w-3 h-3" strokeWidth={1.5} />
-          <span className="section-label">mermaid</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
+    <NodeViewWrapper as="div" className="ui-code-message ui-rich-editor-code">
+      <header contentEditable={false}>
+        <span className="ui-rich-editor-code-lang">
+          <CodeIcon />
+          mermaid
+        </span>
+        <span className="ui-rich-editor-code-actions">
+          <Button
+            variant="ghost"
+            size="xs"
             onClick={() => setMode("preview")}
-            className={cn(
-              "h-6 px-2 inline-flex items-center gap-1 rounded text-xs",
-              mode === "preview"
-                ? "bg-bg-1 text-text-1"
-                : "text-text-4 hover:text-text-1 hover:bg-state-hover",
-            )}
             aria-pressed={mode === "preview"}
             title="Preview diagram"
           >
-            <Eye className="w-3 h-3" strokeWidth={1.5} />
+            <Eye />
             Preview
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="ghost"
+            size="xs"
             onClick={() => setMode("edit")}
-            className={cn(
-              "h-6 px-2 inline-flex items-center gap-1 rounded text-xs",
-              mode === "edit"
-                ? "bg-bg-1 text-text-1"
-                : "text-text-4 hover:text-text-1 hover:bg-state-hover",
-            )}
             aria-pressed={mode === "edit"}
             title="Edit source"
           >
-            <Pencil className="w-3 h-3" strokeWidth={1.5} />
+            <Pencil />
             Edit
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="ghost"
+            size="xs"
             onClick={() => {
               const next = (language ?? "").toLowerCase() === "mermaid"
                 ? ""
                 : "mermaid";
               updateAttributes({ language: next || null });
             }}
-            className="h-6 px-2 inline-flex items-center text-xs text-text-4 hover:text-text-1 hover:bg-state-hover rounded"
             title="Convert back to a plain code block"
           >
             Plain
-          </button>
-        </div>
-      </div>
+          </Button>
+        </span>
+      </header>
 
       {mode === "edit" ? (
-        <pre className="tiptap-codeblock__pre">
+        <pre>
           <NodeViewContent<"code"> as="code" />
         </pre>
       ) : (
-        <div contentEditable={false} className="p-0">
+        <div contentEditable={false}>
           {source.trim().length > 0 ? (
             <MermaidDiagram code={source} minHeight={120} />
           ) : (
-            <div className="t-xs italic px-3 py-6 text-center text-text-3">
+            <p className="ui-rich-editor-code-empty">
               Empty diagram. Switch to Edit and add mermaid source.
-            </div>
+            </p>
           )}
         </div>
       )}

@@ -1,23 +1,29 @@
 // Native /resume picker for Claude Code stream-mode tabs. Reads the
 // session list straight off `~/.claude/projects/<encoded-cwd>/*.jsonl`
-// (no TUI hop), surfaces it as a list of conversations the user can
-// pick from, and pins the chosen session id into the stream store —
-// the next prompt fires with `--resume <id>`.
+// (no TUI hop), surfaces it in the shared command dialog, and pins the
+// chosen session id into the stream store — the next prompt fires with
+// `--resume <id>`.
 //
-// The actual resumption is lazy: we don't replay the full session into
-// the bubble view (that would cost a lot of tokens to re-render and
-// the user already knows what they were doing). Instead we push a
-// synthetic system bubble like "↺ resumed session <id>" so the user
-// sees confirmation, then their next message threads onto the existing
-// conversation server-side.
+// The on-disk transcript is replayed into the bubble view after the pick so
+// the pane isn't empty; the conversation itself carries on server-side.
 
 import { useEffect, useMemo, useState } from "react";
 import { api, type ClaudeSession } from "../../lib/api";
 import { refreshSessions } from "../../lib/sessionsCache";
 import { setResumedHistory, setResumeSession } from "../../lib/agentStreamStore";
-import { AsciiSpinner } from "../ui/ascii-spinner";
 import { relativeAgeFromSecs } from "../../lib/relativeTime";
 import { sessionPromptTitle } from "../../lib/sessionPromptTitle";
+import { Button } from "../ui/button";
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "../ui/command";
+import { ErrorState, LoadingState } from "../ui/state";
+import "../ui/resume-dialog.css";
 
 type Props = {
   channel: string;
@@ -30,297 +36,176 @@ type Props = {
   onResumed?: (session: ClaudeSession) => void;
 };
 
-// Sessions older than this are considered stale and hidden behind the
-// "Show older" toggle. Tuned to 24h because the dialog is meant for
-// resuming work-in-progress; a day-old transcript almost certainly
-// belongs to a different task. The same cap is reused on the Cleanup
-// affordance so the two filters agree on what "old" means.
+// Sessions older than this sit behind "Show older". Tuned to 24h because the
+// picker is for resuming work in progress; a day-old transcript almost
+// certainly belongs to a different task.
 const STALE_THRESHOLD_SECS = 24 * 60 * 60;
+
+function isStale(s: ClaudeSession, nowSec: number): boolean {
+  return s.mtime > 0 && nowSec - s.mtime > STALE_THRESHOLD_SECS;
+}
 
 export function ResumeDialog({ channel, repoRoot, open, onClose, onResumed }: Props) {
   const [sessions, setSessions] = useState<ClaudeSession[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [activeIdx, setActiveIdx] = useState(0);
-  // Default to "fresh sessions only" — the user reported the picker was
-  // dominated by hours-old transcripts they didn't want to resume. The
-  // toggle below brings older rows back when explicitly requested.
+  const [query, setQuery] = useState("");
+  // Fresh sessions only by default — the picker used to be dominated by
+  // hours-old transcripts nobody wanted to resume.
   const [showOlder, setShowOlder] = useState(false);
-  // IDs the user has dismissed via the Cleanup affordance. We do NOT
-  // delete the underlying JSONL (those are Claude Code's own files);
-  // we just hide the row for this session of the dialog. Reopens
-  // re-show everything from disk, which is the correct "Claude owns
-  // these files" semantics.
+  // Rows dismissed with Hide. The JSONL on disk is Claude Code's own file and
+  // is never touched; a reopen shows everything again.
   const [hidden, setHidden] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (!open) return;
     setSessions(null);
     setError(null);
-    setActiveIdx(0);
+    setQuery("");
     setHidden(new Set());
     refreshSessions(repoRoot)
       .then(setSessions)
       .catch((e) => setError(String(e)));
   }, [open, repoRoot]);
 
-  // Split the list into fresh (≤24h) vs stale. Counts in the strip
-  // header tell the user what's behind the "Show older" toggle so they
-  // don't think the dialog is missing sessions.
-  const { stale, visible } = useMemo(() => {
-    const all = sessions ?? [];
+  const { fresh, stale } = useMemo(() => {
     const nowSec = Math.floor(Date.now() / 1000);
-    const isStale = (s: ClaudeSession) =>
-      s.mtime > 0 && nowSec - s.mtime > STALE_THRESHOLD_SECS;
-    const freshList = all.filter((s) => !isStale(s) && !hidden.has(s.session_id));
-    const staleList = all.filter((s) => isStale(s) && !hidden.has(s.session_id));
+    const shown = (sessions ?? []).filter((s) => !hidden.has(s.session_id));
     return {
-      stale: staleList,
-      visible: showOlder ? [...freshList, ...staleList] : freshList,
+      fresh: shown.filter((s) => !isStale(s, nowSec)),
+      stale: shown.filter((s) => isStale(s, nowSec)),
     };
-  }, [sessions, showOlder, hidden]);
-
-  // Reset cursor when the visible list changes shape (filter toggle,
-  // dismiss). Without this an "Enter" key with an out-of-range cursor
-  // would pick the wrong row or no-op silently.
-  useEffect(() => {
-    if (activeIdx >= visible.length) setActiveIdx(0);
-  }, [visible.length, activeIdx]);
-
-  useEffect(() => {
-    if (!open) return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (visible.length === 0) return;
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setActiveIdx((i) => Math.min(visible.length - 1, i + 1));
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setActiveIdx((i) => Math.max(0, i - 1));
-        return;
-      }
-      if (e.key === "Enter") {
-        e.preventDefault();
-        const target = visible[activeIdx];
-        if (target) pick(target);
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, visible, activeIdx]);
+  }, [sessions, hidden]);
 
   function pick(s: ClaudeSession) {
     setResumeSession(channel, s);
     onResumed?.(s);
     onClose();
-    // Replay the on-disk transcript into the bubble view so the user
-    // sees what they were doing instead of an empty pane. Failures
-    // are non-fatal — the live session can still continue server-side.
+    // Replay the on-disk transcript into the bubble view so the user sees
+    // what they were doing instead of an empty pane. A failure is non-fatal —
+    // the live session still continues server-side.
     api
       .claudeLoadSession(s.file_path, 500)
       .then((events) => setResumedHistory(channel, events))
       .catch((e) => console.warn("claude_load_session failed:", e));
   }
 
-  if (!open) return null;
+  function hide(id: string) {
+    setHidden((prev) => new Set(prev).add(id));
+  }
+
+  const workspace = repoRoot.split("/").filter(Boolean).pop() ?? repoRoot;
+  const none = sessions !== null && sessions.length === 0;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-24 bg-black/40"
-      onClick={onClose}
+    <CommandDialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+      title="Resume a Claude session"
+      description={`Pick a past Claude session in ${workspace} and press Enter to carry on from it.`}
     >
-      <div
-        className="w-[640px] max-w-[92vw] max-h-[70vh] bg-bg-2 border border-line rounded-lg shadow-2xl overflow-hidden flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <header className="flex items-center gap-2 h-10 px-3 border-b border-line-soft bg-bg-chrome">
-          <span className="text-text-1 text-base font-medium">Resume Claude session</span>
-          <span className="text-text-5 text-xs font-mono truncate">
-            {shortRoot(repoRoot)}
-          </span>
-          {stale.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setShowOlder((v) => !v)}
-              title={
-                showOlder
-                  ? "Hide sessions older than 24 hours"
-                  : `Show ${stale.length} older session${stale.length === 1 ? "" : "s"} (>24h)`
-              }
-              className={`ml-2 text-xs px-2 h-6 rounded transition-colors ${
-                showOlder
-                  ? "bg-bg-card text-text-1 hover:bg-state-hover"
-                  : "text-text-4 hover:text-text-1 hover:bg-state-hover"
-              }`}
-            >
-              {showOlder ? "Hide older" : `Show older · ${stale.length}`}
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={onClose}
-            className="ml-auto text-text-4 hover:text-text-1 text-xs px-2 h-6 rounded hover:bg-state-hover transition-colors"
-            title="Close (Esc)"
-          >
-            ✕
-          </button>
-        </header>
-
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          {sessions === null && !error && (
-            <div className="flex items-center gap-1.5 p-6 text-text-4 text-sm">
-              <AsciiSpinner />
-              Finding your past sessions…
-            </div>
-          )}
-          {error && (
-            <div className="p-6 text-red text-sm font-mono whitespace-pre-wrap">
-              {error}
-            </div>
-          )}
-          {sessions && sessions.length === 0 && (
-            <div className="p-6 text-text-4 text-sm">
-              no past Claude Code sessions for this workspace.
-            </div>
-          )}
-          {sessions && sessions.length > 0 && visible.length === 0 && (
-            <div className="p-6 text-text-4 text-sm flex flex-col gap-2 items-start">
-              <span>
-                All sessions for this workspace are older than 24h.
-              </span>
-              {stale.length > 0 && !showOlder && (
-                <button
-                  type="button"
-                  onClick={() => setShowOlder(true)}
-                  className="text-sm text-accent hover:underline"
+      <CommandInput
+        value={query}
+        onValueChange={setQuery}
+        placeholder={`Resume a Claude session in ${workspace}…`}
+        aria-label="Find a session"
+      />
+      <CommandList className="ui-resume-list">
+        {error ? (
+          <ErrorState size="sm" title="Couldn’t read past sessions" message={error} />
+        ) : sessions === null ? (
+          <LoadingState label="Finding your past sessions…" />
+        ) : none ? (
+          <div className="ui-command-empty">No past Claude sessions in this workspace.</div>
+        ) : (
+          <>
+            <CommandEmpty>No session matches.</CommandEmpty>
+            {fresh.length > 0 && (
+              <CommandGroup heading="Last 24 hours">
+                {fresh.map((s) => (
+                  <SessionRow key={s.session_id} session={s} onPick={pick} onHide={hide} />
+                ))}
+              </CommandGroup>
+            )}
+            {showOlder && stale.length > 0 && (
+              <CommandGroup heading="Older">
+                {stale.map((s) => (
+                  <SessionRow key={s.session_id} session={s} onPick={pick} onHide={hide} stale />
+                ))}
+              </CommandGroup>
+            )}
+            {stale.length > 0 && (
+              <CommandGroup forceMount>
+                <CommandItem
+                  forceMount
+                  value="__older"
+                  onSelect={() => setShowOlder((v) => !v)}
+                  className="ui-resume-older"
                 >
-                  Show {stale.length} older session{stale.length === 1 ? "" : "s"} ↗
-                </button>
-              )}
-            </div>
-          )}
-          {visible.length > 0 && (
-            <ul>
-              {visible.map((s, i) => {
-                // Prefer the last user prompt — most sessions open with
-                // "hi" or "test" and the *last* thing the user typed is
-                // far more identifying. Fall back to first if there's
-                // no last (interrupted session). Both go through
-                // cleanPrompt: scheduled-task / autonomous-loop turns
-                // arrive as raw <task-notification> XML and would
-                // otherwise dominate the row.
-                const lastClean = sessionPromptTitle(s.last_prompt);
-                const firstClean = sessionPromptTitle(s.first_prompt);
-                const title = lastClean || firstClean;
-                const nowSec = Math.floor(Date.now() / 1000);
-                const isStale =
-                  s.mtime > 0 && nowSec - s.mtime > STALE_THRESHOLD_SECS;
-                return (
-                  <li
-                    key={s.session_id}
-                    onMouseEnter={() => setActiveIdx(i)}
-                    onClick={() => pick(s)}
-                    className={`flex items-start gap-3 px-3 py-2.5 cursor-pointer border-b border-line-soft/50 group ${
-                      i === activeIdx ? "bg-bg-card" : "hover:bg-state-hover"
-                    } ${isStale ? "opacity-70" : ""}`}
-                  >
-                    <div className="flex-1 min-w-0">
-                      <div className="text-text-1 text-base truncate flex items-center gap-2">
-                        {isStale && (
-                          <span
-                            title="Last activity > 24h ago"
-                            className="meta-tag"
-                          >
-                            stale
-                          </span>
-                        )}
-                        <span className="truncate">
-                          {title || (
-                            <span className="text-text-4 italic">empty session</span>
-                          )}
-                        </span>
-                      </div>
-                      {/* Show the leading prompt as a quieter subtitle when
-                          it differs from the title — gives the user
-                          context for what the conversation started about. */}
-                      {firstClean &&
-                        lastClean &&
-                        firstClean !== lastClean && (
-                          <div className="text-text-4 text-xs truncate mt-0.5">
-                            ↳ first: {firstClean}
-                          </div>
-                        )}
-                      <div className="flex items-center gap-2 mt-1 text-xs">
-                        {s.cwd_rel && (
-                          <span
-                            className="font-mono px-1.5 py-px rounded text-text-3"
-                            style={{ background: "var(--color-bg-2)" }}
-                            title={`cwd · ${s.cwd_rel}`}
-                          >
-                            {s.cwd_rel}
-                          </span>
-                        )}
-                        <span className="text-text-5 font-mono">
-                          {s.session_id.slice(0, 8)}
-                        </span>
-                        <span className="text-text-5">·</span>
-                        <span className="text-text-4 tabular-nums">
-                          {s.turn_count} turn{s.turn_count === 1 ? "" : "s"}
-                        </span>
-                        <span className="text-text-5">·</span>
-                        <span className="text-text-5">{relAge(s.mtime)}</span>
-                      </div>
-                    </div>
-                    {/* Cleanup affordance: hide a row the user has decided
-                        is dead. We never touch the underlying JSONL on
-                        disk — those are Claude Code's own files and
-                        deleting them silently would lose the transcript
-                        for /resume in the native CLI. */}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setHidden((prev) => {
-                          const next = new Set(prev);
-                          next.add(s.session_id);
-                          return next;
-                        });
-                      }}
-                      title="Hide this session from the picker (keeps the on-disk transcript)"
-                      className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-text-4 hover:text-red text-xs px-1.5 py-0.5 rounded hover:bg-state-hover flex-shrink-0 self-center focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
-                    >
-                      hide
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-
-        <footer className="flex items-center gap-2 h-9 px-3 border-t border-line-soft text-xs text-text-5">
-          <span>↑↓ navigate</span>
-          <span>↵ resume</span>
-          <span>esc close</span>
-        </footer>
-      </div>
-    </div>
+                  {showOlder
+                    ? "Hide sessions older than a day"
+                    : `Show ${stale.length} ${stale.length === 1 ? "session" : "sessions"} older than a day`}
+                </CommandItem>
+              </CommandGroup>
+            )}
+          </>
+        )}
+      </CommandList>
+    </CommandDialog>
   );
 }
 
-function shortRoot(root: string): string {
-  const parts = root.split("/").filter(Boolean);
-  if (parts.length <= 2) return root;
-  return ".../" + parts.slice(-2).join("/");
-}
-
-function relAge(unixSecs: number): string {
-  // One ladder for the whole app — see lib/relativeTime.
-  return relativeAgeFromSecs(unixSecs);
+function SessionRow({
+  session: s,
+  onPick,
+  onHide,
+  stale,
+}: {
+  session: ClaudeSession;
+  onPick: (s: ClaudeSession) => void;
+  onHide: (id: string) => void;
+  stale?: boolean;
+}) {
+  // The last prompt names a session far better than the first (most open
+  // with "hi"); the first is the fallback for an interrupted one. Both go
+  // through sessionPromptTitle so task-notification XML never becomes a title.
+  const last = sessionPromptTitle(s.last_prompt);
+  const first = sessionPromptTitle(s.first_prompt);
+  const title = last || first;
+  const meta = [
+    s.cwd_rel || null,
+    s.session_id.slice(0, 8),
+    `${s.turn_count} ${s.turn_count === 1 ? "turn" : "turns"}`,
+    relativeAgeFromSecs(s.mtime),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <CommandItem
+      value={`${title} ${first} ${s.cwd_rel ?? ""} ${s.session_id}`}
+      onSelect={() => onPick(s)}
+      className="ui-resume-row"
+      data-stale={stale ? "" : undefined}
+      title={first && last && first !== last ? `Started with: ${first}` : undefined}
+    >
+      <span className="ui-resume-label">
+        {title || <em>Empty session</em>}
+        <small>{meta}</small>
+      </span>
+      <Button
+        size="xs"
+        variant="ghost"
+        className="ui-resume-hide"
+        title="Hide from this list (the transcript stays on disk)"
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          onHide(s.session_id);
+        }}
+      >
+        Hide
+      </Button>
+    </CommandItem>
+  );
 }

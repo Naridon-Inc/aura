@@ -1,7 +1,7 @@
 //! The floating, always-on-top **HUD** — a small glanceable bar that
 //! mirrors the active chat's status + last messages and lets you fire a
 //! quick reply without opening the full Aura window. Think "movie-bar":
-//! summon it with ⌘⇧A (or the menu-bar icon) while something else is
+//! summon it with ⌃⌘A (or the menu-bar icon) while something else is
 //! fullscreen, glance at where the agent is, optionally reply, dismiss.
 //!
 //! The window loads the same `index.html` with a `?hud=1` marker; the
@@ -108,7 +108,7 @@ fn store_mode(mode: Mode) {
 }
 
 /// Master on/off for the floating HUD — a persistent Settings switch
-/// (`hud.enabled`, default on). When off, ⌘⇧A, the menu-bar tray, and every
+/// (`hud.enabled`, default on). When off, ⌃⌘A, the menu-bar tray, and every
 /// programmatic summon are no-ops, so the HUD never appears. Seeded from the
 /// saved TOML at startup (`seed_enabled`) and flipped live from Settings
 /// (`hud_set_enabled`); an atomic so the global-shortcut handler and the IPC
@@ -146,7 +146,7 @@ fn mode_win_width(mode: Mode) -> f64 {
     }
 }
 
-/// `⌘⇧A` / tray-left-click entry point: show the HUD if hidden, hide it if
+/// `⌃⌘A` / tray-left-click entry point: show the HUD if hidden, hide it if
 /// already on screen.
 pub fn toggle(app: &AppHandle<Wry>) {
     if !is_enabled() {
@@ -1277,15 +1277,17 @@ mod overlay {
 }
 
 // ── Global shortcut ────────────────────────────────────────────────────
-// Registered from Rust (not JS) so ⌘⇧A works even while the main window is
+// Registered from Rust (not JS) so ⌃⌘A works even while the main window is
 // hidden in the menu bar. Registering here also means the global-shortcut
 // plugin needs no JS-side capability entry.
 
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-/// Default summon chord: ⌘⇧A ("A for Aura"). Rebindable later from Settings.
+/// Default summon chord: ⌃⌘A ("A for Aura"). ⌘⇧A is the window's own
+/// "Archive workspace", and a global chord is taken by the OS before any
+/// window sees it, so the HUD keeps ⌃ instead. Rebindable later from Settings.
 pub fn register_shortcut(app: &tauri::App<Wry>) {
-    let accel = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA);
+    let accel = Shortcut::new(Some(Modifiers::SUPER | Modifiers::CONTROL), Code::KeyA);
     let for_handler = accel;
     let plugin = tauri_plugin_global_shortcut::Builder::new()
         .with_handler(move |app, shortcut, event| {
@@ -1300,8 +1302,8 @@ pub fn register_shortcut(app: &tauri::App<Wry>) {
         return;
     }
     match app.global_shortcut().register(accel) {
-        Ok(()) => eprintln!("[HUD] ⌘⇧A registered"),
-        Err(e) => eprintln!("[HUD] failed to register ⌘⇧A: {e}"),
+        Ok(()) => eprintln!("[HUD] ⌃⌘A registered"),
+        Err(e) => eprintln!("[HUD] failed to register ⌃⌘A: {e}"),
     }
 }
 
@@ -1356,9 +1358,9 @@ pub fn hud_set_opacity(app: AppHandle<Wry>, opacity: f64) {
 }
 
 /// Flip the persistent HUD master switch live from Settings. Stores the flag so
-/// ⌘⇧A, the tray, and programmatic summons honor it immediately, and hides the
+/// ⌃⌘A, the tray, and programmatic summons honor it immediately, and hides the
 /// HUD now if it's on screen when turned off. Turning it back on does NOT force
-/// the HUD up — it stays summon-only; the user brings it back with ⌘⇧A.
+/// the HUD up — it stays summon-only; the user brings it back with ⌃⌘A.
 #[tauri::command]
 pub fn hud_set_enabled(app: AppHandle<Wry>, enabled: bool) {
     HUD_ENABLED.store(enabled, Ordering::Relaxed);

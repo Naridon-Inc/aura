@@ -1,0 +1,186 @@
+/* Trace lists — Home's 44px rows, grouped under a sticky caption, each with
+   Home's hover preview. */
+
+.ui-trace-list {
+  min-height: 0;
+  background: var(--ui-bg);
+}
+
+.ui-trace-group-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 32px;
+  padding: 0 16px;
+  border: 0;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-sheet);
+  color: var(--ui-muted-fg);
+  font: 500 12px var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+}
+.ui-trace-group-header:disabled {
+  cursor: default;
+}
+.ui-trace-group-header:not(:disabled):hover {
+  color: var(--ui-fg);
+}
+.ui-trace-group-header:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+/* A caption with an action beside it: the bar takes the sticky edge and the
+   rule, and the fold button inside it is just the label. The action shows on
+   hover or focus, so a column of captions doesn't read as a column of
+   buttons. */
+.ui-trace-group-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-sheet);
+}
+.ui-trace-group-bar > .ui-trace-group-header {
+  position: static;
+  flex: 1;
+  min-width: 0;
+  border-bottom: 0;
+}
+.ui-trace-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+  opacity: 0;
+}
+.ui-trace-group-bar:hover .ui-trace-group-actions,
+.ui-trace-group-actions:focus-within {
+  opacity: 1;
+}
+.ui-trace-group-count {
+  color: var(--ui-faint);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-trace-row:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+.ui-trace-row-status,
+.ui-trace-row-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.ui-trace-row-status svg,
+.ui-trace-row-icon svg {
+  width: 14px;
+  height: 14px;
+}
+.ui-trace-row-icon img {
+  width: 16px;
+  height: 16px;
+}
+.ui-trace-row[data-tone="attention"] .ui-home-title {
+  color: var(--ui-destructive);
+}
+.ui-trace-row-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.ui-trace-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ui-faint);
+  white-space: nowrap;
+}
+.ui-trace-mark[data-tone="danger"] {
+  color: var(--ui-destructive);
+}
+.ui-trace-mark[data-tone="good"] {
+  color: var(--ui-green);
+}
+.ui-trace-mark[data-tone="warn"] {
+  color: var(--ui-yellow);
+}
+.ui-trace-mark-action {
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ui-trace-mark-action:hover {
+  color: var(--ui-fg);
+}
+.ui-trace-mark-action:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: 1px;
+}
+.ui-trace-mark svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.ui-trace-preview-meta {
+  min-width: 0;
+}
+.ui-trace-preview-summary {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.ui-trace-empty {
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  padding: 80px 24px;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+  text-align: center;
+}
+.ui-trace-empty p {
+  margin: 0;
+  max-width: 420px;
+  font-size: 12px;
+  line-height: 18px;
+}
+.ui-trace-empty strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+
+.ui-trace-agent {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--ui-muted-fg);
+}
+.ui-trace-agent svg {
+  width: 16px;
+  height: 16px;
+}
+.ui-trace-where[data-elsewhere] {
+  color: var(--ui-link);
+}
+.ui-workspace-card-content footer .ui-trace-mark {
+  font-size: 11px;
+}

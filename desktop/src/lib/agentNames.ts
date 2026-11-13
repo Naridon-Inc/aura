@@ -38,10 +38,8 @@
 //   vendorName(id)  → who is billing you: "Anthropic", "OpenAI", "Google".
 //                     What a cost or usage surface means by "provider".
 //
-// manager/chat/usageAtoms already drew this exact distinction — providerLabel
-// said "Anthropic" while providerBrand said "Claude" — and it was the only one
-// of the six that did. Both come off one table here, so a new agent is added
-// in one place and cannot arrive with a vendor but no product name.
+// The two answers come off one table, so a new agent is added in one place
+// and cannot arrive with a vendor but no product name.
 
 import { titleCaseName } from "@shared/textCase";
 
@@ -72,10 +70,6 @@ const AGENTS: Record<string, AgentEntry> = {
   amp: { agent: "Amp", vendor: "Sourcegraph" },
   windsurf: { agent: "Windsurf", vendor: "Windsurf" },
   aura: { agent: "Aura", vendor: "Aura" },
-  // The paid brain, and a real distinction: plain `aura` is the free built-in
-  // agent, and one of the six read it as "Aura Pro" — naming a tier the user
-  // may not be on.
-  "aura-pro": { agent: "Aura Pro", vendor: "Aura" },
   // Any OpenAI-shaped endpoint the user pointed at themselves. Not OpenAI.
   "openai-compat": { agent: "Local model", vendor: "Local model" },
 };
@@ -96,6 +90,9 @@ const ALIASES: Record<string, string> = {
   // Aura's pre-commit hook writes its own intents; that is Aura, not an agent
   // called "Hook Auto".
   "hook-auto": "aura",
+  // A retired managed brain that answered on Claude. Turns saved while it
+  // existed still carry its id; they read as the model that wrote them.
+  "aura-pro": "claude",
 };
 
 /** The ids that mean "some agent, we were not told which". */

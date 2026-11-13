@@ -55,6 +55,15 @@ function subscribe(cb: () => void): () => void {
   return () => window.removeEventListener(EVENT, cb);
 }
 
+/** Every flagged tab, live. For a strip that builds each tab's menu as it
+ *  renders: the menu has to offer "Mark as read" on a tab that is already
+ *  flagged, so the strip re-renders when any flag changes. */
+export function useUnreadTabs(): ReadonlySet<string> {
+  return useSyncExternalStore(subscribe, () => unread, () => NONE);
+}
+
+const NONE: ReadonlySet<string> = new Set();
+
 /** Live read of the flag for one tab. */
 export function useTabUnread(id: string): boolean {
   return useSyncExternalStore(subscribe, () => unread.has(id), () => false);

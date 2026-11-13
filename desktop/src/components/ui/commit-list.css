@@ -1,0 +1,107 @@
+/* History's saved versions: the trace list's rows in a narrow rail. Added
+   here are the author's face at row size, the short hash taking only the
+   width it needs (the rail has no room for the home list's 160px column),
+   the "you are here" dot, and the empty and loading lines sitting at the top
+   of the rail instead of the middle of a page. */
+
+.ui-commit-list .ui-home-row {
+  gap: 8px;
+  padding: 0 12px;
+}
+.ui-commit-list .ui-home-project {
+  width: auto;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-commit-list .ui-home-project code,
+.ui-workspace-hover .ui-trace-preview-meta code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-commit-list .ui-home-row time {
+  width: auto;
+  min-width: 28px;
+  color: var(--ui-muted-fg);
+  white-space: nowrap;
+}
+.ui-commit-list .ui-trace-row-icon {
+  width: 20px;
+  height: 20px;
+}
+.ui-commit-list-avatar.ui-avatar {
+  width: 20px;
+  height: 20px;
+}
+.ui-commit-list-avatar .ui-avatar-fallback {
+  color: var(--ui-muted-fg);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+.ui-commit-list .ui-home-title {
+  min-width: 35%;
+}
+.ui-commit-list .ui-trace-row-marks {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 35%;
+  overflow: hidden;
+}
+.ui-commit-list-ref[data-remote] {
+  opacity: 0.7;
+}
+.ui-commit-list-here {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.ui-commit-list-refs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ui-state-row.ui-commit-list-state {
+  padding: 12px 14px;
+}
+.ui-state.ui-commit-list-empty {
+  padding: 32px 16px;
+}
+
+/* History's frame: the saved versions in a 360px rail under the details
+   caption, the picked version's story filling the rest, and the shared
+   empty state in its place until one is picked. */
+.ui-history {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+}
+.ui-history-rail {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 360px;
+  min-height: 0;
+  border-right: 1px solid var(--ui-border);
+}
+.ui-history-head {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-history-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.ui-history-detail {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.ui-history-pick {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 0 16px;
+}

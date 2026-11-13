@@ -1,0 +1,182 @@
+/* The plan's fan-out: one lane per step, each on its own brain. It sits inside
+   the plan's "Agent assignments" disclosure, so it is a list on the card's own
+   surface rather than a card of its own — a header row, numbered lanes, and
+   the merged changes and token meter under them once the wave has run. */
+
+.ui-wave {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-wave-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 24px;
+}
+.ui-wave-title {
+  display: inline-flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ui-fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ui-wave-title small,
+.ui-wave-lane small,
+.ui-wave-change-head small {
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  font-weight: 400;
+}
+.ui-wave-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ui-wave-lanes {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+.ui-wave-lane {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+}
+.ui-wave-lane + .ui-wave-lane {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-wave-index {
+  flex-shrink: 0;
+  width: 16px;
+  padding-top: 1px;
+  color: var(--ui-muted-fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: right;
+}
+.ui-wave-lane-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.ui-wave-lane-body > p {
+  margin: 0;
+  color: var(--ui-fg);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.ui-wave-lane-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ui-wave-zones,
+.ui-wave-mono {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.ui-wave-picked {
+  color: var(--ui-green) !important;
+}
+.ui-wave-problem {
+  color: var(--ui-red) !important;
+}
+.ui-wave-problem code {
+  font-family: var(--font-mono);
+}
+.ui-wave-summary {
+  overflow-wrap: anywhere;
+}
+.ui-wave-tail {
+  max-height: 60px;
+  margin: 2px 0 0;
+  padding: 4px 6px;
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  background: var(--ui-muted);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+.ui-wave-brain {
+  flex-shrink: 0;
+  max-width: 160px;
+}
+
+.ui-wave-changes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ui-wave-change {
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+}
+.ui-wave-change-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--ui-muted);
+  font-size: 11px;
+}
+.ui-wave-change-head strong {
+  min-width: 0;
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-wave-change > pre {
+  max-height: 160px;
+  margin: 0;
+  padding: 6px 8px;
+  overflow: auto;
+  color: var(--ui-secondary-fg);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+.ui-wave-meter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  color: var(--ui-muted-fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-wave-meter strong {
+  color: var(--ui-fg);
+  font-family: var(--font-sans);
+  font-weight: 500;
+}
+.ui-wave-meter [data-tone="green"] {
+  color: var(--ui-green);
+}
+.ui-wave-meter-end {
+  margin-left: auto;
+}

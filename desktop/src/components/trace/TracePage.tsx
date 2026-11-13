@@ -23,7 +23,7 @@ import { TraceTabs } from "./TraceTabs";
 import { TraceToolSurface } from "./TraceToolSurface";
 import type { TraceDest } from "./traceRoute";
 import type { TraceKey } from "./traceDestinations";
-import type { TraceActions } from "../AdeSidebar";
+import type { TraceActions } from "./traceActions";
 import { TraceSurface } from "../workpanes/TraceSurface";
 import { IntentInspector } from "../workpanes/IntentInspector";
 import { ProvenanceReplay } from "../workpanes/ProvenanceReplay";
@@ -49,6 +49,8 @@ function activeKeyFor(dest: TraceDest): TraceKey | null {
       return "intent";
     case "graph":
       return "codemap";
+    case "prove":
+      return "goals";
     case "tool":
       return dest.tool;
     default:
@@ -80,7 +82,7 @@ export function TracePage({
   onClose: () => void;
 }): JSX.Element {
   return (
-    <div className="flex h-full min-h-0 flex-col bg-bg-content">
+    <div className="ui-trace-page">
       <TraceTabs
         repoRoot={repoRoot}
         switchProject
@@ -89,7 +91,7 @@ export function TracePage({
         impactsCount={actions.impactsCount}
         busyKey={actions.busyKey}
       />
-      <div className="min-h-0 flex-1">
+      <div className="ui-trace-page-body">
         {dest.kind === "sessions" ? (
           <TraceSurface
             repoRoot={repoRoot}

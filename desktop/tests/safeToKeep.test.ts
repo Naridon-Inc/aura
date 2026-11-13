@@ -229,19 +229,21 @@ async function read(rel: string): Promise<string> {
 }
 
 describe("both surfaces render the verdicts their functions computed", () => {
-  test("the PR rail's grid and its summary come from one list", async () => {
-    const src = await read("components/pr/PrRightRail.tsx");
-    // One Counter element, driven by the map. Four hand-written ones is how
-    // the grid and the summary drifted apart in the first place.
-    expect(src.split("<Counter").length - 1).toBe(1);
-    expect(src).toContain("REVIEW_CHANNELS.map((ch)");
-    expect(src).toContain("count={ch.items(review).length}");
+  test("the PR safety row and its summary come from one list", async () => {
+    const row = await read("components/pr/overview/PrOverviewRows.tsx");
+    // The row's marks are the channel list, mapped — four hand-written ones
+    // is how the counts and the summary drifted apart in the first place.
+    expect(row).toContain("REVIEW_CHANNELS.map((ch)");
+    expect(row).toContain("ch.items(review).length");
+    for (const ch of ["Broken rules", "Ripple effects", "Unproven", "Branch clashes"]) {
+      expect(row).not.toContain(`"${ch}"`);
+    }
     // The summary is the function, fed the payload that may be null.
-    expect(src).toContain("reviewFlash(refreshed.aura_review)");
+    const run = await read("components/pr/overview/useSafetyCheck.ts");
+    expect(run).toContain("reviewFlash(refreshed.aura_review)");
     // And the sentence it used to print exists nowhere.
-    expect(src).not.toContain("all clear");
-    // FindingList reads the same list rather than re-enumerating the four.
-    expect(src).toContain("REVIEW_CHANNELS.find((c) => c.key === section)");
+    expect(row).not.toContain("all clear");
+    expect(run).not.toContain("all clear");
   });
 
   test("the dialog's lead is the function, fed the unproven count", async () => {

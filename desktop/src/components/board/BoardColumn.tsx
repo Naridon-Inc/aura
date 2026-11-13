@@ -1,78 +1,31 @@
-// One board lane — the shell every board surface in the app renders through.
+// One board lane: the shell every board surface in the app renders through,
+// drawn as the task board's column (header with the stage's glyph, name, any
+// lane buttons and its count; a stack of cards; an optional footer).
 //
-// Anatomy follows Plane's column, top to bottom:
+// Three behaviours live here rather than in each board:
 //
-//   ◐  In Progress   3                    ⊟  +   sticky header
-//   ┌────────────────────────────────┐
-//   │ card                           │            body: spaced stack
-//   └────────────────────────────────┘
-//   + New                                         footer: optional quick-add
-//
-// The lane itself has NO background, border or radius at rest — it is a header
-// and a spaced stack, not a panel (see `boardTokens` for why). It becomes a
-// panel for exactly one moment: while you drag a card over it.
-//
-// Three behaviours are baked in here rather than re-implemented per board:
-//
-//   • Drag-over. The lane body tints and rounds, and a 2px accent drop bar
-//     with rounded end-caps marks where the card will land — so "will it go
-//     here?" is answered before you let go. Only boards that pass `onDropCard`
-//     get this; a board whose lane is derived from real state (you can't drag
-//     a working agent into "Done") stays inert.
-//   • Collapse. Plane folds a lane to a narrow strip instead of hiding it, so
-//     the pipeline's shape survives while you focus on one stage. The title
-//     uses real CSS vertical writing-mode, not a rotate transform, so text
-//     metrics and truncation stay correct. Collapsed lanes unmount their
-//     cards rather than hiding them. `collapseWhenEmpty` applies the same fold
-//     automatically to a lane holding nothing, for boards whose lanes are
-//     derived from state and must all render.
+//   • Drag-over. Only boards that pass `onDropCard` get a drop target; the
+//     column shows where the card will go while you hold it over the lane. A
+//     board whose lanes are derived from real state (you can't drag a working
+//     agent into "Done") stays inert.
+//   • Collapse. A lane folds to a narrow strip instead of hiding, so the
+//     pipeline's shape survives while you focus on one stage. The strip's
+//     name uses real vertical writing-mode, not a rotate transform, so text
+//     metrics and truncation stay correct. Folded lanes unmount their cards.
+//     `collapseWhenEmpty` applies the same fold automatically to a lane
+//     holding nothing, for boards whose lanes are derived from state and must
+//     all render.
 //   • Empty + loading. An empty lane keeps its place and says, in plain words,
-//     what would land there. Loading shows the app's one block loader.
+//     what would land there. Loading shows the library's loading line, and
+//     the header holds back its count until there is one to show.
 
 import { useState, type JSX, type ReactNode } from "react";
 import { ChevronsLeftRight, ChevronsRightLeft } from "lucide-react";
 
-import { AsciiSpinner } from "../ui/ascii-spinner";
-import { BoardCount } from "./BoardFrame";
-import {
-  BOARD_CARD_GAP,
-  BOARD_COLUMN_COLLAPSED_WIDTH,
-  BOARD_COLUMN_DRAG_OVER,
-  BOARD_COLUMN_HEADER,
-  BOARD_COLUMN_MIN_BODY,
-  BOARD_COLUMN_SHELL,
-  BOARD_COLUMN_TITLE,
-  BOARD_COLUMN_WIDTH,
-  BOARD_DROP_CAP,
-} from "./boardTokens";
-
-/** The insertion marker: a 2px accent bar capped with a rounded square at each
- *  end. Plane's signature drop affordance — unmistakable, and far calmer than
- *  a full card-shaped ghost slot. */
-function DropIndicator(): JSX.Element {
-  return (
-    <div className="relative h-0.5 w-full rounded-full bg-accent" aria-hidden>
-      <span
-        className="absolute rounded-[2px] bg-accent"
-        style={{
-          width: BOARD_DROP_CAP,
-          height: BOARD_DROP_CAP,
-          left: 0,
-          top: -(BOARD_DROP_CAP - 2) / 2,
-        }}
-      />
-      <span
-        className="absolute rounded-[2px] bg-accent"
-        style={{
-          width: BOARD_DROP_CAP,
-          height: BOARD_DROP_CAP,
-          right: 0,
-          top: -(BOARD_DROP_CAP - 2) / 2,
-        }}
-      />
-    </div>
-  );
-}
+import { Button } from "../ui/button";
+import { LoadingState } from "../ui/state";
+import { TaskBoardColumn } from "../ui/tasks-board";
+import "../ui/board-lane.css";
 
 export function BoardColumn({
   title,
@@ -123,15 +76,9 @@ export function BoardColumn({
   // Set when the reader opens an auto-folded empty lane, so it stays open while
   // they read its hint.
   const [emptyOpened, setEmptyOpened] = useState(false);
-  // Tracked as a counter, not a boolean: dragging across a child card fires
-  // dragleave on the parent, so a naive boolean flickers the highlight off
-  // mid-drag. Enter/leave pairs balance to zero only when the pointer truly
-  // leaves the lane.
-  const [dragDepth, setDragDepth] = useState(0);
-  const dragOver = dragDepth > 0;
   // A count of nothing is a claim, and mid-fetch we haven't got one. The body
-  // already says "Loading…" here, so the header printing "Backlog 0" over a
-  // spinner contradicted the only other thing in the lane.
+  // already says it is loading here, so the header printing "Backlog 0" over
+  // it would contradict the only other thing in the lane.
   const countPending = loading && count === 0;
   const folded =
     collapsed ||
@@ -139,108 +86,61 @@ export function BoardColumn({
 
   if (folded) {
     return (
-      <div
-        className={`${BOARD_COLUMN_SHELL} flex-shrink-0 items-center gap-2 rounded-[4px] bg-bg-2/40 py-2`}
-        style={{ width: BOARD_COLUMN_COLLAPSED_WIDTH }}
-      >
+      <section className="ui-board-lane-folded" aria-label={`${title} lane`} title={titleHint}>
         {glyph}
-        {!countPending && <BoardCount n={count} />}
+        {!countPending && <span className="ui-board-lane-count">{count}</span>}
         {/* Real vertical text flow rather than a rotate transform, so
             truncation and text metrics stay correct. */}
-        <span
-          className="min-h-0 flex-1 overflow-hidden text-ellipsis text-base font-medium text-text-2"
-          style={{ writingMode: "vertical-lr" }}
-        >
-          {title}
-        </span>
-        <button
-          type="button"
+        <h2>{title}</h2>
+        <Button
+          variant="ghost"
+          size="iconXs"
           onClick={() => {
             setCollapsed(false);
             setEmptyOpened(true);
           }}
           title={`Expand ${title}`}
           aria-label={`Expand ${title}`}
-          className="inline-flex h-5 w-5 items-center justify-center rounded-[4px] text-text-4 transition-colors hover:bg-state-hover hover:text-text-1"
         >
-          <ChevronsLeftRight className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />
-        </button>
-      </div>
+          <ChevronsLeftRight />
+        </Button>
+      </section>
     );
   }
 
+  const laneActions =
+    actions || collapsible ? (
+      <>
+        {actions}
+        {collapsible && (
+          <Button
+            variant="ghost"
+            size="iconXs"
+            onClick={() => {
+              setCollapsed(true);
+              setEmptyOpened(false);
+            }}
+            title={`Collapse ${title}`}
+            aria-label={`Collapse ${title}`}
+          >
+            <ChevronsRightLeft />
+          </Button>
+        )}
+      </>
+    ) : undefined;
+
   return (
-    <div
-      className={`${BOARD_COLUMN_SHELL} flex-shrink-0`}
-      style={{ width: BOARD_COLUMN_WIDTH }}
-      onDragEnter={onDropCard ? () => setDragDepth((d) => d + 1) : undefined}
-      onDragLeave={
-        onDropCard ? () => setDragDepth((d) => Math.max(0, d - 1)) : undefined
-      }
-      onDragOver={
-        onDropCard
-          ? (e) => {
-              e.preventDefault();
-              e.dataTransfer.dropEffect = "move";
-            }
-          : undefined
-      }
-      onDrop={
-        onDropCard
-          ? (e) => {
-              e.preventDefault();
-              setDragDepth(0);
-              onDropCard();
-            }
-          : undefined
-      }
+    <TaskBoardColumn
+      label={title}
+      hint={titleHint}
+      count={countPending ? null : count}
+      icon={glyph}
+      actions={laneActions}
+      onDrop={onDropCard}
+      footer={footer}
     >
-      <div className={BOARD_COLUMN_HEADER}>
-        <span className={BOARD_COLUMN_TITLE} title={titleHint}>
-          {glyph}
-          <span className="truncate">{title}</span>
-        </span>
-        {!countPending && <BoardCount n={count} />}
-        <span className="ml-auto inline-flex flex-shrink-0 items-center gap-1">
-          {actions}
-          {collapsible && (
-            <button
-              type="button"
-              onClick={() => {
-                setCollapsed(true);
-                setEmptyOpened(false);
-              }}
-              title={`Collapse ${title}`}
-              aria-label={`Collapse ${title}`}
-              className="inline-flex h-5 w-5 items-center justify-center rounded-[4px] text-text-4 transition-colors hover:bg-state-hover hover:text-text-1"
-            >
-              <ChevronsRightLeft className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />
-            </button>
-          )}
-        </span>
-      </div>
-
-      <div
-        className={`flex-1 overflow-y-auto px-1 py-1 transition-colors ${
-          dragOver ? BOARD_COLUMN_DRAG_OVER : ""
-        }`}
-        style={{ minHeight: BOARD_COLUMN_MIN_BODY }}
-      >
-        <div className="flex flex-col" style={{ gap: BOARD_CARD_GAP }}>
-          {loading && count === 0 ? (
-            <div className="flex items-center gap-1.5 px-1 py-3 text-sm text-text-4">
-              <AsciiSpinner className="text-2xs" />
-              <span>Loading…</span>
-            </div>
-          ) : (
-            children
-          )}
-          {!loading && count === 0 && !dragOver && emptyHint}
-          {dragOver && <DropIndicator />}
-        </div>
-      </div>
-
-      {footer}
-    </div>
+      {countPending ? <LoadingState label="Loading…" className="ui-board-lane-loading" /> : children}
+      {!loading && count === 0 && emptyHint}
+    </TaskBoardColumn>
   );
 }

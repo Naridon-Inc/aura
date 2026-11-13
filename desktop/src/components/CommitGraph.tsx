@@ -167,7 +167,7 @@ export function CommitGraph({ repoRoot, limit = 300, reloadToken = 0 }: Props) {
         {loading && commits.length === 0 ? (
           <div className="flex items-center gap-1.5 px-4 py-3 text-text-4 text-xs">
             <AsciiSpinner className="text-2xs" />
-            <span>Reading the project’s story…</span>
+            <span>Reading the repository’s story…</span>
           </div>
         ) : error ? (
           <div className="px-4 py-3 text-text-4 text-xs">
@@ -175,7 +175,7 @@ export function CommitGraph({ repoRoot, limit = 300, reloadToken = 0 }: Props) {
           </div>
         ) : layout.rows.length === 0 ? (
           <div className="px-4 py-6 text-text-4 text-sm leading-relaxed">
-            No commits yet. Once you save your first version, the project’s
+            No commits yet. Once you save your first version, the repository’s
             story shows up here.
           </div>
         ) : (

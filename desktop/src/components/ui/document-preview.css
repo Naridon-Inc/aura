@@ -1,0 +1,197 @@
+/* A text file's rendered side: a table, a tree, a page or a picture, filling
+   the file view's body and scrolling inside it. */
+
+.ui-doc-preview-note {
+  flex: 1;
+  min-width: 0;
+  padding: 16px;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+  line-height: 20px;
+}
+.ui-doc-preview-scroll {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow: auto;
+  padding: 16px;
+}
+.ui-doc-preview-truncated {
+  margin: 0 0 12px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 16px;
+}
+.ui-doc-preview-scroll > .ui-table-scroll {
+  overflow: visible;
+}
+.ui-table.ui-csv-table {
+  width: max-content;
+  min-width: 100%;
+  white-space: pre;
+}
+.ui-doc-preview-frame {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
+.ui-doc-preview-frame > iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+.ui-doc-preview-picture {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 16px;
+}
+.ui-doc-preview-picture > img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+/* ── the JSON tree ────────────────────────────────────────────────────── */
+
+.ui-json-preview {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.ui-json-tree {
+  margin: 0 0 0 0.125em;
+  padding: 0;
+  border: 0;
+  list-style: none;
+  background: transparent;
+  user-select: none;
+}
+.ui-json-tree ul,
+.ui-json-root {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-json-tree button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.ui-json-label {
+  display: inline-block;
+  color: var(--code-number);
+}
+.ui-json-node {
+  position: relative;
+  padding-top: 0.25em;
+  padding-left: 1.125em;
+}
+.ui-json-node[data-nested] {
+  margin-left: 0.875em;
+}
+.ui-json-node[data-expandable] {
+  padding-left: 0;
+}
+.ui-json-node > .ui-json-label {
+  margin: 0;
+  padding: 0;
+  user-select: text;
+  cursor: default;
+}
+.ui-json-node[data-expandable] > .ui-json-label {
+  user-select: inherit;
+  cursor: pointer;
+}
+.ui-json-item-string {
+  padding-left: 0.5em;
+  color: var(--ui-muted-fg);
+  cursor: default;
+}
+.ui-json-item-type {
+  margin: 0 0.3em;
+}
+.ui-json-children {
+  display: none;
+}
+.ui-json-children[data-expanded] {
+  display: block;
+}
+.ui-json-value {
+  margin-left: 0.875em;
+  padding-top: 0.25em;
+  padding-right: 0;
+  padding-left: 1.25em;
+  overflow-wrap: break-word;
+  word-break: break-all;
+  text-indent: -0.5em;
+  user-select: text;
+}
+.ui-json-value[data-nested] {
+  padding-left: 2.125em;
+}
+.ui-json-value-label {
+  margin: 0 0.5em 0 0;
+}
+.ui-json-value-text {
+  color: var(--code-keyword);
+}
+.ui-json-value-text[data-type="String"] {
+  color: var(--code-string);
+}
+.ui-json-value-text[data-type="Number"] {
+  color: var(--code-number);
+}
+.ui-json-link {
+  color: var(--ui-link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.ui-json-arrow-box {
+  display: inline-block;
+  padding-right: 0.5em;
+  cursor: pointer;
+}
+.ui-json-arrow-box[data-double] {
+  padding-left: 1em;
+}
+.ui-json-arrow {
+  position: relative;
+  margin-left: 0;
+  color: var(--ui-muted-fg);
+  font-size: 0.75em;
+  line-height: 1.1em;
+  transform: rotateZ(0deg);
+  transform-origin: 45% 50%;
+  transition: 150ms;
+}
+.ui-json-arrow[data-expanded] {
+  transform: rotateZ(90deg);
+}
+.ui-json-arrow-inner {
+  position: absolute;
+  top: 0;
+  left: -0.4em;
+  color: var(--ui-muted-fg);
+}
+.ui-json-range {
+  padding-top: 0.25em;
+  color: var(--ui-muted-fg);
+  cursor: pointer;
+}
+.ui-json-range[data-expanded] {
+  padding-top: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-json-arrow {
+    transition: none;
+  }
+}

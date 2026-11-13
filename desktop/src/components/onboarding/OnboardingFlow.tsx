@@ -1,22 +1,19 @@
-// First-run flow (v2). Four calm, full-bleed screens modeled on the
-// reference editor's onboarding, rendered on Aura tokens:
+// First run. Three steps in the shared step flow:
 //
-//   signin  -> Sign in (GitHub / GitLab / Google) or Skip
-//   agent   -> Connect a coding agent (optional)
-//   open    -> Open Project (drop-zone + recents)
-//   new     -> New Project (Empty / Clone / Template)
+//   Sign in  -> GitHub / GitLab / Google, or skip
+//   Agents   -> connect a coding agent (optional)
+//   Project  -> open one (drop a folder, choose one, a recent) or make a new
+//               one (empty / clone / template) on the same step
 //
-// Plus one screen that is not part of that walkthrough:
+// Plus one page that is not part of that walkthrough:
 //
-//   support -> Aura is open source (star + community). Shown once, on a
-//              genuinely new install, on its own — see below.
+//   support  -> Aura is open source (star + community). Shown once, on a
+//               genuinely new install, on its own — see below.
 //
-// Mount contract matches the legacy OnboardingDialog so exactly one
-// first-run surface exists: it auto-opens when
-// localStorage["aura.onboarding.complete"] !== "1", re-opens on the
-// `aura:open-onboarding` event, and marks complete on finish. Opening or
-// creating a project dispatches `aura:open-repo-picker-path`, which App.tsx
-// already turns into loadProjectAt().
+// It re-opens on the `aura:open-onboarding` event and stamps
+// localStorage["aura.onboarding.complete"] on finish. Opening or creating a
+// project dispatches `aura:open-repo-picker-path`, which App.tsx already
+// turns into loadProjectAt().
 
 import { useCallback, useEffect, useState } from "react";
 import { OnboardingShell } from "./OnboardingShell";
@@ -31,22 +28,39 @@ const COMPLETE_KEY = "aura.onboarding.complete";
 
 type Step = "signin" | "agent" | "open" | "new" | "support";
 
+/** Where each page sits in the step list; support stands alone. */
+const STEP_INDEX: Record<Step, number | null> = {
+  signin: 0,
+  agent: 1,
+  open: 2,
+  new: 2,
+  support: null,
+};
+const STEP_AT: Step[] = ["signin", "agent", "open"];
+
 export function OnboardingFlow() {
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState<Step>("signin");
+  const [furthest, setFurthest] = useState(0);
   const [newBusy, setNewBusy] = useState(false);
 
-  // The walkthrough no longer auto-opens on first launch. First-run onboarding
-  // is now the pre-populated "Get Started" workspace (Recipe Box) the app boots
-  // onto — seeing a real project beats a four-screen walkthrough — so those
-  // four screens are opt-in only, re-opened from Settings via the
-  // `aura:open-onboarding` event below. We still stamp COMPLETE_KEY so anything
-  // keying off "onboarded" reads true from the first launch.
+  const go = useCallback((next: Step) => {
+    setStep(next);
+    const at = STEP_INDEX[next];
+    if (at !== null) setFurthest((v) => Math.max(v, at));
+  }, []);
+
+  // The walkthrough doesn't open by itself on first launch. First run is the
+  // pre-populated "Get Started" workspace (Recipe Box) the app boots onto —
+  // a real project beats a walkthrough — so these steps are opt-in, opened
+  // from Settings via the `aura:open-onboarding` event below. COMPLETE_KEY is
+  // still stamped so anything keying off "onboarded" reads true from the
+  // first launch.
   //
-  // The one thing that does show on a new install is the support screen: a
-  // single ask, on its own, before the person has a project open and anything
-  // to lose by reading it. It never returns — `markGreeted` is stamped whether
-  // they act or skip.
+  // The one thing that does show on a new install is the support page: a
+  // single ask, on its own, before the person has a project open and
+  // anything to lose by reading it. It never returns — `markGreeted` is
+  // stamped whether they act or skip.
   useEffect(() => {
     try {
       localStorage.setItem(COMPLETE_KEY, "1");
@@ -59,7 +73,7 @@ export function OnboardingFlow() {
     }
   }, []);
 
-  // Re-openable from Settings (same event the legacy dialog used).
+  // Re-openable from Settings.
   useEffect(() => {
     const onOpen = () => {
       try {
@@ -68,6 +82,7 @@ export function OnboardingFlow() {
         /* private mode */
       }
       setStep("signin");
+      setFurthest(0);
       setNewBusy(false);
       setOpen(true);
     };
@@ -84,7 +99,7 @@ export function OnboardingFlow() {
     setOpen(false);
   }, []);
 
-  // The support screen stands alone: finishing it closes the surface and
+  // The support page stands alone: finishing it closes the surface and
   // spends the one ask this install gets.
   const finishSupport = useCallback(() => {
     markGreeted();
@@ -93,37 +108,22 @@ export function OnboardingFlow() {
 
   if (!open) return null;
 
-  // Back target per step (signin is the entry, so no Back there; support is a
-  // standalone screen with nowhere behind it). While a create is in flight on
-  // the New Project screen we drop Back.
-  const back: (() => void) | null =
-    step === "agent"
-      ? () => setStep("signin")
-      : step === "open"
-        ? () => setStep("agent")
-        : step === "new" && !newBusy
-          ? () => setStep("open")
-          : null;
-
   return (
-    <OnboardingShell onBack={back}>
+    <OnboardingShell
+      step={STEP_INDEX[step]}
+      furthest={furthest}
+      // While a create is in flight the steps hold still: leaving would
+      // strand a half-made repository with nothing showing its progress.
+      onStep={(i) => {
+        if (!newBusy) go(STEP_AT[i]);
+      }}
+    >
       {step === "signin" && (
-        <SignInScreen
-          onAuthed={() => setStep("agent")}
-          onSkip={() => setStep("open")}
-        />
+        <SignInScreen onAuthed={() => go("agent")} onSkip={() => go("open")} />
       )}
-      {step === "agent" && (
-        <ConnectAgentScreen
-          onDone={() => setStep("open")}
-          onSkip={() => setStep("open")}
-        />
-      )}
+      {step === "agent" && <ConnectAgentScreen onDone={() => go("open")} />}
       {step === "open" && (
-        <OpenProjectScreen
-          onOpened={() => finish()}
-          onNewProject={() => setStep("new")}
-        />
+        <OpenProjectScreen onOpened={() => finish()} onNewProject={() => go("new")} />
       )}
       {step === "new" && (
         <NewProjectScreen onCreated={() => finish()} onBusyChange={setNewBusy} />

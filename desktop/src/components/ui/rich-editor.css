@@ -1,0 +1,456 @@
+/* The rich text editor a task's description is written in. While editing it
+   reads as the shared message markdown it will be shown in; added here is the
+   frame around it, its selection toolbar and menus, and the blocks only an
+   editor draws: the empty-line hint, task checkboxes, callouts, toggles,
+   columns, table handles and the code block's language picker. */
+
+.ui-rich-editor {
+  position: relative;
+  width: 100%;
+  overflow-y: auto;
+  color: var(--ui-fg);
+}
+.ui-rich-editor[data-variant="page"],
+.ui-rich-editor[data-variant="bare"] {
+  height: 100%;
+}
+/* Dense is a field that grows with its text, so it never scrolls, and a
+   menu opened on its last line can hang below it. */
+.ui-rich-editor[data-variant="dense"] {
+  overflow: visible;
+  border: 1px solid var(--ui-input);
+  border-radius: 6px;
+}
+.ui-rich-editor[data-variant="dense"]:focus-within {
+  border-color: var(--ui-ring);
+  outline: 1px solid var(--ui-ring);
+}
+.ui-rich-editor-content {
+  min-height: 100%;
+}
+.ui-rich-editor-content[data-fill] {
+  height: 100%;
+}
+.ui-rich-editor-page {
+  width: 100%;
+  padding: 20px 32px;
+}
+
+/* ── the text ──────────────────────────────────────────────────────── */
+
+.ui-rich-editor-prose {
+  min-height: 100%;
+  outline: none;
+}
+.ui-rich-editor-prose[data-pad="dense"] {
+  padding: 6px 12px;
+}
+.ui-rich-editor-prose[data-pad="bare"] {
+  padding: 12px 16px;
+}
+.ui-rich-editor-prose[data-pad="page"] {
+  padding: 24px 32px;
+}
+.ui-rich-editor-prose > :first-child {
+  margin-top: 0;
+}
+.ui-rich-editor-prose > :last-child {
+  margin-bottom: 0;
+}
+.ui-rich-editor-prose p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: var(--ui-muted-fg);
+  pointer-events: none;
+}
+/* The editor wraps a list item's text in a paragraph; the item, not the
+   paragraph, carries the spacing. */
+.ui-rich-editor-prose li > p {
+  margin: 0;
+}
+.ui-rich-editor-prose hr {
+  margin: 16px 0;
+  border: 0;
+  border-top: 1px solid var(--ui-border);
+}
+.ui-rich-editor-prose mark {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ui-yellow) 30%, transparent);
+  color: inherit;
+  box-decoration-break: clone;
+}
+.ui-rich-editor-prose a[href^="aura-wiki:"] {
+  color: var(--ui-link);
+  text-decoration-style: dotted;
+}
+
+/* A task list: the checkbox on the first line, the text beside it. */
+.ui-rich-editor-prose ul[data-type="taskList"] {
+  padding-left: 4px;
+  list-style: none;
+}
+.ui-rich-editor-prose ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.ui-rich-editor-prose ul[data-type="taskList"] li > label {
+  flex: none;
+  margin-top: 4px;
+}
+.ui-rich-editor-prose ul[data-type="taskList"] li > div {
+  flex: 1;
+  min-width: 0;
+}
+.ui-rich-editor-prose ul[data-type="taskList"] li p {
+  margin: 0;
+}
+.ui-rich-editor-prose ul[data-type="taskList"] input[type="checkbox"] {
+  margin: 0;
+  accent-color: var(--ui-fg);
+}
+
+/* A callout, tinted by what it says. */
+.ui-rich-editor-prose .callout {
+  --callout-ink: var(--ui-link);
+  position: relative;
+  margin-block: 12px;
+  padding: 8px 12px 8px 36px;
+  border-left: 3px solid var(--callout-ink);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--callout-ink) 9%, transparent);
+}
+.ui-rich-editor-prose .callout::before {
+  content: attr(data-icon);
+  position: absolute;
+  top: 8px;
+  left: 12px;
+}
+.ui-rich-editor-prose .callout > :first-child {
+  margin-top: 0;
+}
+.ui-rich-editor-prose .callout > :last-child {
+  margin-bottom: 0;
+}
+.ui-rich-editor-prose .callout:is([data-callout-type="tip"], [data-callout-type="success"]) {
+  --callout-ink: var(--ui-green);
+}
+.ui-rich-editor-prose .callout[data-callout-type="warning"] {
+  --callout-ink: var(--ui-yellow);
+}
+.ui-rich-editor-prose .callout[data-callout-type="danger"] {
+  --callout-ink: var(--ui-red);
+}
+
+/* A toggle: the triangle, then the summary and its folded body. */
+.ui-rich-editor-prose div[data-type="details"] {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  margin-block: 6px;
+}
+.ui-rich-editor-prose div[data-type="details"] > button {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ui-muted-fg);
+  cursor: pointer;
+}
+.ui-rich-editor-prose div[data-type="details"] > button::before {
+  content: "▸";
+  font-size: 11px;
+  transition: transform 120ms ease;
+}
+.ui-rich-editor-prose div[data-type="details"].is-open > button::before {
+  transform: rotate(90deg);
+}
+.ui-rich-editor-prose div[data-type="details"] > div {
+  flex: 1;
+  min-width: 0;
+}
+.ui-rich-editor-prose div[data-type="details"] summary {
+  font-weight: 500;
+  list-style: none;
+}
+.ui-rich-editor-prose div[data-type="details"] summary::-webkit-details-marker {
+  display: none;
+}
+.ui-rich-editor-prose div[data-type="details"]:not(.is-open) div[data-type="detailsContent"] {
+  display: none;
+}
+.ui-rich-editor-prose div[data-type="detailsContent"] > :first-child {
+  margin-top: 0;
+}
+
+/* Columns side by side, a rule between them. */
+.ui-rich-editor-prose div[data-type="columns"] {
+  display: flex;
+  gap: 20px;
+  margin-block: 12px;
+}
+.ui-rich-editor-prose div[data-type="column"] {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.ui-rich-editor-prose div[data-type="column"] + div[data-type="column"] {
+  padding-left: 20px;
+  border-left: 1px solid var(--ui-border);
+}
+
+/* A table scrolls rather than widening the editor; the edge of a column is a
+   handle to drag. */
+.ui-rich-editor-prose .tableWrapper {
+  margin-block: 12px;
+  overflow-x: auto;
+}
+.ui-rich-editor-prose .tableWrapper table {
+  margin: 0;
+  table-layout: fixed;
+}
+.ui-rich-editor-prose :is(th, td) {
+  position: relative;
+  min-width: 64px;
+  vertical-align: top;
+}
+.ui-rich-editor-prose :is(th, td) > p {
+  margin: 0;
+}
+.ui-rich-editor-prose th {
+  background: var(--ui-muted);
+  font-weight: 500;
+}
+.ui-rich-editor-prose .column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  bottom: 0;
+  width: 4px;
+  background: var(--ui-link);
+  opacity: 0;
+  cursor: col-resize;
+}
+.ui-rich-editor-prose table:hover .column-resize-handle {
+  opacity: 0.35;
+}
+.ui-rich-editor-prose .selectedCell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--ui-link) 12%, transparent);
+  pointer-events: none;
+}
+
+/* ── code blocks ───────────────────────────────────────────────────── */
+
+/* The box and header are the shared code block's; the language name opens a
+   picker laid invisibly over it. */
+.ui-rich-editor-code header {
+  gap: 8px;
+  min-height: 30px;
+  padding-block: 2px;
+  user-select: none;
+}
+.ui-rich-editor-code pre {
+  margin: 0;
+}
+.ui-rich-editor-code pre code {
+  padding: 0;
+  border: 0;
+  font: inherit;
+}
+.ui-rich-editor-code-lang {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-rich-editor-code-lang svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-rich-editor-code-lang small {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--ui-muted);
+  font-size: 10px;
+}
+.ui-rich-editor-code-lang select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+  appearance: none;
+}
+.ui-rich-editor-code-lang:hover {
+  color: var(--ui-fg);
+}
+.ui-rich-editor-code-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.ui-rich-editor-code-actions .ui-button[aria-pressed="true"] {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-rich-editor-code-empty {
+  margin: 0;
+  padding: 24px 12px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  text-align: center;
+}
+.ui-rich-editor-code :is(.token.comment, .token.prolog, .token.doctype, .token.cdata) {
+  color: var(--ui-muted-fg);
+  font-style: italic;
+}
+.ui-rich-editor-code .token.punctuation {
+  color: var(--ui-muted-fg);
+}
+.ui-rich-editor-code :is(.token.property, .token.tag, .token.boolean, .token.number, .token.constant, .token.symbol, .token.deleted) {
+  color: var(--ui-yellow);
+}
+.ui-rich-editor-code :is(.token.selector, .token.attr-name, .token.string, .token.char, .token.builtin, .token.inserted) {
+  color: var(--ui-green);
+}
+.ui-rich-editor-code :is(.token.atrule, .token.attr-value, .token.keyword, .token.function, .token.class-name) {
+  color: var(--ui-link);
+}
+.ui-rich-editor-code :is(.token.regex, .token.important, .token.variable) {
+  color: var(--ui-red);
+}
+.ui-rich-editor-code :is(.token.important, .token.bold) {
+  font-weight: 600;
+}
+
+/* ── selection toolbar, menus and the block handle ─────────────────── */
+
+.ui-rich-editor-bubble {
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-popover);
+  box-shadow: 0 4px 12px #0003;
+}
+.ui-rich-editor-bubble .ui-toggle {
+  min-width: 28px;
+  padding: 4px;
+}
+.ui-rich-editor-bubble svg {
+  width: 16px;
+  height: 16px;
+}
+.ui-rich-editor-bubble .ui-separator {
+  height: 16px;
+  margin-inline: 2px;
+}
+
+.ui-rich-editor-menu {
+  position: absolute;
+  max-height: 280px;
+}
+.ui-rich-editor-menu[data-menu="block"] {
+  width: 184px;
+}
+.ui-rich-editor-menu[data-menu="turn-into"] {
+  top: 0;
+  left: 180px;
+  width: 176px;
+}
+.ui-rich-editor-menu[data-menu="mention"] {
+  width: 256px;
+}
+.ui-rich-editor-menu .ui-menu-row {
+  width: 100%;
+  background: transparent;
+  cursor: pointer;
+}
+.ui-rich-editor-menu .ui-menu-row[data-highlighted] {
+  background: var(--ui-hover);
+}
+.ui-rich-editor-menu .ui-avatar {
+  width: 20px;
+  height: 20px;
+}
+.ui-rich-editor-menu .ui-avatar-fallback {
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.ui-rich-editor-row-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-rich-editor-row-label[data-stacked] {
+  display: flex;
+  flex-direction: column;
+  line-height: 18px;
+}
+.ui-rich-editor-row-label small {
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+.ui-rich-editor-glyph {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: var(--ui-muted);
+  color: var(--ui-muted-fg);
+  font-size: 10px;
+  font-weight: 500;
+}
+.ui-rich-editor-glyph[data-kind="task"] {
+  color: var(--ui-link);
+}
+
+.ui-rich-editor-handle-portal {
+  z-index: 20;
+}
+.ui-rich-editor-handle {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  transform: translateX(-6px);
+}
+.ui-rich-editor-handle button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ui-muted-fg);
+}
+.ui-rich-editor-handle button:hover {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-rich-editor-handle svg {
+  width: 16px;
+  height: 16px;
+}
+.ui-rich-editor-handle [data-handle="grip"] {
+  cursor: grab;
+}

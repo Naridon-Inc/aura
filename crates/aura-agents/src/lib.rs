@@ -29,6 +29,7 @@ pub mod kimi_coder;
 pub mod opencode;
 pub mod pi;
 pub mod toml_loader;
+pub mod version_cache;
 
 /// What the caller wants the provider to produce. Providers may emit
 /// different argv shapes per mode (e.g. claude one-shot vs. stream-json
@@ -449,12 +450,18 @@ pub struct AgentDescriptor {
 
 impl AgentDescriptor {
     pub fn from_provider(p: &dyn AgentProvider) -> Self {
+        Self::with_version(p, p.version())
+    }
+
+    /// The descriptor with a version already known, so listing the registry
+    /// can take versions from [`version_cache`] instead of spawning each CLI.
+    pub fn with_version(p: &dyn AgentProvider, version: Option<String>) -> Self {
         Self {
             id: p.id().to_string(),
             label: p.label().to_string(),
             bin: p.bin_name().to_string(),
             available: p.is_available(),
-            version: p.version(),
+            version,
             capabilities: p.capabilities(),
             cost_per_1k: p.cost_per_1k(),
         }
@@ -521,11 +528,21 @@ impl Registry {
         self.order.iter()
     }
 
+    /// Every provider's descriptor. Versions come from [`version_cache`]: one
+    /// parallel probe the first time, then from memory, never one `--version`
+    /// spawn per provider per call.
     pub fn descriptors(&self) -> Vec<AgentDescriptor> {
         self.order
             .iter()
-            .map(|p| AgentDescriptor::from_provider(p.as_ref()))
+            .zip(self.versions())
+            .map(|(p, version)| AgentDescriptor::with_version(p.as_ref(), version))
             .collect()
+    }
+
+    /// Each provider's `--version`, in registry order, through
+    /// [`version_cache`].
+    pub fn versions(&self) -> Vec<Option<String>> {
+        version_cache::versions(&self.order)
     }
 
     /// Build a registry preloaded with the compiled-in defaults plus
@@ -578,6 +595,10 @@ pub fn registry() -> Arc<Registry> {
 /// Re-read `~/.aura/agents.toml` and rebuild from defaults. Surfaced to
 /// the UI as `agents_reload`.
 pub fn reload() -> Arc<Registry> {
+    // "Look again" means something was installed, removed or upgraded: where
+    // each binary lives and what version it is are both questions to ask again.
+    bin_resolve::forget();
+    version_cache::forget();
     let new = Arc::new(Registry::with_defaults());
     *registry_cell().write() = new.clone();
     new

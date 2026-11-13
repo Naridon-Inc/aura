@@ -18,7 +18,7 @@
 // Every decision on this screen is in `lib/place/make`. What is left here is
 // drawing, the two calls, and the four states a surface is allowed to be in.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 
 import { CircleCheck, Server, Sparkles } from "lucide-react";
 
@@ -35,8 +35,11 @@ import {
 import { FullscreenOverlay } from "../../FullscreenOverlay";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
+import { Label } from "../../ui/label";
 import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { EmptyState, ErrorState, LoadingState } from "../../ui/state";
+import "../../ui/cloud-onboarding.css";
+import "../../ui/make-place.css";
 
 export function MakePlaceWizard({
   /** The places already on screen, so a name clash is caught before a machine
@@ -69,6 +72,7 @@ export function MakePlaceWizard({
   const [making, setMaking] = useState(false);
   const [failed, setFailed] = useState("");
   const [made, setMade] = useState<MadePlace | null>(null);
+  const nameId = useId();
 
   const loadOffer = useCallback(() => {
     setOffer(null);
@@ -129,90 +133,92 @@ export function MakePlaceWizard({
         )
       }
     >
-      <div className="mx-auto flex w-full max-w-[560px] flex-col gap-5 px-6 py-8">
-        {made ? (
-          <Made made={made} />
-        ) : offerBroke ? (
-          <ErrorState
-            message={`Aura couldn't work out what it can make here. ${offerBroke}`}
-            onRetry={() => void loadOffer()}
-          />
-        ) : offer === null ? (
-          <LoadingState label="Working out what Aura can make for you…" size="md" />
-        ) : !offer.can_make ? (
-          <Barred
-            offer={offer}
-            onRetry={() => void loadOffer()}
-            onConnectInstead={onConnectInstead}
-          />
-        ) : (
-          <>
-            <header className="flex flex-col gap-1">
-              <h2 className="text-lg font-semibold text-text-1">
-                Have Aura make a machine
-              </h2>
-              <p className="text-base text-text-4">
-                It belongs to {offer.org}. Nobody has to buy hardware, install
-                anything or hold a key — Aura keeps the key and lets your
-                teammates in.
-              </p>
-            </header>
+      <div className="ui-make-place">
+        <div className="ui-cloud-setup-page">
+          {made ? (
+            <Made made={made} />
+          ) : offerBroke ? (
+            <ErrorState
+              message={`Aura couldn't work out what it can make here. ${offerBroke}`}
+              onRetry={() => void loadOffer()}
+            />
+          ) : offer === null ? (
+            <LoadingState label="Working out what Aura can make for you…" size="md" />
+          ) : !offer.can_make ? (
+            <Barred
+              offer={offer}
+              onRetry={() => void loadOffer()}
+              onConnectInstead={onConnectInstead}
+            />
+          ) : (
+            <>
+              <header>
+                <h1>Have Aura make a machine</h1>
+                <p>
+                  It belongs to {offer.org}. Nobody has to buy hardware, install
+                  anything or hold a key — Aura keeps the key and lets your
+                  teammates in.
+                </p>
+              </header>
 
-            <label className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium text-text-4">
-                What should it be called?
-              </span>
-              <Input
-                autoFocus
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="design-box"
-                invalid={problem !== null}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") make();
-                }}
-              />
-              {problem ? (
-                <span className="text-xs text-amber">{problem}</span>
-              ) : (
-                <span className="text-xs text-text-5">
-                  How it shows up in everyone's list of places.
-                </span>
-              )}
-            </label>
-
-            <fieldset className="flex flex-col gap-1.5">
-              <legend className="pb-1.5 text-xs font-medium text-text-4">
-                How big?
-              </legend>
-              {offer.sizes.map((s) => (
-                <SizeChoice
-                  key={s.id}
-                  id={s.id}
-                  title={s.title}
-                  detail={s.detail}
-                  suggested={s.suggested}
-                  chosen={size === s.id}
-                  onChoose={() => setSize(s.id)}
+              <div className="ui-make-place-field">
+                <Label htmlFor={nameId} size="small">
+                  What should it be called?
+                </Label>
+                <Input
+                  id={nameId}
+                  autoFocus
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="design-box"
+                  invalid={problem !== null}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") make();
+                  }}
                 />
-              ))}
-            </fieldset>
+                {problem ? (
+                  <small role="alert" data-tone="error">
+                    {problem}
+                  </small>
+                ) : (
+                  <small>How it shows up in everyone's list of places.</small>
+                )}
+              </div>
 
-            {/* The fact this screen exists to surface. Quiet, because it is
-                information rather than a warning — but present before the
-                button, not after the machine. */}
-            <p className="text-xs text-text-5">{entitledLine(offer.entitled)}</p>
+              <fieldset className="ui-make-place-field">
+                <legend className="ui-label" data-size="small" data-weight="plus">
+                  How big?
+                </legend>
+                <div role="radiogroup" aria-label="How big?" className="ui-make-place-sizes">
+                  {offer.sizes.map((s) => (
+                    <SizeChoice
+                      key={s.id}
+                      title={s.title}
+                      detail={s.detail}
+                      suggested={s.suggested}
+                      chosen={size === s.id}
+                      onChoose={() => setSize(s.id)}
+                    />
+                  ))}
+                </div>
+              </fieldset>
 
-            {failed && (
-              <ErrorState
-                size="sm"
-                title="It wasn't made"
-                message={failed}
-                onRetry={make}
-              />
-            )}
-          </>
-        )}
+              {/* The fact this screen exists to surface. Quiet, because it is
+                  information rather than a warning — but present before the
+                  button, not after the machine. */}
+              <small>{entitledLine(offer.entitled)}</small>
+
+              {failed && (
+                <ErrorState
+                  size="sm"
+                  title="It wasn't made"
+                  message={failed}
+                  onRetry={make}
+                />
+              )}
+            </>
+          )}
+        </div>
       </div>
     </FullscreenOverlay>
   );
@@ -221,14 +227,12 @@ export function MakePlaceWizard({
 /** One size. A row, not a card — the house rule is no bulky cards, and four
  *  bordered boxes for four one-line choices is exactly the thing it is about. */
 function SizeChoice({
-  id,
   title,
   detail,
   suggested,
   chosen,
   onChoose,
 }: {
-  id: string;
   title: string;
   detail: string;
   suggested: boolean;
@@ -241,26 +245,16 @@ function SizeChoice({
       role="radio"
       aria-checked={chosen}
       onClick={onChoose}
-      className={`flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${
-        chosen ? "bg-state-selected" : "hover:bg-state-hover"
-      }`}
+      className="ui-make-place-size"
     >
-      <span
-        className={`mt-0.5 flex-none ${chosen ? "text-accent-green" : "text-text-5"}`}
-        aria-hidden
-      >
-        <CircleCheck size={14} />
+      <CircleCheck aria-hidden />
+      <span>
+        <strong>
+          {title}
+          {suggested && <em>Suggested</em>}
+        </strong>
+        <small>{detail}</small>
       </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-2">
-          <span className="text-base text-text-1">{title}</span>
-          {suggested && (
-            <span className="flex-none text-xs text-accent-green">Suggested</span>
-          )}
-        </span>
-        <span className="mt-0.5 block text-xs text-text-5">{detail}</span>
-      </span>
-      <span className="sr-only">{id}</span>
     </button>
   );
 }
@@ -292,13 +286,9 @@ function Barred({
       }
       footnote={
         retry ? (
-          <button
-            type="button"
-            onClick={onConnectInstead}
-            className="text-text-4 underline-offset-4 hover:underline"
-          >
+          <Button variant="link" size="xs" onClick={onConnectInstead}>
             Or connect a machine you already have
-          </button>
+          </Button>
         ) : undefined
       }
     />
@@ -313,11 +303,9 @@ function Made({ made }: { made: MadePlace }) {
       title={`${made.name} is yours`}
       body={madeLine(made)}
       footnote={
-        <span className="text-text-5">
-          {canOpenItNow(made)
-            ? `${entitledLine(made.entitled)} It's in your list of places — open it whenever you like.`
-            : entitledLine(made.entitled)}
-        </span>
+        canOpenItNow(made)
+          ? `${entitledLine(made.entitled)} It's in your list of places — open it whenever you like.`
+          : entitledLine(made.entitled)
       }
     />
   );

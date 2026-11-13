@@ -122,30 +122,30 @@ export function SidebarHeader({
           (the top-level project visit history) grouped beside settings +
           collapse.
 
-          These say "Previous project" / "Next project", not "Back" / "Forward".
+          These say "Previous repository" / "Next repository", not "Back" / "Forward".
           They reload the whole workspace, and the Pages rail has its own
           back/forward roughly 110px below them that steps one page. Two pairs
           of arrows in one column both labelled "Back" is a coin toss. */}
       <div className="flex items-center gap-0.5 flex-shrink-0">
         <Tooltip>
           <TooltipTrigger asChild>
-            <ChromeBtn title="Previous project" tooltip className={ICON_BTN} disabled={!canBack} onClick={onBack}>
+            <ChromeBtn title="Previous repository" tooltip className={ICON_BTN} disabled={!canBack} onClick={onBack}>
               <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
                 <path d="M10 3.5L5.5 8l4.5 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </ChromeBtn>
           </TooltipTrigger>
-          <TooltipContent side="bottom">Previous project</TooltipContent>
+          <TooltipContent side="bottom">Previous repository</TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <ChromeBtn title="Next project" tooltip className={ICON_BTN} disabled={!canForward} onClick={onForward}>
+            <ChromeBtn title="Next repository" tooltip className={ICON_BTN} disabled={!canForward} onClick={onForward}>
               <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
                 <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </ChromeBtn>
           </TooltipTrigger>
-          <TooltipContent side="bottom">Next project</TooltipContent>
+          <TooltipContent side="bottom">Next repository</TooltipContent>
         </Tooltip>
         {onOpenSettings && (
           <Tooltip>

@@ -32,6 +32,9 @@ type Props = {
    *  never a random settings pane. Falls back to onOpenSettings. */
   onOpenStrict?: () => void;
   onFocusChat?: () => void;
+  /** Keep the Aura pill up at rest, as the header's door to Aura (Home with
+   *  its panel open), not only while a turn is running. On when Aura is. */
+  auraDoor?: boolean;
   /** Deep-link to the Capture pane (Settings → Capture) so the user can
    *  turn on the no-MCP passive capture in one click. Falls back to
    *  onOpenSettings. */
@@ -53,6 +56,7 @@ export function StatusPills({
   onOpenStrict,
   onOpenCapture,
   onFocusChat,
+  auraDoor = false,
 }: Props) {
   const [state, setState] = useState<State>({
     strict: false,
@@ -146,10 +150,21 @@ export function StatusPills({
         // unmounted); click to jump back to the conversation.
         <Pill
           tone="ok"
-          title="Aura is working in this project. Click to open the chat"
+          title="Aura is working in this repository. Click to open the chat"
           onClick={onFocusChat}
         >
           <AsciiSpinner className="text-xs" />
+          <span>Aura</span>
+        </Pill>
+      )}
+      {!chatWorking && auraDoor && (
+        // At rest: the way to Aura from any workspace. It opens Home with
+        // Aura's panel beside the list, on the conversation you were having.
+        <Pill
+          tone="neutral"
+          title="Open Aura beside Home (⌥⇧⌘A)"
+          onClick={onFocusChat}
+        >
           <span>Aura</span>
         </Pill>
       )}
@@ -160,7 +175,7 @@ export function StatusPills({
         // a one-time on-ramp, never persistent chrome.
         <Pill
           tone="info"
-          title="Aura isn't recording changes in this project yet. Click to turn it on"
+          title="Aura isn't recording changes in this repository yet. Click to turn it on"
           onClick={onOpenCapture ?? onOpenSettings}
         >
           <ShieldGlyph />

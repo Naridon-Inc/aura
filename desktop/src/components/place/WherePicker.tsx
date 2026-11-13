@@ -13,8 +13,8 @@
 // file is only the flyout, so nothing about which places are offered can be
 // decided twice.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Laptop } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, ChevronDown, Laptop } from "lucide-react";
 
 import { api, type PlaceRoster } from "../../lib/api";
 import {
@@ -23,9 +23,17 @@ import {
   whereOptions,
   type WhereOption,
 } from "../../lib/place";
-import { ChipButton } from "../ui/chip";
+import { cn } from "../../lib/utils";
+import { Button } from "../ui/button";
 import { CloudGlyph } from "../ui/cloud-glyph";
-import { useDismiss } from "../../lib/useDismiss";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
+import "../ui/launcher.css";
 
 /** The choice, remembered per project.
  *
@@ -115,8 +123,8 @@ export function useWherePlaces(
   return { options, chosen: chosenWhere(options, id), choose, loading };
 }
 
-/** The chip and its list. Always rendered with at least one row — this laptop —
- *  so there is never a disabled control or an empty menu to explain. */
+/** The button and its menu. Always rendered with at least one row — this
+ *  laptop — so there is never a disabled control or an empty menu to explain. */
 export function WherePicker({
   places,
   disabled,
@@ -126,67 +134,45 @@ export function WherePicker({
   disabled?: boolean;
   className?: string;
 }) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  useDismiss(open, () => setOpen(false), rootRef);
-
   const { options, chosen, choose } = places;
   const remote = chosen.machineId !== null;
 
   return (
-    <div className={`relative ${className ?? ""}`} ref={rootRef}>
-      <ChipButton
-        onClick={() => setOpen((v) => !v)}
-        disabled={disabled}
-        active={remote}
-      >
-        <WhereGlyph option={chosen} />
-        <span className="max-w-[160px] truncate">{chosen.label}</span>
-      </ChipButton>
-      {open && (
-        <div
-          className="absolute left-0 top-8 z-40 max-h-[40vh] w-[280px] overflow-y-auto rounded-lg py-1 shadow-xl"
-          style={{
-            background: "var(--color-bg-1)",
-            border: "1px solid var(--color-line)",
-          }}
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={disabled}
+          className={cn("ui-where-trigger", className)}
+          data-remote={remote ? "" : undefined}
+          aria-label={`Where this runs: ${chosen.label}`}
+          title="Choose which computer new work runs on"
         >
-          <div className="px-3 pb-1 pt-1.5 text-xs font-medium text-text-4">
-            Where this runs
-          </div>
-          {options.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              onClick={() => {
-                choose(option.id);
-                setOpen(false);
-              }}
-              className="flex w-full items-start gap-2 px-3 py-1.5 text-left transition-colors hover:bg-state-hover"
-            >
-              <span className="mt-[3px] shrink-0">
-                <WhereGlyph option={option} />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span
-                  className={`block truncate text-sm ${
-                    option.id === chosen.id ? "text-text-1" : "text-text-2"
-                  }`}
-                >
-                  {option.label}
-                </span>
-                <span className="block truncate text-2xs text-text-5">
-                  {option.detail}
-                </span>
-              </span>
-              {option.id === chosen.id && (
-                <span className="mt-[2px] shrink-0 text-sm text-accent">✓</span>
-              )}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
+          <WhereGlyph option={chosen} />
+          <span className="ui-where-label">{chosen.label}</span>
+          <ChevronDown className="ui-where-chevron" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="ui-where-menu">
+        <DropdownMenuLabel>Where this runs</DropdownMenuLabel>
+        {options.map((option) => (
+          <DropdownMenuItem
+            key={option.id}
+            className="ui-where-row"
+            data-current={option.id === chosen.id ? "" : undefined}
+            onSelect={() => choose(option.id)}
+          >
+            <WhereGlyph option={option} />
+            <span className="ui-where-row-text">
+              <span>{option.label}</span>
+              <small>{option.detail}</small>
+            </span>
+            {option.id === chosen.id && <Check className="ui-where-check" />}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -195,8 +181,8 @@ export function WherePicker({
  *  here" — not which of three ways a box came to be theirs. */
 function WhereGlyph({ option }: { option: WhereOption }) {
   return option.machineId === null ? (
-    <Laptop size={13} className="text-text-4" />
+    <Laptop size={13} className="ui-where-glyph" />
   ) : (
-    <CloudGlyph size={13} className="text-accent" />
+    <CloudGlyph size={13} className="ui-where-glyph ui-where-glyph-remote" />
   );
 }

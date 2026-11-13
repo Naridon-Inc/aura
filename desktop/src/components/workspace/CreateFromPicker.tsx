@@ -1,371 +1,272 @@
-// CreateFromPicker — the "Create from… ▾" popover for the new-workspace
-// composer. Conductor-style: a single search box that filters BOTH the open
-// pull requests ("Check out a PR") and the branches you can start new work
-// from ("Start new work from…"), with a DEFAULT badge on the repo's default
-// branch. Picking a row resolves to a concrete START POINT for the new
-// worktree — a PR's head_ref, or a branch name.
+// What new work starts from: a branch, an open pull request, or a GitHub
+// issue. One search filters all three. A branch or PR resolves to the git
+// start point of the new copy; an issue starts from HEAD and hands the dialog
+// the issue as its objective.
 //
-// Real data only: branches from `api.gitBranchesRich(repoRoot)`, PRs from the
-// cached `prList` wrapper (`lib/prsCache`) so opening the popover never blocks
-// on a cold `gh pr list`. Row styling mirrors BranchSwitcherModal.
+// Real data only: branches from `gitBranchesRich`, PRs through the cached
+// list so opening the menu never waits on a cold `gh pr list`, issues from
+// `githubIssueList`. The lists load when the menu opens.
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, CircleDot, GitBranch, GitPullRequest, Search } from "lucide-react";
-
+import { useEffect, useMemo, useState } from "react";
 import {
-  api,
-  type GitBranchRich,
-  type GithubIssue,
-  type PrSummary,
-} from "../../lib/api";
-import { fetchPrList, getPrListCached } from "../../lib/prsCache";
-import { prStartPoint } from "../../lib/prStartPoint";
-import { useDismiss } from "../../lib/useDismiss";
+  Check,
+  ChevronDown,
+  CircleDot,
+  GitBranch,
+  GitFork,
+  GitPullRequest,
+} from "lucide-react";
 
-/** What the picker resolves to — the worktree's start point plus a
- *  human label for the chip and the kind so the chip can show the right
- *  glyph. `ref` is the git start point (branch name or PR head_ref). */
+import { Button } from "../ui/button";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
+import { api, type GitBranchRich, type GithubIssue, type PrSummary } from "../../lib/api";
+import { fetchPrList, getPrListCached } from "../../lib/prsCache";
+import { prStartPoint, prStartSelection, type PrStartSelection } from "../../lib/prStartPoint";
+
 export type CreateFromSelection = {
   kind: "branch" | "pr" | "issue";
-  /** Git start point for the new worktree — branch name or PR head_ref. */
+  /** Git start point — a branch name, or a PR's head (fork PRs use the
+   *  `pull/<n>/head:<local>` spelling the backend fetches). */
   ref: string;
-  /** Chip label, e.g. "main" or "#36 feat: …". */
+  /** e.g. "main" or "#36 Retry with backoff". */
   label: string;
-  /** Issue selections seed the composer with this complete mission. */
+  /** An issue hands the dialog this complete objective. */
   prompt?: string;
   issueNumber?: number;
+  /** A pull request from this repo: the work goes on its own branch. */
+  continues?: PrStartSelection["continues"];
 };
 
-type Props = {
-  repoRoot: string;
-  /** Currently-resolved selection (drives the checkmark), or null for the
-   *  implicit default (current/default branch). */
-  value: CreateFromSelection | null;
-  onPick: (sel: CreateFromSelection) => void;
-  onClose: () => void;
-};
-
-/** Is this the branch a new worktree would start from by default — the
- *  current branch, falling back to a conventional default name? */
-function isDefaultBranch(b: GitBranchRich, branches: GitBranchRich[]): boolean {
-  if (b.isRemote) return false;
-  const hasCurrent = branches.some((x) => x.isCurrent && !x.isRemote);
-  if (hasCurrent) return b.isCurrent;
-  // No current branch flagged (detached/odd state) — fall back to the
-  // conventional default-branch names.
-  return b.name === "main" || b.name === "master";
+/** The branch a new workspace starts from unless you pick another: main,
+ *  else master, else the branch checked out now. The dialog seeds its start
+ *  with this and the menu tags the same row, so the two never disagree. */
+export function defaultStartBranch(branches: GitBranchRich[]): GitBranchRich | undefined {
+  const locals = branches.filter((b) => !b.isRemote);
+  return (
+    locals.find((b) => b.name === "main") ??
+    locals.find((b) => b.name === "master") ??
+    locals.find((b) => b.isCurrent) ??
+    locals[0]
+  );
 }
 
-export function CreateFromPicker({ repoRoot, value, onPick, onClose }: Props) {
-  const [branches, setBranches] = useState<GitBranchRich[]>([]);
-  const [prs, setPrs] = useState<PrSummary[]>(() => getPrListCached(repoRoot) ?? []);
-  const [issues, setIssues] = useState<GithubIssue[]>([]);
-  const [loadingBranches, setLoadingBranches] = useState(true);
-  const [loadingIssues, setLoadingIssues] = useState(true);
-  const [query, setQuery] = useState("");
-  const rootRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+function issuePrompt(issue: GithubIssue): string {
+  return [
+    `Work on GitHub issue #${issue.number}: ${issue.title}`,
+    issue.body.trim(),
+    `Issue: ${issue.url}`,
+    "Implement the issue completely, verify the behavior, and report any decisions or remaining risks.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
 
-  // Load branches once on open. Best-effort — an unreadable repo just shows
-  // no branches rather than blanking the whole composer.
+export function CreateFromPicker({
+  repoRoot,
+  value,
+  onPick,
+  open,
+  onOpenChange,
+}: {
+  repoRoot: string | null;
+  value: CreateFromSelection | null;
+  onPick: (selection: CreateFromSelection) => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <DropdownMenu open={open} onOpenChange={onOpenChange}>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm" aria-label="Starting point" disabled={!repoRoot}>
+          <GitFork />
+          <ChevronDown />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="ui-workspaces-create-starts">
+        {repoRoot && <StartPoints repoRoot={repoRoot} value={value} onPick={onPick} />}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function StartPoints({
+  repoRoot,
+  value,
+  onPick,
+}: {
+  repoRoot: string;
+  value: CreateFromSelection | null;
+  onPick: (selection: CreateFromSelection) => void;
+}) {
+  const [branches, setBranches] = useState<GitBranchRich[] | null>(null);
+  const [prs, setPrs] = useState<PrSummary[]>(() => getPrListCached(repoRoot) ?? []);
+  const [issues, setIssues] = useState<GithubIssue[] | null>(null);
+  const [query, setQuery] = useState("");
+
   useEffect(() => {
     let alive = true;
-    setLoadingBranches(true);
+    // Best-effort: an unreadable repository shows no rows, not a broken menu.
     api
       .gitBranchesRich(repoRoot)
-      .then((rows) => {
-        if (alive) setBranches(rows);
-      })
-      .catch(() => {
-        if (alive) setBranches([]);
-      })
-      .finally(() => {
-        if (alive) setLoadingBranches(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [repoRoot]);
-
-  // PRs through the cache: instant from `getPrListCached`, then SWR-refresh.
-  // No `gh` hammering — the cache owns backoff.
-  useEffect(() => {
-    let alive = true;
+      .then((rows) => alive && setBranches(rows))
+      .catch(() => alive && setBranches([]));
     fetchPrList(repoRoot)
-      .then((list) => {
-        if (alive) setPrs(list);
-      })
+      .then((list) => alive && setPrs(list))
       .catch(() => {
-        /* offline / no gh — leave whatever the cache handed us */
+        /* offline / no gh — keep what the cache had */
       });
-    return () => {
-      alive = false;
-    };
-  }, [repoRoot]);
-
-  // Issues are workspace missions rather than git start points. A selection
-  // starts from HEAD and seeds the complete issue body into the composer.
-  useEffect(() => {
-    let alive = true;
-    setLoadingIssues(true);
     api
       .githubIssueList(repoRoot)
-      .then((rows) => {
-        if (alive) setIssues(rows);
-      })
-      .catch(() => {
-        if (alive) setIssues([]);
-      })
-      .finally(() => {
-        if (alive) setLoadingIssues(false);
-      });
+      .then((rows) => alive && setIssues(rows))
+      .catch(() => alive && setIssues([]));
     return () => {
       alive = false;
     };
   }, [repoRoot]);
 
-  // Focus the filter the moment the popover mounts.
-  useEffect(() => {
-    const id = requestAnimationFrame(() => inputRef.current?.focus());
-    return () => cancelAnimationFrame(id);
-  }, []);
-
-  // Click-away + Esc close the popover (the parent composer owns its own
-  // outer Esc; here we just dismiss this layer).
-  useDismiss(true, onClose, rootRef);
-
   const q = query.trim().toLowerCase();
-
-  // Only open PRs are checkout targets. Filter by number/title/branch.
-  const filteredPrs = useMemo(() => {
-    const open = prs.filter((p) => p.state.toLowerCase() === "open");
-    if (!q) return open;
-    return open.filter(
-      (p) =>
-        String(p.number).includes(q) ||
-        p.title.toLowerCase().includes(q) ||
-        p.head_ref.toLowerCase().includes(q),
-    );
-  }, [prs, q]);
-
-  const filteredIssues = useMemo(() => {
-    if (!q) return issues;
-    return issues.filter(
-      (issue) =>
-        String(issue.number).includes(q) ||
-        issue.title.toLowerCase().includes(q) ||
-        issue.body.toLowerCase().includes(q) ||
-        issue.labels.some((label) => label.toLowerCase().includes(q)),
-    );
-  }, [issues, q]);
-
-  // Local branches only for "start new work from" — current first, then the
-  // backend's committerdate order (already sorted).
-  const filteredBranches = useMemo(() => {
-    const locals = branches.filter((b) => !b.isRemote);
+  const fallback = useMemo(() => defaultStartBranch(branches ?? []), [branches]);
+  // The default leads, then the branch checked out now, then the rest.
+  const localBranches = useMemo(() => {
+    const locals = (branches ?? []).filter((b) => !b.isRemote);
     const rows = q ? locals.filter((b) => b.name.toLowerCase().includes(q)) : locals;
-    return [...rows].sort((a, b) => {
-      if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
-      return 0;
-    });
-  }, [branches, q]);
+    const rank = (b: GitBranchRich) => (b === fallback ? 0 : b.isCurrent ? 1 : 2);
+    return [...rows].sort((a, b) => rank(a) - rank(b));
+  }, [branches, q, fallback]);
+  // Only open PRs are something to check out.
+  const openPrs = useMemo(
+    () =>
+      prs.filter(
+        (p) =>
+          p.state.toLowerCase() === "open" &&
+          (!q ||
+            String(p.number).includes(q) ||
+            p.title.toLowerCase().includes(q) ||
+            p.head_ref.toLowerCase().includes(q)),
+      ),
+    [prs, q],
+  );
+  const matchingIssues = useMemo(
+    () =>
+      (issues ?? []).filter(
+        (i) =>
+          !q ||
+          String(i.number).includes(q) ||
+          i.title.toLowerCase().includes(q) ||
+          i.body.toLowerCase().includes(q) ||
+          i.labels.some((l) => l.toLowerCase().includes(q)),
+      ),
+    [issues, q],
+  );
 
-  // A fork's PR has no branch in this repo, so its start point is the
-  // `pull/<n>/head:<local>` spelling the backend fetches before checkout
-  // (see lib/prStartPoint). Same-repo PRs keep starting from head_ref.
-  function pickPr(pr: PrSummary) {
-    onPick({ kind: "pr", ref: prStartPoint(pr), label: `#${pr.number} ${pr.title}` });
-    onClose();
-  }
-
-  function pickIssue(issue: GithubIssue) {
-    const prompt = [
-      `Work on GitHub issue #${issue.number}: ${issue.title}`,
-      issue.body.trim(),
-      `Issue: ${issue.url}`,
-      "Implement the issue completely, verify the behavior, and report any decisions or remaining risks.",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-    onPick({
-      kind: "issue",
-      ref: "HEAD",
-      label: `#${issue.number} ${issue.title}`,
-      prompt,
-      issueNumber: issue.number,
-    });
-    onClose();
-  }
-
-  function pickBranch(b: GitBranchRich) {
-    onPick({ kind: "branch", ref: b.name, label: b.name });
-    onClose();
-  }
-
-  const isSelected = (
-    kind: "branch" | "pr" | "issue",
-    ref: string,
-    issueNumber?: number,
-  ) =>
+  const picked = (kind: CreateFromSelection["kind"], ref: string, issueNumber?: number) =>
     value != null &&
     value.kind === kind &&
     value.ref === ref &&
     (kind !== "issue" || value.issueNumber === issueNumber);
 
   return (
-    <div
-      ref={rootRef}
-      className="absolute left-0 top-8 z-40 w-[340px] overflow-hidden rounded-lg shadow-xl"
-      style={{ background: "var(--color-bg-1)", border: "1px solid var(--color-line)" }}
-      onMouseDown={(e) => e.stopPropagation()}
-    >
-      {/* Search */}
-      <div className="flex items-center gap-2 border-b border-line-soft px-3 py-2">
-        <Search size={13} className="shrink-0 text-text-4" />
-        <input
-          ref={inputRef}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search branches, pull requests, and issues…"
-          className="flex-1 bg-transparent text-base text-text-1 placeholder:text-text-4 focus:outline-none"
-        />
-      </div>
-
-      <div className="max-h-[46vh] overflow-y-auto py-1">
-        {/* Check out a PR */}
-        {filteredPrs.length > 0 && (
-          <>
-            <SectionLabel>Check out a PR</SectionLabel>
-            {filteredPrs.map((pr) => (
-              <button
-                key={`pr-${pr.number}`}
-                type="button"
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  pickPr(pr);
-                }}
-                className="flex w-full items-start gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-state-hover"
-              >
-                <GitPullRequest size={13} className="mt-0.5 shrink-0 text-text-4" />
-                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span className="flex items-center gap-1.5">
-                    <span className="shrink-0 font-mono text-xs text-text-3 tabular-nums">
-                      #{pr.number}
-                    </span>
-                    <span className="truncate text-base text-text-1">{pr.title}</span>
-                    {pr.is_draft && (
-                      <span className="meta-tag">
-                        draft
-                      </span>
-                    )}
-                    {pr.is_cross_repository && (
-                      <span
-                        className="meta-tag"
-                        title={`This pull request comes from ${
-                          pr.head_repo_owner ? `${pr.head_repo_owner}'s` : "a"
-                        } fork. Aura fetches its branch for you.`}
-                      >
-                        fork
-                      </span>
-                    )}
-                  </span>
-                  <span className="truncate font-mono text-2xs text-text-4">
-                    {pr.is_cross_repository && pr.head_repo_owner
-                      ? `${pr.head_repo_owner}:${pr.head_ref}`
-                      : pr.head_ref}
-                  </span>
-                </span>
-                {isSelected("pr", prStartPoint(pr)) && (
-                  <Check size={13} className="mt-0.5 shrink-0 text-accent" />
-                )}
-              </button>
-            ))}
-          </>
-        )}
-
-        {/* Start from a GitHub issue */}
-        {(loadingIssues || filteredIssues.length > 0) && (
-          <>
-            <SectionLabel>Work on a GitHub issue</SectionLabel>
-            {loadingIssues && filteredIssues.length === 0 ? (
-              <div className="px-3 py-2 text-sm text-text-4">
-                Loading issues…
-              </div>
+    <>
+      <input
+        className="ui-workspaces-create-search"
+        aria-label="Search branches, pull requests and issues"
+        placeholder="Search branches, pull requests and issues…"
+        value={query}
+        autoFocus
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key !== "Escape" && e.key !== "Tab") e.stopPropagation();
+        }}
+      />
+      <DropdownMenuLabel>Start from</DropdownMenuLabel>
+      {branches === null ? (
+        <DropdownMenuItem disabled>
+          <AsciiSpinner /> Reading branches…
+        </DropdownMenuItem>
+      ) : localBranches.length === 0 ? (
+        <DropdownMenuItem disabled>No branches match</DropdownMenuItem>
+      ) : (
+        localBranches.map((b) => (
+          <DropdownMenuItem
+            key={`br-${b.name}`}
+            onSelect={() => onPick({ kind: "branch", ref: b.name, label: b.name })}
+          >
+            <GitBranch />
+            <span>{b.name}</span>
+            {picked("branch", b.name) ? (
+              <Check />
             ) : (
-              filteredIssues.map((issue) => (
-                <button
-                  key={`issue-${issue.number}`}
-                  type="button"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    pickIssue(issue);
-                  }}
-                  className="flex w-full items-start gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-state-hover"
-                >
-                  <CircleDot size={13} className="mt-0.5 shrink-0 text-text-4" />
-                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="flex items-center gap-1.5">
-                      <span className="shrink-0 font-mono text-xs text-text-3 tabular-nums">
-                        #{issue.number}
-                      </span>
-                      <span className="truncate text-base text-text-1">
-                        {issue.title}
-                      </span>
-                    </span>
-                    {issue.labels.length > 0 && (
-                      <span className="truncate text-2xs text-text-4">
-                        {issue.labels.join(" · ")}
-                      </span>
-                    )}
-                  </span>
-                  {isSelected("issue", "HEAD", issue.number) && (
-                    <Check size={13} className="mt-0.5 shrink-0 text-accent" />
-                  )}
-                </button>
-              ))
+              b === fallback && <small>default</small>
             )}
-          </>
-        )}
-
-        {/* Start new work from… */}
-        <SectionLabel>Start new work from…</SectionLabel>
-        {loadingBranches && filteredBranches.length === 0 ? (
-          <div className="px-3 py-2 text-sm text-text-4">Loading branches…</div>
-        ) : filteredBranches.length === 0 ? (
-          <div className="px-3 py-2 text-sm text-text-4">No branches match.</div>
-        ) : (
-          filteredBranches.map((b) => (
-            <button
-              key={`br-${b.name}`}
-              type="button"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                pickBranch(b);
-              }}
-              className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors hover:bg-state-hover"
+          </DropdownMenuItem>
+        ))
+      )}
+      {openPrs.length > 0 && (
+        <>
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel>Pull requests</DropdownMenuLabel>
+          {openPrs.map((pr) => (
+            <DropdownMenuItem
+              key={`pr-${pr.number}`}
+              title={
+                pr.is_cross_repository
+                  ? `From ${pr.head_repo_owner ? `${pr.head_repo_owner}'s` : "a"} fork. Aura fetches its branch for you.`
+                  : `Continues on ${pr.head_ref}`
+              }
+              onSelect={() => onPick(prStartSelection(pr))}
             >
-              <GitBranch size={13} className="shrink-0 text-text-4" />
-              <span className="truncate font-mono text-base text-text-1">{b.name}</span>
-              {isDefaultBranch(b, branches) && (
-                <span className="meta-tag">
-                  default
-                </span>
+              <GitPullRequest />
+              <span>{`#${pr.number} ${pr.title}`}</span>
+              {picked("pr", prStartPoint(pr)) ? (
+                <Check />
+              ) : (
+                (pr.is_draft || pr.is_cross_repository) && (
+                  <small>{pr.is_draft ? "draft" : "fork"}</small>
+                )
               )}
-              {isSelected("branch", b.name) && (
-                <Check size={13} className="ml-auto shrink-0 text-accent" />
-              )}
-            </button>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="section-label px-3 pb-1 pt-2">
-      {children}
-    </div>
+            </DropdownMenuItem>
+          ))}
+        </>
+      )}
+      {(issues === null || matchingIssues.length > 0) && (
+        <>
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel>Issues</DropdownMenuLabel>
+          {issues === null ? (
+            <DropdownMenuItem disabled>
+              <AsciiSpinner /> Reading issues…
+            </DropdownMenuItem>
+          ) : (
+            matchingIssues.map((issue) => (
+              <DropdownMenuItem
+                key={`issue-${issue.number}`}
+                title={issue.labels.join(" · ") || undefined}
+                onSelect={() =>
+                  onPick({
+                    kind: "issue",
+                    ref: "HEAD",
+                    label: `#${issue.number} ${issue.title}`,
+                    prompt: issuePrompt(issue),
+                    issueNumber: issue.number,
+                  })
+                }
+              >
+                <CircleDot />
+                <span>{`#${issue.number} ${issue.title}`}</span>
+                {picked("issue", "HEAD", issue.number) && <Check />}
+              </DropdownMenuItem>
+            ))
+          )}
+        </>
+      )}
+    </>
   );
 }

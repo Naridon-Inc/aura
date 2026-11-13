@@ -15,7 +15,11 @@ import { readSrc, stripComments } from "./support/code";
 
 describe("the session detail asks what would happen before it says it", () => {
   it("takes the destination and the words from the plan", async () => {
-    const src = stripComments(await readSrc("components/workpanes/SessionActions.tsx"));
+    // The confirm that prints the plan's words is its own part now.
+    const src = stripComments(
+      (await readSrc("components/workpanes/SessionActions.tsx")) +
+        (await readSrc("components/workpanes/sessionActions/ResumeConfirm.tsx")),
+    );
 
     expect(src).toContain("resumePlan({");
     // The verb changes with the plan: a continuation and a fresh start are

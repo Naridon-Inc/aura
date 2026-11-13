@@ -1,0 +1,41 @@
+/* The resume picker inside the shared command dialog. The dialog, search,
+   list, groups and rows are the library's; this is only what a session row
+   carries beyond a label: its meta line, a dimmed older row, and the Hide
+   action that shows on the row being read. */
+.ui-resume-list {
+  max-height: min(420px, 60dvh);
+}
+.ui-command-item.ui-resume-row {
+  align-items: center;
+}
+.ui-resume-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-resume-label em {
+  color: var(--ui-muted-fg);
+  font-style: normal;
+}
+.ui-resume-label small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-resume-row[data-stale] .ui-resume-label {
+  opacity: 0.7;
+}
+.ui-resume-hide {
+  flex-shrink: 0;
+  opacity: 0;
+}
+.ui-resume-row:hover .ui-resume-hide,
+.ui-resume-row[data-selected="true"] .ui-resume-hide,
+.ui-resume-hide:focus-visible {
+  opacity: 1;
+}
+.ui-command-item.ui-resume-older {
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}

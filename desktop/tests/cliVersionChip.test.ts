@@ -25,16 +25,18 @@
 // permanent relabelled nag: with the current binary first on PATH the chip
 // disappears entirely.
 //
-// AND THE TOAST STAYS QUIET. Replacing the shadowing copy means a macOS
-// admin-password prompt. Asking for one unprompted at launch, to fix
-// something that is not stopping anything, is exactly the nag the toast
-// exists to avoid — so the shadow case is the chip's to carry, silently.
+// THE TOAST REPLACES IT WHEN THAT TAKES NO PASSWORD. A shadow in a folder the
+// user owns (~/.cargo/bin, ~/.local/bin) is replaced at launch like any
+// outdated CLI — otherwise the terminal stays on an old aura after every app
+// update. A root-owned folder means a macOS admin-password prompt, and asking
+// for one unprompted to fix something that isn't stopping anything is the
+// nag the toast exists to avoid — so that case stays the chip's, silently.
 
 import { describe, expect, test } from "bun:test";
 
 import { readSrc } from "./support/code";
 
-const BAR = "components/StatusBar.tsx";
+const CHIP = "components/nav/CliVersionChip.tsx";
 const TOAST = "components/CliUpdateToast.tsx";
 const API = "lib/api.ts";
 const TAURI = "../src-tauri/src/cmd_doctor_cli.rs";
@@ -48,8 +50,8 @@ async function checkFn(): Promise<string> {
 
 /** The `CliVersionChip` component body. */
 async function chip(): Promise<string> {
-  const src = await readSrc(BAR);
-  return src.slice(src.indexOf("function CliVersionChip("));
+  const src = await readSrc(CHIP);
+  return src.slice(src.indexOf("export function CliVersionChip("));
 }
 
 describe("the chip reports the binary the app runs", () => {
@@ -116,7 +118,8 @@ describe("a shadow is only reported on evidence", () => {
 
 describe("the chip renders on the shadow, and only says so once", () => {
   test("visibility includes it alongside outdated and missing", async () => {
-    const src = await readSrc(BAR);
+    // The gate lives where the chip is placed: the sidebar footer, in App.
+    const src = await readSrc("App.tsx");
     const gate = src.slice(
       src.indexOf("{cliVersion &&"),
       src.indexOf("<CliVersionChip"),
@@ -147,32 +150,48 @@ describe("the chip renders on the shadow, and only says so once", () => {
 
   test("the popover prints the shadow state over the raw status", async () => {
     const body = await chip();
-    expect(body).toContain('{shadowed ? "old copy on your PATH" : info.status}');
+    expect(body).toContain(
+      '{shadowed ? "Old copy on your PATH" : STATUS_WORD[info.status] ?? info.status}',
+    );
     // "Aura uses", not "Installed": with two binaries in play, "installed"
     // no longer identifies anything.
     expect(body).toContain("Aura uses");
     // And the other copy gets a row of its own.
     expect(body).toContain("{info.shadowing && (");
-    expect(body).toContain("{info.shadowing.installed} · {info.shadowing.path}");
+    expect(body).toContain("{info.shadowing.installed} · <PathText path={info.shadowing.path} />");
   });
 
   test("the fix is offered in the user's words, not the app's", async () => {
     const body = await chip();
-    expect(body).toContain('info.status === "outdated" ||\n            info.status === "missing" ||\n            shadowed');
+    expect(body).toContain(
+      '(info.status === "outdated" || info.status === "missing" || shadowed)',
+    );
     expect(body).toContain("Aura is fine — it runs the newer one.");
-    expect(body).toContain("type yourself gets the old copy.");
+    expect(body).toContain("yourself gets the old copy.");
     expect(body).toContain("Replace the old copy with ${info.expected}");
   });
 });
 
-describe("the launch toast stays out of it", () => {
-  test("it still bails on ok, which is what the shadow case is", async () => {
+describe("the launch toast replaces a shadow only when no password is needed", () => {
+  test("the backend says whether the shadow's folder is the user's", async () => {
+    const rs = await readSrc(TAURI);
+    const fn = rs.slice(rs.indexOf("fn shadowing_cli("));
+    expect(fn).toContain("let writable = Path::new(&path).parent().is_some_and(dir_writable);");
+    expect(await readSrc(API)).toContain("writable: boolean;");
+  });
+
+  test("ok bails unless the shadow is writable", async () => {
     const src = await readSrc(TOAST);
-    expect(src).toContain(
-      'if (!live() || check.status === "ok" || check.status === "unknown") {',
-    );
-    // No shadow-specific escape hatch snuck in below the bail.
-    expect(src.slice(src.indexOf("if (!live() ||"))).not.toContain("shadowing");
+    expect(src).toContain('if (!live() || check.status === "unknown") return;');
+    expect(src).toContain('const shadow = check.status === "ok" ? check.shadowing : null;');
+    expect(src).toContain('if (check.status === "ok" && !shadow?.writable) return;');
+  });
+
+  test("a shadow is settled per copy, and only once PATH finds the new one", async () => {
+    const src = await readSrc(TOAST);
+    expect(src).toContain("const guardKey = shadow ? `${check.expected}|${shadow.path}` : check.expected;");
+    expect(src).toContain("if (shouldSkipAuto(guardKey)) return;");
+    expect(src).toContain('if (res.status === "ok" && !(shadow && res.shadowing)) {');
   });
 });
 
@@ -189,11 +208,11 @@ describe("one shape, one source", () => {
   });
 
   test("its consumers import it instead of re-declaring it", async () => {
-    const bar = await readSrc(BAR);
+    const bar = await readSrc(CHIP);
     const toast = await readSrc(TOAST);
     const app = await readSrc("App.tsx");
     expect(bar).toContain("type AuraCliCheck");
-    expect(bar).toContain("cliVersion?: AuraCliCheck | null;");
+    expect(bar).toContain("info: AuraCliCheck;");
     expect(toast).toContain("type CliCheck = AuraCliCheck;");
     expect(app).toContain("useState<AuraCliCheck | null>(null)");
     // The four hand-copied literal shapes are gone.

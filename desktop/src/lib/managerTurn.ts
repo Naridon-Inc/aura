@@ -55,13 +55,6 @@ export type ManagerTurnOptions = {
    *  means. Callers that made the session themselves pass what they made it
    *  with, so the pointer they write names the same place the session has. */
   machineId?: string | null;
-  /** Run the turn WITHOUT bringing it to the user's attention: don't repoint
-   *  the project's ambient pointer at this session and don't fire the focus
-   *  event. For background jobs (see lib/auraJob) whose whole point is that
-   *  they don't interrupt the conversation the user is already in. Only
-   *  meaningful alongside `sessionId` — a background turn runs in its own lane,
-   *  never the ambient one. */
-  background?: boolean;
 };
 
 /** Trailing-slash-tolerant root compare — same rule the ambient bookkeeping
@@ -142,17 +135,13 @@ export async function sendAmbientManagerTurn(
   //    cross-workspace sid falls through to a fresh start). Seeding the fresh
   //    session with the prompt makes it the objective; the dispatch below
   //    delivers it as the first user turn (same two-step the rail uses).
-  //    A background turn skips the focus entirely: repointing the ambient
-  //    pointer at a job session would hand the user's next "open Aura here" to
-  //    a PR-drafting job, and firing the focus event would yank the rail off
-  //    whatever they were reading.
   //    The place is read once, here, and used for both the resolution and the
   //    pointer — reading it twice could straddle a change of focus and file the
   //    chat under a place it isn't running in.
   const place = opts.machineId ?? placeForNewWork(repoRoot);
   const sid =
     opts.sessionId ?? (await resolveAmbientSession(repoRoot, trimmed, place));
-  if (!opts.background) focusAmbientManager(repoRoot, sid, place);
+  focusAmbientManager(repoRoot, sid, place);
 
   // 2) Slash sweep — identical interpreter to the in-app composer. A handled
   //    command runs client-side and never reaches the brain; persist it so it

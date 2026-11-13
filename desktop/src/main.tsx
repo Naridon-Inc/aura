@@ -6,6 +6,7 @@ import { PopoutRoot } from "./components/PopoutRoot";
 import { readPopoutParams } from "./lib/popout";
 import { sidebarGlassEnabled } from "./lib/sidebarGlass";
 import { installContextMenuGuard } from "./lib/suppressContextMenu";
+import { watchMotionClock } from "./lib/motionClock";
 import { installErrorReporting } from "./lib/track";
 import { primeCloudOrigins } from "./lib/cloudOrigin";
 import { TooltipProvider } from "./components/ui/tooltip";
@@ -17,6 +18,12 @@ import "@xterm/xterm/css/xterm.css";
 // Kill the native webview right-click menu (Reload / Inspect Element) so the
 // app never reads as a web page. Runs for the main window and every popout.
 installContextMenuGuard();
+
+// Menus and popovers fade in with the interface library's motion, which only
+// shows them if the animation clock runs. WKWebView parks that clock when it
+// thinks the window is hidden; this says so on <html>, and styles.css then
+// opens them instantly instead of leaving them on an invisible first frame.
+watchMotionClock();
 
 // Count uncaught errors and rejected promises. Until this, a webview crash
 // left no trace off the machine at all — a whole surface could be broken in

@@ -1,170 +1,53 @@
-//! Consecutive ACTION tool calls, clubbed into one living status bar.
+//! Consecutive ACTION tool calls, folded into one living step group.
 //!
-//! Read-only bursts collapse into `ExploringGroup` ("Exploring… / Explored").
-//! Their world-changing siblings — a run of edit / write / run / dispatch /
-//! task calls fired back-to-back for the same plan — used to stack as a tower
-//! of separate cards. This clubs them instead: a single bar that *morphs*
-//! through the run. While the brain works it mirrors the active step
-//! ("Editing · ToolCard.tsx" → its result → "Running · cargo check"), a dot
-//! rail tracking how far the sequence has progressed. When the run settles it
-//! reads as one calm summary ("Ran 4 steps · cargo check"). Click expands to
-//! every step's full card — nothing is hidden, just folded.
-//!
-//! The same "intent/plan is the same → show one living status, not ten cards"
-//! ask the user raised for the tool stream. Streaming-only: tool blocks aren't
-//! persisted, so this never has to render a settled-reload timeline.
-//!
-//! Tokens only — colours track the theme; the bar must never out-shout the
-//! prose it sits beside.
+//! Read-only bursts fold into `ExploringGroup`. Their world-changing siblings
+//! — a run of edit / write / run / dispatch calls fired back-to-back for the
+//! same plan — fold here instead of stacking as a tower of rows. While the
+//! brain works, the group line names the step it is on right now ("Editing
+//! ToolCard.tsx", then "Running cargo check"); once the run settles it names
+//! the last step. Opening it shows every step in full — nothing is hidden,
+//! just folded.
 
-import { useState } from "react";
-
+import { ToolGroup } from "../../ui/transcript-patterns";
 import { describeTool } from "./toolDescribe";
 import { ToolCard } from "./ToolCard";
 import { FileDiffTool, isFileDiffTool } from "./FileDiffTool";
-import { toolStatus, type StreamBlock, type ToolStatus } from "./types";
+import { toolStatus, type StreamBlock } from "./types";
 
 type ToolBlock = Extract<StreamBlock, { kind: "tool" }>;
 
-/** Per-tool status from its result: absent → running, error flag → error,
- *  else ok. The same derivation `ToolCard` uses, kept local so the bar and
- *  the cards it expands to agree. */
-function statusOf(t: ToolBlock): ToolStatus {
-  return toolStatus(t.result);
-}
-
-/** Render one tool block the way the bubble would on its own — an inline
- *  Monaco diff for edits/writes with extractable content, else the generic
- *  card. Reused for every row of the expanded list so a clubbed edit keeps
- *  its diff. */
+/** Render one tool block the way the bubble would on its own — the file
+ *  diff for an edit or write with extractable content, else the step row.
+ *  Reused for every row of the open group so a folded edit keeps its diff. */
 function renderToolBlock(t: ToolBlock, key: string | number) {
   if (isFileDiffTool(t.name, t.input)) {
-    return (
-      <FileDiffTool key={key} name={t.name} input={t.input} result={t.result} />
-    );
+    return <FileDiffTool key={key} name={t.name} input={t.input} result={t.result} />;
   }
   return <ToolCard key={key} name={t.name} input={t.input} result={t.result} />;
 }
 
-/** A run of ≥2 consecutive action-tier tool calls, rendered as one morphing
- *  status bar that expands to the individual cards. */
+/** A run of two or more consecutive action steps as one group whose line
+ *  follows the live edge of the run. */
 export function LiveToolStatus({ tools }: { tools: ToolBlock[] }) {
-  const [open, setOpen] = useState(false);
-
-  // The step the bar currently reflects: the first one still running (the
-  // live edge), or — once everything has landed — the last one, so the bar
-  // settles on the final result instead of snapping back to the top.
+  // The step the line reflects: the first one still running (the live edge),
+  // or — once everything has landed — the last one, so the line settles on
+  // the final step instead of snapping back to the top.
   const runningIdx = tools.findIndex((t) => !t.result);
-  const activeIdx = runningIdx === -1 ? tools.length - 1 : runningIdx;
-  const active = tools[activeIdx]!;
-  const activeView = describeTool(active.name, active.input, active.result);
-  const activeStatus = statusOf(active);
-
-  const allDone = runningIdx === -1;
-  const anyError = tools.some((t) => statusOf(t) === "error");
-  const cancelled = tools.filter((t) => statusOf(t) === "cancelled").length;
-  const unknown = tools.filter((t) => statusOf(t) === "unknown").length;
-  const failures = tools.filter((t) => statusOf(t) === "error").length;
-
-  // Headline: while the run is live it IS the active step (verb · subject),
-  // so the one bar morphs action→action as the stream advances. Once settled
-  // it folds into a count + the last subject — the calm post-run summary.
-  const verb = allDone
-    ? `${tools.length} steps${failures + cancelled + unknown ? ` · ${failures + cancelled + unknown} incomplete` : ""}`
-    : activeView.verb;
-  const subject = activeView.subject;
+  const active = tools[runningIdx === -1 ? tools.length - 1 : runningIdx]!;
+  const view = describeTool(active.name, active.input, active.result);
+  const statuses = tools.map((t) => toolStatus(t.result));
+  const detail =
+    runningIdx === -1 ? view.subject : [view.verb, view.subject].filter(Boolean).join(" ");
 
   return (
-    <div>
-      {/* Flat header line — a chevron leads, then a plain verb (no box, no
-          [RUNNING] shout). Live: "Working · N steps"; settled: "Ran N steps".
-          The dot rail + active subject + metric ride the right edge. */}
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        title={`${open ? "Collapse steps" : "Show every step"} · ${failures} failed · ${cancelled} cancelled · ${unknown} without results`}
-        aria-expanded={open}
-        className="aura-tool-row"
-      >
-        {/* Chevron fills the fixed leading column so the verb after it lands at
-            the same x as every other row's verb. */}
-        <span
-          className="aura-tool-glyph"
-          style={{ color: "var(--color-text-4)" }}
-        >
-          <Chevron dir={open ? "up" : "down"} />
-        </span>
-        <span
-          className="aura-tool-chip-verb"
-          style={anyError ? { color: "var(--color-red)" } : undefined}
-        >
-          {verb}
-        </span>
-        {!allDone && (
-          <span
-            className="shrink-0 tabular-nums text-xs"
-            style={{
-              fontFamily: "var(--font-mono)",
-              color: "var(--color-text-3)",
-            }}
-          >
-            · {tools.length} steps
-          </span>
-        )}
-        {/* Right cluster: the dot rail (live progression — done fill green,
-            active pulses, pending hollow), the active step's subject, and its
-            result metric once it lands. Pushed right as one unit. */}
-        <span className="ml-auto flex items-center gap-2 min-w-0">
-          {subject && (
-            <span
-              className={`min-w-0 truncate text-sm ${activeView.mono ? "font-mono" : ""}`}
-              style={{ color: "var(--color-text-3)" }}
-              title={subject}
-            >
-              {subject}
-            </span>
-          )}
-          {activeStatus !== "running" && activeView.metric && (
-            <span
-              className="min-w-0 truncate tabular-nums text-[10.5px]"
-              style={{
-                fontFamily: "var(--font-mono)",
-                color: "var(--color-text-3)",
-              }}
-            >
-              {activeView.metric}
-            </span>
-          )}
-        </span>
-      </button>
-      {open && (
-        <div className="aura-tool-substream">
-          {tools.map((t, i) => renderToolBlock(t, t.tool_use_id || i))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Tiny inline chevron — own SVG, currentColor, rotates on open. */
-function Chevron({ dir }: { dir: "up" | "down" }) {
-  return (
-    <svg
-      width={11}
-      height={11}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      style={{
-        transform: dir === "up" ? "rotate(180deg)" : undefined,
-        transition: "transform var(--motion-fast)",
-      }}
-      aria-hidden
+    <ToolGroup
+      count={tools.length}
+      running={runningIdx !== -1}
+      failed={statuses.filter((s) => s === "error").length}
+      incomplete={statuses.filter((s) => s === "cancelled" || s === "unknown").length}
+      detail={detail}
     >
-      <path d="M4 6l4 4 4-4" />
-    </svg>
+      {tools.map((t, i) => renderToolBlock(t, t.tool_use_id || i))}
+    </ToolGroup>
   );
 }

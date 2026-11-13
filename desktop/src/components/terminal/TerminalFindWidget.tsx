@@ -3,17 +3,22 @@
 // match readout, prev/next navigation, and Aa / .* / W toggles for
 // case-sensitive / regex / whole-word. Esc closes it.
 //
-// It drives the live xterm SearchAddon through the exported helpers in
-// `Terminal.tsx`, keyed by the active terminal's `termId`. The highlight and
-// active-match colors are the SearchAddon decorations declared in
-// `Terminal.tsx` — those live inside the terminal canvas and are part of its
-// own palette, not the app's design tokens.
+// It drives whichever engine backs the pane through the exported helpers in
+// `Terminal.tsx`, keyed by the active terminal's `termId` — the xterm
+// SearchAddon, or the GPU engine's own scanner in Rust. The highlight colors
+// live with the engine that paints them (SearchAddon decorations in
+// `Terminal.tsx`, the palette's search colors in `aura-term-core`), because
+// they are inside the terminal canvas rather than part of the app's tokens.
+//
+// Running the query and stepping through hits are separate calls: the GPU
+// engine lands on the first hit at or after the viewport and stays there, so
+// Enter has to ask for the next one explicitly.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUp, ArrowDown, X } from "lucide-react";
 import {
-  terminalFindNext,
-  terminalFindPrevious,
+  terminalFindRun,
+  terminalFindStep,
   clearTerminalFind,
   onTerminalFindResults,
   type TerminalFindOptions,
@@ -30,6 +35,9 @@ export function TerminalFindWidget({ termId, onClose }: Props) {
   const [query, setQuery] = useState("");
   const [opts, setOpts] = useState<TerminalFindOptions>({});
   const [count, setCount] = useState<{ index: number; total: number } | null>(null);
+  /** Set when the pattern itself will not compile, which is not the same as a
+   *  pattern that matched nothing. */
+  const [patternError, setPatternError] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Focus the field as soon as the widget mounts so the user can type
@@ -53,25 +61,49 @@ export function TerminalFindWidget({ termId, onClose }: Props) {
     return off;
   }, [termId]);
 
-  const runNext = useCallback(
-    (back = false) => {
-      if (!termId) return;
-      if (!query) {
-        clearTerminalFind(termId);
+  /** Apply a status an engine answered with directly. The subscription above
+   *  only fires when a count *changes*, so re-running a query that happens to
+   *  match the same number of lines would otherwise leave a stale readout. */
+  const apply = useCallback((status: { index: number; total: number } | null) => {
+    if (!status) return;
+    setCount(status.total > 0 ? { index: status.index + 1, total: status.total } : null);
+  }, []);
+
+  const run = useCallback(() => {
+    if (!termId) return;
+    if (!query) {
+      clearTerminalFind(termId);
+      setCount(null);
+      setPatternError(false);
+      return;
+    }
+    terminalFindRun(termId, query, opts).then(
+      (status) => {
+        setPatternError(false);
+        apply(status);
+      },
+      () => {
+        // Only a regular expression can fail to compile, and the engine sends
+        // its message back rather than reporting zero hits.
+        setPatternError(true);
         setCount(null);
-        return;
-      }
-      if (back) terminalFindPrevious(termId, query, opts);
-      else terminalFindNext(termId, query, opts);
+      },
+    );
+  }, [termId, query, opts, apply]);
+
+  const step = useCallback(
+    (back: boolean) => {
+      if (!termId || !query) return;
+      terminalFindStep(termId, !back, query, opts).then(apply, () => {});
     },
-    [termId, query, opts],
+    [termId, query, opts, apply],
   );
 
   // Re-run on query / option / target change so the highlight stays live
   // as the user types or flips a toggle.
   useEffect(() => {
-    runNext(false);
-  }, [runNext]);
+    run();
+  }, [run]);
 
   function close() {
     if (termId) clearTerminalFind(termId);
@@ -84,7 +116,7 @@ export function TerminalFindWidget({ termId, onClose }: Props) {
       close();
     } else if (e.key === "Enter") {
       e.preventDefault();
-      runNext(e.shiftKey);
+      step(e.shiftKey);
     }
   }
 
@@ -102,7 +134,13 @@ export function TerminalFindWidget({ termId, onClose }: Props) {
         className="h-6 w-44 rounded bg-bg-content px-2 text-sm text-text-1 placeholder:text-text-4 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/50"
       />
       <span className="w-20 shrink-0 truncate text-center text-xs tabular-nums text-text-4">
-        {query ? (count ? `${count.index} of ${count.total}` : "No results") : ""}
+        {!query
+          ? ""
+          : patternError
+            ? "Bad pattern"
+            : count
+              ? `${count.index} of ${count.total}`
+              : "No results"}
       </span>
       <Toggle active={!!opts.caseSensitive} label="Match Case" onClick={() => setOpts((o) => ({ ...o, caseSensitive: !o.caseSensitive }))}>
         Aa
@@ -113,10 +151,10 @@ export function TerminalFindWidget({ termId, onClose }: Props) {
       <Toggle active={!!opts.regex} label="Match a pattern" onClick={() => setOpts((o) => ({ ...o, regex: !o.regex }))}>
         .*
       </Toggle>
-      <FindBtn label="Previous Match" onClick={() => runNext(true)}>
+      <FindBtn label="Previous Match" onClick={() => step(true)}>
         <ArrowUp className="h-3.5 w-3.5" />
       </FindBtn>
-      <FindBtn label="Next Match" onClick={() => runNext(false)}>
+      <FindBtn label="Next Match" onClick={() => step(false)}>
         <ArrowDown className="h-3.5 w-3.5" />
       </FindBtn>
       <FindBtn label="Close" onClick={close}>

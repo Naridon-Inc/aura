@@ -1,21 +1,10 @@
-// Onboarding glyphs. Provider marks (GitHub / GitLab / Google) keep their
-// real brand silhouettes so the sign-in row reads instantly; the rest are
-// drawn on `currentColor` so they inherit Aura's text tokens. No external
-// icon dependency — these are the only marks the first-run flow needs.
+// Sign-in provider marks (GitHub / GitLab / Google). They keep their real
+// brand silhouettes so each sign-in row reads at a glance; every other glyph
+// on the first-run pages is the icon set the rest of the app uses.
 
 import type { SVGProps } from "react";
 
 type IconProps = SVGProps<SVGSVGElement> & { size?: number };
-
-function base({ size = 16, ...props }: IconProps) {
-  return {
-    width: size,
-    height: size,
-    viewBox: "0 0 16 16",
-    fill: "none" as const,
-    ...props,
-  };
-}
 
 export function GitHubMark({ size = 18, ...props }: IconProps) {
   return (
@@ -67,68 +56,3 @@ export function GoogleMark({ size = 18, ...props }: IconProps) {
   );
 }
 
-export function FolderIcon(props: IconProps) {
-  return (
-    <svg {...base({ size: 20, ...props })}>
-      <path
-        d="M1.5 4.5A1.5 1.5 0 013 3h3.2l1.3 1.6H13a1.5 1.5 0 011.5 1.5v5.4A1.5 1.5 0 0113 13H3a1.5 1.5 0 01-1.5-1.5v-7z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-export function PlusIcon(props: IconProps) {
-  return (
-    <svg {...base({ size: 14, ...props })}>
-      <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-export function EmptyRepoIcon(props: IconProps) {
-  return (
-    <svg {...base({ size: 18, ...props })}>
-      <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M8 5.5v5M5.5 8h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-export function CloneIcon(props: IconProps) {
-  return (
-    <svg {...base({ size: 18, ...props })}>
-      <circle cx="4.5" cy="4" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="4.5" cy="12" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="11.5" cy="6" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M4.5 5.6v4.8M4.5 8h4.2a1.4 1.4 0 001.4-1.4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-export function TemplateIcon(props: IconProps) {
-  return (
-    <svg {...base({ size: 18, ...props })}>
-      <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M2.5 6.2h11M6.2 6.2v7.3" stroke="currentColor" strokeWidth="1.2" />
-    </svg>
-  );
-}
-
-export function BackArrow(props: IconProps) {
-  return (
-    <svg {...base({ size: 15, ...props })}>
-      <path d="M9.5 3.5L5 8l4.5 4.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-export function CheckIcon(props: IconProps) {
-  return (
-    <svg {...base({ size: 14, ...props })}>
-      <path d="M3 8.5l3 3 7-7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}

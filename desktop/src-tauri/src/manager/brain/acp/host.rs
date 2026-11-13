@@ -59,7 +59,24 @@ pub struct AcpHost {
     /// Commands this session is running. Dropped with the host, which is
     /// what stops a closed conversation leaving processes behind.
     terminals: Terminals,
+    /// Told each answer Aura gives on the person's behalf, for a caller
+    /// that keeps its own record of the conversation.
+    resolved: Option<Resolved>,
+    /// Whether this machine's files and shell are the agent's to use. Off
+    /// for an agent running somewhere else, which was told so at the
+    /// handshake; an agent that asks anyway is refused, not served from
+    /// the wrong disk.
+    local_tools: bool,
 }
+
+/// `(kind, payload)`; the kind is an `_aura/…` event name.
+pub type Resolved = Arc<dyn Fn(&str, Value) + Send + Sync>;
+
+/// The event a permission answer is recorded as.
+pub const PERMISSION_RESOLVED: &str = "_aura/permission_resolved";
+
+/// The event a form or link answer is recorded as.
+pub const ELICITATION_RESOLVED: &str = "_aura/elicitation_resolved";
 
 impl AcpHost {
     pub fn new(
@@ -73,7 +90,21 @@ impl AcpHost {
             root,
             session_id: session_id.into(),
             policy,
+            resolved: None,
+            local_tools: true,
         }
+    }
+
+    /// Serve no files and run no commands on this machine. For an agent on
+    /// another one, whose own disk and shell are the right ones.
+    pub fn without_local_tools(mut self) -> Self {
+        self.local_tools = false;
+        self
+    }
+
+    pub fn on_resolved(mut self, resolved: Resolved) -> Self {
+        self.resolved = Some(resolved);
+        self
     }
 
     /// The output of a terminal this session is hosting.
@@ -103,6 +134,11 @@ impl AcpHost {
         let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
 
         let reply = match method_name {
+            m if !self.local_tools && is_local_tool(m) => jsonrpc_error(
+                id,
+                -32601,
+                format!("{m} is not offered: this agent runs on another machine and uses its own"),
+            ),
             method::FS_READ_TEXT_FILE => match self.read_text_file(&params).await {
                 Ok(v) => jsonrpc_result(id, v),
                 Err(msg) => jsonrpc_error(id, -32602, msg),
@@ -112,8 +148,37 @@ impl AcpHost {
                 Err(msg) => jsonrpc_error(id, -32602, msg),
             },
             method::SESSION_REQUEST_PERMISSION => {
-                jsonrpc_result(id, self.request_permission(&params).await)
+                let outcome = self.request_permission(&params).await;
+                if let Some(resolved) = &self.resolved {
+                    resolved(
+                        PERMISSION_RESOLVED,
+                        json!({
+                            "requestId": id,
+                            "optionId": outcome["outcome"].get("optionId").cloned().unwrap_or(Value::Null),
+                            "outcome": outcome["outcome"]["outcome"].clone(),
+                        }),
+                    );
+                }
+                jsonrpc_result(id, outcome)
             }
+            // Held open while the person fills the form, like a
+            // permission; `serve` is already off the stream's loop.
+            method::ELICITATION_CREATE => match self.policy.elicit(&params).await {
+                Ok(answer) => {
+                    if let Some(resolved) = &self.resolved {
+                        resolved(
+                            ELICITATION_RESOLVED,
+                            json!({
+                                "requestId": id,
+                                "action": answer.get("action").cloned().unwrap_or(Value::Null),
+                                "content": answer.get("content").cloned().unwrap_or(Value::Null),
+                            }),
+                        );
+                    }
+                    jsonrpc_result(id, answer)
+                }
+                Err(e) => jsonrpc_error(id, e.code, e.message),
+            },
             method::TERMINAL_CREATE => match self.create_terminal(&params).await {
                 Ok(v) => jsonrpc_result(id, v),
                 Err(msg) => jsonrpc_error(id, -32602, msg),
@@ -357,6 +422,11 @@ fn normalise(p: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// The requests that reach this machine's disk or shell.
+fn is_local_tool(method_name: &str) -> bool {
+    method_name.starts_with("fs/") || method_name.starts_with("terminal/")
 }
 
 #[cfg(test)]

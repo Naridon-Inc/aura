@@ -146,10 +146,10 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "aura_workspace_models",
-            "description": "The model ids the Aura cloud can route a workspace to, with whether this org has a key for each provider. Call it before passing `model` to aura_workspace_create so you name one that will actually run.",
+            "description": "The models a cloud workspace's agent can run (Claude Code's, Codex's), each with the agent that runs it and whether you are signed in to that agent here. Call it before passing `model` to aura_workspace_create so you name one that will actually run.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": {
-                "title": "List Routable Models",
+                "title": "List Workspace Models",
                 "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true,
                 "auraCapability": "auto"
             }

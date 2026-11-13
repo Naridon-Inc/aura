@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
+import { srcTree } from "../../../tests/support/code";
+
 import type { Place } from "./contract";
 import { placeHere, placeOfMachine } from "./contract";
 import {
@@ -141,7 +143,6 @@ describe("telling asleep apart from broken", () => {
     // and the panel's are three opinions that only have to agree until one of
     // them is edited. `contract.ts` is exempt because it is where the field
     // arrives, and this file because it is where the question is answered.
-    const src = `${import.meta.dir}/../..`;
     const mine = new Set([
       "lib/place/sleep.ts",
       "lib/place/sleep.test.ts",
@@ -149,9 +150,8 @@ describe("telling asleep apart from broken", () => {
       "lib/api.ts",
     ]);
     const guilty: string[] = [];
-    for await (const rel of new Bun.Glob("**/*.{ts,tsx}").scan({ cwd: src })) {
+    for (const [rel, text] of await srcTree()) {
       if (mine.has(rel)) continue;
-      const text = await Bun.file(`${src}/${rel}`).text();
       const reads = text.split("\n").filter((line) => {
         const t = line.trim();
         if (!t || t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) {

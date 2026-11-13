@@ -1,0 +1,22 @@
+<!doctype html>
+<!--
+  Visual harness for Aura's panel beside Home: cloud Home with the Aura switch
+  in its toolbar, the panel docked open, and the panel's history listing every
+  conversation with the projects each covers.
+
+  Dev-server only: Vite's build input is index.html, so this page never
+  reaches a bundle. `bun run dev` serves it at
+  /home-aura-harness.html?scene=<name>; the scenes are listed in
+  src/components/home/__harness__/main.tsx.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Home Aura harness</title>
+  </head>
+  <body>
+    <div id="home-aura-harness"></div>
+    <script type="module" src="/src/components/home/__harness__/main.tsx"></script>
+  </body>
+</html>

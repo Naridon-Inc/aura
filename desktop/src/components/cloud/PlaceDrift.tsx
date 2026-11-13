@@ -6,10 +6,10 @@
 // merely undeclared and what the header says; this file only has to not bury
 // them.
 //
-// So: no card, no panel of its own, no border. A label, a sentence, and one
-// line per thing that is wrong — the same rows the sessions above it use, in
-// the same type ladder. A machine that is short three tools should read as
-// three lines you can take in on the way past, not as a report you open.
+// So: no card, no panel of its own. A label, a sentence, and one line per
+// thing that is wrong, in the machine panel's own type ladder. A machine that
+// is short three tools should read as three lines you can take in on the way
+// past, not as a report you open.
 //
 // Takes a `Place`, and there is nothing in here that asks which kind it is:
 // this laptop answers the same question in the same words, which is the only
@@ -30,21 +30,10 @@ import {
   trustWarning,
   type Drift,
   type DriftItem,
-  type DriftTone,
   type Place,
 } from "../../lib/place";
 import { AsciiSpinner } from "../ui/ascii-spinner";
-import { MENU_LABEL } from "../ui/menuSurface";
-
-/** The accent a row carries. One decision, taken from the tone the library
- *  already assigned, so no second opinion about how bad `disputed` is can grow
- *  in a component. */
-const TONE: Record<DriftTone, string> = {
-  bad: "var(--color-red)",
-  warn: "var(--color-amber)",
-  ok: "var(--color-accent)",
-  info: "var(--color-text-4)",
-};
+import { Button } from "../ui/button";
 
 export function PlaceDrift({ place }: { place: Place }) {
   const [drift, setDrift] = useState<Drift | null>(null);
@@ -79,17 +68,13 @@ export function PlaceDrift({ place }: { place: Place }) {
 
   if (asking && !drift) {
     return (
-      <p className="flex items-center gap-1.5 px-2 py-1 text-xs text-text-5">
-        <AsciiSpinner /> Checking what this machine has…
+      <p className="ui-box-asking">
+        <AsciiSpinner size={10} /> Checking what this machine has…
       </p>
     );
   }
   if (error) {
-    return (
-      <p className="px-2 py-1 text-xs" style={{ color: "var(--color-amber)" }}>
-        Couldn’t ask this machine what it has — {error}
-      </p>
-    );
+    return <p data-tone="warn">Couldn’t ask this machine what it has — {error}</p>;
   }
   if (!drift) return null;
 
@@ -103,76 +88,72 @@ export function PlaceDrift({ place }: { place: Place }) {
   const rest = [...extra, ...here];
 
   return (
-    <div className="flex flex-col">
-      <div className="flex items-center justify-between pr-1">
-        <div className={MENU_LABEL}>What this machine has</div>
-        {asking && <AsciiSpinner />}
+    <div className="ui-box-facts-block">
+      <div className="ui-cloud-row">
+        <strong>What this machine has</strong>
+        {asking && <AsciiSpinner size={10} />}
       </div>
 
-      <p className="px-2 pb-0.5 text-xs text-text-4">
+      <p>
         {driftHeadline(drift)}
-        {drift.declares_environment && (
-          <span className="text-text-5"> · {drift.spec_from}</span>
-        )}
+        {drift.declares_environment && <span> · {drift.spec_from}</span>}
       </p>
 
       {/* An edited-since-sealed spec is not a footnote: its commands are the
           ones this place is about to run unattended. */}
-      {warning && (
-        <p className="px-2 pb-0.5 text-xs" style={{ color: "var(--color-amber)" }}>
-          {warning}
-        </p>
+      {warning && <p data-tone="warn">{warning}</p>}
+
+      {short.length > 0 && (
+        <ul className="ui-box-facts">
+          {short.map((item) => (
+            <Row key={item.id} item={item} />
+          ))}
+        </ul>
       )}
 
-      {short.map((item) => (
-        <Row key={item.id} item={item} />
-      ))}
-
       {rest.length > 0 && (
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="xs"
+          className="ui-box-facts-toggle"
+          aria-expanded={open}
           onClick={() => setOpen((o) => !o)}
-          className="flex items-center gap-1 px-2 py-0.5 text-left text-xs text-text-5 transition-colors hover:text-text-3"
         >
-          {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          {open ? <ChevronDown /> : <ChevronRight />}
           {open
             ? "Hide what else is here"
             : extra.length > 0
               ? `${extra.length} here that nothing asked for, ${here.length} as asked`
               : `${here.length} as asked`}
-        </button>
+        </Button>
       )}
 
-      {open && rest.map((item) => <Row key={item.id} item={item} />)}
+      {open && (
+        <ul className="ui-box-facts">
+          {rest.map((item) => (
+            <Row key={item.id} item={item} />
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
 
 /** One line of the diff.
  *
- *  Two lines only when there is something to do about it: the command that
- *  would close the gap gets its own monospace line, because a fix wrapped into
- *  prose is a fix nobody copies. */
+ *  The command that would close the gap is set in monospace, because a fix
+ *  wrapped into prose is a fix nobody copies. The tone is the one the library
+ *  already assigned, so no second opinion about how bad `disputed` is can grow
+ *  in a component. */
 function Row({ item }: { item: DriftItem }) {
-  const colour = TONE[driftTone(item.standing)];
   return (
-    <div className="flex min-w-0 items-baseline gap-1.5 px-2 py-[1px] text-xs">
-      <span
-        aria-hidden
-        className="h-1 w-1 flex-shrink-0 self-center rounded-full"
-        style={{ background: colour }}
-      />
-      <span className="flex-shrink-0 text-text-2">{item.title}</span>
-      <span className="flex-shrink-0" style={{ color: colour }}>
-        {standingWord(item.standing)}
+    <li data-tone={driftTone(item.standing)}>
+      <span aria-hidden className="ui-box-fact-dot" />
+      <span className="ui-box-fact-title">{item.title}</span>
+      <span className="ui-box-fact-word">{standingWord(item.standing)}</span>
+      <span className="ui-box-fact-detail" title={item.detail}>
+        {item.fix ? <code>{item.fix}</code> : item.detail}
       </span>
-      <span className="min-w-0 flex-1 truncate text-text-5" title={item.detail}>
-        {item.fix ? (
-          <code className="font-mono text-text-4">{item.fix}</code>
-        ) : (
-          item.detail
-        )}
-      </span>
-    </div>
+    </li>
   );
 }

@@ -1,12 +1,12 @@
 import { type ReactNode } from "react";
-import { IconButton } from "@medusajs/ui";
-import { XMark } from "@medusajs/icons";
 import {
   Dialog as DialogPrimitive,
-  DialogClose,
-  DialogContent as DialogContentPrimitive,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
   DialogTitle,
 } from "./ui/dialog";
+import "./ui/trace-page.css";
 
 type DialogProps = {
   open: boolean;
@@ -23,56 +23,29 @@ export function Dialog({ open, title, onClose, children, footer, width = 520, in
   if (inline) {
     if (!open) return null;
     return (
-      <div className="flex h-full w-full flex-col bg-bg-2">
-        <div className={`min-h-0 flex-1 ${fill ? "flex" : "overflow-auto"}`}>
-          <div
-            className={`mx-auto w-full px-8 py-7 ${fill ? "flex h-full min-h-0 flex-col" : ""}`}
-            style={{ maxWidth: width }}
-          >
+      <div className="ui-trace-tool">
+        <div className="ui-trace-tool-scroll" data-fill={fill || undefined}>
+          <div className="ui-trace-tool-column" style={{ maxWidth: width }}>
             {children}
           </div>
         </div>
-        {footer && (
-          <div className="flex shrink-0 items-center justify-end gap-2 border-t border-line-soft px-8 py-3">
-            {footer}
-          </div>
-        )}
+        {footer && <footer className="ui-trace-tool-footer">{footer}</footer>}
       </div>
     );
   }
 
   return (
     <DialogPrimitive open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContentPrimitive
-        showCloseButton={false}
-        className="inset-auto left-1/2 top-[18vh] max-w-none translate-x-[-50%] translate-y-0 gap-0 overflow-hidden p-0"
-        style={{ maxWidth: width, width: "100%" }}
-        onPointerDownOutside={onClose}
-        onEscapeKeyDown={onClose}
+      <DialogContent
+        aria-describedby={undefined}
+        style={{ width: `min(${width}px, calc(100vw - 32px))` }}
       >
-        <header className="flex items-center border-b border-line-soft px-4 py-2.5">
-          <DialogTitle className="text-[13px] font-medium leading-5 text-text-1">{title}</DialogTitle>
-          <DialogClose asChild>
-            <IconButton
-              type="button"
-              size="small"
-              variant="transparent"
-              onClick={onClose}
-              className="ml-auto"
-              aria-label="Close dialog"
-              title="Close (esc)"
-            >
-              <XMark aria-hidden />
-            </IconButton>
-          </DialogClose>
-        </header>
-        <div className="px-4 py-3">{children}</div>
-        {footer && (
-          <div className="flex items-center justify-end gap-2 border-t border-line-soft px-4 py-2.5">
-            {footer}
-          </div>
-        )}
-      </DialogContentPrimitive>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+        </DialogHeader>
+        {children}
+        {footer && <DialogFooter>{footer}</DialogFooter>}
+      </DialogContent>
     </DialogPrimitive>
   );
 }

@@ -1,0 +1,7 @@
+/* The app's questions (confirm, notice, a short form) on the shared dialog.
+   A body is whatever the caller had to say, often several lines or a pasted
+   path, so its line breaks are kept and a long word may wrap. */
+.ui-ask .ui-ask-body {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}

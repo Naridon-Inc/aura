@@ -12,23 +12,27 @@
 // person would sit there retyping a code that was always going to be refused.
 
 import { useState, type JSX } from "react";
-import { CircleAlert, LogIn, Users } from "lucide-react";
+import { CircleAlert, FolderGit2, LogIn, Server, User, Users } from "lucide-react";
 
+import { Alert, AlertDescription, AlertTitle } from "../../ui/alert";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
-import { AsciiSpinner } from "../../ui/ascii-spinner";
-import { EmptyState } from "../../ui/state";
+import { SettingsMemberRow } from "../../ui/settings-team-members";
+import { EmptyState, ErrorNote, LoadingState } from "../../ui/state";
 import { Avatar } from "../../team/presentation/Avatar";
 import { AccessGlyph } from "./AccessLevelMenu";
 import { JoinFailureNotice } from "./JoinFailureNotice";
 import { ACCESS_META, type JoinFailure, type JoinPreview } from "./shareTypes";
+import "../../ui/cloud-patterns.css";
+import "../../ui/join-session.css";
 
 /** Take whatever someone pasted and find the code in it. People paste the whole
  *  link as often as they type the six characters, and rejecting a valid link
  *  because it isn't a bare code is a self-inflicted dead end. */
 export function extractJoinCode(input: string): string {
   const text = input.trim();
-  const fromLink = /(?:\/join\/|[?&]code=)([A-Za-z0-9]{4,12})/.exec(text);
+  const fromLink = /(?:\/join\/|\/s\/|[?&]code=)([A-Za-z0-9]{4,12})/.exec(text);
   if (fromLink) return fromLink[1].toLowerCase();
   return text.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
 }
@@ -61,6 +65,14 @@ export function JoinSessionPanel({
   const [joinError, setJoinError] = useState<string | null>(null);
   const code = extractJoinCode(raw);
 
+  // Leaving a preview leaves its join error behind with it. Kept, it would
+  // sit under the NEXT session you look up, blaming that one for a join that
+  // never touched it.
+  function reset() {
+    setJoinError(null);
+    onReset();
+  }
+
   async function join() {
     if (!preview || joining) return;
     setJoining(true);
@@ -81,9 +93,9 @@ export function JoinSessionPanel({
         failure={failure}
         onTryAnother={() => {
           setRaw("");
-          onReset();
+          reset();
         }}
-        onBack={onReset}
+        onBack={reset}
       />
     );
   }
@@ -95,95 +107,101 @@ export function JoinSessionPanel({
     const meta = ACCESS_META[preview.yourAccess];
 
     return (
-      <div className="flex flex-col gap-4">
-        <div className="min-w-0">
-          <p className="text-xs font-medium text-text-4">You&apos;re joining</p>
-          <p className="mt-1 text-lg font-semibold leading-snug text-text-1">
-            {preview.title}
-          </p>
-          <p className="mt-1 text-sm leading-snug text-text-3">
-            Running on {preview.hostName}&apos;s machine ({preview.hostMachine})
-            {preview.repoName ? ` · ${preview.repoName}` : ""}
-          </p>
-        </div>
+      <div className="ui-join-session">
+        <div className="ui-cloud-details">
+          <header>
+            <strong title={preview.title}>{preview.title}</strong>
+          </header>
+          {/* Whose machine, which machine, which project, and what you can
+              do once you are in: the four things to know before walking in. */}
+          <dl className="ui-cloud-resource-table">
+            <dt>
+              <User />
+              Host
+            </dt>
+            <dd>{preview.hostName}</dd>
+            <dt>
+              <Server />
+              Machine
+            </dt>
+            <dd>{preview.hostMachine}</dd>
+            {preview.repoName && (
+              <>
+                <dt>
+                  <FolderGit2 />
+                  Repository
+                </dt>
+                <dd>{preview.repoName}</dd>
+              </>
+            )}
+            <dt>
+              <AccessGlyph level={preview.yourAccess} />
+              Your access
+            </dt>
+            <dd>
+              <strong>{meta.label}</strong>
+            </dd>
+          </dl>
+          <p className="ui-cloud-note">{meta.guestBlurb}</p>
 
-        <section className="flex flex-col gap-2 border-t border-line-soft pt-3.5">
-          <h3 className="text-xs font-medium text-text-4">Already in there</h3>
-          {preview.participants.length === 0 ? (
-            <p className="text-sm text-text-3">
-              Nobody yet. You&apos;d be the first in.
-            </p>
-          ) : (
-            <>
-              <div className="flex flex-wrap items-center gap-2">
-                {preview.participants.map((p) => (
-                  <span
-                    key={p.id}
-                    className="flex items-center gap-1.5 text-sm text-text-2"
-                  >
+          <section>
+            <div className="ui-cloud-row">
+              <strong>Already in there</strong>
+              {preview.participants.length > 0 && (
+                <span className="ui-join-session-count">
+                  {others.length === 1 ? "1 person" : `${others.length} people`}
+                  {agents.length > 0 &&
+                    `, and ${agents.length === 1 ? "1 agent" : `${agents.length} agents`} working`}
+                </span>
+              )}
+            </div>
+            {preview.participants.length === 0 ? (
+              <p>Nobody yet. You&apos;d be the first in.</p>
+            ) : (
+              preview.participants.map((p) => (
+                <SettingsMemberRow
+                  key={p.id}
+                  avatar={
                     <Avatar
                       name={p.name}
                       src={p.avatar}
-                      size={22}
+                      size={26}
                       shape={p.kind === "agent" ? "rounded" : "circle"}
+                      title=""
                     />
-                    {p.name}
-                  </span>
-                ))}
-              </div>
-              <p className="text-xs text-text-4">
-                {others.length === 1 ? "1 person" : `${others.length} people`}
-                {agents.length > 0 &&
-                  `, and ${agents.length === 1 ? "1 agent" : `${agents.length} agents`} working`}
-                .
-              </p>
-            </>
-          )}
-        </section>
-
-        <section className="flex items-start gap-2.5 border-t border-line-soft pt-3.5">
-          <AccessGlyph
-            level={preview.yourAccess}
-            size={14}
-            className={`mt-0.5 shrink-0 ${
-              preview.yourAccess === "drive" ? "text-accent" : "text-text-3"
-            }`}
-          />
-          <p className="min-w-0 text-sm leading-snug text-text-3">
-            <span className="font-medium text-text-2">{meta.label}.</span>{" "}
-            {meta.guestBlurb}
-          </p>
-        </section>
+                  }
+                  name={p.name}
+                  detail={p.kind === "agent" ? "Agent" : p.role === "host" ? "Host" : "Person"}
+                />
+              ))
+            )}
+          </section>
+        </div>
 
         {/* Host offline is a caution, not a wall: the session stays open and
             what you send is kept until they're back. */}
         {!preview.hostOnline && (
-          <p className="flex items-start gap-2 text-sm leading-snug text-amber">
-            <CircleAlert size={13} className="mt-0.5 shrink-0" aria-hidden />
-            {preview.hostName} isn&apos;t at their machine right now, so nothing
-            will run yet. You can still go in and read what happened. Anything
-            you send waits for them.
-          </p>
+          <Alert role="status">
+            <AlertTitle>
+              <CircleAlert size={13} aria-hidden />
+              {preview.hostName} isn&apos;t at their machine right now
+            </AlertTitle>
+            <AlertDescription>
+              Nothing will run yet. You can still go in and read what happened. Anything you
+              send waits for them.
+            </AlertDescription>
+          </Alert>
         )}
 
-        {joinError && (
-          <p role="alert" className="text-sm leading-snug text-red">
-            {joinError}
-          </p>
-        )}
+        {joinError && <ErrorNote>{joinError}</ErrorNote>}
 
-        <div className="flex items-center gap-2">
-          <Button
-            variant="accentSoft"
-            onClick={() => void join()}
-            disabled={joining}
-            className="flex-1"
-          >
-            {joining ? <AsciiSpinner /> : <LogIn size={14} />}
-            Join this session
-          </Button>
-          <Button variant="ghost" onClick={onReset} disabled={joining}>
+        <div className="ui-pattern-actions">
+          <Button variant="ghost" onClick={reset} disabled={joining}>
             Back
+          </Button>
+          <Button onClick={() => void join()} disabled={joining}>
+            {joining ? <AsciiSpinner /> : <LogIn />}
+            Join this session
           </Button>
         </div>
       </div>
@@ -192,17 +210,12 @@ export function JoinSessionPanel({
 
   // ── Looking it up ───────────────────────────────────────────────────────
   if (looking) {
-    return (
-      <div className="flex flex-col items-center gap-2.5 px-4 py-10 text-center">
-        <AsciiSpinner className="text-base" />
-        <p className="text-base text-text-3">Finding that session…</p>
-      </div>
-    );
+    return <LoadingState size="md" label="Finding that session…" />;
   }
 
   // ── The code box ────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col gap-4">
+    <div className="ui-join-session">
       <EmptyState
         icon={Users}
         title="Join someone's session"
@@ -211,7 +224,7 @@ export function JoinSessionPanel({
       />
 
       <form
-        className="flex items-center gap-2"
+        className="ui-cloud-inline"
         onSubmit={(e) => {
           e.preventDefault();
           if (code) void onLookup(code);
@@ -223,17 +236,16 @@ export function JoinSessionPanel({
           placeholder="Code or link"
           aria-label="Session code or link"
           autoFocus
-          className="font-mono text-base"
         />
-        <Button type="submit" variant="accentSoft" disabled={!code}>
+        <Button type="submit" disabled={!code}>
           Look it up
         </Button>
       </form>
 
-      <p className="text-xs leading-snug text-text-4">
-        You&apos;ll see what the session is and who&apos;s in it before you join
-        anything. Aura checks your account against the team that owns it. You
-        can only get into sessions belonging to a team you&apos;re part of.
+      <p className="ui-cloud-note">
+        You&apos;ll see what the session is and who&apos;s in it before you join anything. Aura
+        checks your account against the team that owns it. You can only get into sessions
+        belonging to a team you&apos;re part of.
       </p>
     </div>
   );

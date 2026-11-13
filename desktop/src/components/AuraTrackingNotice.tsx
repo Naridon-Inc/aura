@@ -1,4 +1,4 @@
-// Thin top-strip that makes "Aura is always running" visible without
+// Sidebar notice that makes "Aura is always running" visible without
 // nagging. On repo focus it calls `aura_ensure_tracked`, which silently
 // turns on capture + wires the agents for any git repo. This component only
 // renders when there's something worth saying:
@@ -11,8 +11,8 @@
 //     auto-dismisses. When the repo was already tracked, it renders
 //     nothing — silence is the success state.
 //
-// Two inks, both earned: green on the confirmation because it reports state,
-// amber on the action strip because it's asking the reader to do something.
+// Two marks, both earned: green on the confirmation because it reports state,
+// yellow on the action notice because it's asking the reader to do something.
 // Nothing here is coloured just to be a category.
 //
 // ── The dead "Try again" ────────────────────────────────────────────────
@@ -40,7 +40,8 @@ import {
   type AuraTrackStatus,
 } from "../lib/api";
 import { isNeedsAuthError } from "./CliUpdateToast";
-import { AsciiSpinner } from "./ui/ascii-spinner";
+import { Button } from "./ui/button";
+import { ShellNotice } from "./ui/shell-notice";
 
 type Props = {
   repoRoot: string;
@@ -197,7 +198,7 @@ export function noticeCopy(state: TrackAttempt): NoticeCopy {
     error ??
     status?.detail ??
     (isGit
-      ? "Aura couldn't start tracking this project."
+      ? "Aura couldn't start tracking this repository."
       : "This folder isn't a Git repository yet. Aura tracks changes on top of Git.");
 
   // Name that the attempt happened, and count it. Silence after a press is
@@ -349,35 +350,10 @@ export function AuraTrackingNotice({ repoRoot, onCliUpdated }: Props) {
   // ── Success confirmation (just turned on) ──────────────────────────────
   if (status.is_git && status.tracked && status.newly_enabled) {
     return (
-      <div
-        className="flex items-center gap-2 h-7 px-3 text-sm border-b"
-        style={{
-          background: "color-mix(in oklab, var(--color-green) 12%, transparent)",
-          borderColor: "color-mix(in oklab, var(--color-green) 34%, transparent)",
-          color: "var(--color-green)",
-        }}
-        role="status"
-      >
-        <span
-          className="inline-block w-1.5 h-1.5 rounded-full"
-          style={{ background: "var(--color-green)" }}
-        />
-        <span className="section-label">
-          Aura on
-        </span>
-        <span className="text-text-2 truncate flex-1">
-          Now tracking this project. Every AI edit gets a reason, and off-scope
-          changes get flagged.
-        </span>
-        <button
-          type="button"
-          onClick={() => setDismissed(true)}
-          className="text-sm w-5 h-5 rounded hover:bg-state-hover transition-colors text-text-4 hover:text-text-1"
-          title="Dismiss"
-        >
-          ✕
-        </button>
-      </div>
+      <ShellNotice tone="ok" onDismiss={() => setDismissed(true)}>
+        <strong>Aura on.</strong> Now tracking this repository. Every AI edit gets
+        a reason, and off-scope changes get flagged.
+      </ShellNotice>
     );
   }
 
@@ -395,103 +371,60 @@ export function AuraTrackingNotice({ repoRoot, onCliUpdated }: Props) {
       .catch(() => {});
   }
 
+  const ctaTitle = !status.is_git
+    ? "Set this folder up for Git and start tracking it with Aura"
+    : privacyPath
+      ? `Open Full Disk Access so macOS lets Aura read ${privacyPath}`
+      : attempt.needsPassword
+        ? "Update Aura's helper — this asks for your password"
+        : status.stale_cli
+          ? "Replace the out-of-date Aura helper on this computer, then switch tracking on"
+          : "Start tracking this repository with Aura";
+
   return (
-    <div
-      className="border-b"
-      style={{
-        background: "color-mix(in oklab, var(--color-amber) 12%, transparent)",
-        borderColor: "color-mix(in oklab, var(--color-amber) 34%, transparent)",
-        color: "var(--color-amber)",
+    <ShellNotice
+      tone="attention"
+      busy={busy}
+      action={{
+        label: busy ? "Working…" : cta,
+        onClick: () =>
+          privacyPath
+            ? void api.openMacosPrivacyPane("Privacy_AllFiles")
+            : void turnOn(attempt.needsPassword),
+        disabled: busy,
+        title: ctaTitle,
       }}
-      role="status"
+      // Everything the tool actually said stays one press away rather than
+      // lost, without making the notice tall by default.
+      secondary={
+        details
+          ? {
+              label: expanded ? "Hide details" : "Details",
+              onClick: () => setExpanded((v) => !v),
+              title: expanded ? "Hide the full message" : "Show the full message",
+            }
+          : undefined
+      }
+      detail={
+        expanded && details ? (
+          <>
+            <pre>{details}</pre>
+            {showInstallCommand && (
+              <>
+                <span>or install it yourself:</span>
+                <code title={AURA_CLI_INSTALL_COMMAND}>{AURA_CLI_INSTALL_COMMAND}</code>
+                <Button size="xs" variant="ghost" onClick={copyInstall} title="Copy install command">
+                  {copied ? "Copied" : "Copy"}
+                </Button>
+              </>
+            )}
+          </>
+        ) : undefined
+      }
+      onDismiss={() => setDismissed(true)}
     >
-      <div className="flex items-center gap-2 h-7 px-3 text-sm">
-        <span
-          className="inline-block w-1.5 h-1.5 rounded-full"
-          style={{ background: "var(--color-amber)" }}
-        />
-        <span className="section-label">
-          Aura off
-        </span>
-        {/* The strip is one line tall, so a long reason clips — the full text
-            stays reachable on hover, and everything the tool actually said is
-            behind Details rather than lost to the clip. */}
-        <span className="text-text-2 truncate flex-1" title={line}>
-          {line}
-        </span>
-        {details && (
-          <button
-            type="button"
-            onClick={() => setExpanded((v) => !v)}
-            className="text-xs px-1.5 py-0.5 rounded hover:bg-state-hover text-text-3"
-            aria-expanded={expanded}
-            title={expanded ? "Hide the full message" : "Show the full message"}
-          >
-            {expanded ? "Hide details" : "Details"}
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={() =>
-            privacyPath
-              ? void api.openMacosPrivacyPane("Privacy_AllFiles")
-              : void turnOn(attempt.needsPassword)
-          }
-          disabled={busy}
-          className="flex items-center gap-1 text-xs px-2 py-0.5 rounded font-medium bg-accent text-bg-0 hover:opacity-90 disabled:opacity-50"
-          title={
-            !status.is_git
-              ? "Set this folder up for Git and start tracking it with Aura"
-              : privacyPath
-                ? `Open Full Disk Access so macOS lets Aura read ${privacyPath}`
-                : attempt.needsPassword
-                ? "Update Aura's helper — this asks for your password"
-                : status.stale_cli
-                  ? "Replace the out-of-date Aura helper on this computer, then switch tracking on"
-                  : "Start tracking this project with Aura"
-          }
-        >
-          {/* Inherits the button's ink — the spinner's usual amber would sit on
-              the accent fill and disappear. */}
-          {busy && <AsciiSpinner className="text-xs leading-none text-bg-0" />}
-          {busy ? "Working…" : cta}
-        </button>
-        <button
-          type="button"
-          onClick={() => setDismissed(true)}
-          className="text-sm w-5 h-5 rounded hover:bg-state-hover transition-colors text-text-4 hover:text-text-1"
-          title="Dismiss"
-        >
-          ✕
-        </button>
-      </div>
-      {expanded && details && (
-        <div className="px-3 pb-2 flex flex-col gap-1.5">
-          <pre className="m-0 font-mono text-xs whitespace-pre-wrap break-words text-text-3 select-text">
-            {details}
-          </pre>
-          {showInstallCommand && (
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs text-text-4">or install it yourself:</span>
-              <code
-                className="flex-1 font-mono text-xs px-1.5 py-1 rounded bg-bg-2 truncate text-text-3"
-                title={AURA_CLI_INSTALL_COMMAND}
-              >
-                {AURA_CLI_INSTALL_COMMAND}
-              </code>
-              <button
-                type="button"
-                onClick={copyInstall}
-                className="text-xs px-2 py-1 rounded hover:bg-state-hover text-text-3"
-                title="Copy install command"
-              >
-                {copied ? "Copied" : "Copy"}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+      <strong>Aura off.</strong> {line}
+    </ShellNotice>
   );
 }
 

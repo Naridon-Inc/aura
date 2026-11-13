@@ -1,0 +1,32 @@
+/* Who is on a task, as a row of the library avatar overlapping a little, the
+   way the branch switcher shows who is on a branch. Dense is a step smaller,
+   for a table cell. */
+.ui-assignee-stack {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+}
+.ui-assignee-stack .ui-avatar {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--ui-bg);
+}
+.ui-assignee-stack .ui-avatar + .ui-avatar {
+  margin-left: -4px;
+}
+.ui-assignee-stack .ui-avatar-fallback {
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.ui-assignee-stack[data-dense] .ui-avatar {
+  width: 16px;
+  height: 16px;
+}
+.ui-assignee-stack[data-dense] .ui-avatar-fallback {
+  font-size: 9px;
+}
+.ui-assignee-stack-more {
+  margin-left: 4px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}

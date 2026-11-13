@@ -1,0 +1,150 @@
+/* Task form — additions to the shared dialog form. */
+.ui-tasks-form-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 12px;
+  margin-top: 16px;
+}
+.ui-tasks-form-row > .ui-form-field + .ui-form-field {
+  margin-top: 0;
+}
+.ui-form-field + .ui-tasks-form-row,
+.ui-tasks-form-row + .ui-form-field,
+.ui-tasks-form-row + .ui-check-label,
+.ui-form-field + .ui-check-label {
+  margin-top: 16px;
+}
+@media (max-width: 520px) {
+  .ui-tasks-form-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.ui-tasks-form-heading {
+  margin: 24px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--ui-border);
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  font-weight: 500;
+}
+.ui-tasks-form-heading + .ui-form-field,
+.ui-tasks-form-heading + .ui-tasks-form-row {
+  margin-top: 12px;
+}
+.ui-tasks-form-error {
+  margin: 16px 0 0;
+  color: var(--ui-red);
+  font-size: 13px;
+  line-height: 20px;
+}
+.ui-tasks-owner-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.ui-tasks-owner-trigger[data-empty] .ui-tasks-owner-value {
+  color: var(--ui-muted-fg);
+}
+.ui-tasks-owner-menu {
+  /* Wide enough for a name and its @handle side by side. */
+  width: max-content;
+  max-width: min(280px, calc(100vw - 16px));
+  min-width: var(--radix-dropdown-menu-trigger-width);
+  max-height: min(320px, var(--radix-dropdown-menu-content-available-height));
+  overflow-y: auto;
+}
+.ui-form-field .ui-select-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-tasks-scope-empty {
+  margin: 12px 0 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 20px;
+}
+.ui-tasks-scope-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-tasks-scope-bar > span {
+  margin-left: auto;
+}
+.ui-tasks-scope-list {
+  max-height: 220px;
+  margin: 8px 0 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+.ui-tasks-scope-list .ui-check-label {
+  align-items: center;
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.ui-tasks-scope-list .ui-check-label:hover {
+  background: var(--ui-accent);
+}
+.ui-tasks-scope-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-tasks-scope-points {
+  flex-shrink: 0;
+  color: var(--ui-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-tasks-form-hint {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 16px;
+}
+.ui-tasks-sprint-outcome {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0 0 16px;
+  border-block: 1px solid var(--ui-border);
+}
+.ui-tasks-sprint-outcome > div {
+  padding: 12px 0;
+}
+.ui-tasks-sprint-outcome > div + div {
+  padding-left: 16px;
+  border-left: 1px solid var(--ui-border);
+}
+.ui-tasks-sprint-outcome dt {
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  font-weight: 500;
+}
+.ui-tasks-sprint-outcome dd {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-tasks-sprint-outcome dd:first-of-type {
+  margin-top: 4px;
+  color: var(--ui-fg);
+  font-size: 20px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.ui-tasks-sprint-outcome dd[data-alert] {
+  color: var(--ui-yellow);
+}

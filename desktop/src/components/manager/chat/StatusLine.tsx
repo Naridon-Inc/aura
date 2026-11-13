@@ -1,25 +1,19 @@
 //! Ambient status indicators for the native Aura chat.
 //!
-//! Everything here is *quiet* — these are the chat's peripheral signals
-//! (the brain is thinking, a plan is forming, which model produced a turn,
-//! whether a tool is mid-flight). They share one visual family so the eye
-//! reads them as a single calm register rather than four competing widgets.
+//! Everything here is *quiet* — the chat's peripheral signals (the brain is
+//! thinking, a plan is forming, a turn has gone silent). They are all the
+//! shared chat status row, so the eye reads them as one calm register.
 //!
-//! - `ThinkingLine` / `PlanningStatusLine` — the animated shimmer line,
-//!   reusing the `.aura-chat`-scoped `.thinking`/`.spinner`/`.shimmer` CSS
-//!   in `styles.css`. They differ only in their default caption.
-//! - `humanizeBrainId` — maps a persisted legacy brain id to a display name.
-//! - `BrainProvenanceChip` — a subtle mono chip naming the brain behind a turn.
-//! - `StatusPip` — a 6px dot keyed to a `ToolStatus`, for reuse by cards.
-//!
-//! Tokens only — never a raw hex. These must never out-shout the message
-//! content they sit beside.
+//! - `ThinkingLine` / `PlanningStatusLine` — the working row with a live
+//!   timer. They differ only in their default caption.
+//! - `StallNotice` — the same row, raised when a turn goes silent, with Stop.
+//! - `humanizeBrainId` / `brainAgentId` — a persisted brain id as a display
+//!   name and as the agent whose mark to draw.
 
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, Sparkles } from "lucide-react";
-
-import { AsciiSpinner } from "../../ui/ascii-spinner";
-import type { ToolStatus } from "./types";
+import { Button } from "../../ui/button";
+import { ChatStatus } from "../../ui/message";
+import "../../ui/chat-surface.css";
 import { formatDuration, formatLiveDuration } from "../../../lib/duration";
 import { agentName } from "../../../lib/agentNames";
 
@@ -55,11 +49,10 @@ function useElapsedSeconds(startedAt: number | null | undefined): number {
   return sec;
 }
 
-/** The shimmer "Thinking…" line shown while the brain works. Renders the
- *  `.aura-chat`-scoped `.thinking` family (spinner + shimmer caption) from
- *  `styles.css`. It appends a quiet tabular-nums timer, counting in tenths,
+/** The "Thinking…" working row shown while the brain works. It appends a
+ *  quiet tabular-nums timer, counting in tenths,
  *  so a long turn visibly keeps working — the persistent "still going"
- *  affordance Conductor/Claude Code show, instead of a state that flashes
+ *  affordance a long turn needs, instead of a state that flashes
  *  once and vanishes. */
 export function ThinkingLine({
   label = "Thinking…",
@@ -70,20 +63,18 @@ export function ThinkingLine({
 }) {
   const elapsedSec = useElapsedSeconds(startedAt);
   return (
-    <div className="thinking">
-      <AsciiSpinner />
-      <span className="shimmer">{label}</span>
+    <ChatStatus state="working">
+      {label}
       {elapsedSec > 0 && (
-        <span className="thinking-elapsed">{formatLiveDuration(elapsedSec)}</span>
+        <span className="ui-chat-status-elapsed">{formatLiveDuration(elapsedSec)}</span>
       )}
-    </div>
+    </ChatStatus>
   );
 }
 
-/** Same shimmer family as `ThinkingLine`, captioned for the post-answer
- *  beat — Cursor shows a tiny spinner while the brain works its follow-up
- *  after answers land. Sits under the AnswersCard before the next bubble
- *  streams. Default caption "Planning next moves". Carries the same optional
+/** The same working row as `ThinkingLine`, captioned for the post-answer
+ *  beat while the brain works its follow-up after answers land. Sits under
+ *  the answered question before the next reply streams. Default caption "Planning next moves". Carries the same optional
  *  elapsed timer as `ThinkingLine`. */
 export function PlanningStatusLine({
   label = "Planning next moves",
@@ -94,13 +85,12 @@ export function PlanningStatusLine({
 }) {
   const elapsedSec = useElapsedSeconds(startedAt);
   return (
-    <div className="thinking">
-      <AsciiSpinner />
-      <span className="shimmer">{label}</span>
+    <ChatStatus state="working">
+      {label}
       {elapsedSec > 0 && (
-        <span className="thinking-elapsed">{formatLiveDuration(elapsedSec)}</span>
+        <span className="ui-chat-status-elapsed">{formatLiveDuration(elapsedSec)}</span>
       )}
-    </div>
+    </ChatStatus>
   );
 }
 
@@ -113,7 +103,7 @@ export function PlanningStatusLine({
  *  This anchors on a caller-supplied *last-activity* getter, NOT the turn's
  *  start: every streamed delta refreshes it, so a legitimately long answer that
  *  keeps producing tokens/reasoning never trips the notice — only true silence
- *  does. Once `idle ≥ thresholdSec` it fades in a calm amber row that names how
+ *  does. Once `idle ≥ thresholdSec` it raises the status row to name how
  *  long it's been quiet and offers a one-click Stop, so the user isn't left
  *  guessing or force-quitting the app.
  *
@@ -145,15 +135,16 @@ export function StallNotice({
   if (idleSec < thresholdSec) return null;
   const who = brainLabel ?? "the model";
   return (
-    <div className="aura-stall-notice" role="status">
-      <AlertTriangle size={13} strokeWidth={2} className="aura-stall-icon" aria-hidden />
-      <span className="aura-stall-text">
-        No response from {who} for {formatDuration(idleSec)}. It may be stuck.
-      </span>
-      <button type="button" className="aura-stall-stop" onClick={onStop}>
-        Stop
-      </button>
-    </div>
+    <ChatStatus
+      state="error"
+      action={
+        <Button size="xs" variant="outline" onClick={onStop}>
+          Stop
+        </Button>
+      }
+    >
+      No response from {who} for {formatDuration(idleSec)}. It may be stuck.
+    </ChatStatus>
   );
 }
 
@@ -165,8 +156,8 @@ export function StallNotice({
  *  endpoint resolves through the same prefix-strip + name table. */
 export function humanizeBrainId(id: string): string {
   // The prefix-strip and the name table both live in lib/agentNames now — one
-  // table for the whole app. This one read a plain `aura` as "Aura Pro",
-  // naming a paid tier for the free built-in agent.
+  // table for the whole app. This one read a plain `aura` as a paid tier,
+  // naming something the free built-in agent is not.
   return agentName(id);
 }
 
@@ -190,66 +181,4 @@ export function brainAgentId(id: string): string {
   if (key.includes("cursor")) return "cursor";
   if (key.includes("opencode")) return "opencode";
   return key;
-}
-
-/** Per-turn brain provenance. Shows which brain produced THIS turn so a
- *  conversation that swapped brains mid-stream (Claude → Gemini → Kimi via
- *  the composer BrainPicker) stays legible when scrolled back. Reads the
- *  persisted `ChatTurn.brain`; renders nothing when it's absent (native
- *  `brain_chat_turn` turns don't persist one, so the chip surfaces exactly
- *  the cross-vendor swaps this is for).
- *
- *  Redesigned as a subtle token chip — mono, muted ink, hairline border on
- *  a faint chrome fill. It names the model without ever pulling focus. */
-export function BrainProvenanceChip({ brain }: { brain: string }) {
-  const label = humanizeBrainId(brain);
-  if (!label) return null;
-  return (
-    <span
-      className="inline-flex items-center gap-1 mb-1 select-none align-middle"
-      style={{
-        fontFamily: "var(--font-mono)",
-        fontSize: "10px",
-        lineHeight: "14px",
-        letterSpacing: "0.02em",
-        color: "var(--color-text-3)",
-        background: "var(--color-bg-1)",
-        border: "1px solid var(--color-line)",
-        borderRadius: "var(--radius-sm)",
-        padding: "1px 5px",
-      }}
-      title={`This turn was produced by ${label}`}
-    >
-      <Sparkles size={9} strokeWidth={1.75} />
-      {label}
-    </span>
-  );
-}
-
-/** A 6px status dot keyed to a tool's `ToolStatus`, for reuse by cards and
- *  inline rows. `running` is the arctic accent and pulses; `ok` is the green
- *  status token; `error` is the red token. Pure ambient signal — no label. */
-export function StatusPip({ status }: { status: ToolStatus }) {
-  const color =
-    status === "error"
-      ? "var(--color-red)"
-      : status === "ok"
-      ? "var(--color-accent-green)"
-      : "var(--color-accent)";
-  return (
-    <span
-      aria-hidden
-      style={{
-        width: "6px",
-        height: "6px",
-        flex: "none",
-        borderRadius: "50%",
-        background: color,
-        animation:
-          status === "running"
-            ? "aura-chat-shimmer 1.6s ease-in-out infinite"
-            : undefined,
-      }}
-    />
-  );
 }

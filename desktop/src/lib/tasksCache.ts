@@ -5,10 +5,10 @@
 // ontology mirror, first-touch of the cycle and module catalogs, and the legacy
 // sprint fold — writing back to disk whenever any of them changed something.
 //
-// Opening Tasks mounts three surfaces that each ask for it at the same instant:
-// the board, the place rail's groups, and BuildNav. Under "All projects" each
-// of those fans out per project root, so a four-project scope opened the board
-// with twelve of those heal passes racing each other over the same files. Add
+// Opening Tasks mounts surfaces that each ask for it at the same instant: the
+// board and the place rail's groups. Under "All projects" each of those fans
+// out per project root, so a four-project scope opened the board with a heal
+// pass per surface per root, all racing each other over the same files. Add
 // the task detail pane and the sprint progress pane and it is more.
 //
 // WHY NO FRESHNESS WINDOW. Every surface that reads the board is also a surface

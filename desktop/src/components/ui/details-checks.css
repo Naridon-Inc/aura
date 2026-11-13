@@ -1,0 +1,84 @@
+/* Check rows inside the details panel. They set their own line height so a
+   row is the same height whatever the page around it uses. */
+.ui-details-checks .ui-check-runs {
+  line-height: normal;
+}
+.ui-details-checks .ui-check-runs > div > .ui-activity-loader {
+  flex: none;
+}
+.ui-details-checks .ui-check-runs > div > svg {
+  flex-shrink: 0;
+}
+.ui-details-checks .ui-check-runs > div > span {
+  min-width: 0;
+}
+/* A row that opens a page when clicked. */
+.ui-details-checks .ui-check-runs > div[data-clickable] {
+  cursor: pointer;
+  border-radius: 6px;
+}
+.ui-details-checks .ui-check-runs > div[data-clickable]:hover {
+  background: var(--ui-accent);
+}
+.ui-details-checks .ui-check-runs > div[data-clickable] > svg:last-child {
+  margin-left: auto;
+  color: var(--ui-muted-foreground);
+}
+/* The height split between the checks and the pull request list: a hairline
+   with a taller invisible grip. */
+.ui-details-split {
+  position: relative;
+  flex-shrink: 0;
+  height: 1px;
+  background: var(--ui-border);
+}
+.ui-details-split::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -3px;
+  height: 6px;
+  cursor: row-resize;
+  z-index: 1;
+}
+/* The flat list: no rules between rows, each row a mark, one line of text
+   and a text action at its end, 32px tall. Rows keep the text on the list's
+   left edge; a hover fill reaches a few pixels past it. */
+.ui-check-runs.ui-check-runs--flat > div {
+  gap: 10px;
+  min-height: 32px;
+  margin: 0 -6px;
+  padding: 0 6px;
+  border-bottom: 0;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.ui-check-runs.ui-check-runs--flat > div > .ui-activity-loader {
+  /* The spinner draws 12px wide against 14px marks; a pixel each side puts it
+     in the same slot so every row's text starts on one line. */
+  flex: none;
+  margin: 0 1px;
+}
+.ui-check-runs.ui-check-runs--flat > div > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-check-runs.ui-check-runs--flat > div[data-nested] {
+  padding-left: 30px;
+}
+.ui-check-runs.ui-check-runs--flat > div > .ui-button {
+  flex: none;
+  height: 24px;
+  margin-right: -4px;
+  padding: 0 4px;
+  background: none;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  font-weight: 400;
+}
+.ui-check-runs.ui-check-runs--flat > div > .ui-button:hover:not(:disabled) {
+  background: none;
+  color: var(--ui-fg);
+}

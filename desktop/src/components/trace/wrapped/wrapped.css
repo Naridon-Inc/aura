@@ -1,0 +1,168 @@
+/* Year in review: one reading column in the trace report, hairlines between
+   readings, neutral ink for every bar. Colour only where it means something:
+   green/red on line churn, green on the sealed share. */
+
+.ui-wrapped-body {
+  flex: 1;
+  min-height: 0;
+}
+
+.ui-wrapped-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-wrapped-hero-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+}
+.ui-wrapped-kicker {
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--ui-muted-fg);
+}
+.ui-wrapped-year {
+  margin: 0;
+  font-size: 40px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: var(--ui-fg);
+  font-variant-numeric: tabular-nums;
+}
+.ui-wrapped-lede {
+  margin: 4px 0 0;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--ui-muted-fg);
+}
+.ui-wrapped-lede strong {
+  font-weight: 600;
+  color: var(--ui-fg);
+}
+
+.ui-wrapped-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ui-wrapped-num {
+  font-variant-numeric: tabular-nums;
+}
+.ui-wrapped-num[data-tone="added"] {
+  color: var(--ui-green);
+}
+.ui-wrapped-num[data-tone="removed"] {
+  color: var(--ui-red);
+}
+
+.ui-wrapped-aside {
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-wrapped-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ui-wrapped-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 20px;
+  font-size: 13px;
+}
+.ui-wrapped-row-label {
+  width: 128px;
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-fg);
+}
+.ui-wrapped-row .ui-wrapped-meter {
+  flex: 1;
+}
+.ui-wrapped-count {
+  margin-left: auto;
+  min-width: 40px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ui-wrapped-meter {
+  display: block;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--ui-hover);
+}
+.ui-wrapped-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ui-muted-fg);
+}
+.ui-wrapped-meter[data-tone="sealed"] {
+  height: 6px;
+  margin-bottom: 10px;
+}
+.ui-wrapped-meter[data-tone="sealed"] > span {
+  background: var(--ui-green);
+}
+
+.ui-wrapped-months {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 104px;
+}
+.ui-wrapped-month {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-wrapped-month-track {
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
+  height: 80px;
+}
+.ui-wrapped-month-track > span {
+  display: block;
+  width: 100%;
+  border-radius: 3px 3px 0 0;
+  background: var(--ui-faint);
+}
+.ui-wrapped-month-track > span[data-busiest] {
+  background: var(--ui-fg);
+}
+.ui-wrapped-month-label {
+  font-size: 11px;
+  color: var(--ui-faint);
+}
+
+.ui-wrapped-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding-top: 48px;
+}
+
+.ui-wrapped-foot {
+  text-align: center;
+}

@@ -1,0 +1,17 @@
+/* Every pull request of a repository on the Dashboard: the details panel's
+   caption, filter chips and pull request rows, in one readable column. */
+.ui-dashboard-pulls {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 880px;
+  min-height: 0;
+  margin: 0 auto;
+  padding: 16px 16px 0;
+}
+.ui-dashboard-pulls-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border-top: 1px solid var(--ui-border);
+}

@@ -10,19 +10,31 @@
 // nothing on the row is lit.
 //
 // This gives a strip both halves: the active tab is always scrolled into view,
-// and each edge with content hidden behind it fades out.
+// and each edge with tabs hidden behind it gets the library's scroll chevron
+// (ui/workspace-tabs.tsx) — a button that moves the strip 240px that way.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const FADE_PX = 22;
+/** How far one chevron click moves the strip — the library's step. */
+const STEP_PX = 240;
+
+/** Smooth unless the person asked the OS for less motion. */
+function scrollBehavior(): ScrollBehavior {
+  return typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    ? "auto"
+    : "smooth";
+}
 
 export type TabStripScroll = {
   /** Put on the horizontally-scrolling element that wraps the tabs. */
   scrollRef: (el: HTMLDivElement | null) => void;
   /** Put on whichever tab is currently active. */
   activeRef: (el: HTMLElement | null) => void;
-  /** Spread onto the scrolling element — fades whichever edge is hiding tabs. */
-  fadeStyle: React.CSSProperties;
+  /** Which edges have tabs hidden behind them — show a chevron on each. */
+  edges: { start: boolean; end: boolean };
+  /** Move the strip one step toward that edge (-1 = start, 1 = end). */
+  scrollStep: (dir: -1 | 1) => void;
 };
 
 /**
@@ -90,18 +102,9 @@ export function useTabStripScroll(activeKey: string): TabStripScroll {
     measure();
   }, [activeKey, measure]);
 
-  const fadeStyle: React.CSSProperties = {};
-  if (edges.start || edges.end) {
-    const stops = [
-      edges.start ? "transparent 0px" : "#000 0px",
-      `#000 ${edges.start ? FADE_PX : 0}px`,
-      `#000 calc(100% - ${edges.end ? FADE_PX : 0}px)`,
-      edges.end ? "transparent 100%" : "#000 100%",
-    ].join(", ");
-    const mask = `linear-gradient(to right, ${stops})`;
-    fadeStyle.maskImage = mask;
-    fadeStyle.WebkitMaskImage = mask;
-  }
+  const scrollStep = useCallback((dir: -1 | 1) => {
+    elRef.current?.scrollBy({ left: dir * STEP_PX, behavior: scrollBehavior() });
+  }, []);
 
-  return { scrollRef, activeRef, fadeStyle };
+  return { scrollRef, activeRef, edges, scrollStep };
 }

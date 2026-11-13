@@ -1,9 +1,23 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Check, ChevronsUp, Pencil, X } from "lucide-react";
+import { useState, type PointerEvent } from "react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronDown,
+  ChevronRight,
+  ChevronsUp,
+  GripVertical,
+  Pencil,
+  X,
+} from "lucide-react";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { Textarea } from "../ui/textarea";
+import { usePointerDrag } from "../ui/use-pointer-drag";
 import type { ComposerAttachment, ComposerMode } from "./ManagerComposer";
 import type { ReasoningEffort, ApprovalPolicy } from "../../lib/api";
+import "../ui/chat-surface.css";
 
-/** A message parked while a turn is in flight (W2 — Conductor-style
+/** A message parked while a turn is in flight (W2 — the
  *  type-ahead queue). Carries the full send payload so draining replays it
  *  identically — including the cross-agent Effort/Fast controls — through
  *  whichever brain or piped PTY runs the turn. `attachments` is in-memory
@@ -34,6 +48,14 @@ type Props = {
   onClear: () => void;
 };
 
+/** The grip is what a hand reaches for, but it is the row that moves: a press
+ *  on the grip is passed on as a press on its row, so the row is what lifts
+ *  and follows the pointer. */
+function asRowPress(event: PointerEvent<HTMLElement>): PointerEvent<HTMLElement> | undefined {
+  const row = event.currentTarget.closest<HTMLElement>(".ui-queue-row");
+  return row ? { ...event, currentTarget: row, target: row } : undefined;
+}
+
 const MODE_LABEL: Record<ComposerMode, string> = {
   auto: "Autopilot",
   plan: "Plan",
@@ -50,183 +72,169 @@ export function ManagerQueueStack({
   onMove,
   onClear,
 }: Props) {
+  const [expanded, setExpanded] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
-  const editRef = useRef<HTMLInputElement>(null);
-
-  // Focus the inline editor as soon as it mounts so editing is keyboard-first.
-  useEffect(() => {
-    if (editingId) editRef.current?.focus();
-  }, [editingId]);
+  // Pointer-driven: the desktop app's web view never delivers an HTML5 drop.
+  const drag = usePointerDrag<string>((id, row) => moveTo(id, Number(row)));
 
   if (queue.length === 0) return null;
 
-  function startEdit(m: QueuedMessage) {
-    setEditingId(m.id);
-    setDraft(m.text);
+  // Each step is a functional update upstream, so stepping is safe in a loop.
+  function moveTo(id: string, target: number) {
+    const from = queue.findIndex((m) => m.id === id);
+    const to = Math.max(0, Math.min(queue.length - 1, target));
+    if (from < 0 || from === to) return;
+    const dir = to < from ? "up" : "down";
+    for (let step = 0; step < Math.abs(to - from); step += 1) onMove(id, dir);
   }
-  function commitEdit() {
-    if (editingId) {
-      const next = draft.trim();
-      if (next) onEdit(editingId, next);
-    }
+
+  function save() {
+    const next = draft.trim();
+    if (!editingId || !next) return;
+    onEdit(editingId, next);
     setEditingId(null);
     setDraft("");
   }
-  function cancelEdit() {
+  function cancel() {
     setEditingId(null);
     setDraft("");
   }
 
   return (
-    <div
-      className="mb-1.5 rounded-md overflow-hidden"
-      style={{
-        background: "var(--color-bg-2)",
-        border: "1px solid var(--color-line-soft)",
-      }}
-    >
-      <div className="flex items-center gap-2 px-2.5 py-1 text-xs text-text-3">
-        <span
-          className="inline-block w-1.5 h-1.5 rounded-full"
-          style={{ background: "var(--color-accent)" }}
-        />
-        <span className="min-w-0 flex-1 truncate">
-          <span className="tabular-nums">{queue.length}</span> queued ·{" "}
-          {busy ? "sends as the agent finishes each turn" : "sending them now"}
-        </span>
-        <button
-          type="button"
-          className="text-text-3 hover:text-text-1 transition-colors"
-          onClick={onClear}
-          title="Clear the queue"
-        >
-          Clear
+    <div className="ui-message-queue ui-chat-queue" aria-label="Queued messages">
+      <div className="ui-queue-caption">
+        <button type="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          {queue.length} queued {queue.length === 1 ? "message" : "messages"}
+          <span className="ui-queue-hint">
+            {busy ? "Sends as the agent finishes each turn" : "Sending now"}
+          </span>
         </button>
+        <Button size="xs" variant="ghost" onClick={onClear} title="Clear the queue">
+          Clear
+        </Button>
       </div>
-
-      <ul className="flex flex-col">
-        {queue.map((m, i) => {
-          const editing = editingId === m.id;
-          return (
-            <li
-              key={m.id}
-              className="flex items-center gap-2 px-2.5 py-1.5 border-t text-sm"
-              style={{ borderColor: "var(--color-line-soft)" }}
+      {expanded &&
+        queue.map((m, i) => (
+          <div
+            className="ui-queue-row"
+            key={m.id}
+            {...drag.target(String(i))}
+            {...(editingId !== m.id ? drag.source(m.id) : {})}
+          >
+            <button
+              type="button"
+              className="ui-queue-handle"
+              aria-label={`Reorder queued message ${i + 1}`}
+              title="Alt + arrow keys to reorder"
+              onPointerDown={(event) => {
+                const press = editingId !== m.id && asRowPress(event);
+                if (press) drag.source(m.id).onPointerDown(press);
+              }}
+              onKeyDown={(event) => {
+                if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+                  event.preventDefault();
+                  onMove(m.id, event.key === "ArrowUp" ? "up" : "down");
+                }
+              }}
             >
-              <span className="text-text-4 tabular-nums w-4 text-right">
-                {i + 1}
-              </span>
-
-              {/* Per-turn run-option badges, so a queued message shows how it
-                  will run before it ever fires. */}
-              {m.mode !== "build" && (
-                <span className="text-2xs leading-none px-1.5 py-0.5 rounded bg-bg-3 text-text-3 shrink-0">{MODE_LABEL[m.mode]}</span>
-              )}
-              {m.effort && (
-                <span className="text-2xs leading-none px-1.5 py-0.5 rounded bg-bg-3 text-text-3 shrink-0" style={{ color: "var(--color-accent)" }}>
-                  {m.effort}
-                </span>
-              )}
-              {m.fast && (
-                <span className="text-2xs leading-none px-1.5 py-0.5 rounded bg-bg-3 text-text-3 shrink-0" style={{ color: "var(--color-accent)" }}>
-                  ⚡
-                </span>
-              )}
-              {m.pipeTargetSessionId && <span className="text-2xs leading-none px-1.5 py-0.5 rounded bg-bg-3 text-text-3 shrink-0">↪</span>}
-
-              {editing ? (
-                <input
-                  ref={editRef}
+              <GripVertical size={14} />
+            </button>
+            {editingId === m.id ? (
+              <div className="ui-queue-editor">
+                <Textarea
+                  aria-label="Edit queued message"
+                  autoFocus
                   value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      commitEdit();
-                    } else if (e.key === "Escape") {
-                      e.preventDefault();
-                      cancelEdit();
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.stopPropagation();
+                      cancel();
+                    }
+                    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                      event.preventDefault();
+                      save();
                     }
                   }}
-                  onBlur={commitEdit}
-                  className="flex-1 min-w-0 bg-transparent outline-none text-text-1"
                 />
-              ) : (
-                <button
-                  type="button"
-                  className="flex-1 min-w-0 text-left truncate text-text-2 hover:text-text-1 transition-colors"
-                  onDoubleClick={() => startEdit(m)}
-                  title={m.text}
-                >
-                  {m.text || "(empty)"}
-                </button>
-              )}
-
-              <div className="flex items-center gap-0.5 shrink-0 text-text-3">
-                {editing ? (
-                  <IconBtn label="Save" onClick={commitEdit}>
-                    <Check size={13} />
-                  </IconBtn>
-                ) : (
-                  <>
-                    {i > 0 && (
-                      <IconBtn label="Send next" onClick={() => onPromote(m.id)}>
-                        <ChevronsUp size={13} />
-                      </IconBtn>
-                    )}
-                    <IconBtn
-                      label="Move up"
-                      disabled={i === 0}
-                      onClick={() => onMove(m.id, "up")}
-                    >
-                      <ArrowUp size={13} />
-                    </IconBtn>
-                    <IconBtn
-                      label="Move down"
-                      disabled={i === queue.length - 1}
-                      onClick={() => onMove(m.id, "down")}
-                    >
-                      <ArrowDown size={13} />
-                    </IconBtn>
-                    <IconBtn label="Edit" onClick={() => startEdit(m)}>
-                      <Pencil size={13} />
-                    </IconBtn>
-                    <IconBtn label="Remove" onClick={() => onRemove(m.id)}>
-                      <X size={13} />
-                    </IconBtn>
-                  </>
-                )}
+                <div className="ui-pattern-actions">
+                  <Button size="xs" variant="ghost" onClick={cancel}>
+                    Cancel
+                  </Button>
+                  <Button size="xs" disabled={!draft.trim()} onClick={save}>
+                    Save edit
+                  </Button>
+                </div>
               </div>
-            </li>
-          );
-        })}
-      </ul>
+            ) : (
+              <>
+                <div className="ui-queue-text" title={m.text}>
+                  {/* How the message will run, shown before it ever fires. */}
+                  <span className="ui-queue-badges">
+                    {m.mode !== "build" && <Badge variant="outline">{MODE_LABEL[m.mode]}</Badge>}
+                    {m.effort && <Badge variant="outline">{m.effort}</Badge>}
+                    {m.fast && <Badge variant="outline">Fast</Badge>}
+                    {m.goal && <Badge variant="outline">Goal</Badge>}
+                    {m.pipeTargetSessionId && <Badge variant="outline">To agent</Badge>}
+                  </span>
+                  <span className="ui-chat-queue-text">{m.text || "(empty)"}</span>
+                </div>
+                <div className="ui-queue-actions">
+                  {i > 0 && (
+                    <Button
+                      variant="ghost"
+                      size="iconXs"
+                      aria-label={`Send queued message ${i + 1} next`}
+                      title="Send next"
+                      onClick={() => onPromote(m.id)}
+                    >
+                      <ChevronsUp />
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="iconXs"
+                    aria-label={`Move message ${i + 1} up`}
+                    disabled={i === 0}
+                    onClick={() => onMove(m.id, "up")}
+                  >
+                    <ArrowUp />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="iconXs"
+                    aria-label={`Move message ${i + 1} down`}
+                    disabled={i === queue.length - 1}
+                    onClick={() => onMove(m.id, "down")}
+                  >
+                    <ArrowDown />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="iconXs"
+                    aria-label={`Edit queued message ${i + 1}`}
+                    onClick={() => {
+                      setEditingId(m.id);
+                      setDraft(m.text);
+                    }}
+                  >
+                    <Pencil />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="iconXs"
+                    aria-label={`Remove queued message ${i + 1}`}
+                    onClick={() => onRemove(m.id)}
+                  >
+                    <X />
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        ))}
     </div>
-  );
-}
-
-function IconBtn({
-  label,
-  onClick,
-  disabled,
-  children,
-}: {
-  label: string;
-  onClick: () => void;
-  disabled?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      disabled={disabled}
-      onClick={onClick}
-      className="p-1 rounded hover:bg-state-hover hover:text-text-1 transition-colors disabled:opacity-30 disabled:hover:bg-transparent"
-    >
-      {children}
-    </button>
   );
 }

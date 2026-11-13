@@ -2,7 +2,8 @@
 //
 //   bun test
 //
-// The status bar's chips are the app's most-read numbers — they are on screen
+// The window's counts (changes, items to review, conflicts) are the app's
+// most-read numbers — they are on screen
 // in every window, all the time. Every one of them came from a 4-second poll
 // whose failures were spent as answers:
 //
@@ -21,8 +22,8 @@
 // reading "0 changes", hover "No changes yet", before `git diff` had run.
 //
 // Two rules, held below by source pins because neither surface can be
-// imported into a test (App.tsx and StatusBar.tsx both pull the Tauri bridge
-// and Monaco through their import graph):
+// imported into a test (App.tsx pulls the Tauri bridge
+// and Monaco through its import graph):
 //
 //   1. A read that failed leaves the last known number alone.
 //   2. A number nobody has read yet is not zero, and doesn't get a sentence.
@@ -86,37 +87,28 @@ describe("a badge count is a number somebody read", () => {
   });
 });
 
-describe("the changes chip", () => {
-  test("it takes a count that can be unread", async () => {
-    const src = stripComments(await readSrc("components/StatusBar.tsx"));
-    expect(src).toContain("changedFiles: number | null");
+describe("the changes count", () => {
+  test("the rail passes the unread state through instead of flattening it", async () => {
+    // The tab counts the Changes list itself (tests/changesBadgeCount.test.ts).
+    // `undefined` until git has answered for the project — the tab draws
+    // nothing for it.
+    const hook = stripComments(await readSrc("components/rightrail/useChangeList.ts"));
+    expect(hook).toContain("return changes.loading ? undefined : count;");
+    const rail = stripComments(await readSrc("components/rightrail/RightRail.tsx"));
+    expect(rail).toContain("const changesCount = useChangedFileCount(");
+    expect(rail).not.toMatch(/useChangedFileCount\([^)]*\)\s*\?\?\s*0/);
   });
 
-  test("'No changes yet' is only said once we've looked", async () => {
-    const src = stripComments(await readSrc("components/StatusBar.tsx"));
-    const at = src.indexOf('"No changes yet"');
-    expect(at).toBeGreaterThan(-1);
-    // The null arm has to come first — a bare `changedFiles > 0 ? … : "No
-    // changes yet"` sends every unread render down the sentence.
-    const before = src.slice(Math.max(0, at - 400), at);
-    expect(before).toContain("changedFiles === null");
-    expect(before).toContain("hasn’t read this workspace’s changes yet");
-  });
-
-  test("an unread count draws a dash and doesn't navigate", async () => {
-    const src = stripComments(await readSrc("components/StatusBar.tsx"));
+  test("the Changes tab draws a count only for a read, positive number", async () => {
+    const src = stripComments(await readSrc("components/ui/details-panel.tsx"));
     const flat = src.replace(/\s+/g, "");
-    expect(flat).toContain('changedFiles===null?"—"');
-    // Clicking opens the review surface. There is nothing to review from a
-    // read that hasn't happened.
-    expect(flat).toContain("changedFiles!==null&&changedFiles>0?onClickDiff:undefined");
+    // A count nobody has read yet, and a clean tree, both draw no number —
+    // neither one gets to say "0".
+    expect(flat).toContain("tab.count!=null&&tab.count>0");
   });
 
-  test("the App passes the unread state through instead of flattening it", async () => {
+  test("an unread count doesn't mark the branch as having changes", async () => {
     const src = stripComments(await readSrc("App.tsx"));
-    expect(src).toContain("changedFiles={diffStats?.changed_files ?? null}");
-    // The rail's tab badge hides itself on a nullish count, so `undefined` is
-    // the honest thing to hand it.
-    expect(src).toContain("changesCount={diffStats?.changed_files}");
+    expect(src).toContain("dirty={(diffStats?.changed_files ?? 0) > 0}");
   });
 });

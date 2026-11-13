@@ -346,7 +346,14 @@ impl Brain for CliWrapperBrain {
             .filter(|s| !s.is_empty())
         {
             Some(machine_id) => spawn_there(machine_id, &invocation, &agent_id).await?,
-            None => spawn_here(&invocation, &request.cwd, &agent_id)?,
+            None => {
+                // The workspace's linked folders, through this CLI's own
+                // extra-directory flag. They are paths on this disk, so only a
+                // CLI started here gets them.
+                let dirs = super::linked_dirs::readable(&request.linked_dirs, &request.cwd);
+                super::linked_dirs::apply(&agent_id, &mut invocation.args, &dirs);
+                spawn_here(&invocation, &request.cwd, &agent_id)?
+            }
         };
 
         Ok(read_turn(spawned))
@@ -545,6 +552,9 @@ fn read_turn(spawned: Spawned) -> BoxStream<'static, Result<ChatChunk, BrainErro
         let mut reader = BufReader::new(stdout).lines();
         let mut block_idx: usize = 0;
         let mut any_text = false;
+        // A plain-text engine's own account of its failure, worded, held
+        // until the turn ends so it can become the turn's error.
+        let mut engine_error: Option<String> = None;
 
         while let Some(line) = reader
             .next_line()
@@ -596,6 +606,16 @@ fn read_turn(spawned: Spawned) -> BoxStream<'static, Result<ChatChunk, BrainErro
                     break;
                 }
             } else {
+                // An engine that fails writes its error event where its
+                // answer would be. That JSON is not an answer: word it and
+                // keep it out of the text.
+                if let Some(sentence) = super::plain_cli_transcript::engine_error_sentence(
+                    &line,
+                    &super::engine_errors::engine_label(&bin),
+                ) {
+                    engine_error.get_or_insert(sentence);
+                    continue;
+                }
                 // Non-stream-json CLIs (cursor, kimi) → raw stdout, one
                 // big text block, minus the engine's own decoration.
                 let line = transcript.line(&line);
@@ -629,6 +649,27 @@ fn read_turn(spawned: Spawned) -> BoxStream<'static, Result<ChatChunk, BrainErro
         // Reaped — the pid is free for the kernel to reuse, so the guard
         // must not fire on it any more.
         tree.disarm();
+
+        // The engine said itself why it failed, which beats a guess from its
+        // exit code — and it may well have exited 0 after saying it.
+        if let Some(message) = engine_error {
+            if !any_text {
+                tracing::warn!(
+                    engine = %super::engine_errors::engine_label(&bin),
+                    machine = remote.as_ref().map(|r| r.label.as_str()).unwrap_or("this laptop"),
+                    exit = status.code().unwrap_or(-1),
+                    "engine CLI reported an error event"
+                );
+                Err(BrainError::Process { message })?;
+                unreachable!();
+            }
+            // It answered and then failed: the answer stands, and the
+            // failure follows it as its own paragraph.
+            yield ChatChunk::Text {
+                block_idx,
+                text: format!("\n{message}\n"),
+            };
+        }
 
         if !status.success() {
             let exit = status.code().unwrap_or(-1);
@@ -792,6 +833,7 @@ mod tests {
             approval: None,
             output_style: None, // AURA-1296
             machine_id: None,
+            linked_dirs: Vec::new(),
         };
         let prompt = CliWrapperBrain::build_prompt(&req);
         assert!(prompt.starts_with("You are a coordinator."));
@@ -900,5 +942,70 @@ mod tests {
         // Locally, 127 is still the engine mapping's business.
         let here = failure_sentence("claude", NOT_FOUND, "", None);
         assert!(!here.contains("build-box"), "{here}");
+    }
+
+    /// Run a plain-text "engine" that is just a shell script, through the
+    /// same reader a real turn uses.
+    async fn plain_turn(script: &str) -> Vec<Result<ChatChunk, BrainError>> {
+        use futures_util::StreamExt as _;
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        crate::child_reaper::own_process_group(&mut cmd);
+        let spawned = Spawned {
+            child: cmd.spawn().expect("spawn sh"),
+            bin: "opencode".into(),
+            stream_json: false,
+            transcript: super::super::plain_cli_transcript::PlainCliTranscript::for_engine(
+                "cli_wrapper:opencode",
+            ),
+            remote: None,
+        };
+        read_turn(spawned).collect().await
+    }
+
+    fn texts(chunks: &[Result<ChatChunk, BrainError>]) -> String {
+        chunks
+            .iter()
+            .filter_map(|c| match c {
+                Ok(ChatChunk::Text { text, .. }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const OPENCODE_401: &str = r#"{"type":"error","timestamp":1762790000000,"sessionID":"ses_1","error":{"name":"UnknownError","data":{"message":"Failed to get direct access token: 401 Unauthorized"}}}"#;
+
+    /// The bug: OpenCode prints its sign-in failure to stdout and the JSON
+    /// became the turn's answer. Now the turn ends in that failure, worded,
+    /// and no text carries the JSON — whatever the exit code.
+    #[tokio::test]
+    async fn a_plain_engines_error_event_is_the_turns_error_not_its_text() {
+        for exit in [1, 0] {
+            let chunks = plain_turn(&format!("printf '%s\\n' '{OPENCODE_401}'; exit {exit}")).await;
+            assert_eq!(texts(&chunks), "", "exit {exit}: the error event leaked into the text");
+            match chunks.last() {
+                Some(Err(BrainError::Process { message })) => {
+                    assert_eq!(message, "OpenCode couldn't sign in (401).", "exit {exit}")
+                }
+                other => panic!("exit {exit}: turn did not end in the engine's error: {other:?}"),
+            }
+        }
+    }
+
+    /// An answer that arrived before the failure is kept, and the failure
+    /// follows it as a sentence rather than as JSON.
+    #[tokio::test]
+    async fn an_answer_before_the_error_event_stands_with_the_failure_after_it() {
+        let chunks = plain_turn(&format!("echo 'Half an answer.'; printf '%s\\n' '{OPENCODE_401}'; exit 1")).await;
+        assert_eq!(
+            texts(&chunks),
+            "Half an answer.\n\nOpenCode couldn't sign in (401).\n"
+        );
+        assert!(matches!(chunks.last(), Some(Ok(ChatChunk::End { .. }))));
     }
 }

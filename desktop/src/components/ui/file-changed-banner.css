@@ -1,0 +1,25 @@
+.ui-file-changed-banner {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--ui-warning-border);
+  background: var(--ui-warning);
+  color: var(--ui-warning-foreground);
+  font-size: var(--text-sm);
+  line-height: var(--text-sm--line-height);
+}
+.ui-file-changed-banner-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--ui-warning-foreground);
+}
+.ui-file-changed-banner-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -8,8 +8,8 @@
 //   taskColumns    TASK_COLUMNS            In Progress    In Review
 //   taskColumns    TASK_STATUS_LABEL       In Progress    In Review
 //   TasksFilterBar STATUS_LABEL            In Progress    In Review
-//   TaskDetailSidePanel STATUS_OPTIONS     In Progress    In Review
-//   CreateTaskWizard STATUS_OPTS           In progress    In review
+//   task side panel STATUS_OPTIONS         In Progress    In Review
+//   create-task form STATUS_OPTS           In progress    In review
 //   TaskDetailPane (inline)                in progress    in review
 //
 // Two of those sat ten lines apart in the same file. The last one wasn't a
@@ -30,9 +30,9 @@
 // a lane header, a chip on a card inside that lane, a dropdown row, and a
 // filter entry. It has to read as a sentence in at least three of those.
 //
-// (Plane, which this board's layout follows, seeds its default states in Title
-// Case. That is Plane's seed data rather than its type ramp, and it loses to
-// our own two live vocabularies.)
+// (The side panel and the create form have since given way to the task
+// detail's property cards and the task editor dialog, and both read this
+// table.)
 
 import type { TaskStatus } from "./api";
 

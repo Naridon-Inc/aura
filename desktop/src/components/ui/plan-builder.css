@@ -1,0 +1,177 @@
+/* The plan builder's own pieces inside the shared step flow: the goal box,
+   recent work, the repository facts, and the editable waves of tasks. The
+   step list, the page column, its headings and the bordered choice list are
+   the step flow's own rules. */
+
+.ui-plan-builder {
+  height: 100%;
+}
+
+.ui-plan-goal {
+  width: 100%;
+  min-height: 96px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.ui-plan-recent {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.ui-plan-recent .ui-cloud-agent-connections > button {
+  padding: 12px 16px;
+}
+.ui-plan-recent .ui-cloud-agent-connections > button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── what Aura reads ───────────────────────────────────────────────── */
+
+.ui-plan-facts {
+  width: 100%;
+  margin: 0;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ui-plan-facts > div {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 16px;
+  font-size: 14px;
+}
+.ui-plan-facts > div + div {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-plan-facts dt {
+  width: 120px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-plan-facts dd {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  color: var(--ui-fg);
+  font-variant-numeric: tabular-nums;
+}
+.ui-plan-facts dd small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-faint);
+  font: 12px/16px var(--font-mono);
+}
+
+/* ── the waves of tasks ────────────────────────────────────────────── */
+
+.ui-plan-waves {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+}
+.ui-plan-wave {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-plan-wave-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-plan-wave-head > span {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.ui-plan-wave-head > .ui-input {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+}
+.ui-plan-wave-head > small,
+.ui-plan-task-row > small {
+  flex-shrink: 0;
+  color: var(--ui-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* The page indents and enlarges a bare list; this one is a bordered set of
+   rows, so it opts out at the page's own specificity. */
+.ui-cloud-setup-page .ui-plan-tasks {
+  margin: 0;
+  padding: 0;
+  font-size: 14px;
+  line-height: 20px;
+  list-style: none;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ui-plan-task {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+}
+.ui-plan-task + .ui-plan-task {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-plan-task-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-plan-task-row > .ui-input {
+  flex: 1;
+  min-width: 0;
+}
+.ui-plan-agent {
+  flex-shrink: 0;
+  width: auto;
+  min-width: 112px;
+}
+.ui-plan-task-more svg {
+  transition: transform 0.15s;
+}
+.ui-plan-task-more[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+.ui-plan-task > .ui-textarea {
+  width: 100%;
+}
+
+/* ── starting it ───────────────────────────────────────────────────── */
+
+.ui-cloud-setup-page header > p.ui-plan-goal-quote {
+  color: var(--ui-fg);
+}
+.ui-plan-summary {
+  display: block;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-plan-launch > button > svg:first-child {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-plan-launch > button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.ui-plan-launch > button:disabled:hover {
+  background: none;
+}

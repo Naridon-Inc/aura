@@ -1,0 +1,20 @@
+/* An entry's sub-pages hang off a rule under it, one step in, the way a
+   repository opens to its own pages. */
+.ui-settings-nav-sub {
+  margin: 0 0 4px 16px;
+  border-left: 1px solid var(--ui-border);
+  padding-left: 4px;
+}
+.ui-settings-nav-sub .ui-sidebar-item {
+  margin-block: 2px;
+}
+/* On a repository's pages the header names the repository, picture first. */
+.ui-settings-toolbar-repo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+  min-width: 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}

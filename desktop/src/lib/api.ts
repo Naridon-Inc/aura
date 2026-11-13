@@ -8,6 +8,8 @@ import { isToolMetadataPath } from "@shared/categorizeChange";
 import { roomAuthHeaders } from "./roomAuth";
 import { cloudOrigins } from "./cloudOrigin";
 import { placeAtSpawnStart, recordSpawnOrigin } from "./agentSpawnOrigin";
+import { linkedDirsForLaunch } from "./workspaceCustomization";
+import { learnMachineIds } from "./machineRef";
 // The place contract is spelled once, in lib/place, and mirrors
 // `manager::brain::place_contract`. Imported rather than restated here: a wire
 // type the UI keeps its own copy of is a type that can disagree with the seam.
@@ -148,6 +150,9 @@ export type FileBase64 = {
 export type ShadowedCli = {
   path: string;
   installed: string;
+  /** The folder it sits in is the user's own, so replacing it needs no
+   *  password and the launch-time update does it unasked. */
+  writable: boolean;
 };
 
 /** Mirrors `AuraCliVersionCheck` in `cmd_doctor_cli.rs`. `path` / `installed`
@@ -1177,7 +1182,27 @@ export type BrainChatContext = {
   // the request; "concise" → Claude Code's `--output-style concise`. Other
   // brains ignore it. snake_case to match the Rust `ChatRequest`.
   output_style?: string | null;
+  /** Folders linked to this workspace that a CLI brain may also read, handed
+   *  over through its own extra-directory flag. Filled by `brainChatTurn`
+   *  from the workspace's links. snake_case to match the Rust `ChatRequest`. */
+  linked_dirs?: string[];
 };
+
+/** The linked folders an agent started in `repoRoot` may read, or null when
+ *  there are none (the launch then carries nothing new). */
+function launchLinks(repoRoot: string | null | undefined): string[] | null {
+  const dirs = repoRoot ? linkedDirsForLaunch(repoRoot) : [];
+  return dirs.length > 0 ? dirs : null;
+}
+
+function withLaunchLinks(
+  context: BrainChatContext | null,
+  repoRoot: string | null | undefined,
+): BrainChatContext | null {
+  const linked = launchLinks(repoRoot);
+  if (!linked || context?.linked_dirs) return context;
+  return { ...(context ?? {}), linked_dirs: linked };
+}
 
 /** Per-turn token accounting for the chat context-fill meter. `input_tokens`
  *  is the prompt the provider billed (history + system + tools); `output_tokens`
@@ -1259,48 +1284,6 @@ export type BrainChatChunk =
   | { kind: "tool_result"; tool_use_id: string; content: string; is_error: boolean }
   | { kind: "end"; stop_reason?: string | null }
   | { kind: "error"; message: string };
-
-/** Sign-in state for the Aura Pro brain (v0.2.31 task #352). Read from
- *  `~/.aura/credentials.json` — same file OnboardingDialog populates,
- *  so signing in once unlocks the picker. */
-export type AuraProSignInState = {
-  signed_in: boolean;
-  user: string | null;
-  cloud_origin: string | null;
-};
-
-/** Monthly token quota for the Aura Pro brain. Mirrors the cloud
- *  `QuotaView` returned by `GET /v1/brain/quota`. `monthly_token_limit`
- *  is `null` for the unlimited (enterprise) tier — the picker renders
- *  "∞" in that case instead of a fraction. */
-export type AuraProQuota = {
-  tier: string;
-  active: boolean;
-  monthly_token_limit: number | null;
-  tokens_used_current_period: number;
-  /** ISO-8601 timestamp the current 30-day window started. */
-  period_started_at: string;
-};
-
-/** Why a quota read failed. `auraProIsSignedIn` proves only that a token is on
- *  disk, so `unauthorized` is the case the panel must be able to see: the
- *  session is over, and refreshing will repeat the 401 forever. */
-export type AuraProQuotaError = {
-  /** `unauthorized` | `offline` | `server` | `unsupported`. */
-  kind: string;
-  message: string;
-};
-
-/** Narrow a rejected `auraProQuota()` to the typed error the backend sends.
- *  Anything else (a thrown `Error`, a plain string) is not one. */
-export function isAuraProQuotaError(e: unknown): e is AuraProQuotaError {
-  return (
-    typeof e === "object" &&
-    e !== null &&
-    typeof (e as AuraProQuotaError).kind === "string" &&
-    typeof (e as AuraProQuotaError).message === "string"
-  );
-}
 
 /** One concrete model a provider currently serves (`agent_models_list`). */
 export type ModelInfo = {
@@ -1495,6 +1478,10 @@ export const api = {
   fsRevealInFinder: (path: string) =>
     invoke<void>("fs_reveal_in_finder", { path }),
   editorsList: () => invoke<EditorInfo[]>("editors_list"),
+  /** Each installed editor's own app icon (and `"finder"`'s), as PNG data
+   *  URLs by editor id. Empty off macOS; an app with no readable icon is
+   *  simply absent. */
+  editorsIcons: () => invoke<Record<string, string>>("editors_icons"),
   editorOpen: (path: string, editorId: string) =>
     invoke<void>("editor_open", { path, editorId }),
   fsFindFiles: (repoRoot: string) =>
@@ -1522,12 +1509,14 @@ export const api = {
     invoke<Record<string, string>>("git_status", { repoRoot }),
   /** One file's working-tree patch. `sinceBase` (worktrees only) shows the
    *  file's full change from the worktree's fork base → working tree (committed
-   *  + uncommitted) instead of just vs HEAD; omitted/false keeps vs-HEAD. */
-  gitDiff: (repoRoot: string, file: string, sinceBase?: boolean) =>
+   *  + uncommitted) instead of just vs HEAD; omitted/false keeps vs-HEAD.
+   *  `ignoreWhitespace` reads it with `git -w`. */
+  gitDiff: (repoRoot: string, file: string, sinceBase?: boolean, ignoreWhitespace?: boolean) =>
     invoke<string>("git_diff", {
       repoRoot,
       file,
       sinceBase: sinceBase ?? null,
+      ignoreWhitespace: ignoreWhitespace ?? null,
     }),
   /** One-sentence, plain-language "what changed" for a single working-tree
    *  file — the human-readable half of the file-insight strip. Uses whichever
@@ -1602,6 +1591,11 @@ export const api = {
    *  local tracking branch. Rejects with git's stderr on failure. */
   gitCheckout: (repoRoot: string, branch: string) =>
     invoke<void>("git_checkout", { repoRoot, branch }),
+  /** This folder onto `branch` as GitHub has it, tracking it: a pull
+   *  request's own branch. Refuses in words when the branch is open in
+   *  another copy, gone from GitHub, or moved both here and there. */
+  gitContinueBranchHere: (repoRoot: string, branch: string) =>
+    invoke<void>("git_continue_branch_here", { repoRoot, branch }),
   /** Create + switch to a new branch from HEAD (`git checkout -b`). */
   gitCreateBranch: (repoRoot: string, name: string) =>
     invoke<void>("git_create_branch", { repoRoot, name }),
@@ -1768,6 +1762,16 @@ export const api = {
     invoke<void>("worktree_remove_managed", { repoRoot, worktreePath }),
   worktreeResolvePath: (repoRoot: string, branch: string) =>
     invoke<string>("worktree_resolve_path", { repoRoot, branch }),
+  /** Fetch `branch` from GitHub into a worktree of `repoRoot`: the one it is
+   *  already checked out in (moved forward when it is only behind), or a new
+   *  one. Refuses, with a sentence, rather than move a branch with work of
+   *  its own on it. */
+  worktreeBring: (repoRoot: string, branch: string) =>
+    invoke<BroughtWorktree>("worktree_bring", { repoRoot, branch }),
+  /** Folders under `root` that are git repositories of their own. */
+  nestedReposList: (root: string) => invoke<NestedRepo[]>("nested_repos_list", { root }),
+  /** Nested repositories under `root` whose work deleting `root` would lose. */
+  nestedReposDirty: (root: string) => invoke<NestedDirty[]>("nested_repos_dirty", { root }),
 
   // ── lost-worktree recovery ──────────────────────────────────────────
   // `git worktree list` is the roster's only source of worktree rows, so
@@ -1818,6 +1822,10 @@ export const api = {
     agents: LaunchAgentSpec[],
     cols?: number,
     rows?: number,
+    /** Check `branch` out as GitHub has it instead of making it new: a pull
+     *  request's own branch, so pushes land on the pull request. `base` is
+     *  the branch it merges into. */
+    continueBranch?: { base?: string | null } | null,
   ) =>
     invoke<WorkspaceLaunchManifest>("workspace_launch", {
       repoRoot,
@@ -1832,6 +1840,8 @@ export const api = {
       })),
       cols: cols ?? null,
       rows: rows ?? null,
+      continueBranch: continueBranch ? true : null,
+      base: continueBranch?.base ?? null,
     }),
 
   // Agent CLI surface — discovery + spawn. Streaming variant emits
@@ -1916,6 +1926,9 @@ export const api = {
       profileName: profileName ?? null,
       permissionMode: permissionMode ?? null,
       machineId: machineId ?? null,
+      // The workspace's linked folders are paths on this disk, so an agent
+      // started on a machine gets none.
+      linkedDirs: machineId ? null : launchLinks(repoRoot),
     }).then((handle) => {
       recordSpawnOrigin(handle.id, startedIn);
       return handle;
@@ -2229,6 +2242,7 @@ export const api = {
       permissionMode: permissionMode ?? null,
       effort: effort ?? null,
       fast: fast ?? null,
+      linkedDirs: launchLinks(repoRoot),
     }),
   agentStreamInterrupt: (channel: string) =>
     invoke<boolean>("agent_stream_interrupt", { channel }),
@@ -2869,6 +2883,9 @@ export const api = {
     invoke<void>("cloud_org_invite", { githubUsername, role: role ?? null }),
   /** Everyone in the org you are acting as, privileged roles first. */
   cloudOrgMembers: () => invoke<CloudOrgMember[]>("cloud_org_members"),
+  /** Who is signed in, by the user id the cloud names them with on every
+   *  member row, workspace owner and turn author. */
+  cloudMe: () => invoke<CloudMe>("cloud_me"),
   /** Change a member's org role (owner|admin|member). The server owns the
    *  authority model — owner-only for anything touching `owner`, last owner
    *  immovable — and refuses with a sentence worth showing. */
@@ -2879,6 +2896,17 @@ export const api = {
    *  transaction. */
   cloudOrgMemberRemove: (userId: string) =>
     invoke<void>("cloud_org_member_remove", { userId }),
+  /** Who in the org you are acting as holds a cloud seat — may open the org's
+   *  machines — and how many seats the plan has. Owners and admins never need
+   *  one; the server lets them in by role. */
+  cloudAccessList: () => invoke<CloudAccess>("cloud_access_list"),
+  /** Give a member a cloud seat. Owner/admin only, and the server refuses with
+   *  a sentence worth showing: not on a plan with shared machines, every seat
+   *  taken, not a member of this org. */
+  cloudAccessGrant: (login: string) => invoke<void>("cloud_access_grant", { login }),
+  /** Take a member's cloud seat back. They stay in the org. */
+  cloudAccessRevoke: (userId: string) =>
+    invoke<void>("cloud_access_revoke", { userId }),
   /** Every org this account can act as, with the current one ticked.
    *  Derived from `GET /api/v2/repos` — the one cross-org read the server has.
    *  Throws when signed out or the cloud is unreachable: an empty list would
@@ -3709,14 +3737,6 @@ export const api = {
   brainCloudConfigGet: (providerId: "bedrock" | "vertex") =>
     invoke<BrainCloudConfig>("brain_cloud_config_get", { providerId }),
 
-  // Aura Pro brain (v0.2.31 task #352) — managed/subscription backend.
-  // No keychain row: sign-in state + quota live in cloud-auth land
-  // (~/.aura/credentials.json + the `/v1/brain/quota` endpoint), and
-  // the BrainSettings UI special-cases the `aura_pro` row to render
-  // these instead of an API-key field.
-  auraProIsSignedIn: () => invoke<AuraProSignInState>("aura_pro_is_signed_in"),
-  auraProQuota: () => invoke<AuraProQuota>("aura_pro_quota"),
-
   // Brain-trait chat surface (v0.2.31 LL.0). Sibling of `managerChat` —
   // bypasses the legacy `manager-stream:<sid>` MCP/CLI path for native
   // brains and streams `BrainChatChunk`s directly on
@@ -3741,7 +3761,7 @@ export const api = {
     invoke<void>("brain_chat_turn", {
       sessionId,
       userMessage,
-      contextJson: contextJson ?? null,
+      contextJson: withLaunchLinks(contextJson ?? null, repoRoot),
       brainOverride: brainOverride ?? null,
       // The repo/worktree root the user is actually in. The backend spawns a
       // CLI-wrapper brain's subprocess here (so a worktree chat runs inside
@@ -3749,14 +3769,18 @@ export const api = {
       // falls back to the session's bound project list.
       repoRoot: repoRoot ?? null,
     }),
+  /** Which of these linked folders no longer exist on this disk. */
+  linkedDirsMissing: (paths: string[]) =>
+    invoke<string[]>("linked_dirs_missing", { paths }),
   brainChatCancel: (sessionId: string) =>
     invoke<void>("brain_chat_cancel", { sessionId }),
   /**
    * List every brain the chat-header BrainPicker can swap to (WW-B1) —
-   * static singletons (Aura Pro, Claude, …), installed CLI wrappers, and
+   * static singletons (Claude, Gemini, …), installed CLI wrappers, and
    * each user-registered `openai_compat:<slug>` endpoint. `active` marks
-   * the globally-active brain. Same source as the Settings picker, so
-   * the two never drift.
+   * the brain a turn runs on when the session picks none: the saved
+   * choice, or the first agent or key that is set up. Same source as the
+   * Settings picker, so the two never drift.
    */
   managerListBrains: () => invoke<BrainChoice[]>("manager_list_brains"),
   /**
@@ -3778,6 +3802,14 @@ export const api = {
    */
   managerSetBrainOverride: (sessionId: string, providerId: string | null) =>
     invoke<void>("manager_set_brain_override", { sessionId, providerId }),
+  /**
+   * Tell Aura where the person is looking while they talk to it — today, the
+   * organization's cloud rather than the laptop project the conversation is
+   * filed under. The note rides in front of the next question; it is never
+   * saved in the conversation. `null` (or blank) clears it.
+   */
+  managerSetView: (sessionId: string, note: string | null) =>
+    invoke<void>("manager_set_view", { sessionId, note }),
   /**
    * Assemble the carryover payload for a brain swap (WW-B3). Shells
    * `aura carryover --json` and returns the typed {@link AuraCarryover}
@@ -3971,18 +4003,24 @@ export const api = {
    *  to. `repoRoot` stays first either way — it is the cwd the tools run in —
    *  and the extras are the other projects the conversation is allowed to be
    *  about. Used by Aura's own door, which spans every project you have open;
-   *  an ordinary chat omits it and gets exactly one, as before. */
+   *  an ordinary chat omits it and gets exactly one, as before.
+   *
+   *  `brain` is the brain the chat is born with. A chat on one of the org's
+   *  machines is born with that machine's agent, which keeps it off the
+   *  cloud's session list: its workspace is already its row there. */
   managerChatStart: (
     repoRoot: string,
     prompt: string,
     machineId?: string | null,
     projects?: string[],
+    brain?: string | null,
   ) =>
     invoke<string>("manager_chat_start", {
       repoRoot,
       prompt,
       machineId: machineId ?? null,
       projects: projects ?? null,
+      brain: brain ?? null,
     }),
   /** Cross-agent continuity — hydrate a native Aura chat session from a
    *  Claude Code / Gemini CLI transcript. Reads the agent's own on-disk
@@ -4097,7 +4135,11 @@ export const api = {
    *  The runner board says which boxes are UP; this says which ones we have an
    *  address for. Both are needed to open a workspace on one — a registry row
    *  carries no host, no login and no key. */
-  machinesList: () => invoke<Machine[]>("machines_list"),
+  machinesList: () =>
+    invoke<Machine[]>("machines_list").then((book) => {
+      learnMachineIds(book);
+      return book;
+    }),
   /** The one list: the boxes this laptop can reach AND the places your org has,
    *  each saying whose it is, who added it, and what you may do with it.
    *
@@ -4107,7 +4149,22 @@ export const api = {
    *  server's own words, why the other half is missing. `machinesList` remains
    *  the right call for a surface that only wants addresses; this is the one
    *  for a surface that lists PLACES. */
-  placesList: () => invoke<PlaceRoster>("places_list"),
+  placesList: () =>
+    invoke<PlaceRoster>("places_list").then((roster) => {
+      learnMachineIds(roster?.places?.flatMap((p) => (p.machine ? [p.machine] : [])));
+      return roster;
+    }),
+  /** Every machine across every org you belong to — your personal account,
+   *  each team — grouped by whose it is, plus the boxes only this laptop knows.
+   *  A view only: opening a row of another org still switches to that org.
+   *  Never throws for the cloud's sake, like `placesList`. */
+  placesListAll: () =>
+    invoke<AllPlaces>("places_list_all").then((all) => {
+      learnMachineIds(
+        all?.groups?.flatMap((g) => g.places.flatMap((p) => (p.machine ? [p.machine] : []))),
+      );
+      return all;
+    }),
   /** What Aura can make for this team, and who would be able to open it. Never
    *  throws for a person who may not make one — that comes back as `can_make:
    *  false` with a reason and a sentence, because "you are not an admin" is an
@@ -4122,8 +4179,9 @@ export const api = {
    *  than rounded to the suggestion. */
   placeMake: (name: string, size: string) =>
     invoke<MadePlace>("place_make", { name, size }),
-  /** Remember a machine (or update the entry for that `user@host`). Stores the
-   *  key's PATH, never the key. */
+  /** Remember a machine, or update one. With `id`, that row is the one
+   *  updated, whatever address it is given; without, the row already at this
+   *  address is. Stores the key's PATH, never the key. */
   machineSave: (machine: MachineInput) =>
     invoke<Machine>("machine_save", { machine }),
   /** Mark a machine as the one just worked on, so the list orders by attention. */
@@ -4198,10 +4256,11 @@ export const api = {
    *  `carries` must be empty. Anything in it is somebody's credential sitting
    *  in a place meant to be everyone's, and nothing will be copied out until it
    *  is gone. */
-  placeTeamBase: (place: { root: string | null; machineId: string | null }) =>
+  placeTeamBase: (place: TeamBaseAt) =>
     invoke<TeamBase>("place_team_base", {
       root: place.root,
       machineId: place.machineId,
+      repoPath: place.repoPath ?? null,
     }),
   /** Build the team's environment once, and start this member from it.
    *
@@ -4222,13 +4281,14 @@ export const api = {
    *  `force` rebuilds a base that is already at spec, and applies one whose
    *  lock this laptop's team registry cannot vouch for. */
   placeTeamBaseWarm: (
-    place: { root: string | null; machineId: string | null },
+    place: TeamBaseAt,
     login?: string,
     force = false,
   ) =>
     invoke<BaseBuild>("place_team_base_warm", {
       root: place.root,
       machineId: place.machineId,
+      repoPath: place.repoPath ?? null,
       login: login ?? null,
       force,
     }),
@@ -4316,6 +4376,9 @@ export const api = {
       root?: string | null;
       machineId?: string | null;
       address?: PlaceAddress | null;
+      /** The worktree on the box a launched workspace works in, when it is
+       *  not the checkout the machine row records. */
+      remoteRoot?: string | null;
     },
     open: PlaceOpen,
   ) =>
@@ -4324,6 +4387,7 @@ export const api = {
       machineId: place.machineId ?? null,
       address: place.address ?? null,
       open,
+      remoteRoot: place.remoteRoot ?? null,
     }),
   /** What a place HAS, set against what the project ASKS IT FOR — the same
    *  capability probe as above joined to every check the project's declared
@@ -4383,12 +4447,14 @@ export const api = {
     root: string,
     file: string,
     sinceBase?: boolean,
+    ignoreWhitespace?: boolean,
   ) =>
     invoke<string>("place_git_diff", {
       machineId,
       root,
       file,
       sinceBase: sinceBase ?? null,
+      ignoreWhitespace: ignoreWhitespace ?? null,
     }),
   placeGitDiffAtCommit: (
     machineId: string,
@@ -4956,6 +5022,10 @@ export const api = {
     invoke<void>("manager_resume", { sessionId }),
   managerPause: (sessionId: string) =>
     invoke<void>("manager_pause", { sessionId }),
+  /** Rename a conversation (its title, as the tab strip and the chat list
+   *  show it). A blank or unchanged name is a no-op on the backend. */
+  managerRename: (sessionId: string, title: string) =>
+    invoke<void>("manager_rename", { sessionId, title }),
   managerCancel: (sessionId: string) =>
     invoke<void>("manager_cancel", { sessionId }),
   managerOverride: (
@@ -4979,6 +5049,11 @@ export const api = {
    *  on a non-terminal task is a silent no-op. */
   managerRateTask: (sessionId: string, taskId: number, rating: -1 | 1) =>
     invoke<void>("manager_rate_task", { sessionId, taskId, rating }),
+  /** Remove a finished task's own copy of the project. Its branch stays, and
+   *  so do the branches of nested repositories inside it. Without `force` a
+   *  copy still holding unsaved work is kept and that work listed. */
+  managerRemoveTaskWorktree: (sessionId: string, taskId: number, force: boolean) =>
+    invoke<TaskCopyRemoval>("manager_remove_task_worktree", { sessionId, taskId, force }),
   /** Bucket G3 — user clicked the SkillBadge dropdown and picked a
    *  different provider for one todo on a pending plan. The override
    *  is honored at Build-time mint; if the plan is no longer pending
@@ -5159,12 +5234,12 @@ export const api = {
   /** Set the HUD window's uniform opacity (0.2–1.0). `hud::hud_set_opacity`. */
   hudSetOpacity: (opacity: number) =>
     invoke<void>("hud_set_opacity", { opacity }),
-  /** Flip the persistent HUD master switch live. When off, ⌘⇧A / tray /
+  /** Flip the persistent HUD master switch live. When off, ⌃⌘A / tray /
    *  programmatic summons are no-ops and a visible HUD is hidden now.
    *  `hud::hud_set_enabled`. */
   hudSetEnabled: (enabled: boolean) =>
     invoke<void>("hud_set_enabled", { enabled }),
-  /** Summon the floating HUD (⌘⇧A) — used to preview while tuning it in
+  /** Summon the floating HUD (⌃⌘A) — used to preview while tuning it in
    *  Settings → HUD. `hud::hud_show`. */
   hudShow: () => invoke<void>("hud_show"),
 
@@ -5395,6 +5470,15 @@ export const api = {
    *  surfaced per-check instead of only summarized to a chip. */
   prChecks: (repoRoot: string, number: number, remoteRepo?: string | null) =>
     invoke<PrCheck[]>("pr_checks", {
+      repoRoot,
+      number,
+      remoteRepo: remoteRepo ?? null,
+    }),
+  /** Re-run the failed jobs of every GitHub Actions run behind a failing
+   *  check on the PR. Resolves to how many runs were restarted; rejects with
+   *  a readable reason when nothing failing can be re-run from here. */
+  prRerunFailedChecks: (repoRoot: string, number: number, remoteRepo?: string | null) =>
+    invoke<number>("pr_rerun_failed_checks", {
       repoRoot,
       number,
       remoteRepo: remoteRepo ?? null,
@@ -5699,6 +5783,9 @@ export const api = {
     serverUrl?: string | null;
     oauthClientId?: string | null;
     oauthScope?: string | null;
+    /** Attach the server to this project only. Omitted, it is added for
+     *  every project. */
+    projectRoot?: string | null;
   }) =>
     invoke<McpServerEntry>("mcp_servers_add", {
       name: input.name,
@@ -5709,6 +5796,7 @@ export const api = {
       serverUrl: input.serverUrl ?? null,
       oauthClientId: input.oauthClientId ?? null,
       oauthScope: input.oauthScope ?? null,
+      projectRoot: input.projectRoot ?? null,
     }),
   mcpServersRemove: (name: string) =>
     invoke<void>("mcp_servers_remove", { name }),
@@ -6014,10 +6102,26 @@ export type CloudBillingStatus = {
   effective_plan?: string | null;
   org_slug?: string | null;
   seat_count?: number | null;
+  /** Everyone in the org; a Teams checkout buys a seat for each. */
+  member_count?: number | null;
   has_billing?: boolean | null;
   trial_active?: boolean | null;
   trial_days_remaining?: number | null;
+  /** A failed payment, or null when payments are fine. Read it through
+   *  `paymentNoticeOf` (cloudPayment.ts). */
+  payment?: CloudBillingPayment | null;
   error?: string | null;
+};
+
+/** `payment` on billing status: what aura-cloud's `billing_lifecycle` says
+ *  about a failed payment. */
+export type CloudBillingPayment = {
+  state?: string | null;
+  since?: string | null;
+  grace_ends_at?: string | null;
+  paused?: boolean | null;
+  action?: string | null;
+  message?: string | null;
 };
 
 // ── plugin host (W0.3) ──────────────────────────────────────────────
@@ -6626,6 +6730,10 @@ export type VercelDeployment = {
 export type CrashSummary = {
   path: string;
   timestamp_ms: number;
+  /** `"panic"` — the shell came apart — or `"renderer_reclaimed"`, where
+   *  macOS took the window's renderer for its memory and the page was
+   *  reloaded. Records written before the field existed read as `"panic"`. */
+  kind: string;
   panic_message: string;
   location: string | null;
   session_id: string | null;
@@ -6878,6 +6986,12 @@ export type ProjectRef = {
   label: string;
 };
 
+/** What became of removing a task's copy: gone, or kept because it still
+ *  holds the listed unsaved work. */
+export type TaskCopyRemoval =
+  | { outcome: "removed" }
+  | { outcome: "kept"; unsaved: string[] };
+
 export type ManagerTask = {
   id: number;
   description: string;
@@ -7074,6 +7188,14 @@ export type ChatTurn = {
    *  assistant turns and on history persisted before the field. Mirrors the
    *  Rust `ChatTurn.attachments`. */
   attachments?: ChatImageAttachment[] | null;
+  /** The key a machine chat's turn was kept on its workspace's log under,
+   *  when this laptop sent it (`<turn>-u` / `<turn>-a`). Set on both sides of
+   *  a turn a person asked from this laptop. Mirrors the Rust
+   *  `ChatTurn.cloud_key`. */
+  cloud_key?: string | null;
+  /** The id of this turn's copy on its workspace's log, when the turn was
+   *  filed here from that log. Mirrors the Rust `ChatTurn.cloud_id`. */
+  cloud_id?: string | null;
 };
 
 /** One image a user attached to a chat turn, as persisted on the Rust
@@ -7831,6 +7953,43 @@ export type PlaceOrgHalf = {
 
 export type PlaceRoster = { places: PlaceRow[]; org: PlaceOrgHalf };
 
+/** One account's machines on the every-org list. */
+export type PlaceGroup = {
+  /** `"personal"` — an org with you as its only member: your own account.
+   *  `"team"` — an org with other people in it.
+   *  `"laptop"` — boxes only this laptop's book knows, filed under no org. */
+  kind: "personal" | "team" | "laptop";
+  org: PlaceOrgHalf;
+  /** The org the app is acting as. A row of any other group opens after a
+   *  switch to its org. */
+  current: boolean;
+  /** People in the org, when its roster answered. */
+  members: number | null;
+  places: PlaceRow[];
+};
+
+export type AllPlaces = {
+  /** About the list of orgs: `"ok"` | `"signed_out"` | `"unreachable"`. */
+  status: string;
+  detail: string;
+  groups: PlaceGroup[];
+};
+
+/** One member holding a cloud seat. `source` is how they got it: `manual`
+ *  (an admin gave it), `owner`, or `backfill` (held one before seats were
+ *  counted). */
+export type CloudAccessGrant = { user_id: string; github_login: string; source: string };
+
+/** Who may open the org's machines beyond its owners and admins. */
+export type CloudAccess = {
+  org_slug: string;
+  grants: CloudAccessGrant[];
+  granted: number;
+  /** Seats the plan pays for. `0` means not metered, not "none left". */
+  seat_count: number;
+  plan: string;
+};
+
 /** One machine size, as it is offered. The list comes from the backend rather
  *  than being spelled here so the picker cannot invent a fifth size, and so no
  *  surface ever shows the substrate's own word for a shape. */
@@ -7902,12 +8061,17 @@ export type MadePlace = {
 /** A machine this laptop can open a workspace on — an address, not a secret.
  *  `key_path` is a path on THIS disk; the key itself never leaves it. */
 export type Machine = {
-  /** `user@host:/repo` — lowercased through the host, then the box's own path
-   *  verbatim. One runner holding clones of several repos is several rows, so
-   *  connecting a second project no longer overwrites the first. Entries
-   *  written before projects were part of the key keep the bare `user@host`
-   *  form. Never print this; resolve it to `name` via `useMachineName`. */
+  /** `m-` and sixteen hex digits — the machine's own name, with nothing in it
+   *  about where the box is, so reconnecting it at a new address keeps every
+   *  workspace, chat and tab that points at it. One runner holding clones of
+   *  several repos is still several rows. Never print this; resolve it to
+   *  `name` via `useMachineName`. */
   id: string;
+  /** Ids this row answered to before: the `user@host:/repo` key it was named
+   *  by until ids stopped carrying the address, or the id of a lost machine it
+   *  was reconnected as. Anything still holding one of these means this row —
+   *  look it up with `findMachine`, not `===`. Absent when there are none. */
+  aliases?: string[];
   /** What it is called on the cloud runner board. */
   name: string;
   host: string;
@@ -8038,13 +8202,21 @@ export type Waking = {
   note: string;
 };
 
-/** What the app sends to record a machine. The id and timestamps are derived. */
+/** What the app sends to record a machine. Timestamps are derived, and so is
+ *  the id unless `id` names the row being edited. */
 export type MachineInput = {
+  /** The machine this is, when the caller knows: a lost one being connected
+   *  again at a new address, or one whose details are being edited. That row
+   *  is updated in place and keeps its id. Omitted, the row already at this
+   *  address is updated, or a new one is made. */
+  id?: string | null;
   name: string;
   host: string;
   user: string;
   key_path: string;
   box_kind: string;
+  /** Omit to leave the folder the row has — the wizard, which can't know it.
+   *  `null` says there is none, which is what clearing it means. */
   repo_path?: string | null;
   /** Omit to leave the filing alone. Omission is not a request to clear it —
    *  the directory editor re-sends the whole record to change one path and has
@@ -8147,6 +8319,15 @@ export type BoxProject = {
   dirty: number;
 };
 
+/** Which checkout a team-base command reads: this laptop's `root`, or a box
+ *  by `machineId` — at the folder its book row names, or at `repoPath` when the
+ *  repository is one the box holds and the book has no row for. */
+export type TeamBaseAt = {
+  root: string | null;
+  machineId: string | null;
+  repoPath?: string | null;
+};
+
 /** A project the place holds and does not offer, with the reason. */
 export type WithheldProject = {
   /** Absolute path on the place. Named rather than merely counted: whoever is
@@ -8197,6 +8378,9 @@ export type NewBoxSession = {
   branch?: string | null;
   /** The first thing to say to the agent. Omitted leaves it at its own prompt. */
   prompt?: string | null;
+  /** For a shell session: the project's own command to start first, in the
+   *  login shell, with the shell left behind when it ends. */
+  run?: string | null;
 };
 
 export type LoopDispatchedNode = {
@@ -8364,6 +8548,15 @@ export type ManagerSummary = {
   /** The connected machine this conversation's hands are on. `null`/absent —
    *  the overwhelming default — means the code is on this disk. */
   machine_id?: string | null;
+  /** How many projects the conversation is bound to. Aura's panel on Home
+   *  lists every conversation and names the projects each covers; this is the
+   *  "+N" when an older build sends only the first root. Absent from older
+   *  builds. */
+  project_count?: number;
+  /** Every project root the conversation is bound to, first one first.
+   *  Absent from older builds — read through `conversationProjects`, which
+   *  falls back to `repo_root`. */
+  projects?: string[];
 };
 
 export type ManagerSearchHit = {
@@ -8588,9 +8781,9 @@ export type AppSettings = {
      *  Settings → Experimental. */
     show_message_tokens: boolean;
   };
-  /** Floating HUD (⌘⇧A) presentation prefs — fully frontend-owned. */
+  /** Floating HUD (⌃⌘A) presentation prefs — fully frontend-owned. */
   hud: {
-    /** Master on/off. When false the HUD never appears (⌘⇧A / tray / summons
+    /** Master on/off. When false the HUD never appears (⌃⌘A / tray / summons
      *  are no-ops). Default true. */
     enabled: boolean;
     /** capsule | sidebar | minimal | ambient */
@@ -8782,6 +8975,16 @@ export type BlockUpdate =
    *  is 0 for ordinary streaming output, which is nearly every update. */
   | { op: "reframe"; block_id: string; drop_lines: number; lines: string[] }
   | { op: "close"; block: BlockEnvelope };
+
+/** Where `worktreeBring` put a branch. */
+export type BroughtWorktree = {
+  path: string;
+  branch: string;
+  /** A new worktree was made (false: one that was already here). */
+  created: boolean;
+  /** The branch was moved forward to GitHub's copy. */
+  fast_forwarded: boolean;
+};
 
 export type GitStatusEntry = {
   path: string;
@@ -10000,6 +10203,13 @@ export type CloudOrgMember = {
   role: string;
 };
 
+/** The signed-in account as the cloud knows it (`cloud_me`). */
+export type CloudMe = {
+  user_id: string;
+  github_login: string;
+  email?: string | null;
+};
+
 export type CloudAuthStatus = {
   connected: boolean;
   user?: string | null;
@@ -10888,6 +11098,37 @@ export type ManagedWorktree = {
   branch: string;
   path: string;
   start_point: string;
+  /** One per nested repository in the project: its own copy at the same
+   *  folder inside this one. Absent when the project has none. */
+  nested?: NestedWorktreeOutcome[];
+};
+
+/** A folder inside a project that is a git repository of its own — mirrors
+ *  `nested_repos::NestedRepo`. */
+export type NestedRepo = {
+  /** From the project root, `/`-separated: `cloud`, `services/api`. */
+  rel_path: string;
+  root: string;
+  kind: "nested" | "submodule";
+  branch: string | null;
+  /** Where a pull request from `branch` goes; null when unknown. */
+  base: string | null;
+};
+
+export type NestedWorktreeOutcome = {
+  rel_path: string;
+  state: "created" | "attached" | "skipped" | "failed";
+  branch: string | null;
+  detail: string | null;
+};
+
+/** A nested repository that deleting its folder would lose work from. */
+export type NestedDirty = {
+  rel_path: string;
+  /** Files with uncommitted changes. */
+  changed: number;
+  /** It is a whole repository that lives only here, history and all. */
+  standalone: boolean;
 };
 
 // Lost-worktree recovery — mirrors `worktree_recover.rs`.

@@ -12,58 +12,40 @@
 import { useState } from "react";
 import type { GoalRun } from "../../lib/goalStore";
 import { VERDICT } from "../../lib/goalVerdict";
+import { Button } from "../ui/button";
+import { TraceMark } from "../ui/trace-list";
+import { VERDICT_TONE } from "./verdictTone";
+import "./goals.css";
 import { relativeAge } from "../../lib/relativeTime";
 
 const SHOWN = 6;
 
 // One check on the thread: a verdict dot on a connecting rail, the plain result,
 // and where it happened (session or commit) + who + when.
-function ThreadRow({
-  run,
-  current,
-  last,
-}: {
-  run: GoalRun;
-  current: boolean;
-  last: boolean;
-}) {
+function ThreadRow({ run, current }: { run: GoalRun; current: boolean }) {
   const v = VERDICT[run.verdict];
   const who = current ? "this session" : run.label ?? run.agentId ?? run.runKey.slice(0, 8);
   const onCommit = run.trigger === "build";
   return (
-    <li className="flex gap-2.5">
-      {/* Rail: dot + connector down to the next row. */}
-      <div className="flex flex-col items-center">
-        <span
-          aria-hidden
-          className="mt-[3px] h-2 w-2 shrink-0 rounded-full"
-          style={{ background: v.color, boxShadow: current ? `0 0 0 3px color-mix(in oklab, ${v.color} 22%, transparent)` : undefined }}
-        />
-        {!last ? <span aria-hidden className="mt-0.5 w-px flex-1 bg-line-soft" /> : null}
-      </div>
-      <div className="min-w-0 flex-1 pb-2.5">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium" style={{ color: v.color }}>
+    // The library timeline: the filled marker is the session you are reading.
+    <li data-tone={current ? "active" : "neutral"}>
+      <span className="ui-timeline-marker" aria-hidden />
+      <div>
+        <strong>
+          <span className="ui-goal-verdict" data-tone={VERDICT_TONE[run.verdict]}>
             {v.label}
           </span>
           {run.total > 0 ? (
-            <span className="text-2xs text-text-4 tabular-nums">{run.ok}/{run.total} in place</span>
-          ) : null}
-          {onCommit ? (
-            <span className="meta-tag">
-              on commit
+            <span className="ui-goal-meta">
+              {run.ok}/{run.total} in place
             </span>
           ) : null}
-          <span className="ml-auto text-2xs text-text-5">{relativeAge(run.at)}</span>
-        </div>
-        <div className="mt-0.5 flex items-center gap-1.5 text-xs text-text-4">
-          <span className="min-w-0 truncate">{who}</span>
-          {run.commit ? (
-            <>
-              <span aria-hidden className="text-text-5">·</span>
-              <span className="font-mono text-text-5">{run.commit.slice(0, 7)}</span>
-            </>
-          ) : null}
+          {onCommit ? <TraceMark>on commit</TraceMark> : null}
+          <span className="ui-goal-meta ui-goal-thread-when">{relativeAge(run.at)}</span>
+        </strong>
+        <div>
+          <span className="ui-goal-thread-who">{who}</span>
+          {run.commit ? <code className="ui-goal-meta"> · {run.commit.slice(0, 7)}</code> : null}
         </div>
       </div>
     </li>
@@ -86,32 +68,23 @@ export function FeatureHistory({
   const hidden = runs.length - shown.length;
   const commits = new Set(runs.filter((r) => r.commit).map((r) => r.commit)).size;
   return (
-    <section>
-      <div className="section-label mb-2">
+    <section className="ui-goal-part">
+      <h3 className="ui-goal-part-title">
         The feature&apos;s thread
-        <span className="ml-1.5 normal-case tracking-normal text-text-5">
+        <small>
           {runs.length} check{runs.length === 1 ? "" : "s"}
           {commits > 0 ? ` across ${commits} commit${commits === 1 ? "" : "s"}` : ""}
-        </span>
-      </div>
-      <ul className="flex flex-col">
+        </small>
+      </h3>
+      <ol className="ui-timeline ui-goal-thread" data-orientation="vertical" data-position="after">
         {shown.map((run, i) => (
-          <ThreadRow
-            key={`${run.runKey}:${i}`}
-            run={run}
-            current={run.runKey === currentRunKey}
-            last={i === shown.length - 1 && hidden <= 0}
-          />
+          <ThreadRow key={`${run.runKey}:${i}`} run={run} current={run.runKey === currentRunKey} />
         ))}
-      </ul>
+      </ol>
       {hidden > 0 ? (
-        <button
-          type="button"
-          onClick={() => setExpanded(true)}
-          className="text-xs text-text-4 hover:text-text-2 transition-colors"
-        >
+        <Button type="button" variant="ghost" size="sm" onClick={() => setExpanded(true)}>
           Show {hidden} earlier check{hidden === 1 ? "" : "s"}
-        </button>
+        </Button>
       ) : null}
     </section>
   );

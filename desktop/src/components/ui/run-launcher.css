@@ -1,0 +1,81 @@
+/* Orchestrate a multi-step session: the objective with Discover beside its
+   label, a line once Aura has split it, then the tasks as rows in one
+   bordered list (the same box other dialogs list things in), each with its
+   description on top and its agent, repository, order and folders under it. */
+.ui-launcher {
+  display: flex;
+  flex-direction: column;
+}
+.ui-launcher > * + * {
+  margin-top: 16px;
+}
+.ui-launcher-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+}
+.ui-launcher-head > span {
+  font-weight: 500;
+}
+.ui-launcher-plan {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-launcher-plan > svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--ui-green);
+}
+.ui-launcher-tasks-section {
+  font-size: 14px;
+}
+.ui-launcher-tasks {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+.ui-launcher-task {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+.ui-launcher-task + .ui-launcher-task {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-launcher-task-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-launcher-task-line > .ui-input {
+  flex: 1;
+  min-width: 0;
+}
+.ui-launcher-task-no {
+  width: 20px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.ui-launcher-task-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding-left: 28px;
+}
+.ui-launcher-task-options .ui-select-trigger {
+  width: 100%;
+}

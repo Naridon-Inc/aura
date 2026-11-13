@@ -1,0 +1,171 @@
+/* Add project: the menu under the list heading and its two dialogs. */
+
+.ui-add-project-anchor {
+  position: absolute;
+  right: 24px;
+  top: 100%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.ui-popover.ui-add-project-menu {
+  width: 320px;
+  padding: 4px;
+  border-radius: 8px;
+}
+
+.ui-add-project-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ui-fg);
+  font: 400 14px/20px var(--font-sans);
+  text-align: left;
+  outline: none;
+  cursor: default;
+}
+.ui-add-project-row svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.ui-add-project-row[data-tone="secondary"] svg {
+  color: var(--ui-muted-fg);
+}
+.ui-add-project-row:hover,
+.ui-add-project-row:focus {
+  background: var(--ui-hover);
+}
+
+.ui-dialog-content.ui-add-project-dialog {
+  width: min(525px, calc(100vw - 32px));
+}
+
+.ui-add-project-body {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.ui-add-project-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-add-project-location {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+.ui-add-project-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-add-project-hint[data-error] {
+  color: var(--ui-red);
+}
+.ui-add-project-hint code {
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: var(--ui-hover);
+  font-family: var(--font-mono);
+}
+
+.ui-add-project-templates {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.ui-add-project-template {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ui-hover) 50%, transparent);
+  color: var(--ui-fg);
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.ui-add-project-template:hover {
+  background: var(--ui-hover);
+}
+.ui-add-project-template[data-selected] {
+  border-color: var(--ui-special);
+  background: color-mix(in srgb, var(--ui-special) 20%, transparent);
+}
+.ui-add-project-template-icon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-bg);
+}
+.ui-add-project-template-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  text-align: center;
+}
+.ui-add-project-template-label {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-add-project-template-note {
+  font-size: 10px;
+  color: var(--ui-muted-fg);
+}
+
+.ui-add-project-working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-add-project-working p {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ui-muted-fg);
+}
+.ui-add-project-error {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--ui-red) 50%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ui-red) 10%, transparent);
+}
+.ui-add-project-error p {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ui-red);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
+
+.ui-add-project-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.ui-add-project-chord {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  font-size: 12px;
+  opacity: 0.6;
+}

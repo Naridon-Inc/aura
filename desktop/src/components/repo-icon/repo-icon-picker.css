@@ -1,0 +1,233 @@
+/* The repository icon picker: a 32px button and a 360px panel with four tabs. */
+.ui-repo-icon-trigger {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--ui-input);
+  border-radius: var(--radius-md, 6px);
+  background: transparent;
+  color: var(--ui-muted-fg);
+  cursor: default;
+}
+.ui-repo-icon-trigger:hover {
+  background: var(--ui-hover);
+}
+.ui-repo-icon-trigger:focus-visible {
+  outline: 2px solid var(--ui-ring);
+  outline-offset: 2px;
+}
+.ui-repo-icon-trigger-emoji {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.ui-popover.ui-repo-icon-popover {
+  width: 360px;
+  padding: 0;
+  overflow: hidden;
+}
+.ui-repo-icon-panel {
+  display: flex;
+  flex-direction: column;
+  height: 320px;
+}
+.ui-repo-icon-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-repo-icon-tabs > button {
+  padding: 8px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: default;
+}
+.ui-repo-icon-tabs > button:hover {
+  color: var(--ui-fg);
+}
+.ui-repo-icon-tabs > button[data-active] {
+  color: var(--ui-fg);
+  border-bottom-color: var(--ui-primary);
+}
+.ui-repo-icon-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ui-repo-icon-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.ui-repo-icon-search {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ui-border);
+  color: var(--ui-muted-fg);
+}
+.ui-repo-icon-search > input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ui-fg);
+  font-size: 14px;
+}
+.ui-repo-icon-search > input::placeholder {
+  color: var(--ui-muted-fg);
+}
+.ui-repo-icon-clear,
+.ui-repo-icon-more {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-md, 6px);
+  background: none;
+  color: var(--ui-muted-fg);
+  cursor: default;
+}
+.ui-repo-icon-clear {
+  width: 32px;
+  height: 32px;
+  margin: -8px -8px -8px 0;
+}
+.ui-repo-icon-more {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+.ui-repo-icon-clear:hover,
+.ui-repo-icon-more:hover {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+
+.ui-repo-icon-grid {
+  display: grid;
+  flex: 1;
+  align-content: start;
+  justify-items: center;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ui-repo-icon-grid[data-cols="9"] {
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px;
+}
+.ui-repo-icon-grid[data-cols="8"] {
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 2px;
+  padding: 8px;
+}
+.ui-repo-icon-grid > button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: var(--radius-sm, 4px);
+  background: none;
+  color: var(--ui-fg);
+  cursor: default;
+}
+.ui-repo-icon-grid > .ui-repo-icon-emoji {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md, 6px);
+  font-size: 18px;
+  line-height: 1;
+}
+.ui-repo-icon-grid > button:hover {
+  background: var(--ui-hover);
+}
+.ui-repo-icon-grid > button[data-selected] {
+  background: var(--ui-hover);
+  box-shadow: 0 0 0 1px var(--ui-ring);
+}
+.ui-repo-icon-empty {
+  margin: 0;
+  padding: 16px;
+  text-align: center;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+}
+
+.ui-repo-icon-pane {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 16px;
+  height: 100%;
+  padding: 16px;
+}
+.ui-repo-icon-stage {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+}
+.ui-repo-icon-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.ui-repo-icon-preview > img,
+.ui-repo-icon-initial {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm, 4px);
+}
+.ui-repo-icon-initial {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ui-muted);
+  color: var(--ui-muted-fg);
+  font-size: 16px;
+  font-weight: 500;
+}
+.ui-repo-icon-preview > p {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+}
+.ui-repo-icon-preview > p[role="alert"] {
+  color: var(--ui-red);
+  font-size: 12px;
+}
+.ui-repo-icon-note {
+  margin: 0;
+  padding: 12px;
+  border-radius: var(--radius-md, 6px);
+  background: color-mix(in srgb, var(--ui-muted) 40%, transparent);
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ui-repo-icon-note code {
+  font-size: 11px;
+}

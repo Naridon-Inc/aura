@@ -94,7 +94,7 @@ const MEANING: Record<EvidenceKind, EvidenceMeaning> = {
   git_fact: {
     title: "Where the code ended up",
     establishes:
-      "The change is recorded in the project's history at the version named here.",
+      "The change is recorded in the repository's history at the version named here.",
     doesNotEstablish:
       "Saving and sending code is not releasing it. Nobody is running this because of that.",
   },

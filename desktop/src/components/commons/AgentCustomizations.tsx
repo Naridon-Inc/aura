@@ -67,13 +67,13 @@ const NAV: CustomizeNavItem[] = [
   {
     id: "instructions",
     label: "Instructions",
-    blurb: "Standing rules every agent follows on your project.",
+    blurb: "Standing rules every agent follows in your repository.",
     icon: <BookOpen size={15} />,
   },
   {
     id: "memory",
     label: "Memory",
-    blurb: "What your AI remembers about you and this project.",
+    blurb: "What your AI remembers about you and this repository.",
     icon: <Database size={15} />,
   },
   {
@@ -106,7 +106,7 @@ const NAV_BY_ID = Object.fromEntries(NAV.map((n) => [n.id, n])) as Record<
 
 // Grouped sidebar model — clusters by meaning, not a flat list. The top block
 // (Overview + Agents) has no heading; the rest carry a quiet section label.
-// "Project" is intentionally last and de-emphasised so the safety net stops
+// "Repository" is intentionally last and de-emphasised so the safety net stops
 // competing with the things people actually tune.
 type NavGroup = {
   heading?: string;
@@ -118,7 +118,7 @@ const GROUPS: NavGroup[] = [
   { items: ["overview", "agents"] },
   { heading: "Knowledge", items: ["skills", "instructions", "memory"] },
   { heading: "Add-ons & connections", items: ["addons", "mcp"] },
-  { heading: "Project", items: ["hooks"], muted: true },
+  { heading: "Repository", items: ["hooks"], muted: true },
 ];
 
 export function AgentCustomizations({

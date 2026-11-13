@@ -9,6 +9,11 @@
 //!   cheap immutable [`grid::GridSnapshot`] (char + color + flags per cell,
 //!   plus cursor) for a renderer to paint.
 //!
+//! * [`search`] — the matching half, kept deliberately free of any terminal
+//!   state: it takes rows of text with their grid columns and returns hits in
+//!   reading order, so every case-folding and wide-glyph rule is unit-tested
+//!   without spawning a PTY.
+//!
 //! Colors are resolved into a toolkit-neutral [`color::Rgba`] via a
 //! [`color::Palette`]. The iced work surface (`aura-term`) converts `Rgba` ->
 //! `iced::Color`; the Tauri shell's native GPU renderer uploads `Rgba`
@@ -23,18 +28,21 @@ pub mod error;
 pub mod grid;
 pub mod pty;
 pub mod render;
+pub mod search;
 pub mod wheel;
 
 pub use color::{Palette, Rgba};
 pub use error::{Error, Result};
 pub use grid::{
-    GridSnapshot, GridTerminal, RenderCell, Selection, snapshot_selection_text, snapshot_to_text,
+    FindResult, GridSnapshot, GridTerminal, RenderCell, Selection, snapshot_selection_text,
+    snapshot_to_text,
 };
 pub use pty::{Osc133, PtyConfig, PtyEvent, PtySession, default_window_size, spawn};
 pub use render::{
     BgRect, CellMetrics, CursorRect, GlyphQuad, RenderList, append_selection_rects,
     build_render_list, translate,
 };
+pub use search::{RowText, SearchHit, SearchOpts, hit_at_or_after, scan};
 pub use wheel::{LINES_PER_NOTCH, WheelAccum, WheelAction, WheelInput, WheelModes};
 
 // Re-export the alacritty window-size type so callers can build a `PtyConfig`

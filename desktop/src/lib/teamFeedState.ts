@@ -84,15 +84,15 @@ export function teamEmptyCopy(state: TeamSyncState): {
   switch (state) {
     case "no_project":
       return {
-        title: "No project open",
-        body: "Open a project and this is where you'll see who on your team changed what, and why.",
+        title: "No repository open",
+        body: "Open a repository and this is where you'll see who on your team changed what, and why.",
         cta: null,
         tone: "known",
       };
     case "checking":
       return {
         title: "",
-        body: "Checking how this project is set up…",
+        body: "Checking how this repository is set up…",
         cta: null,
         tone: "waiting",
       };
@@ -106,7 +106,7 @@ export function teamEmptyCopy(state: TeamSyncState): {
     case "sync_off":
       return {
         title: "Turn on team activity",
-        body: "You're signed in. Turn on live sync for this project and your team's AI changes will flow in here as everyone works.",
+        body: "You're signed in. Turn on live sync for this repository and your team's AI changes will flow in here as everyone works.",
         cta: "sync",
         tone: "known",
       };

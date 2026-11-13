@@ -15,6 +15,7 @@ import { useState, type JSX } from "react";
 import type { Task } from "../../lib/api";
 import { stepProgress } from "../../lib/taskSteps";
 import { Checkbox } from "../ui/checkbox";
+import { Progress } from "../ui/progress";
 import { toast } from "../../lib/toast";
 
 export function TaskPlan({
@@ -32,28 +33,21 @@ export function TaskPlan({
   // condition, so this component and its heading vanish together.
   if (!progress || steps.length === 0) return null;
 
-  const pct = progress.total === 0 ? 0 : (progress.done / progress.total) * 100;
-
   return (
-    <section aria-label="Plan">
-      <div className="flex items-center gap-3 mb-3">
-        <h3 className="text-sm font-medium text-text-2">Plan</h3>
-        <span className="text-xs tabular-nums text-text-4">
-          {progress.done} of {progress.total}
-        </span>
-        <div
-          className="ml-auto h-1 w-24 rounded-full bg-line-soft overflow-hidden"
-          role="progressbar"
-          aria-valuenow={progress.done}
-          aria-valuemin={0}
-          aria-valuemax={progress.total}
+    <section className="ui-tasks-detail-section" aria-label="Plan">
+      <div className="ui-tasks-detail-section-head">
+        <h4>
+          Plan
+          <span className="ui-tasks-detail-count">
+            {progress.done} of {progress.total}
+          </span>
+        </h4>
+        <Progress
+          className="ml-auto h-1 w-24"
+          value={progress.done}
+          max={progress.total}
           aria-label={`${progress.done} of ${progress.total} steps done`}
-        >
-          <div
-            className="h-full rounded-full bg-accent transition-[width] duration-200"
-            style={{ width: `${pct}%` }}
-          />
-        </div>
+        />
       </div>
       <ol className="flex flex-col gap-0.5">
         {steps.map((step, i) => (

@@ -32,7 +32,7 @@ import {
   type Place,
 } from "../../lib/place";
 import { AsciiSpinner } from "../ui/ascii-spinner";
-import { MENU_LABEL } from "../ui/menuSurface";
+import { Button } from "../ui/button";
 
 /** The accent the headline carries.
  *
@@ -40,18 +40,18 @@ import { MENU_LABEL } from "../ui/menuSurface";
  *  the project asked for — and drawn as either green or red it is read wrong
  *  both ways. `open` is the one that matters most: a machine holding nobody to
  *  anything, which a panel showing a list would otherwise imply it was. */
-const TONE: Record<EgressTone, string> = {
-  held: "var(--color-accent)",
-  unsealed: "var(--color-amber)",
-  open: "var(--color-red)",
+const TONE: Record<EgressTone, "ok" | "warn" | "bad"> = {
+  held: "ok",
+  unsealed: "warn",
+  open: "bad",
 };
 
 /** The dot beside one row, by why that row is on the list. What the project
  *  chose is the half worth auditing; the floor is not news. */
-const REASON_TONE: Record<Allowed["reason"], string> = {
-  declared: "var(--color-accent)",
-  remote: "var(--color-text-4)",
-  model: "var(--color-text-4)",
+const REASON_TONE: Record<Allowed["reason"], "ok" | "info"> = {
+  declared: "ok",
+  remote: "info",
+  model: "info",
 };
 
 export function PlaceEgress({ place, bin }: { place: Place; bin: string }) {
@@ -88,54 +88,52 @@ export function PlaceEgress({ place, bin }: { place: Place; bin: string }) {
 
   if (asking && !plan) {
     return (
-      <p className="flex items-center gap-1.5 px-2 py-1 text-xs text-text-5">
-        <AsciiSpinner /> Working out what an agent here could reach…
+      <p className="ui-box-asking">
+        <AsciiSpinner size={10} /> Working out what an agent here could reach…
       </p>
     );
   }
   if (error) {
-    return (
-      <p className="px-2 py-1 text-xs" style={{ color: "var(--color-amber)" }}>
-        Couldn’t work out this place’s allowlist — {error}
-      </p>
-    );
+    return <p data-tone="warn">Couldn’t work out this place’s allowlist — {error}</p>;
   }
   if (!plan) return null;
 
-  const tone = egressTone(plan);
   const rows = listed(plan);
 
   return (
-    <div className="flex flex-col">
-      <div className="flex items-center justify-between pr-1">
-        <div className={MENU_LABEL}>What an agent here can reach</div>
-        {asking && <AsciiSpinner />}
+    <div className="ui-box-facts-block">
+      <div className="ui-cloud-row">
+        <strong>What an agent here can reach</strong>
+        {asking && <AsciiSpinner size={10} />}
       </div>
 
-      <p className="px-2 pb-0.5 text-xs" style={{ color: TONE[tone] }}>
-        {egressHeadline(plan)}
-      </p>
+      <p data-tone={TONE[egressTone(plan)]}>{egressHeadline(plan)}</p>
 
       {/* The note always says something true and actionable — which wall is
           holding it, or exactly why nothing is. It is the whole answer when a
           machine can hold no wall, so it is never behind a disclosure. */}
-      <p className="px-2 pb-0.5 text-xs text-text-5">{plan.note}</p>
+      <p>{plan.note}</p>
 
       {rows.length > 0 && (
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="xs"
+          className="ui-box-facts-toggle"
+          aria-expanded={open}
           onClick={() => setOpen((o) => !o)}
-          className="flex items-center gap-1 px-2 py-0.5 text-left text-xs text-text-5 transition-colors hover:text-text-3"
         >
-          {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          {open ? <ChevronDown /> : <ChevronRight />}
           {open ? "Hide the list" : `Show all ${rows.length}`}
-        </button>
+        </Button>
       )}
 
-      {open &&
-        rows.map((row) => (
-          <Row key={`${row.endpoint.host}:${row.endpoint.port}`} row={row} />
-        ))}
+      {open && (
+        <ul className="ui-box-facts">
+          {rows.map((row) => (
+            <Row key={`${row.endpoint.host}:${row.endpoint.port}`} row={row} />
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -147,18 +145,10 @@ export function PlaceEgress({ place, bin }: { place: Place; bin: string }) {
  *  having read it is not doing the job. */
 function Row({ row }: { row: Allowed }) {
   return (
-    <div className="flex min-w-0 items-baseline gap-1.5 px-2 py-[1px] text-xs">
-      <span
-        aria-hidden
-        className="h-1 w-1 flex-shrink-0 self-center rounded-full"
-        style={{ background: REASON_TONE[row.reason] }}
-      />
-      <span className="flex-shrink-0 font-mono text-text-2">
-        {endpointLabel(row.endpoint)}
-      </span>
-      <span className="min-w-0 flex-1 truncate text-text-5">
-        {reasonWord(row.reason)}
-      </span>
-    </div>
+    <li data-tone={REASON_TONE[row.reason]}>
+      <span aria-hidden className="ui-box-fact-dot" />
+      <code className="ui-box-fact-title">{endpointLabel(row.endpoint)}</code>
+      <span className="ui-box-fact-detail">{reasonWord(row.reason)}</span>
+    </li>
   );
 }

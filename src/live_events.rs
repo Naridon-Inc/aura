@@ -531,30 +531,43 @@ pub fn current_branch() -> String {
 
 /// Helper to get repo name from git remote (e.g., "Naridon-Inc/aura").
 pub fn repo_name() -> String {
-    let url = git2::Repository::discover(".")
-        .ok()
-        .and_then(|repo| {
-            repo.find_remote("origin")
-                .ok()
-                .and_then(|remote| remote.url().map(|u| u.to_string()))
-        })
-        .unwrap_or_else(|| "local".to_string());
+    slug_of_remote(&origin_url().unwrap_or_else(|| "local".to_string()))
+}
 
-    // Extract "owner/repo" from URLs like:
-    //   https://github.com/Owner/Repo.git
-    //   git@github.com:Owner/Repo.git
+/// `owner/repo` of the origin remote, but only when it is on GitHub — the one
+/// host the cloud resolves a repo name for. Any other origin (a local path, a
+/// self-hosted server) is `None`, which callers read as "no repo scope".
+pub fn github_repo_name() -> Option<String> {
+    github_slug_of_remote(&origin_url()?)
+}
+
+fn origin_url() -> Option<String> {
+    let repo = git2::Repository::discover(".").ok()?;
+    let remote = repo.find_remote("origin").ok()?;
+    remote.url().map(|u| u.to_string())
+}
+
+/// Extract "owner/repo" from URLs like:
+///   https://github.com/Owner/Repo.git
+///   git@github.com:Owner/Repo.git
+fn github_slug_of_remote(url: &str) -> Option<String> {
     let cleaned = url.trim_end_matches(".git");
-    if let Some(idx) = cleaned.find("github.com") {
-        let after = &cleaned[idx + "github.com".len()..];
-        let after = after.trim_start_matches('/').trim_start_matches(':');
-        return after.to_string();
+    let idx = cleaned.find("github.com")?;
+    let after = &cleaned[idx + "github.com".len()..];
+    Some(after.trim_start_matches('/').trim_start_matches(':').to_string())
+}
+
+/// The GitHub slug, or else the remote's last two path segments.
+fn slug_of_remote(url: &str) -> String {
+    if let Some(slug) = github_slug_of_remote(url) {
+        return slug;
     }
-    // Fallback: return last two path segments
+    let cleaned = url.trim_end_matches(".git");
     let parts: Vec<&str> = cleaned.rsplitn(3, '/').collect();
     if parts.len() >= 2 {
         format!("{}/{}", parts[1], parts[0])
     } else {
-        url
+        url.to_string()
     }
 }
 
@@ -576,4 +589,28 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod remote_slug_tests {
+    use super::{github_slug_of_remote, slug_of_remote};
+
+    #[test]
+    fn a_github_remote_names_its_repo() {
+        assert_eq!(github_slug_of_remote("https://github.com/Owner/Repo.git").as_deref(), Some("Owner/Repo"));
+        assert_eq!(github_slug_of_remote("git@github.com:Owner/Repo.git").as_deref(), Some("Owner/Repo"));
+    }
+
+    #[test]
+    fn any_other_remote_names_no_github_repo() {
+        assert_eq!(github_slug_of_remote("/srv/git/team/remote.git"), None);
+        assert_eq!(github_slug_of_remote("https://git.example.test/team/app.git"), None);
+    }
+
+    #[test]
+    fn repo_name_keeps_its_two_segment_fallback() {
+        assert_eq!(slug_of_remote("/srv/git/team/remote.git"), "team/remote");
+        assert_eq!(slug_of_remote("git@github.com:Owner/Repo.git"), "Owner/Repo");
+        assert_eq!(slug_of_remote("local"), "local");
+    }
 }

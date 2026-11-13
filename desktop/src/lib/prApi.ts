@@ -45,6 +45,10 @@ export async function prChecks(repoRoot: string, prNumber: number) {
   return api.prChecks(repoRoot, prNumber, await remoteRepoFor(repoRoot));
 }
 
+export async function prRerunFailedChecks(repoRoot: string, prNumber: number) {
+  return api.prRerunFailedChecks(repoRoot, prNumber, await remoteRepoFor(repoRoot));
+}
+
 export async function prVercelStatus(repoRoot: string, prNumber: number) {
   return api.prVercelStatus(repoRoot, prNumber, await remoteRepoFor(repoRoot));
 }

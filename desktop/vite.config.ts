@@ -43,6 +43,21 @@ export default defineConfig(async () => ({
     ],
   },
 
+  // Prepare every library the app can import when the dev server starts.
+  // Left to discover them as screens first open, Vite re-prepares mid-session
+  // under new names, and a window opened earlier then asks for the old ones:
+  // "Importing a module script failed." Tests and type files are left out —
+  // they import `bun:test`, which no browser bundle can resolve.
+  optimizeDeps: {
+    entries: [
+      "*.html",
+      "src/**/*.html",
+      "src/**/*.{ts,tsx}",
+      "!src/**/*.test.{ts,tsx}",
+      "!src/**/*.d.ts",
+    ],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

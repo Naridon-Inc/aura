@@ -32,6 +32,7 @@
 import type { PlaceRoster, PlaceRow } from "../api";
 import type { Place } from "./contract";
 import { placeHere } from "./contract";
+import { canonicalMachineId } from "../machineRef";
 import { ownerLine, placeOfRow } from "./roster";
 
 /** The three kinds of answer, which are three different sentences rather than
@@ -145,9 +146,17 @@ export function optionOfRow(
  *  A box that has been forgotten, or a project's cloud seen from a project that
  *  doesn't have one, must not leave a surface holding an id that is no longer
  *  on the list — the next launch would name a machine nobody can reach. Falling
- *  back to the local option is the one answer that is always true. */
+ *  back to the local option is the one answer that is always true.
+ *
+ *  A choice remembered under an id the machine has since left behind is still
+ *  that machine, so it is looked for under the id it goes by now as well. */
 export function chosenWhere(options: WhereOption[], id: string | null): WhereOption {
-  return options.find((o) => o.id === id) ?? options[0];
+  const now = canonicalMachineId(id);
+  return (
+    options.find((o) => o.id === id) ??
+    (now ? options.find((o) => o.id === now) : undefined) ??
+    options[0]
+  );
 }
 
 /** Two repo roots, compared the way a filesystem means them: a trailing slash

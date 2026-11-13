@@ -186,7 +186,7 @@ export function hostOf(url: string): string {
   }
 }
 
-// ── Agentation — click-to-annotate a live page (Conductor parity) ────────────
+// ── Agentation — click-to-annotate a live page ──────────────────────────
 //
 // The native webview paints above the React DOM, so we can't overlay our own
 // click capture on top of it. Instead we INJECT a small in-page script that

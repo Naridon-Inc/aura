@@ -20,6 +20,7 @@ import {
   DropdownMenuSeparator,
 } from "./ui/dropdown-menu";
 import { ContextMenuItem, ContextMenuSeparator } from "./ui/context-menu";
+import "./ui/new-tab.css";
 
 export type TabMenuItem =
   | { kind: "separator" }
@@ -29,6 +30,9 @@ export type TabMenuItem =
       onSelect: () => void;
       disabled?: boolean;
       tone?: "danger";
+      /** The chord that does the same thing, printed at the row's right
+       *  edge the way the library's tab menu prints ⌘W. */
+      shortcut?: string;
     };
 
 /** The item list rendered as right-click menu children. Returns the nodes, not
@@ -45,6 +49,7 @@ export function tabContextItems(items: TabMenuItem[]): ReactNode {
         onSelect={item.onSelect}
       >
         {item.label}
+        {item.shortcut && <span className="ui-menu-shortcut">{item.shortcut}</span>}
       </ContextMenuItem>
     ),
   );
@@ -57,10 +62,9 @@ export function tabContextItems(items: TabMenuItem[]): ReactNode {
  *
  *  Why a click button and not just right-click: the pane header bar that used
  *  to carry these was dropped (bccf3b49), leaving right-click as the only path
- *  — and that menu can be swallowed by the draggable tab wrapper / webview, so
- *  it is both invisible AND unreliable. Every tab in the per-pane strip is
- *  `draggable`, so that strip had *only* the unreliable path until this button
- *  reached it. Same item list either way.
+ *  — and while these tabs were HTML5-draggable the webview could swallow that
+ *  menu, so it was both invisible AND unreliable. The per-pane strip had
+ *  *only* that path until this button reached it. Same item list either way.
  *
  *  Stops propagation on mousedown so opening it never activates / drags the
  *  tab. Renders nothing when the only action would be Close — the × already
@@ -98,7 +102,7 @@ export function TabMoreButton({
           </svg>
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-[12rem]">
+      <DropdownMenuContent align="end" className="ui-tab-menu">
         {items.map((item, i) =>
           item.kind === "separator" ? (
             <DropdownMenuSeparator key={`sep-${i}`} />
@@ -110,6 +114,7 @@ export function TabMoreButton({
               variant={item.tone === "danger" ? "destructive" : "default"}
             >
               {item.label}
+              {item.shortcut && <span className="ui-menu-shortcut">{item.shortcut}</span>}
             </DropdownMenuItem>
           ),
         )}

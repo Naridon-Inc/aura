@@ -1,0 +1,147 @@
+/* The new-workspace dialog: header (where it starts), the prompt, a context
+   row for what the work starts from, and a footer (model, options, Create). */
+.ui-workspaces-create {
+  width: min(720px, calc(100vw - 32px));
+  max-width: 720px;
+  padding: 0;
+  gap: 0;
+  border-radius: 12px;
+  background: var(--ui-sidebar);
+  overflow: visible;
+}
+.ui-workspaces-create form > header {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--ui-border);
+  box-sizing: border-box;
+}
+.ui-workspaces-create header i {
+  width: 1px;
+  height: 16px;
+  background: var(--ui-border);
+}
+.ui-workspaces-create-spacer {
+  flex: 1;
+}
+.ui-workspaces-create textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 144px;
+  max-height: 50vh;
+  background: none;
+  border: 0;
+  outline: none;
+  resize: none;
+  color: var(--ui-fg);
+  font: 14px/21px var(--font-sans);
+  padding: 16px;
+}
+.ui-workspaces-create textarea::placeholder {
+  color: var(--ui-muted-fg);
+}
+.ui-workspaces-create textarea:disabled {
+  opacity: 0.6;
+}
+.ui-workspaces-create footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 12px;
+}
+.ui-workspaces-create-context {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 0 12px 8px;
+}
+.ui-workspaces-create-context > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  background: var(--ui-muted);
+  border: 1px solid var(--ui-border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+.ui-workspaces-create-context > span > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-workspaces-create-context button {
+  display: flex;
+  border: 0;
+  background: none;
+  color: var(--ui-muted-fg);
+  cursor: pointer;
+  padding: 0;
+}
+.ui-workspaces-create-search {
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--ui-border);
+  outline: none;
+  color: var(--ui-fg);
+  padding: 8px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.ui-workspaces-create-repositories {
+  min-width: 260px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.ui-workspaces-create-starts {
+  width: 340px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.ui-workspaces-create-starts small {
+  margin-left: auto;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+}
+/* A sentence about what Create will do: a folder switching branch, a queue
+   with no machine on it, a failure. Quiet unless it is bad news. */
+.ui-workspaces-create-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0 16px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ui-muted-fg);
+}
+.ui-workspaces-create-note[data-tone="danger"] {
+  color: var(--ui-red);
+}
+.ui-workspaces-create-note[data-tone="success"] {
+  color: var(--ui-green);
+}
+.ui-workspaces-create-note[data-tone="warning"] {
+  color: var(--ui-yellow);
+}
+/* The place control is shared with the chat launcher; inside this header it
+   takes the header's button size so the row reads as one set of controls. */
+.ui-workspaces-create-where > div > button {
+  height: 28px;
+  padding-inline: 10px;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--ui-fg);
+}
+.ui-workspaces-create-starts [role="menuitem"] > span,
+.ui-workspaces-create-repositories [role="menuitem"] > span:not(.ui-repo-avatar) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

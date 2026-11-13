@@ -5,11 +5,16 @@
 // quiet master list, not the lane-graph renderer (that lives in CommitGraph,
 // which dispatches global events instead of driving an in-surface selection).
 
+import { GitCommitHorizontal } from "lucide-react";
+
 import { type GraphCommit, type GraphRef } from "../../lib/api";
-import { Avatar } from "../team/presentation/Avatar";
-import { AsciiSpinner } from "../ui/ascii-spinner";
+import { monogram } from "../../lib/monogram";
 import { relativeAgeFromDelta } from "../../lib/relativeTime";
 import { shortDateFromSecs } from "../../lib/calendarDate";
+import { Avatar, AvatarFallback } from "../ui/avatar";
+import { EmptyState, LoadingState } from "../ui/state";
+import { TraceList, TraceMark, TraceRow } from "../ui/trace-list";
+import "../ui/commit-list.css";
 
 export function CommitList({
   commits,
@@ -23,121 +28,108 @@ export function CommitList({
   onSelect: (sha: string) => void;
 }) {
   if (loading && commits.length === 0) {
-    return (
-      <div className="flex items-center gap-1.5 px-3.5 py-3 text-sm text-text-4">
-        <AsciiSpinner className="text-2xs" />
-        <span>Reading the project’s story…</span>
-      </div>
-    );
+    return <LoadingState label="Reading the repository’s story…" className="ui-commit-list-state" />;
   }
   if (commits.length === 0) {
     return (
-      <div className="px-3.5 py-6 text-sm leading-relaxed text-text-4">
-        No saved versions yet. Once you save your first version, the project’s
-        story shows up here.
-      </div>
+      <EmptyState
+        icon={GitCommitHorizontal}
+        size="sm"
+        title="No saved versions yet"
+        body="Once you save your first version, the repository’s story shows up here."
+        className="ui-commit-list-empty"
+      />
     );
   }
   return (
-    <div className="py-1">
-      {commits.map((c) => (
+    <TraceList label="Saved versions" className="ui-commit-list">
+      {commits.map((c, i) => (
         <CommitRow
           key={c.sha}
           commit={c}
+          index={i}
           active={selected === c.sha}
           onClick={() => onSelect(c.sha)}
         />
       ))}
-    </div>
+    </TraceList>
   );
 }
 
 function CommitRow({
   commit,
+  index,
   active,
   onClick,
 }: {
   commit: GraphCommit;
+  index: number;
   active: boolean;
   onClick: () => void;
 }) {
+  const when = relTime(commit.timestamp);
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`relative flex w-full items-start gap-2.5 px-3.5 py-2 text-left transition-colors ${
-        active ? "bg-state-selected" : "hover:bg-state-hover"
-      }`}
-    >
-      {active && (
-        <span
-          className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-full"
-          style={{ background: "var(--color-accent)" }}
-          aria-hidden
-        />
-      )}
-      <Avatar name={commit.author} size={22} title={commit.author} />
-      <span className="min-w-0 flex-1">
-        <span className="flex flex-wrap items-center gap-1.5">
-          {commit.refs.map((r, i) => (
-            <RefBadge key={i} name={r.name} kind={r.kind} />
-          ))}
-          <span className="truncate text-base text-text-1">
-            {commit.subject || "(no message)"}
-          </span>
-        </span>
-        <span className="mt-0.5 flex items-center gap-1.5 text-xs text-text-4">
-          <span className="font-mono text-text-3">{commit.short}</span>
-          <span>·</span>
-          <span className="truncate">{commit.author}</span>
-          <span>·</span>
-          <span className="tabular-nums">{relTime(commit.timestamp)}</span>
-        </span>
-      </span>
-    </button>
+    <TraceRow
+      index={index}
+      active={active}
+      onOpen={onClick}
+      icon={
+        <Avatar className="ui-commit-list-avatar" title={commit.author}>
+          <AvatarFallback>{monogram(commit.author, { empty: "·" })}</AvatarFallback>
+        </Avatar>
+      }
+      title={commit.subject || "(no message)"}
+      marks={
+        commit.refs.length > 0
+          ? commit.refs.map((r, i) => <RefMark key={i} name={r.name} kind={r.kind} />)
+          : undefined
+      }
+      where={<code>{commit.short}</code>}
+      whereTitle={commit.sha}
+      time={when}
+      timeTitle={commit.timestamp ? new Date(commit.timestamp * 1000).toLocaleString() : undefined}
+      preview={{
+        meta: (
+          <>
+            <code>{commit.short}</code>
+            <span>{commit.author}</span>
+            {when && <span>{when}</span>}
+          </>
+        ),
+        title: commit.subject || "(no message)",
+        footer:
+          commit.refs.length > 0 ? (
+            <span className="ui-commit-list-refs">
+              {commit.refs.map((r, i) => (
+                <RefMark key={i} name={r.name} kind={r.kind} />
+              ))}
+            </span>
+          ) : undefined,
+      }}
+    />
   );
 }
 
-/** Branch tip / tag / HEAD pill — HEAD ("You are here") is the one orientation
- *  cue that earns the accent; tags and branches are categories, so they stay on
- *  the neutral ramp. Mirrors the graph's badge language (CommitGraph) so the two
- *  history views read identically. */
-function RefBadge({ name, kind }: { name: string; kind: GraphRef["kind"] }) {
+/** Branch tip / tag / HEAD mark. HEAD ("You are here") is the one
+ *  orientation cue that earns a colour; tags and branches are categories, so
+ *  they stay quiet. A copy on the server is quieter still. */
+function RefMark({ name, kind }: { name: string; kind: GraphRef["kind"] }) {
   if (kind === "head") {
     return (
-      <span
-        className="inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs font-medium leading-[15px]"
-        style={{
-          background: "var(--color-accent)",
-          color: "var(--color-accent-foreground)",
-        }}
-        title="You are here. The version you’re working from"
-      >
-        <span
-          className="inline-block h-1 w-1 rounded-full"
-          style={{ background: "currentColor" }}
-        />
+      <TraceMark tone="good" title="You are here. The version you’re working from">
+        <span className="ui-commit-list-here" aria-hidden />
         {name}
-      </span>
+      </TraceMark>
     );
   }
   if (kind === "tag") {
-    return (
-      <span
-        className="inline-flex shrink-0 items-center rounded-full border border-line-soft px-1.5 text-2xs leading-[15px] text-text-3"
-        title="A named release point"
-      >
-        ⌖ {name}
-      </span>
-    );
+    return <TraceMark title="A named release point">⌖ {name}</TraceMark>;
   }
   return (
-    <span
-      className="inline-flex shrink-0 items-center rounded-full border px-1.5 text-2xs leading-[15px] text-text-3"
-      style={{ borderColor: "var(--color-line-soft)", opacity: kind === "remote" ? 0.7 : 1 }}
-      title={kind === "remote" ? "A copy that lives on the server" : "A branch"}
-    >
-      {name}
+    <span className="ui-commit-list-ref" data-remote={kind === "remote" ? "" : undefined}>
+      <TraceMark title={kind === "remote" ? "A copy that lives on the server" : "A branch"}>
+        {name}
+      </TraceMark>
     </span>
   );
 }

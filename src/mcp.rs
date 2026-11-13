@@ -7,6 +7,9 @@ use git2::Repository;
 use std::path::Path;
 use std::sync::Mutex;
 
+/// Review comments an agent leaves on the diff (`aura_review_comment*`).
+mod review_comments;
+
 /// The connecting client's canonical agent id, captured from the MCP
 /// `initialize` handshake's `clientInfo.name`. The server is always driven by
 /// a real CLI agent (Claude Code, Gemini CLI, Codex, Cursor…); historically we
@@ -1309,7 +1312,8 @@ impl McpServer {
                                         "context_id": { "type": "string", "description": "Optional A2A context grouping (free-form)." },
                                         "task_kind": { "type": "string", "enum": ["plan", "wave", "task", "subtask"], "description": "Bucket-K hierarchy level. Defaults to 'subtask' (a leaf that needs no acceptance criteria) when omitted. plan/wave/task REQUIRE a non-empty acceptance_criteria." },
                                         "acceptance_criteria": { "type": "array", "items": { "type": "string" }, "description": "Concrete, checkable done-conditions. Required (non-empty) when task_kind is plan, wave, or task; optional for subtask." },
-                                        "metadata": { "type": "object", "description": "Optional client-supplied metadata bag." }
+                                        "metadata": { "type": "object", "description": "Optional client-supplied metadata bag." },
+                                        "dispatch": { "type": "string", "description": "Which cloud computer runs it: 'auto' (the default: the team's most recently live computer, or none when the team has none), 'none' to leave it on the board unsent, or a place id. A computer is handed your agent sign-in only for work you sent to it." }
                                     },
                                     "required": ["agent_kind", "input"]
                                 },
@@ -2278,6 +2282,7 @@ impl McpServer {
                 // AURA-1295 — cloud workspace tools, defined in mcp_workspace.rs.
                 if let Some(tools) = listing["result"]["tools"].as_array_mut() {
                     tools.extend(crate::mcp_workspace::tool_definitions());
+                    tools.extend(review_comments::tool_definitions());
                 }
                 listing
                 // end AURA-1295
@@ -2440,6 +2445,9 @@ impl McpServer {
                     // messages / list / get / sleep / archive / models / whoami).
                     n if n.starts_with("aura_workspace_") => crate::mcp_workspace::call(n, args),
                     // end AURA-1295
+                    n if n.starts_with("aura_review_comment") => {
+                        review_comments::call(n, args, &caller_agent_id())
+                    }
                     _ => json!({ "isError": true, "content": [{ "type": "text", "text": "Unknown tool" }] })
                 };
 
@@ -6780,7 +6788,12 @@ Re-log with one of: {}.",
         // `subtask` (a leaf, no AC required) so agents/CLI can create cloud
         // tasks without spelling out the hierarchy.
         let mut body = args;
+        let mut target = crate::cloud_dispatch::Target::Nowhere;
         if let Some(obj) = body.as_object_mut() {
+            target = match crate::cloud_dispatch::mcp_target(obj) {
+                Ok(target) => target,
+                Err(e) => return json!({ "isError": true, "content": [{ "type": "text", "text": e }] }),
+            };
             let has_kind = obj
                 .get("task_kind")
                 .and_then(|v| v.as_str())
@@ -6799,25 +6812,62 @@ Re-log with one of: {}.",
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .unwrap_or_else(|_| reqwest::blocking::Client::new());
-        match client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .json(&body)
-            .send()
-        {
-            Ok(resp) => {
-                let status = resp.status();
-                // Read the raw body once, then try to parse. An error body may
-                // be empty or plain text (not JSON) — reporting the text keeps
-                // the real cause visible instead of a misleading parse error.
-                let body_text = resp.text().unwrap_or_default();
+        // Where it goes. A lookup that fails leaves the task unsent and says
+        // so, rather than refusing to make it.
+        let mut unsent = match crate::cloud_dispatch::resolve(&client, &cloud_url, &token, &target) {
+            Ok(Some(place)) => {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("dispatch_place_id".to_string(), json!(place));
+                }
+                None
+            }
+            Ok(None) if target == crate::cloud_dispatch::Target::Auto => Some(
+                "Not sent to a cloud computer: this team has none yet. It waits on the board until it is sent to one.".to_string(),
+            ),
+            Ok(None) => None,
+            Err(e) => Some(format!("Not sent to a cloud computer: {e}")),
+        };
+        // Read the raw body once, then try to parse. An error body may be
+        // empty or plain text (not JSON) — reporting the text keeps the real
+        // cause visible instead of a misleading parse error.
+        let post = |body: &Value| {
+            client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .json(body)
+                .send()
+                .map(|resp| (resp.status(), resp.text().unwrap_or_default()))
+        };
+        let mut sent = post(&body);
+        // `auto` refused because this member has no cloud access: the work
+        // still goes on the board, unsent, rather than being lost to a default
+        // the caller never chose.
+        let lacks_access = match &sent {
+            Ok((status, text)) => crate::cloud_dispatch::auto_lacks_access(&target, status.as_u16(), text),
+            Err(_) => None,
+        };
+        if let Some(detail) = lacks_access {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("dispatch_place_id");
+            }
+            unsent = Some(format!(
+                "Not sent to a cloud computer: {detail}. It waits on the board for your own computer."
+            ));
+            sent = post(&body);
+        }
+        match sent {
+            Ok((status, body_text)) => {
                 match serde_json::from_str::<Value>(&body_text) {
                     Ok(v) => {
                         if !status.is_success() {
                             return json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-create HTTP {}: {}", status, v) }] });
                         }
                         let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
-                        json!({ "content": [{ "type": "text", "text": pretty }] })
+                        let text = match &unsent {
+                            Some(note) => format!("{pretty}\n\n{note}"),
+                            None => pretty,
+                        };
+                        json!({ "content": [{ "type": "text", "text": text }] })
                     }
                     Err(_) => json!({ "isError": true, "content": [{ "type": "text", "text": format!("a2a-task-create HTTP {}: {}", status, if body_text.trim().is_empty() { "(empty response body)" } else { body_text.trim() }) }] }),
                 }

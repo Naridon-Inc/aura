@@ -1,5 +1,3 @@
-import { ChatHeader } from "../chat/ChatHeader";
-import { History } from "lucide-react";
 // Chat surface for a Manager session. Talks to the Rust-side brain
 // (Anthropic Messages API streaming + tool calling). Each user message
 // fires `manager_chat`, which spawns `brain::run_turn` server-side; the
@@ -17,49 +15,28 @@ import { History } from "lucide-react";
 
 import {
   Fragment,
-  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import {
-  AlertTriangle,
-  Check,
-  ChevronDown,
-  ChevronRight,
-  Clock,
-  Copy,
-  GitBranch,
-  ListTree,
-  MessageSquare,
-  MoreHorizontal,
-  Pencil,
-  SquareArrowOutUpRight,
-  Target,
-  X,
-} from "lucide-react";
+import { ArrowDown, SquareArrowOutUpRight } from "lucide-react";
 import {
   api,
   type ActiveBrainInfo,
   type BrainChatChunk,
   type BrainChoice,
   type ChatTurn,
-  type ChatImageAttachment,
   type ManagerSession,
   type ManagerStreamDelta,
-  type PendingPlan,
-  type PersistedToolCall,
-  type PlanParallelism,
   type ReasoningEffort,
   type ApprovalPolicy,
-  type RibbonEntry,
 } from "../../lib/api";
 import { trackFeature } from "../../lib/track";
+import { markSentComments } from "../../lib/diffReview/commentChat";
 import { useMachineName } from "../../lib/machineName";
 import { attachSessionGoal } from "../../lib/goalStore";
 import {
@@ -73,13 +50,12 @@ import {
   getManagerLiveBlocks,
   setManagerLiveBlocks,
 } from "../../lib/managerStore";
-import { PlanPreview } from "../chat/PlanPreview";
-import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { ManagerComposer, type ComposerAttachment } from "./ManagerComposer";
-import { type SlashItem } from "./TiptapComposer";
+import type { SlashItem } from "../chat/composer/useComposerSuggestions";
 import { liveAgentLabel, useAgentSurface } from "../../lib/agentSurface";
 import { AgentPlanStrip } from "./chat/AgentPlanStrip";
-import { type SelectedModel } from "../../lib/modelCatalog";
+import type { SelectedModel } from "../../lib/modelCatalog";
+import { isMachineBrain, turnModel } from "../../lib/machineBrain";
 import {
   loadSessionBrain,
   loadSessionModel,
@@ -89,7 +65,6 @@ import {
 import { ManagerQueueStack, type QueuedMessage } from "./ManagerQueueStack";
 import { CrewComposerBlock } from "./chat/CrewComposerBlock";
 import { ScoutCard } from "./ScoutCard";
-import { WaveDispatchPanel } from "./WaveDispatchPanel";
 import {
   useEditorStore,
   getActiveWorkspaceRoot,
@@ -98,7 +73,6 @@ import {
 import { openPlanWizard } from "../../lib/planWizardStore";
 import {
   buildGoalDirective,
-  hasGoalDirective,
   stripSteeringDirective,
 } from "../../lib/steeringDirective";
 import { openPopout } from "../../lib/popout";
@@ -107,7 +81,6 @@ import { plainLine } from "../../lib/plainPreview";
 import {
   handleChatSlash,
   type SlashInteractive,
-  type SlashResumeRow,
 } from "../../lib/chatSlashHandler";
 import { buildSteeringText } from "../../lib/managerSteering";
 import { playCompletionChime } from "../../lib/completionChime";
@@ -124,68 +97,79 @@ function announceTurnEnd(sid: string) {
     dedupeKey: `turn-end:manager:${sid}`,
   }).catch(() => {});
 }
-import { getAgentIdentity, accentTint } from "../../lib/agentIdentity";
-import { useFlagPrefs } from "../../lib/settingsStore";
-import { AgentIcon } from "../agent/AgentIcon";
-import { Segment } from "../ui/segment";
 
 // Chat-render layer — de-monolithed out of this file into focused modules.
 // The registry that *produces* a ToolView (toolDescribe) and the cards that
 // *consume* it (ToolCard) evolve independently against chat/types.
 import { ChatRepoRootContext } from "./chat/context";
-import {
-  ChatSpendContext,
-  billingForBrain,
-  useChatSpend,
-  useChatSpendValue,
-} from "./chat/spend";
+import { ChatSpendContext, useChatSpendValue } from "./chat/spend";
 import type { StreamBlock, TurnSpend } from "./chat/types";
-import { MarkdownBody } from "./chat/Markdown";
 import {
   StreamingBlocks,
   createStreamStore,
   useStreamCoarse,
 } from "./chat/StreamingBlocks";
-import { TurnActivity } from "./chat/TurnActivity";
-import { TurnChanges } from "./chat/TurnChanges";
-import { extractTurnChanges } from "./chat/turnChangeSummary";
-import { SessionBrainsDetail } from "./chat/SessionBrainsDetail";
-import {
-  InteractiveBlocks,
-  partitionInteractive,
-} from "./chat/InteractiveBlocks";
-import { describeTool, isAskUserTool, isAuraUxBash } from "./chat/toolDescribe";
-// Reuse the Trace transcript's contextual-summary knowledge: the harness's
-// "This session is being continued…" compaction block (and `aura handover`
-// payloads) are detected here so the chat renders them as a contextual card,
-// never as a giant user bubble.
-import { isHandoverSummary, summaryGist } from "../workpanes/transcript/model";
+import { isAskUserTool, isAuraUxBash } from "./chat/toolDescribe";
 import { ChatEmptyState } from "./chat/ChatEmptyState";
+import { ChatStarters } from "./chat/ChatStarters";
+import { ChatFind } from "./chat/ChatFind";
+import { TurnErrorBoundary } from "./chat/TurnErrorBoundary";
+import { ChatComposerArea, ChatTranscript } from "../ui/chat-surface";
+import { composerKey, MANAGER_HISTORY_PREFIX, rememberSent } from "../composer/composerDrafts";
+import { ChatRecovery, HistoryGap } from "../ui/chat-recovery";
+import { PlanReview } from "../ui/chat-decisions";
+import { ChatHistoryMenu } from "./chat/ChatHistoryMenu";
 import {
   ThinkingLine,
   PlanningStatusLine,
   StallNotice,
   humanizeBrainId,
-  brainAgentId,
 } from "./chat/StatusLine";
-import { QuestionCard, formatRelativeApprovalTime } from "./chat/QuestionCard";
+import { QuestionCard } from "./chat/QuestionCard";
 import {
   MessageScrollbackRail,
   type RailAnchor,
 } from "./chat/MessageScrollbackRail";
-import { compactNumber } from "../../lib/compactNumber";
-import { useDismiss } from "../../lib/useDismiss";
-import { formatDuration, formatLiveDuration } from "../../lib/duration";
-import { buildTurnCost } from "../../lib/turnCost";
-import { TurnCostTip } from "../TurnCostTip";
-import { percent } from "../../lib/percent";
 // AURA-1298
-import { ImageLightbox } from "../media/ImageLightbox";
 // AURA-1296 — Concise output style on the turn, "finished 3:42 PM" beside the
 // duration, and a Restart-and-resend for a message that never got through.
 import { outputStyleArg, readOutputStyle } from "../../lib/outputStyle";
-import { TurnCompletedAt } from "./TurnCompletedAt";
+import { Button } from "../ui/button";
 import { UndeliverableMessage } from "./UndeliverableMessage";
+import { loadQueue, saveQueue, newQueueId } from "./chat/managerQueue";
+import {
+  upsertText,
+  upsertReasoning,
+  upsertTool,
+  attachResult,
+} from "./chat/streamBlockEdits";
+import { RunningCommandStatus } from "./chat/RunningCommandStatus";
+import { PlanCard, pendingPlanToTabInput } from "./chat/PlanCard";
+import {
+  SystemLine,
+  SystemCard,
+  PlanModeNotice,
+  ribbonAsSystem,
+} from "./chat/SystemRows";
+import { ResumePicker } from "./chat/ResumePicker";
+import {
+  type SettledSpecialist,
+  isScoutSpawnLine,
+  parseScoutSpecialistLine,
+  SettledScoutBlock,
+} from "./chat/ScoutBlocks";
+import {
+  MilestoneDivider,
+  BrainHandoffDivider,
+  TimeGapDivider,
+} from "./chat/ChatDividers";
+import { AssistantTurnGroup } from "./chat/AssistantTurnGroup";
+import { ChatBubble } from "./chat/ChatBubble";
+import { TurnProjectChips } from "./chat/TurnProjectChips";
+import { useChatHost } from "./chat/chatHost";
+import { openChatHistory } from "../../lib/chatHistoryEvent";
+import { LiveDispatchStrip } from "./chat/LiveDispatchStrip";
+import { WaveTimeline } from "./chat/WaveTimeline";
 
 type LocalSlashEntry = {
   at: number;
@@ -257,53 +241,6 @@ function looksLikePlanRequest(text: string): boolean {
 
 type Props = { session: ManagerSession };
 
-// What the brain accumulates mid-turn — see `chat/types`. This used to be a
-// byte-identical second copy declared right here; it is now imported so the
-// view, the cards that render it, and managerStore's durable mirror all speak
-// ONE declaration and can't drift apart.
-
-/** Convert a settled turn's persisted tool calls into the stream-block shape
- *  `StreamingBubble` consumes, so the reload timeline renders the same tool
- *  cards the live stream did — consecutive read-only calls clubbed into one
- *  "Explored" line, consecutive world-changing calls into one living status
- *  bar. Block indices are positional.
- *
- *  A persisted call with no stored result defaults to a clean DONE result
- *  (not absent): the turn has already settled, so the tool finished — leaving
- *  the result undefined would derive status "running" and paint a perpetual
- *  bold "Running" badge on a finished turn (the backend doesn't always capture
- *  a tool's output). Empty content renders nothing, so this only fixes the
- *  verb/status, never fabricates output. */
-function persistedToolBlocks(calls: PersistedToolCall[]): StreamBlock[] {
-  return calls.map((c, i) => ({
-    kind: "tool",
-    block_idx: i,
-    tool_use_id: c.tool_use_id || `tc-${i}`,
-    name: c.name,
-    input: c.input,
-    result: c.result
-      ? { is_error: c.result.is_error, content: c.result.content }
-      : { is_error: false, content: "" },
-  }));
-}
-
-/** The full settled-turn block stream: any hydrated extended-thinking
- *  (`turn.thinking`, populated only on imported CLI transcripts) as a leading
- *  `reasoning` disclosure, then the persisted tool cards. `StreamingBubble`
- *  renders blocks in array order, so reasoning-before-tools matches the order
- *  the agent emitted them. Returns [] when a turn has neither. */
-function persistedTurnBlocks(turn: ChatTurn): StreamBlock[] {
-  const blocks: StreamBlock[] = [];
-  if (turn.thinking && turn.thinking.trim()) {
-    blocks.push({ kind: "reasoning", block_idx: 0, text: turn.thinking });
-  }
-  const offset = blocks.length;
-  for (const b of persistedToolBlocks(turn.tool_calls ?? [])) {
-    blocks.push({ ...b, block_idx: b.block_idx + offset });
-  }
-  return blocks;
-}
-
 type TimelineEntry =
   | { kind: "turn"; at: number; turn: ChatTurn }
   | {
@@ -339,73 +276,6 @@ const TIME_GAP_MIN_SEC = 10 * 60;
 const CHAT_WINDOW_INITIAL = 60;
 const CHAT_WINDOW_STEP = 80;
 
-// "12m later" · "about 1h later" · "3h later" · "2d later". `at` is epoch
-// seconds, so the gap is already in seconds. Kept deliberately coarse — this
-// is a human seam marker, not a stopwatch.
-function humanizeGap(seconds: number): string {
-  const m = Math.round(seconds / 60);
-  if (m < 60) return `${m}m later`;
-  const h = Math.floor(seconds / 3600);
-  if (h < 24) {
-    const rem = Math.round((seconds - h * 3600) / 60);
-    if (h === 1 && rem < 20) return "about an hour later";
-    return rem >= 30 ? `about ${h + 1}h later` : `${h}h later`;
-  }
-  const d = Math.round(seconds / 86400);
-  return d === 1 ? "a day later" : `${d}d later`;
-}
-
-// ── W2 type-ahead queue persistence ───────────────────────────────────
-// The pending queue is scoped per Manager session so a reload keeps it.
-const QUEUE_KEY = (sid: string) => `aura.manager.queue.${sid}`;
-
-function loadQueue(sid: string): QueuedMessage[] {
-  try {
-    const raw = localStorage.getItem(QUEUE_KEY(sid));
-    if (!raw) return [];
-    const arr = JSON.parse(raw) as Partial<QueuedMessage>[];
-    if (!Array.isArray(arr)) return [];
-    // Persisted entries never carry attachments (stripped on save — base64
-    // blobs are megabyte-scale and don't survive a reload). Rehydrate as
-    // text-only queued turns.
-    return arr
-      .filter((m) => typeof m?.text === "string")
-      .map((m, i) => ({
-        id: typeof m.id === "string" ? m.id : `q${i}`,
-        text: m.text as string,
-        attachments: [],
-        mode: (m.mode as QueuedMessage["mode"]) ?? "build",
-        pipeTargetSessionId: m.pipeTargetSessionId ?? null,
-        effort: m.effort ?? null,
-        fast: !!m.fast,
-        approval: (m.approval as QueuedMessage["approval"]) ?? null,
-        goal: !!m.goal,
-      }));
-  } catch {
-    return [];
-  }
-}
-
-function saveQueue(sid: string, queue: QueuedMessage[]): void {
-  try {
-    // Strip attachments before persisting — keep only the lightweight,
-    // serializable run payload.
-    const lite = queue.map((m) => ({
-      id: m.id,
-      text: m.text,
-      mode: m.mode,
-      pipeTargetSessionId: m.pipeTargetSessionId,
-      effort: m.effort,
-      fast: m.fast,
-      approval: m.approval,
-    }));
-    if (lite.length === 0) localStorage.removeItem(QUEUE_KEY(sid));
-    else localStorage.setItem(QUEUE_KEY(sid), JSON.stringify(lite));
-  } catch {
-    /* storage disabled / quota exceeded */
-  }
-}
-
 // ── Model + brain override persistence ─────────────────────────────────
 // Both live in `lib/managerSessionPrefs` rather than here, because a session
 // can be created by a surface that isn't a chat view — launching a workspace
@@ -419,20 +289,6 @@ const loadModel = loadSessionModel;
 const saveModel = saveSessionModel;
 const loadBrain = loadSessionBrain;
 const saveBrain = saveSessionBrain;
-
-function newQueueId(): string {
-  try {
-    if (
-      typeof crypto !== "undefined" &&
-      typeof crypto.randomUUID === "function"
-    ) {
-      return crypto.randomUUID();
-    }
-  } catch {
-    /* fall through to timestamp id */
-  }
-  return `q-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-}
 
 export function ManagerChatView({ session }: Props) {
   // Where this conversation's hands are. Null for the overwhelming default —
@@ -557,7 +413,7 @@ export function ManagerChatView({ session }: Props) {
   const crewSpawnTimer = useRef<number | null>(null);
   // Elapsed-time stat for the working indicator. Ticks once a second while a
   // turn is in flight so the "Thinking…/Working…" line carries a live timer
-  // (Conductor/Claude-Code style) instead of a state that flashes once and
+  // instead of a state that flashes once and
   // vanishes. `null` when idle; the rising edge of busy/planBuilding stamps
   // the start, the falling edge resets it.
   // Seeded at FIRST RENDER, not by the effect below. The status line latches
@@ -640,6 +496,9 @@ export function ManagerChatView({ session }: Props) {
   useEffect(() => {
     saveBrain(session.id, brainOverride);
   }, [brainOverride, session.id]);
+  // A chat on one of the org's machines stays on its agent there: the picker
+  // offers that machine's models, and a turn carries only one of them.
+  const machineBrain = isMachineBrain(brainOverride) ? brainOverride : null;
   // W2 — type-ahead message queue. Populated while a turn is in flight (the
   // composer enqueues instead of dropping), drained one-per-turn-end.
   // Per-session-persisted (text + run-options; attachments are in-memory).
@@ -690,9 +549,20 @@ export function ManagerChatView({ session }: Props) {
   // impossible AND the repeated mid-stream `scrollTo` blanks the pane under
   // WebKit. Seeded true so the first paint lands at the latest message.
   const atBottomRef = useRef(true);
+  // Scrolled up from the newest message: the library "Jump to latest" pill
+  // sits over the bottom of the transcript until the reader is back down.
+  const [awayFromLatest, setAwayFromLatest] = useState(false);
   const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
-    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    atBottomRef.current = atBottom;
+    setAwayFromLatest(!atBottom);
+  }, []);
+  const jumpToLatest = useCallback(() => {
+    atBottomRef.current = true;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    setAwayFromLatest(false);
   }, []);
   // How many of the most-recent timeline entries are mounted. Older turns stay
   // out of the DOM until the user asks for them, so a 400-turn import scrolls
@@ -704,6 +574,13 @@ export function ManagerChatView({ session }: Props) {
   // and restore it in a layout effect so the user stays on the exact line they
   // were reading.
   const revealAnchorRef = useRef<number | null>(null);
+  // Find in the conversation. Opening it brings every earlier message into
+  // the page, so the search covers the whole conversation and not the window.
+  const [findOpen, setFindOpen] = useState(false);
+  const openFind = useCallback(() => {
+    setVisibleCount(Number.MAX_SAFE_INTEGER);
+    setFindOpen(true);
+  }, []);
   const revealEarlier = useCallback(() => {
     const el = scrollRef.current;
     revealAnchorRef.current = el ? el.scrollHeight - el.scrollTop : null;
@@ -1422,6 +1299,7 @@ export function ManagerChatView({ session }: Props) {
   useEffect(() => {
     setSlashLog([]);
     setVisibleCount(CHAT_WINDOW_INITIAL);
+    setFindOpen(false);
   }, [session.id]);
 
   const pinToBottom = useCallback(() => {
@@ -1514,7 +1392,7 @@ export function ManagerChatView({ session }: Props) {
       // Chat-first sweep — `/search`, `/zones`, `/team` are handled
       // client-side. They run via the Aura CLI and render their output
       // as ephemeral system bubbles; the brain never sees them.
-      // Parity W8 — a non-handled result can carry `forwardText`: the verb
+      // A non-handled result can carry `forwardText`: the verb
       // expanded into a richer prompt (e.g. `/pr describe` → full skill
       // text) that goes to the brain INSTEAD of the raw slash message.
       let outbound = trimmed;
@@ -1744,8 +1622,8 @@ export function ManagerChatView({ session }: Props) {
               // keys match the serde-deserialized `ChatRequest`. Null/false
               // → the brain stays on its configured default (byte-identical
               // to the pre-picker request).
-              model: modelOverride?.modelId ?? null,
-              long_context: modelOverride?.longContext ?? false,
+              model: turnModel(machineBrain, modelOverride)?.modelId ?? null,
+              long_context: turnModel(machineBrain, modelOverride)?.longContext ?? false,
               // #254 — per-turn permission/autonomy policy. Null → the
               // brain stays on its own ask-flow (byte-identical request).
               // Native brains carry it but run their own tool loop; CLI
@@ -1772,6 +1650,8 @@ export function ManagerChatView({ session }: Props) {
           );
         } else {
           await api.managerChat(session.id, finalText, attachments);
+          // Review comments that rode along are now with the agent.
+          markSentComments(attachments.map((a) => a.name));
         }
       } catch (e) {
         lastExitRef.current = "error";
@@ -2098,11 +1978,18 @@ export function ManagerChatView({ session }: Props) {
   }, [session.id, session.chat, session.objective, send]);
 
   // Auto-open plan as a full WorkSurface tab the moment a pending_plan
-  // arrives (Cursor-parity). The inline PlanCard stays in the chat as a
+  // arrives. The inline PlanCard stays in the chat as a
   // condensed reference, but the rich detail view (mermaid + phases +
   // file refs) lives in the tab. We track which plan ids we've already
   // popped so a re-render of the same plan doesn't re-open the tab.
   const editor = useEditorStore();
+  // Where conversations this view hands you open: a tab (no host), or Aura's
+  // panel on Home, which switches itself instead.
+  const host = useChatHost();
+  // Which projects a turn acted on is worth a chip only where there is a
+  // choice of project — Aura's conversation, bound to several. In a single
+  // project's chat every chip would name the project you are already in.
+  const showTurnProjects = host?.scope === "aura" || (session.projects?.length ?? 0) > 1;
   const openedPlanIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const plan = session.pending_plan;
@@ -2167,12 +2054,13 @@ export function ManagerChatView({ session }: Props) {
           }
           // No repo root to scope a window to — fall back to an in-app tab.
         }
-        editor.openManager(newSid, label);
+        if (host) host.openSession(newSid, label);
+        else editor.openManager(newSid, label);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [session.id, session.objective, session.projects, editor, resolvedRepoRoot],
+    [session.id, session.objective, session.projects, editor, resolvedRepoRoot, host],
   );
 
   // Group consecutive bubbles from the same author — the avatar appears
@@ -2285,8 +2173,18 @@ export function ManagerChatView({ session }: Props) {
   return (
     <ChatRepoRootContext.Provider value={repoRootForChat}>
       <ChatSpendContext.Provider value={chatSpend}>
-        <div className="relative flex flex-col h-full min-h-0">
-          <ChatHeader title="Aura" workspace={repoRootForChat} status={busy ? "Working" : undefined} actions={<button type="button" className="chat-icon-button" aria-label="Chat history" onClick={() => window.dispatchEvent(new Event("aura:manager:open-history"))}><History size={15} /></button>} />
+        <div
+          className="relative flex flex-col h-full min-h-0"
+          onKeyDown={(e) => {
+            // ⌘F finds in this conversation, from the composer or anywhere
+            // else in the pane that holds focus.
+            if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") {
+              e.preventDefault();
+              e.stopPropagation();
+              openFind();
+            }
+          }}
+        >
           {/* Scroll region + scrollback rail share ONE positioning context so the
           rail spans only the messages and ends above the composer dock (not
           running to the very bottom of the pane). Also an OS-drop zone for
@@ -2296,28 +2194,23 @@ export function ManagerChatView({ session }: Props) {
             className="relative flex-1 min-h-0 flex flex-col"
             data-os-drop="composer"
           >
-            <div
-              ref={scrollRef}
-              onScroll={onScroll}
-              className="p-scroll flex flex-col"
-            >
+            {findOpen && (
+              <ChatFind
+                scrollRef={scrollRef}
+                revision={timeline}
+                onClose={() => setFindOpen(false)}
+              />
+            )}
+            <ChatTranscript ref={scrollRef} onScroll={onScroll}>
               {showEmptyState && (
                 <ChatEmptyState
-                  onPick={(prompt) => void send(prompt, [], "ask")}
                   projectLabel={session.projects[0]?.label}
                   repoRoot={repoRootForChat ?? undefined}
                   machineName={machineName ?? undefined}
+                  sessionId={session.id}
                 />
               )}
-              {hiddenCount > 0 && (
-                <button
-                  type="button"
-                  onClick={revealEarlier}
-                  className="self-center my-3 px-3 py-1.5 rounded-full text-xs text-[var(--color-text-3)] border border-[var(--color-border)] hover:text-[var(--color-text-1)] hover:bg-[var(--color-muted)] transition-colors"
-                >
-                  Show earlier messages · {hiddenCount} hidden
-                </button>
-              )}
+              {hiddenCount > 0 && <HistoryGap onLoad={revealEarlier} />}
               {timeline.map((entry, idx) => {
                 // Windowed render — older turns stay out of the DOM (returned as
                 // null) so a long imported history scrolls smoothly. We keep the map
@@ -2346,7 +2239,7 @@ export function ManagerChatView({ session }: Props) {
                 return (
                   <Fragment key={idx}>
                     {gapDivider}
-                    {node}
+                    {node && <TurnErrorBoundary>{node}</TurnErrorBoundary>}
                   </Fragment>
                 );
 
@@ -2530,6 +2423,7 @@ export function ManagerChatView({ session }: Props) {
                         onEditResend={onEditResend}
                         onFork={onForkTurn}
                       />
+                      {showTurnProjects && <TurnProjectChips turn={turn} />}
                     </div>
                   );
                 }
@@ -2586,10 +2480,10 @@ export function ManagerChatView({ session }: Props) {
                   scout={session.pending_scout}
                 />
               )}
-              {/* PlanCard renders INLINE in the timeline (Cursor-parity) — not
-            docked at the bottom — so the prepared plan flows as a chat
-            element next to the agent's prose, then the user can either
-            decide inline or click "Open" to expand it as a full PlanTab. */}
+              {/* PlanCard renders INLINE in the timeline — not docked at the
+            bottom — so the prepared plan flows as a chat element next to the
+            agent's prose, then the user can either decide inline or click
+            its title to open it as a full PlanTab. */}
               {session.pending_plan && (
                 <PlanCard
                   sessionId={session.id}
@@ -2667,15 +2561,13 @@ export function ManagerChatView({ session }: Props) {
                 />
               )}
               {error && !undelivered && (
-                <div
-                  role="alert"
-                  aria-live="assertive"
-                  className="text-red text-xs px-2 py-1 bg-red/10 rounded border border-red/30 mt-2"
-                >
-                  {error}
-                </div>
+                <ChatRecovery
+                  kind="generic"
+                  detail={error}
+                  action={{ label: "Dismiss", onClick: () => setError(null) }}
+                />
               )}
-            </div>
+            </ChatTranscript>
             {/* Scrollback rail — a slim minimap on the right edge for jumping
           between turns in a long conversation. Reads bubble offsets off the
           live scroll DOM (the `data-rail-id` stamps above); self-hides when
@@ -2685,10 +2577,20 @@ export function ManagerChatView({ session }: Props) {
               anchors={railAnchors}
               describe={describeTurn}
             />
+            {awayFromLatest && !showEmptyState && (
+              <Button
+                className="ui-conversation-bottom"
+                size="sm"
+                variant="secondary"
+                onClick={jumpToLatest}
+              >
+                <ArrowDown />
+                Jump to latest
+              </Button>
+            )}
           </div>
           {/* The fixed footer has a shared separator and compact inset composer. */}
-          <div
-            className="p-dock"
+          <ChatComposerArea
             data-os-drop="composer"
             style={{
               // A docked choice/multi question — the plan-paused banner — or the
@@ -2713,28 +2615,29 @@ export function ManagerChatView({ session }: Props) {
             reads "no agent reply" as "input is broken". This hint
             clarifies what's happening and points at the resolution. */}
             {session.pending_plan && !session.pending_question && (
-              <div className={`chat-plan-dock ${fusePlan ? "is-docked" : ""}`}>
-                <ListTree size={16} className="text-text-3 shrink-0" />
-                <div>
-                  <strong>{session.pending_plan.title}</strong>
-                  <small>Review the plan before building</small>
-                </div>
-                <button
-                  type="button"
-                  className="chat-plan-secondary"
-                  onClick={() => {
-                    const plan = session.pending_plan;
-                    if (plan)
-                      openPlanWizard(
-                        pendingPlanToTabInput(plan),
-                        resolvedRepoRoot,
-                        session.id,
-                      );
-                  }}
-                >
-                  Review plan <SquareArrowOutUpRight size={13} />
-                </button>
-              </div>
+              <PlanReview
+                className={`chat-plan-review${fusePlan ? " is-docked" : ""}`}
+                title={session.pending_plan.title}
+                status="Review the plan before building"
+                actions={
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    onClick={() => {
+                      const plan = session.pending_plan;
+                      if (plan)
+                        openPlanWizard(
+                          pendingPlanToTabInput(plan),
+                          resolvedRepoRoot,
+                          session.id,
+                        );
+                    }}
+                  >
+                    Review plan <SquareArrowOutUpRight />
+                  </Button>
+                }
+              />
             )}
             {/* `/resume` picker — a compact action panel docked flush above the
             composer (fused into one unit when nothing sits between them),
@@ -2757,13 +2660,15 @@ export function ManagerChatView({ session }: Props) {
                           root,
                           row.agentSessionId,
                         )
-                        .then((newSid) => openManagerSession(newSid, row.title))
-                        .catch(() =>
-                          window.dispatchEvent(
-                            new CustomEvent("aura:manager:open-history"),
-                          ),
-                        );
+                        .then((newSid) =>
+                          host
+                            ? host.openSession(newSid, row.title)
+                            : openManagerSession(newSid, row.title),
+                        )
+                        .catch(() => openChatHistory(session.id));
                     }
+                  } else if (host) {
+                    host.openSession(row.id, row.title);
                   } else {
                     openManagerSession(row.id, row.title);
                   }
@@ -2803,13 +2708,31 @@ export function ManagerChatView({ session }: Props) {
               onActiveChange={onCrewActiveChange}
             />
             {/* Docked in-flight strip — the live "Running … · 12s" status, pinned
-            flush atop the composer (squared bottom + negative margin closes the
-            dock's 6px gap) so it reads as one unit with the input while the
-            turn runs, then collapses away the moment it finishes. */}
+            flush atop the composer in the queued-messages strip's docked frame
+            (rounded top, no bottom seam) so it reads as one unit with the input
+            while the turn runs, then collapses away the moment it finishes. */}
+            {showEmptyState && (
+              <ChatStarters
+                repoRoot={repoRootForChat}
+                sessionId={session.id}
+                onPick={(prompt) => {
+                  // A starter is a message the user sent; up-arrow should
+                  // find it like one they typed.
+                  rememberSent(composerKey(MANAGER_HISTORY_PREFIX, session.id), prompt);
+                  void send(prompt, [], "ask");
+                }}
+              />
+            )}
             {runningTool && <RunningCommandStatus tool={runningTool} docked />}
             <ManagerComposer
               repoRoot={resolvedRepoRoot}
               workspaceLabel={session.projects[0]?.label}
+              linkAgentId={turnBrainId}
+              linkAgentLabel={agentLabel}
+              planAwaitingReply={!!session.pending_plan}
+              history={
+                <ChatHistoryMenu currentSessionId={session.id} repoRoot={resolvedRepoRoot} />
+              }
               // Same composer, one changed word. `@mention files` is dropped on a
               // remote conversation because the picker indexes this laptop's
               // checkout — offering it would attach the wrong copy of a file that
@@ -2822,7 +2745,7 @@ export function ManagerChatView({ session }: Props) {
               // Square the composer's top so the docked running strip (which rounds
               // only its top) meets it on a single hairline — one stacked unit, no
               // floating gap — exactly as the question/plan/resume banners fuse.
-              docked={fuseQuestion || fusePlan || fuseResume || !!runningTool}
+              docked={fuseQuestion || fusePlan || !!runningTool}
               busy={busy}
               usage={usage}
               spend={spend}
@@ -2836,6 +2759,7 @@ export function ManagerChatView({ session }: Props) {
               onBrainOverrideChange={setBrainOverride}
               modelOverride={modelOverride}
               onModelOverrideChange={setModelOverride}
+              machineBrain={machineBrain}
               onSend={(
                 msg,
                 attachments,
@@ -2906,2699 +2830,9 @@ export function ManagerChatView({ session }: Props) {
               onAgentModeChange={agent.setMode}
               agentModeError={agent.modeError}
             />
-          </div>
+          </ChatComposerArea>
         </div>
       </ChatSpendContext.Provider>
     </ChatRepoRootContext.Provider>
-  );
-}
-
-// ── Stream-block accumulators ────────────────────────────────────────────
-
-function upsertText(blocks: StreamBlock[], idx: number, text: string): StreamBlock[] {
-  const i = blocks.findIndex((b) => b.kind === "text" && b.block_idx === idx);
-  if (i >= 0) {
-    const next = blocks.slice();
-    const cur = next[i]!;
-    if (cur.kind === "text") {
-      next[i] = { ...cur, text: cur.text + text };
-    }
-    return next;
-  }
-  const added: StreamBlock = { kind: "text", block_idx: idx, text };
-  return [...blocks, added].sort((a, b) => a.block_idx - b.block_idx);
-}
-
-// Reasoning blocks accumulate exactly like text, but keyed to their own
-// block_idx so the model's chain-of-thought renders as a separate collapsible
-// disclosure above the answer (never interleaved into answer prose).
-function upsertReasoning(blocks: StreamBlock[], idx: number, text: string): StreamBlock[] {
-  const i = blocks.findIndex((b) => b.kind === "reasoning" && b.block_idx === idx);
-  if (i >= 0) {
-    const next = blocks.slice();
-    const cur = next[i]!;
-    if (cur.kind === "reasoning") {
-      next[i] = { ...cur, text: cur.text + text };
-    }
-    return next;
-  }
-  const added: StreamBlock = { kind: "reasoning", block_idx: idx, text };
-  return [...blocks, added].sort((a, b) => a.block_idx - b.block_idx);
-}
-
-function upsertTool(
-  blocks: StreamBlock[],
-  tool: StreamBlock & { kind: "tool" },
-): StreamBlock[] {
-  const i = blocks.findIndex(
-    (b) => b.kind === "tool" && b.block_idx === tool.block_idx,
-  );
-  if (i >= 0) {
-    const next = blocks.slice();
-    const cur = next[i] as typeof tool;
-    // Keep the ORIGINAL start stamp on an update — re-stamping would restart
-    // the live "Running …" timer every time the block is touched.
-    next[i] = { ...tool, result: cur.result, started_at: cur.started_at };
-    return next;
-  }
-  return [
-    ...blocks,
-    { ...tool, started_at: tool.started_at ?? Date.now() },
-  ].sort((a, b) => a.block_idx - b.block_idx);
-}
-
-function attachResult(
-  blocks: StreamBlock[],
-  tool_use_id: string,
-  result: { is_error: boolean; content: string },
-): StreamBlock[] {
-  const i = blocks.findIndex((b) => b.kind === "tool" && b.tool_use_id === tool_use_id);
-  if (i < 0) return blocks;
-  const next = blocks.slice();
-  const cur = next[i]!;
-  if (cur.kind === "tool") {
-    next[i] = { ...cur, result };
-  }
-  return next;
-}
-
-// ── Live running-command status (#3) ─────────────────────────────────────
-//
-// The in-flight tool card above shows WHICH command is running; this adds the
-// live feedback it lacked — a spinner + a 1s-ticking elapsed timer so a slow
-// command (e.g. `aura propose-plan`) visibly keeps working instead of sitting
-// as a static line that reads as hung. In-flight uses the amber `--color-warn`
-// token (green is reserved for the "done" state in this chat scope); the timer
-// is a small `setInterval` that resets whenever the running command changes and
-// tears down when nothing is in flight.
-//
-// True live STDOUT is intentionally NOT shown: neither stream channel
-// (`manager-stream` / `manager-chat-chunk`) carries incremental tool output —
-// the `tool_result` only lands once, AFTER the command finishes — so the front
-// end has no partial output to render. Surfacing it would require a backend
-// `ToolProgress`/`ChatChunk::ToolStdout` streaming field; until that exists this
-// is the honest quick win on the data we already have. Never fake output.
-
-type RunningToolBlock = StreamBlock & { kind: "tool" };
-
-/** Friendly one-line label for the running command — the full shell command
- *  when the registry extracted one (so `Running aura propose-plan` reads as the
- *  real command), else the verb + subject ("Running propose-plan"). Falls back
- *  to a bare "Running" so the row is never blank. */
-function runningLabel(tool: RunningToolBlock): { verb: string; detail: string | null; mono: boolean } {
-  const view = describeTool(tool.name, tool.input, undefined);
-  if (view.command) {
-    return { verb: "Running", detail: view.command, mono: true };
-  }
-  const detail = view.subject ?? null;
-  // The registry verb is present-continuous ("Running" / "Reading"); keep it as
-  // the live verb so the row reads as in-flight.
-  return { verb: view.verb || "Running", detail, mono: !!view.mono };
-}
-
-// `docked` mode renders the strip flush atop the composer (squared bottom, no
-// bottom seam, negative margin to close the dock's 6px gap) so it reads as part
-// of the composer chrome rather than a loose card mid-stream. The default
-// (undocked) variant is kept for any in-stream callers and is what the strip
-// looked like before it was docked.
-function RunningCommandStatus({
-  tool,
-  docked = false,
-}: {
-  tool: RunningToolBlock;
-  docked?: boolean;
-}) {
-  // Anchor on the block's own start stamp, not this component's mount time.
-  // The stamp rides along in the durable block mirror, so a workspace switch
-  // mid-command comes back reading "1m 24s" instead of restarting at 0 — the
-  // restart is what made a still-running command look like it had been
-  // relaunched. Falls back to now for a block with no stamp.
-  // Memoized per command so an unstamped block's `Date.now()` fallback stays
-  // fixed instead of moving every render (which would tear down and rebuild
-  // the interval on each paint).
-  const start = useMemo(
-    () => tool.started_at ?? Date.now(),
-    [tool.tool_use_id, tool.started_at],
-  );
-  const [elapsed, setElapsed] = useState(() =>
-    Math.max(0, (Date.now() - start) / 1000),
-  );
-  // Re-anchor whenever the running command changes. The interval ticks at
-  // 10Hz — the row renders a tenth, and a counter that only moves once a
-  // second sits frozen beside a spinning glyph, which is what a wedged
-  // command looks like. Tears down on unmount / when the running tool swaps,
-  // so it's never left dangling.
-  useEffect(() => {
-    const tick = () => setElapsed(Math.max(0, (Date.now() - start) / 1000));
-    tick();
-    const iv = window.setInterval(tick, 100);
-    return () => window.clearInterval(iv);
-  }, [start]);
-
-  const { verb, detail, mono } = runningLabel(tool);
-  // In-flight amber. `--color-amber` is the pack's warning/in-flight slot and
-  // every pack defines it, so a running tool reads amber the same way the
-  // PlanCard's "Building…" status, the crew glyph and the Automations run dot
-  // do — no hex fallback needed, and no borrowing of the accent, which means
-  // "something you can act on".
-  const warn = "var(--color-amber)";
-  return (
-    <div
-      className={
-        docked
-          ? // Composer-chrome strip: full reading-column width, squared bottom
-            // corners + no bottom border, and a -6px bottom margin so it sits
-            // directly on the composer card with no dock gap between them.
-            "flex items-center gap-2 px-3 py-1.5 w-full"
-          : "flex items-center gap-2 px-2.5 py-1.5 mt-1.5 w-full max-w-[680px]"
-      }
-      style={
-        docked
-          ? {
-              background: `color-mix(in srgb, ${warn} 8%, var(--color-bg-card))`,
-              border: `1px solid color-mix(in srgb, ${warn} 30%, transparent)`,
-              borderBottom: "none",
-              borderRadius: "var(--radius-sm) var(--radius-sm) 0 0",
-              marginBottom: -6,
-            }
-          : {
-              background: `color-mix(in srgb, ${warn} 8%, var(--color-bg-card))`,
-              border: `1px solid color-mix(in srgb, ${warn} 30%, transparent)`,
-              borderRadius: "var(--radius-sm)",
-            }
-      }
-      role="status"
-      aria-live="polite"
-    >
-      <span
-        className="t-2xs t-ui shrink-0"
-        style={{ color: warn, fontWeight: 600 }}
-      >
-        {verb}
-      </span>
-      {detail && (
-        <span
-          className={`t-xs min-w-0 truncate ${mono ? "font-mono" : ""}`}
-          style={{ color: "var(--color-text-2)" }}
-          title={detail}
-        >
-          {detail}
-        </span>
-      )}
-      {/* Live elapsed, in tenths, so a long run visibly keeps working. */}
-      {elapsed > 0 && (
-        <span
-          className="ml-auto shrink-0 tabular-nums t-2xs"
-          style={{
-            color: "var(--color-text-3)",
-            fontFamily: "var(--font-mono)",
-          }}
-        >
-          {formatLiveDuration(elapsed)}
-        </span>
-      )}
-    </div>
-  );
-}
-
-// ── Interactive plan card ───────────────────────────────────────────────
-//
-// Rendered whenever `session.pending_plan` is set. Backed by the persisted
-// plan on the session so it survives reload mid-decision. Clicking Build
-// or Cancel routes to `managerDecidePlan` which resolves the bridge
-// waiter — the CLI brain (claude/gemini/etc) that's blocked inside
-// `aura propose-plan` wakes up with the verb, then either fans out
-// subagents (Build) or backs off and asks the user a follow-up (Cancel).
-
-export function PlanCard({
-  sessionId,
-  plan,
-  onError,
-  onBuildStart,
-  grouped = false,
-  repoRoot,
-}: {
-  sessionId: string;
-  plan: PendingPlan;
-  onError: (msg: string) => void;
-  /** Fires the instant Build is pressed (before the backend round-trip) so the
-   *  parent can show an immediate "Spinning up the crew…" line and close the
-   *  silent gap before the live crew strip appears. */
-  onBuildStart?: () => void;
-  /** Inline-in-scroll mode: when prev author was the same agent, hide
-   *  the avatar gutter. */
-  grouped?: boolean;
-  repoRoot?: string | null;
-}) {
-  const [submitting, setSubmitting] = useState<
-    "build" | "revise" | "cancel" | null
-  >(null);
-  const [revisionOpen, setRevisionOpen] = useState(false);
-  const [revisionFeedback, setRevisionFeedback] = useState("");
-  // Bucket N3 — opt-in team broadcast on Build. Default off so the
-  // common single-developer case stays quiet. When set, the backend
-  // fires `aura msg send "Plan built: <title> (<plan_task_id>)"` after
-  // the build kicks off.
-  const [notifyTeam, setNotifyTeam] = useState(false);
-  // Bucket D — Auto / Parallel / Serial picker. `Auto` (default)
-  // honours the existing zone-overlap heuristic. `Parallel` opts the
-  // user into concurrent worktrees racing the same files. `Serial`
-  // forces strict one-at-a-time even when zones are disjoint.
-  const [parallelism, setParallelism] = useState<PlanParallelism>(
-    plan.parallelism ?? "auto",
-  );
-  // Inventory blocker #3 — local approval overlay so the row updates
-  // instantly on click. Backend persists + emits a fresh snapshot which
-  // will overwrite this, but the optimistic state covers the round-trip
-  // window. `null` means "fall back to whatever's on the persisted plan".
-  const [approvalOverlay, setApprovalOverlay] = useState<{
-    approved_by: string;
-    approved_at: number;
-  } | null>(null);
-  const [approving, setApproving] = useState(false);
-  const approvedBy = approvalOverlay?.approved_by ?? plan.approved_by ?? null;
-  const approvedAt = approvalOverlay?.approved_at ?? plan.approved_at ?? null;
-
-  const decide = useCallback(
-    async (decision: "build" | "revise" | "cancel") => {
-      if (submitting) return;
-      const feedback = revisionFeedback.trim();
-      if (decision === "revise" && !feedback) return;
-      setSubmitting(decision);
-      // Optimistic hand-off: the moment Build is pressed, ask the parent to
-      // show "Spinning up the crew…" so the chat never goes silent during the
-      // spawn. Cancel doesn't spawn anything, so it stays quiet.
-      if (decision === "build") onBuildStart?.();
-      try {
-        await api.managerDecidePlan(
-          sessionId,
-          plan.id,
-          decision,
-          decision === "build" ? notifyTeam : false,
-          decision === "build" ? parallelism : undefined,
-          decision === "revise" ? feedback : undefined,
-        );
-      } catch (e) {
-        onError(e instanceof Error ? e.message : String(e));
-        setSubmitting(null);
-      }
-    },
-    [
-      submitting,
-      sessionId,
-      plan.id,
-      onError,
-      onBuildStart,
-      notifyTeam,
-      parallelism,
-      revisionFeedback,
-    ],
-  );
-
-  // "Open plan" → the proper fullscreen wizard overlay (Document / Tasks),
-  // not a workpane tab. The user reviews the full design doc + breakdown in
-  // focus, then Builds or Cancels from the overlay's top-bar cluster.
-  const openAsTab = useCallback(() => {
-    openPlanWizard(pendingPlanToTabInput(plan), repoRoot ?? null, sessionId);
-  }, [plan, repoRoot, sessionId]);
-
-  // Inventory blocker #3 — Approve handler. Resolves the current user's
-  // effective identity (per-repo git identity overlay, fallback to the
-  // global device identity), stamps the pending plan, and overlays the
-  // result locally so the row updates without waiting for the next
-  // session snapshot. Display-name beats email when both are set; if
-  // neither is set we fall back to "you" rather than a blank handle so
-  // the audit row is never empty.
-  const approve = useCallback(async () => {
-    if (approving || approvedBy) return;
-    setApproving(true);
-    try {
-      let handle = "you";
-      try {
-        const identity = repoRoot
-          ? await api.deviceIdentityForRepo(repoRoot)
-          : await api.deviceIdentity();
-        const name = identity.display_name?.trim();
-        const email = identity.email?.trim();
-        handle = name || email || "you";
-      } catch {
-        // Fall back to "you" — better than blocking approval if the
-        // identity lookup transiently fails (cloud down, repo without
-        // a git user.* set, etc).
-      }
-      const stamp = await api.managerApprovePlan(sessionId, plan.id, handle);
-      setApprovalOverlay(stamp);
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setApproving(false);
-    }
-  }, [approving, approvedBy, repoRoot, sessionId, plan.id, onError]);
-
-  const description = plan.summary?.trim() || plan.objective?.trim() || "";
-  const meta = [
-    plan.phases?.length ? `${plan.phases.length} phases` : null,
-    `${plan.todos.length} task${plan.todos.length === 1 ? "" : "s"}`,
-    approvedBy
-      ? `Approved by ${approvedBy}${approvedAt ? ` · ${formatRelativeApprovalTime(approvedAt)}` : ""}`
-      : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  const status =
-    submitting === "build"
-      ? "Building…"
-      : submitting === "cancel"
-        ? "Cancelling…"
-        : approvedBy
-          ? "Approved"
-          : "Ready for review";
-  return (
-    <div className={grouped ? "mt-1" : "mt-2"}>
-      <PlanPreview
-        title={plan.title}
-        summary={description}
-        status={status}
-        meta={meta}
-        onOpen={openAsTab}
-        actions={
-          <>
-            <Popover>
-              <PopoverTrigger asChild>
-                <button
-                  type="button"
-                  className="chat-plan-secondary"
-                  aria-label="Plan options"
-                  disabled={submitting !== null}
-                >
-                  <MoreHorizontal size={16} />
-                </button>
-              </PopoverTrigger>
-              <PopoverContent
-                align="end"
-                side="top"
-                className="unified-composer-options"
-              >
-                <div className="composer-menu-heading">Plan options</div>
-                {!approvedBy && (
-                  <button
-                    type="button"
-                    className="chat-plan-secondary"
-                    disabled={approving || submitting !== null}
-                    onClick={() => void approve()}
-                  >
-                    {approving ? "Approving…" : "Approve plan"}
-                  </button>
-                )}
-                <div className="px-2 py-2">
-                  <div className="composer-menu-heading">Run tasks</div>
-                  <ParallelismControl
-                    value={parallelism}
-                    onChange={setParallelism}
-                    disabled={submitting !== null}
-                  />
-                </div>
-                <label className="flex items-center gap-2 px-2 py-2 text-xs">
-                  <input
-                    type="checkbox"
-                    checked={notifyTeam}
-                    onChange={(e) => setNotifyTeam(e.target.checked)}
-                    disabled={submitting !== null}
-                  />
-                  Notify team when building starts
-                </label>
-                <button
-                type="button"
-                disabled={submitting !== null}
-                onClick={() => setRevisionOpen((value) => !value)}
-                className="px-3 py-1.5 t-sm text-left disabled:opacity-50 transition-colors hover:bg-state-hover"
-                style={{ color: "var(--color-text-2)" }}
-              >
-                Request changes
-              </button>
-              {revisionOpen && (
-                <div className="px-3 pb-2 flex flex-col gap-2">
-                  <textarea
-                    autoFocus
-                    value={revisionFeedback}
-                    onChange={(event) =>
-                      setRevisionFeedback(event.target.value)
-                    }
-                    rows={3}
-                    maxLength={8000}
-                    placeholder="What should the plan change?"
-                    className="w-full resize-y t-xs px-2 py-1.5 outline-none"
-                    style={{
-                      color: "var(--color-text-1)",
-                      background: "var(--color-bg-2)",
-                      border: "1px solid var(--color-line)",
-                      borderRadius: "var(--radius-sm)",
-                    }}
-                  />
-                  <button
-                    type="button"
-                    disabled={submitting !== null || !revisionFeedback.trim()}
-                    onClick={() => void decide("revise")}
-                    className="self-end t-xs px-2 py-1 disabled:opacity-50"
-                    style={{
-                      color: "var(--color-bg-0)",
-                      background: "var(--color-accent)",
-                      borderRadius: "var(--radius-sm)",
-                    }}
-                  >
-                    {submitting === "revise" ? "Sending…" : "Send feedback"}
-                  </button>
-                </div>
-              )}
-<button
-                  type="button"
-                  className="chat-plan-secondary"
-                  disabled={submitting !== null}
-                  onClick={() => void decide("cancel")}
-                >
-                  {submitting === "cancel" ? "Cancelling…" : "Cancel plan"}
-                </button>
-              </PopoverContent>
-            </Popover>
-            <button
-              type="button"
-              className="chat-plan-secondary"
-              onClick={openAsTab}
-            >
-              Review plan
-            </button>
-            <button
-              type="button"
-              className="chat-primary-action"
-              disabled={submitting !== null}
-              onClick={() => void decide("build")}
-            >
-              {submitting === "build" ? "Building…" : "Build"}
-            </button>
-          </>
-        }
-        extra={
-          <PlanOrchestratorSection plan={plan} repoRoot={repoRoot ?? null} />
-        }
-      >
-        {plan.todos.length > 0 && (
-          <ol className="chat-plan-tasks">
-            {plan.todos.slice(0, 3).map((todo, i) => (
-              <li key={i}>
-                <span className="chat-task-mark" aria-hidden />
-                <span>{todo.description}</span>
-              </li>
-            ))}
-            {plan.todos.length > 3 && (
-              <li>
-                <span className="text-xs text-text-3">
-                  {plan.todos.length - 3} more in the full plan
-                </span>
-              </li>
-            )}
-          </ol>
-        )}
-      </PlanPreview>
-    </div>
-  );
-}
-
-/// v0.2.31 LL.1 — collapsible Orchestrator section on the PlanCard.
-/// Maps the plan's todos to LaneSpec entries (one lane per todo) and
-/// delegates to `<WaveDispatchPanel>` for the actual fan-out. Lives
-/// alongside the legacy Build button — operators choose Build for the
-/// single-agent path or expand Orchestrator for manager-of-managers.
-function PlanOrchestratorSection({
-  plan,
-  repoRoot,
-}: {
-  plan: PendingPlan;
-  repoRoot: string | null;
-}) {
-  const [open, setOpen] = useState(false);
-  const laneCount = plan.todos?.length ?? 0;
-  return (
-    <div className="border-t" style={{ borderColor: "var(--color-line-soft)" }}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full px-4 py-3 flex items-center justify-between text-xs"
-        style={{
-          color: "var(--color-text-3)",
-          background: open ? "var(--color-bg-1)" : "transparent",
-        }}
-      >
-        <span>
-          Agent assignments · {laneCount} task{laneCount === 1 ? "" : "s"}
-        </span>
-        <ChevronDown
-          size={12}
-          style={{ transform: open ? "rotate(180deg)" : "none" }}
-        />
-      </button>
-      {open && (
-        <div className="px-3 py-2">
-          <WaveDispatchPanel plan={plan} repoRoot={repoRoot} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-/// Bucket D — segmented control on the PlanCard footer. Three modes:
-/// Auto (current zone-overlap heuristic), Parallel (ignore overlaps,
-/// concurrent worktrees), Serial (one task at a time, even disjoint).
-/// The brain's per-todo agent picks still apply on top — this is just
-/// the dispatch-tick behaviour at the session level.
-///
-/// Wears the app's one segmented strip (`Segment`). It used to draw its own:
-/// a bordered track whose selected cell was a SOLID accent fill with inverted
-/// text — the loudest thing on a plan card, and a third appearance for a
-/// gesture the right rail and every board switch already share.
-function ParallelismControl({
-  value,
-  onChange,
-  disabled,
-}: {
-  value: PlanParallelism;
-  onChange: (v: PlanParallelism) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <Segment
-      value={value}
-      onChange={onChange}
-      disabled={disabled}
-      size="xs"
-      ariaLabel="How many tasks may run at once"
-      options={[
-        {
-          value: "auto",
-          label: "When safe",
-          title: "Side by side, but hold a task back while another is in the same files.",
-        },
-        {
-          value: "parallel",
-          label: "All at once",
-          title: "Side by side even in the same files. Faster, and you merge the overlap yourself.",
-        },
-        {
-          value: "serial",
-          label: "One at a time",
-          title: "Never run two together, even when they'd never meet.",
-        },
-      ]}
-    />
-  );
-}
-
-// PendingPlan from the wire is snake_case (mirrors the Rust struct);
-// `editor.openPlan` expects camelCase. Centralizing the conversion here
-// keeps the auto-open path and the manual "Open" click producing the
-// exact same PlanTab shape — Cursor parity stays consistent regardless
-// of how the user reached it.
-function pendingPlanToTabInput(plan: PendingPlan) {
-  return {
-    id: plan.id,
-    title: plan.title,
-    summary: plan.summary,
-    objective: plan.objective,
-    baseline: plan.baseline,
-    architectureMermaid: plan.architecture_mermaid,
-    phases: plan.phases?.map((p) => ({
-      title: p.title,
-      body: p.body,
-      fileRefs: p.file_refs ?? [],
-    })),
-    deliverables: plan.deliverables,
-    tests: plan.tests,
-    pendingPlanId: plan.id,
-    todos: plan.todos.map((t) => ({
-      description: t.description,
-      agent: t.agent ?? null,
-      fileRefs: t.file_refs,
-      assignee: t.assignee ?? null,
-      suggestedProvider: t.suggested_provider
-        ? {
-            providerId: t.suggested_provider.provider_id,
-            score: t.suggested_provider.score,
-            sampleCount: t.suggested_provider.sample_count,
-          }
-        : null,
-      goal: t.goal ?? null,
-      acceptance: t.acceptance ?? [],
-      subtasks: t.subtasks?.map((s) => ({
-        description: s.description,
-        agent: s.agent ?? null,
-        goal: s.goal ?? null,
-        acceptance: s.acceptance ?? [],
-      })),
-    })),
-  };
-}
-
-// ── Persisted bubbles + system lines ────────────────────────────────────
-
-function SystemLine({
-  text,
-  tone,
-}: {
-  text: string;
-  tone: "info" | "warn" | "ok";
-}) {
-  const cls =
-    tone === "warn"
-      ? "system-line warn"
-      : tone === "ok"
-        ? "system-line ok"
-        : "system-line";
-  return (
-    <div className={cls}>
-      <span style={{ opacity: 0.7 }}>· </span>
-      {text}
-    </div>
-  );
-}
-
-// A slash-command result (`/help`, `/loop`, `/agents`, …) — a full markdown
-// document, rendered through the chat's own MarkdownBody so lists, bold, code
-// and clickable file/symbol chips all land. It reads like any normal message:
-// NO box, NO border, NO "Aura" masthead — the slash the user typed already
-// echoes as their own bubble just above, so the result needs no header. A
-// `warn`/`ok` result keeps a single quiet leading glyph in the tone colour as
-// a subtle signal; the default `info` tone gets no chrome at all.
-function SystemCard({
-  text,
-  tone,
-}: {
-  text: string;
-  tone: "info" | "warn" | "ok";
-}) {
-  if (tone === "info") {
-    return (
-      <div className="my-1.5">
-        <MarkdownBody source={text} />
-      </div>
-    );
-  }
-  const accent =
-    tone === "warn" ? "var(--color-accent)" : "var(--color-accent-green)";
-  const Glyph = tone === "warn" ? AlertTriangle : Check;
-  return (
-    <div className="my-1.5 flex items-start gap-1.5">
-      <Glyph
-        size={13}
-        className="mt-[3px] shrink-0"
-        style={{ color: accent }}
-      />
-      <div className="min-w-0 flex-1">
-        <MarkdownBody source={text} />
-      </div>
-    </div>
-  );
-}
-
-// A designed mode-switch notice (Auto → Plan). It replaces a flat italic
-// markdown run that read as one unbroken wall of prose — here it's a compact
-// card: an accent glyph, a "Plan mode" headline, a body line that wraps with
-// real leading, and a muted footnote. Calm, not bulky. The accent is the
-// chat-scoped `--color-accent` (the same green as the Plan mode chip), so the
-// notice visually ties to the chip the user flips back from.
-function PlanModeNotice() {
-  return (
-    <div
-      className="my-2 flex items-start gap-2.5 rounded-md border px-3 py-2.5"
-      style={{
-        borderColor: "color-mix(in srgb, var(--color-accent) 26%, transparent)",
-        borderLeftColor: "var(--color-accent)",
-        borderLeftWidth: "2px",
-        background: "color-mix(in srgb, var(--color-accent) 6%, transparent)",
-      }}
-    >
-      <span
-        className="mt-px flex h-5 w-5 shrink-0 items-center justify-center rounded"
-        style={{
-          background: "color-mix(in srgb, var(--color-accent) 14%, transparent)",
-          color: "var(--color-accent)",
-        }}
-      >
-        <ListTree size={13} />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div
-          className="text-base font-semibold leading-5"
-          style={{ color: "var(--color-text-1)" }}
-        >
-          Plan mode
-        </div>
-        <p
-          className="mt-0.5 text-base leading-relaxed"
-          style={{ color: "var(--color-text-2)" }}
-        >
-          You asked for a plan, so I&rsquo;ll lay one out first instead of
-          building straight away. Review it, then hit{" "}
-          <strong style={{ color: "var(--color-text-1)", fontWeight: 600 }}>
-            Build
-          </strong>{" "}
-          to run it.
-        </p>
-        <p
-          className="mt-1 text-sm leading-snug"
-          style={{ color: "var(--color-text-3)" }}
-        >
-          Switch back to Auto from the mode chip anytime.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-// ── Resume picker ───────────────────────────────────────────────────
-//
-// `/resume` is an ACTION command, not an informational one: instead of
-// dumping a markdown list and telling you to "open one from the Sessions
-// list", it renders these live, clickable rows. Picking a row actually
-// reopens that conversation (openManagerSession), so the command does the
-// thing it names. Calm rows in the QuestionCard idiom — bg-1, hover bg-2,
-// a quiet subtitle (progress · when) and an arctic-blue chevron that
-// brightens on hover. Ephemeral by design: the picker is not persisted to
-// chat history (an action, not a record), so it never reappears stale on
-// reload.
-// Compact, composer-docked picker for an action slash command (`/resume`).
-// Renders flush above the composer as one stacked panel (squared bottom, no
-// seam) so it reads as composer chrome — not a bulky card floating mid-stream.
-// One-line rows: glyph · title · faint timestamp · chevron. `onDismiss` lets
-// the user close it without resuming (drops the ephemeral slashLog entry).
-function ResumePicker({
-  sessions,
-  docked,
-  onPick,
-  onDismiss,
-}: {
-  sessions: SlashResumeRow[];
-  docked?: boolean;
-  onPick: (row: SlashResumeRow) => void;
-  onDismiss?: () => void;
-}) {
-  return (
-    <div
-      className={`w-full flex flex-col overflow-hidden ${docked ? "" : "my-1.5"}`}
-      style={{
-        background: "var(--color-bg-1)",
-        border: "1px solid var(--color-line)",
-        // Docked: round only the top + drop the bottom seam so it fuses onto
-        // the composer (which squares its own top) as one unit.
-        borderRadius: docked
-          ? "var(--radius-sm) var(--radius-sm) 0 0"
-          : "var(--radius-md)",
-        borderBottom: docked ? "none" : undefined,
-      }}
-    >
-      <div
-        className="flex items-center gap-1.5 px-2.5 pt-1.5 pb-1 t-2xs t-ui"
-        style={{ color: "var(--color-text-3)" }}
-      >
-        <Clock size={11} className="shrink-0" />
-        <span className="flex-1">Resume a conversation</span>
-        {onDismiss && (
-          <button
-            type="button"
-            onClick={onDismiss}
-            aria-label="Dismiss"
-            className="shrink-0 -my-0.5 p-0.5 transition-opacity hover:opacity-100 opacity-60"
-            style={{ color: "var(--color-text-3)" }}
-          >
-            <X size={12} />
-          </button>
-        )}
-      </div>
-      <div className="px-1.5 pb-1.5 flex flex-col gap-0.5">
-        {sessions.map((s) => (
-          <button
-            key={s.id}
-            type="button"
-            aria-label={`Resume ${s.title}`}
-            onClick={() => onPick(s)}
-            className="group flex items-center gap-2 px-2 py-1 text-left transition-colors"
-            style={{
-              borderRadius: "var(--radius-xs)",
-              background: "transparent",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "var(--color-bg-2)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "transparent";
-            }}
-          >
-            {/* A cross-agent row wears its agent's mark (so you can tell a
-                Claude Code thread from a native Aura chat at a glance); a
-                native chat keeps the neutral message glyph. */}
-            {s.agentId ? (
-              <AgentIcon agentId={s.agentId} size={13} />
-            ) : (
-              <MessageSquare
-                size={12}
-                className="shrink-0"
-                style={{ color: "var(--color-text-3)" }}
-              />
-            )}
-            <span
-              className="t-sm truncate min-w-0"
-              style={{ color: "var(--color-text-1)" }}
-            >
-              {s.title}
-            </span>
-            {/* Plain-language origin tag so it's unambiguous which kind of
-                conversation each row is — the glyph alone isn't obvious to
-                everyone. A quiet hairline badge, not a card. */}
-            <span
-              className="t-2xs shrink-0 rounded border px-1.5 py-px"
-              style={{
-                borderColor: "var(--color-line)",
-                color: "var(--color-text-3)",
-              }}
-            >
-              {s.kind === "claude-code" ? "Claude Code" : "Aura chat"}
-            </span>
-            <span className="flex-1 min-w-0" aria-hidden="true" />
-            {s.subtitle && (
-              <span
-                className="t-2xs shrink-0 tabular-nums"
-                style={{ color: "var(--color-text-3)" }}
-              >
-                {s.subtitle}
-              </span>
-            )}
-            <ChevronRight
-              size={13}
-              className="shrink-0 transition-colors text-[var(--color-text-3)] group-hover:text-[var(--color-accent)]"
-            />
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── Settled Scout block ─────────────────────────────────────────────
-//
-// After Aura Scout finalizes, `pending_scout` clears and the live
-// ScoutCard (proper Architecture / Security / UX rows) is gone. All the
-// backend leaves behind are raw `Scout: spawning…` + `[security]/[arch]/
-// [ux] …` system turns. These parsers + block re-present that residue as
-// named agents with a status so the finalized review reads cleanly
-// instead of as bracketed lowercase text.
-
-type SettledSpecialistKind = "architecture" | "security" | "ux";
-
-interface SettledSpecialist {
-  kind: SettledSpecialistKind;
-  label: string;
-  body: string;
-  status: "done" | "failed";
-}
-
-const SCOUT_KIND_LABEL: Record<SettledSpecialistKind, string> = {
-  architecture: "Architecture",
-  security: "Security",
-  ux: "UX",
-};
-
-function isScoutSpawnLine(text: string): boolean {
-  return /^\s*Scout:\s*spawning\b/i.test(text);
-}
-
-// Parse a persisted `[kind] body` specialist line. Accepts the backend's
-// channel aliases (`arch`/`sec`) as well as full names. Returns null for
-// anything that isn't a specialist line so the grouping pass leaves
-// unrelated system turns untouched.
-function parseScoutSpecialistLine(text: string): SettledSpecialist | null {
-  const m = /^\s*\[(architecture|arch|security|sec|ux)\]\s*(.*)$/i.exec(text);
-  if (!m) return null;
-  const raw = m[1].toLowerCase();
-  const kind: SettledSpecialistKind = raw.startsWith("arch")
-    ? "architecture"
-    : raw.startsWith("sec")
-      ? "security"
-      : "ux";
-  const body = (m[2] ?? "").trim();
-  // Treat any not-completed signal — timed out, errored, or a calm
-  // "skipped" the backend now emits — as the non-done (Skipped) state.
-  const status: SettledSpecialist["status"] =
-    /time(?:d)?\s*out|timeout|failed|error|skip/i.test(body)
-      ? "failed"
-      : "done";
-  return { kind, label: SCOUT_KIND_LABEL[kind], body, status };
-}
-
-// Settled plan-review pass — renders as the SAME compact tool-call row as
-// the live ScoutCard (collapsed by default, expandable), not a bordered
-// card. The collapsed row carries a plain-language summary; expanding it
-// shows each reviewer's note. Skipped reviewers (claude missing / timed
-// out) degrade quietly — no alarming "N timed out" shout.
-function SettledScoutBlock({
-  specialists,
-}: {
-  specialists: SettledSpecialist[];
-}) {
-  const [open, setOpen] = useState(false);
-  const total = specialists.length;
-  const reviewed = specialists.filter((s) => s.status === "done").length;
-  // Plain-language trailing status. All-good → "N reviewers"; partial →
-  // "N of M reviewers"; none → a calm "review skipped" (build proceeded).
-  const reviewerStatus =
-    reviewed === 0
-      ? "review skipped"
-      : reviewed === total
-        ? `${total} reviewer${total === 1 ? "" : "s"}`
-        : `${reviewed} of ${total} reviewers`;
-
-  return (
-    <div className="mt-1 mb-1">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="aura-tool-row"
-        title={open ? "Collapse" : "Expand plan review"}
-      >
-        <span className="aura-tool-glyph">
-          <ChevronRight
-            size={13}
-            style={{ transform: open ? "rotate(90deg)" : undefined }}
-          />
-        </span>
-        <span className="aura-tool-chip-verb">Reviewed the plan</span>
-        <span
-          className="aura-tool-chip-subject"
-          style={{ color: "var(--color-text-3)" }}
-        >
-          {reviewerStatus}
-        </span>
-        <span
-          className="ml-auto shrink-0"
-          style={{ color: "var(--color-text-4)" }}
-        >
-          <ScoutChevron dir={open ? "up" : "down"} />
-        </span>
-      </button>
-      {open && (
-        <div className="aura-tool-substream">
-          {specialists.map((s, i) => (
-            <div
-              key={`${s.kind}-${i}`}
-              className="flex items-start gap-2.5 py-1"
-            >
-              <span className="shrink-0 mt-[1px]">
-                <AgentIcon agentId="claude" size={13} />
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span
-                    className="t-sm font-medium"
-                    style={{ color: "var(--color-text-1)" }}
-                  >
-                    {s.label}
-                  </span>
-                  <SpecialistStatusChip status={s.status} />
-                </div>
-                {s.status === "done" && s.body && (
-                  <div
-                    className="t-xs mt-0.5"
-                    style={{ color: "var(--color-text-2)" }}
-                  >
-                    {s.body}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Inline chevron for the settled scout row — matches the live ScoutCard's.
-function ScoutChevron({ dir }: { dir: "up" | "down" }) {
-  return (
-    <svg
-      width={11}
-      height={11}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      style={{
-        transform: dir === "up" ? "rotate(180deg)" : undefined,
-        transition: "transform var(--motion-fast)",
-      }}
-      aria-hidden
-    >
-      <path d="M4 6l4 4 4-4" />
-    </svg>
-  );
-}
-
-function SpecialistStatusChip({
-  status,
-}: {
-  status: SettledSpecialist["status"];
-}) {
-  const failed = status === "failed";
-  // Status colours only (green = ok, warning-amber = skipped). A skipped
-  // reviewer reads as a calm "Skipped", never an alarming failure.
-  const tone = failed ? "var(--color-accent)" : "var(--color-accent-green)";
-  return (
-    <span
-      className="t-2xs t-ui px-1.5 py-0.5 shrink-0"
-      style={{
-        color: tone,
-        border: `1px solid color-mix(in srgb, ${tone} 40%, transparent)`,
-        borderRadius: "var(--radius-xs)",
-      }}
-    >
-      {failed ? "Skipped" : "Reviewed"}
-    </span>
-  );
-}
-
-// Milestone divider — a centered rule with the caption inset, marking a
-// major thing finished (a task done, a wave shipped). Antigravity adds one
-// of these between phases of work so the timeline reads as discrete
-// completed chapters rather than an unbroken scroll. A small check leads
-// the caption to reinforce "this finished".
-function MilestoneDivider({ text }: { text: string }) {
-  return (
-    <div className="aura-milestone" role="separator" aria-label={text}>
-      <span className="aura-milestone-rule" aria-hidden />
-      <span className="aura-milestone-label">
-        <Check size={12} strokeWidth={2.5} />
-        {text}
-      </span>
-      <span className="aura-milestone-rule" aria-hidden />
-    </div>
-  );
-}
-
-// Brain-handoff divider — drawn where the conversation carried over to a
-// different brain mid-thread (Claude → Gemini → Kimi …). The backend rebuilds
-// the full transcript for whichever brain runs the next turn
-// (`chat_to_messages`), so the switch is genuinely seamless — this marker just
-// makes that legible: "you swapped models here, and the thread came with it",
-// reassuring the user (who switches when a provider's limits hit) that nothing
-// was dropped. Carries the new brain's own logo so the handoff is scannable.
-function BrainHandoffDivider({
-  brain,
-  chat,
-}: {
-  brain: string;
-  chat: ChatTurn[];
-}) {
-  const [open, setOpen] = useState(false);
-  const label = humanizeBrainId(brain);
-  return (
-    <>
-      <div
-        className="aura-milestone"
-        role="separator"
-        aria-label={`Continued on ${label}`}
-      >
-        <span className="aura-milestone-rule" aria-hidden />
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="aura-milestone-label"
-          aria-expanded={open}
-          title={`The conversation carried over to ${label}. The full thread came with it. Click for session details.`}
-          style={{
-            background: "transparent",
-            border: 0,
-            cursor: "pointer",
-            font: "inherit",
-          }}
-        >
-          <AgentIcon agentId={brainAgentId(brain)} size={12} />
-          Continued on {label}
-          <ChevronGlyph open={open} />
-        </button>
-        <span className="aura-milestone-rule" aria-hidden />
-      </div>
-      {open && <SessionBrainsDetail chat={chat} />}
-    </>
-  );
-}
-
-/** Tiny disclosure chevron for the handoff divider — currentColor so it
- *  inherits the divider's green ink; rotates when the session details open. */
-function ChevronGlyph({ open }: { open: boolean }) {
-  return (
-    <svg
-      width={10}
-      height={10}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.75}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      style={{
-        transform: open ? "rotate(180deg)" : undefined,
-        transition: "transform var(--motion-fast)",
-      }}
-      aria-hidden
-    >
-      <path d="M4 6l4 4 4-4" />
-    </svg>
-  );
-}
-
-// Time-gap divider — a wiggly rule flanking a relative-time caption, drawn
-// where the conversation jumped forward in wall-clock time (a session
-// cancelled / closed an hour back, then resumed). The wave (vs. the
-// milestone's straight rule) reads as "time passed here", not "a thing
-// finished". The rule is a tiling SVG sine wave faded at its inner edges.
-function TimeGapDivider({ seconds }: { seconds: number }) {
-  const label = humanizeGap(seconds);
-  return (
-    <div className="aura-timegap" role="separator" aria-label={label}>
-      <span className="aura-timegap-rule" aria-hidden />
-      <span className="aura-timegap-label">
-        <Clock size={11} strokeWidth={2} />
-        {label}
-      </span>
-      <span className="aura-timegap-rule" aria-hidden />
-    </div>
-  );
-}
-
-function ribbonAsSystem(
-  entry: RibbonEntry,
-): { text: string; tone: "info" | "warn" | "ok" } | null {
-  const ev = entry.event;
-  switch (ev.kind) {
-    case "task_dispatched":
-      return {
-        text: `Sent task #${ev.task_id} to ${ev.agent_id}`,
-        tone: "info",
-      };
-    case "task_completed":
-      return ev.exit_code === 0
-        ? { text: `Task #${ev.task_id} done`, tone: "ok" }
-        : {
-            text: `Task #${ev.task_id} exited with ${ev.exit_code}`,
-            tone: "warn",
-          };
-    case "task_failed":
-      return { text: `Task #${ev.task_id} failed: ${ev.error}`, tone: "warn" };
-    case "zone_collision":
-      return { text: `Stuck. Zone claimed by ${ev.claimer}`, tone: "warn" };
-    case "manual_override":
-      return { text: `Override #${ev.task_id}: ${ev.mode}`, tone: "info" };
-    case "rebase_conflict": {
-      const head = `Task #${ev.task_id} rebase onto ${ev.onto_ref} hit conflicts`;
-      const sample = ev.files.slice(0, 3).join(", ");
-      const more = ev.files.length > 3 ? ` (+${ev.files.length - 3} more)` : "";
-      return {
-        text: sample ? `${head}: ${sample}${more}` : head,
-        tone: "warn",
-      };
-    }
-    case "semantic_alert": {
-      const n = ev.deletions.length;
-      const head = `. Aura: task #${ev.task_id} flagged ${n} function deletion${n === 1 ? "" : "s"}`;
-      const sample = ev.deletions.slice(0, 3).join(", ");
-      const more =
-        ev.deletions.length > 3 ? ` (+${ev.deletions.length - 3} more)` : "";
-      const detail = sample ? ` · ${sample}${more}` : "";
-      const tail = ev.reason ? ` · ${ev.reason}` : "";
-      return {
-        text: `${head}${detail}${tail}. Review the worktree before merging.`,
-        tone: "warn",
-      };
-    }
-    case "paused":
-      return { text: "Paused", tone: "info" };
-    case "resumed":
-      return { text: "Resumed", tone: "info" };
-    case "cancelled":
-      return { text: "Cancelled", tone: "warn" };
-    case "plan_ready":
-    case "manager_speech":
-      return null;
-  }
-}
-
-// #2 — cohesive assistant-turn group. A CLI-wrapper brain persists one
-// logical reply as MANY contiguous `manager` turns; left ungrouped they read
-// as N scattered "Claude" bubbles. This wraps a contiguous run in ONE block:
-// a single agent header (AgentIcon + name) up top, then the member turns
-// stacked beneath it. Each member's own answer prose + step roll-up still
-// render through ChatBubble/TurnActivity — the group only adds the shared
-// header + a quiet left rail so the run reads as one turn, not a pile.
-//
-// Reuses the existing `.aura-msg-who` header family (avatar + name) so the
-// header matches the rest of the chat's tone; the rail is a faint hairline,
-// tokens only — never a new color. The header brain is resolved from the
-// first member that recorded one (falling back to the generic Aura mark).
-function AssistantTurnGroup({
-  headerBrain,
-  children,
-}: {
-  headerBrain: string | null;
-  children: ReactNode;
-}) {
-  const iconId = headerBrain ? brainAgentId(headerBrain) : "aura-manager";
-  const name = headerBrain ? humanizeBrainId(headerBrain) : "Aura";
-  return (
-    <div className="mt-2 mb-2">
-      <div className="aura-msg-who">
-        <span className="aura-msg-av" aria-hidden>
-          <AgentIcon agentId={iconId} size={14} />
-        </span>
-        <span className="name">{name || "Aura"}</span>
-      </div>
-      {/* Member turns stack flush under the shared header — no left rail.
-          The header alone signals the group; a vertical hairline down the
-          margin read as clutter (and as a stray "line" users asked to drop). */}
-      <div className="flex flex-col gap-1.5">{children}</div>
-    </div>
-  );
-}
-
-// Direct port of the prototype's `.user-bubble` and `.agent-text` —
-// no avatars, no right-align, no accent tint. The bubble is a simple
-// bordered box; the agent reply is plain prose.
-//
-// User turns that resolved a QuestionCard render as a paired Q+A block
-// (Cursor parity): the originating question sits above the answer in
-// the same bordered card, prefixed with a tiny "Q" label so the reader
-// sees what the answer was answering even on reload.
-
-// User-attached images on a chat turn, rendered as small image CARDS that sit
-// BELOW the text bubble (not inside it) — so the bubble stays text-only and a
-// pasted screenshot reads as a compact attachment card, no chip chrome around
-// it. Each card shows the image itself at a small size; clicking toggles a
-// larger preview under the row. The bytes are persisted base64 on the turn
-// (the same copy the brain receives), so this re-renders correctly on reload.
-// Renders nothing when the turn carried no images.
-function ChatAttachmentCards({
-  attachments,
-}: {
-  attachments?: ChatImageAttachment[] | null;
-}) {
-  const [openIdx, setOpenIdx] = useState<number | null>(null);
-  if (!attachments || attachments.length === 0) return null;
-  const open = openIdx !== null ? attachments[openIdx] : null;
-  return (
-    <div className="mt-1 flex flex-col items-end gap-1">
-      <div className="flex flex-wrap justify-end gap-1.5">
-        {attachments.map((a, i) => (
-          <AttachmentCard
-            key={i}
-            att={a}
-            active={openIdx === i}
-            onToggle={() => setOpenIdx((v) => (v === i ? null : i))}
-          />
-        ))}
-      </div>
-      {open && (
-        // AURA-1298 — same picture, now clickable to full size with copy/save.
-        <ImageLightbox
-          src={`data:${open.media_type};base64,${open.data_base64}`}
-          alt={open.name ?? "attached image"}
-          className="rounded-lg border object-contain"
-          style={{
-            borderColor: "var(--color-line-soft)",
-            maxHeight: 320,
-            maxWidth: "100%",
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-function AttachmentCard({
-  att,
-  active,
-  onToggle,
-}: {
-  att: ChatImageAttachment;
-  active: boolean;
-  onToggle: () => void;
-}) {
-  const src = `data:${att.media_type};base64,${att.data_base64}`;
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      title={active ? "Hide preview" : att.name || "image"}
-      // No padding — the card IS the image, just a thin rounded frame. lineHeight
-      // 0 kills the inline-image descender gap so the border hugs the pixels.
-      className="block rounded-lg overflow-hidden border transition-colors"
-      style={{
-        borderColor: active ? "var(--color-line)" : "var(--color-line-soft)",
-        lineHeight: 0,
-      }}
-    >
-      <img
-        src={src}
-        alt={att.name || "attached image"}
-        className="object-cover"
-        style={{ height: 72, maxWidth: 176, width: "auto", display: "block" }}
-      />
-    </button>
-  );
-}
-
-// Memoized: while a turn streams, ManagerChatView re-renders on every token
-// (streamBlocks grows), which would otherwise re-render every settled bubble in
-// the timeline. All of a settled bubble's props are stable across a stream tick
-// — `turn` is a stable session.chat object, `busy` holds one value for the
-// whole in-flight turn, and `onEditResend` / `onFork` are useCallback-stable —
-// so shallow memo lets the finished transcript sit still while only the live
-// StreamingBubble repaints.
-const ChatBubble = memo(function ChatBubble({
-  turn,
-  chatIndex,
-  busy,
-  durationSec = null,
-  inGroup = false,
-  showActions = true,
-  onEditResend,
-  onFork,
-}: {
-  turn: ChatTurn;
-  chatIndex?: number | null;
-  busy?: boolean;
-  /** Seconds the brain took to produce this turn (gap to the prompt it
-   *  answered), or null when it can't be derived. Drives the persistent
-   *  per-message action row's time-taken stat, Conductor-style. */
-  durationSec?: number | null;
-  /** This bubble is one segment of a cohesive AssistantTurnGroup (CLI-wrapper
-   *  "one reply, N bubbles"). The group header already carries the brand, so
-   *  drop the redundant per-message model chip from the action row. */
-  inGroup?: boolean;
-  /** Draw the action-row footer (copy / model / more). False for non-final
-   *  segments of a group so the whole run reads as ONE message with one
-   *  footer at the bottom, not N stamped bubbles. Defaults true (lone turns). */
-  showActions?: boolean;
-  onEditResend?: (
-    chatIndex: number,
-    newText: string,
-    restoreCode: boolean,
-  ) => Promise<void>;
-  /** Branch the conversation from this turn — clone history up to here
-   *  into a new session and open it as a tab or its own window. Wired to
-   *  the "More" menu. Disabled when `chatIndex` is null (synthetic turns). */
-  onFork?: (chatIndex: number, target: "tab" | "workspace") => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const visibleText =
-    turn.role === "user" ? stripModeDirective(turn.text) : turn.text;
-  // The turn kept its raw `[GOAL …]` steering prefix (stripped from the visible
-  // text above) — badge it so "send as goal" is legible after reload, from the
-  // persisted turn alone.
-  const sentAsGoal = turn.role === "user" && hasGoalDirective(turn.text);
-  const [editText, setEditText] = useState(visibleText);
-  const [restoreChoice, setRestoreChoice] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [moreOpen, setMoreOpen] = useState(false);
-  const moreRef = useRef<HTMLDivElement | null>(null);
-  const taRef = useRef<HTMLTextAreaElement | null>(null);
-  // Experimental "Saved ~N tokens" chip — gated on the reactive settings flag.
-  const {
-    show_token_savings: showSavings,
-    show_message_tokens: showMsgTokens,
-  } = useFlagPrefs();
-  // Read through context rather than a prop: these totals move once per turn,
-  // and threading them down would defeat the memo that keeps the whole settled
-  // transcript still while a reply streams.
-  const chatSpend = useChatSpend();
-
-  // Close the More menu on any outside click / Escape.
-  useDismiss(moreOpen, () => setMoreOpen(false), moreRef);
-
-  // The seed-objective synthetic bubble has no chat[] entry — passing
-  // chatIndex=null disables Edit. Q+A turns from the brain (answered_question)
-  // are the resolution of a QuestionCard and should not be re-edited here
-  // (re-asking would require resurrecting the card flow); they still get
-  // a Copy hover affordance.
-  const canEdit =
-    turn.role === "user" &&
-    chatIndex != null &&
-    !turn.answered_question &&
-    !busy &&
-    !!onEditResend;
-
-  // Fork is available on any turn that maps to a real chat[] entry (the
-  // synthetic seed-objective bubble passes chatIndex=null) once a handler
-  // is wired.
-  const canFork = chatIndex != null && !!onFork;
-
-  function fork(target: "tab" | "workspace") {
-    setMoreOpen(false);
-    if (chatIndex != null && onFork) onFork(chatIndex, target);
-  }
-
-  useEffect(() => {
-    if (editing && taRef.current) {
-      taRef.current.focus();
-      const len = taRef.current.value.length;
-      taRef.current.setSelectionRange(len, len);
-      // auto-grow
-      taRef.current.style.height = "auto";
-      taRef.current.style.height = `${taRef.current.scrollHeight}px`;
-    }
-  }, [editing]);
-
-  async function copyText() {
-    try {
-      await navigator.clipboard.writeText(visibleText);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 900);
-    } catch {
-      /* clipboard denied */
-    }
-  }
-
-  function startEdit() {
-    setEditText(visibleText);
-    setEditing(true);
-    setRestoreChoice(false);
-  }
-
-  function cancelEdit() {
-    setEditing(false);
-    setRestoreChoice(false);
-  }
-
-  async function commit(restoreCode: boolean) {
-    if (chatIndex == null || !onEditResend) return;
-    const next = editText.trim();
-    if (!next) return;
-    setEditing(false);
-    setRestoreChoice(false);
-    await onEditResend(chatIndex, next, restoreCode);
-  }
-
-  // Editing surface — replaces the bubble body with a textarea. Enter
-  // (without shift) opens the Restore-code-or-message confirm row; the
-  // user picks one and the backend truncates / optionally reverts files
-  // before re-running the brain.
-  if (editing) {
-    return (
-      <div className="user-bubble flex flex-col gap-2">
-        <textarea
-          ref={taRef}
-          value={editText}
-          onChange={(e) => {
-            setEditText(e.target.value);
-            const ta = e.currentTarget;
-            ta.style.height = "auto";
-            ta.style.height = `${ta.scrollHeight}px`;
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              if (editText.trim()) setRestoreChoice(true);
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              cancelEdit();
-            }
-          }}
-          className="w-full bg-transparent t-base outline-none resize-none"
-          style={{ color: "var(--color-text-1)", minHeight: "3em" }}
-        />
-        {restoreChoice ? (
-          <div
-            className="flex flex-col gap-2 px-2 py-2 rounded"
-            style={{
-              background: "var(--color-bg-2)",
-              border: "1px solid var(--color-line-soft)",
-            }}
-          >
-            <div className="t-xs t-ui" style={{ color: "var(--color-text-2)" }}>
-              Resend from this point. Also rewind project files to where they
-              were when you sent this?
-            </div>
-            <div className="flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={cancelEdit}
-                className="t-xs t-ui px-2 py-1"
-                style={{ color: "var(--color-text-3)" }}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => void commit(false)}
-                className="t-xs t-ui px-2.5 py-1 border"
-                style={{
-                  borderColor: "var(--color-line)",
-                  borderRadius: "var(--radius-sm)",
-                  color: "var(--color-text-1)",
-                  background: "transparent",
-                }}
-                title="Drop chat from this point and resend; leave files alone"
-              >
-                Just message
-              </button>
-              <button
-                type="button"
-                onClick={() => void commit(true)}
-                className="t-xs t-accent px-2.5 py-1"
-                style={{
-                  background: "var(--color-accent)",
-                  color: "var(--color-bg-0)",
-                  borderRadius: "var(--radius-sm)",
-                }}
-                title="Drop chat AND revert files to their state at this turn"
-              >
-                Restore code
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div
-            className="flex items-center justify-end gap-2 t-xs t-ui"
-            style={{ color: "var(--color-text-3)" }}
-          >
-            <span>Enter to resend · Esc to cancel</span>
-            <button
-              type="button"
-              onClick={cancelEdit}
-              className="px-1.5 py-0.5 rounded hover:bg-state-hover"
-              title="Cancel"
-            >
-              <X size={12} />
-            </button>
-            <button
-              type="button"
-              disabled={!editText.trim()}
-              onClick={() => setRestoreChoice(true)}
-              className="px-1.5 py-0.5 rounded hover:bg-state-hover disabled:opacity-40"
-              title="Resend"
-            >
-              <Check size={12} />
-            </button>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  if (turn.role === "user") {
-    // A compaction / handover summary arrives as a user-role turn by
-    // transport (the harness injects it as a user message), but it is NOT
-    // something the user said — it's carried-over context. Render it as a
-    // collapsible contextual card, the same treatment Trace's transcript
-    // gives it, instead of a wall-of-text user bubble.
-    if (isHandoverSummary(turn.text)) {
-      return <ChatHandoverCard text={turn.text} />;
-    }
-    if (turn.answered_question) {
-      // Header (question) + body (answer) card. No "Q" / "A" letter
-      // glyphs — the layout itself signals which is which: the muted
-      // top strip is the prompt, the body is what the user picked. A
-      // tiny accent bar on the left anchors the whole block as one
-      // logical unit in the transcript.
-      return (
-        <div
-          className="relative group rounded-md border overflow-hidden"
-          style={{
-            borderColor: "var(--color-line-soft)",
-            background: "var(--color-bg-1)",
-          }}
-        >
-          <div
-            className="t-xs t-ui px-3 pt-2 pb-1.5 border-b"
-            style={{
-              color: "var(--color-text-3)",
-              borderColor: "var(--color-line-soft)",
-              background: "var(--color-bg-2)",
-            }}
-          >
-            {turn.answered_question}
-          </div>
-          <div
-            className="t-base px-3 py-2"
-            style={{ color: "var(--color-text-1)" }}
-          >
-            {visibleText}
-          </div>
-          <BubbleActions onCopy={copyText} copied={copied} onEdit={null} />
-        </div>
-      );
-    }
-    return (
-      // Wrapper right-aligns the whole message (bubble + any attachment cards)
-      // and caps its width. The image now hangs BELOW the bubble as its own
-      // compact card instead of living inside the padded text bubble.
-      <div className="ml-auto w-fit max-w-[85%] flex flex-col items-end">
-        {(visibleText.trim() || sentAsGoal) && (
-          <div className="relative group user-bubble">
-            {sentAsGoal && (
-              <div
-                className="mb-1 inline-flex items-center gap-1 t-xs t-ui select-none"
-                style={{ color: "var(--color-accent)" }}
-                title="Sent as a goal. Aura is driving this through the crew work-loop and proving it"
-              >
-                <Target size={11} strokeWidth={2} style={{ flex: "none" }} />
-                <span>Sent as goal</span>
-              </div>
-            )}
-            {visibleText}
-            <BubbleActions
-              onCopy={copyText}
-              copied={copied}
-              onEdit={canEdit ? startEdit : null}
-            />
-          </div>
-        )}
-        <ChatAttachmentCards attachments={turn.attachments} />
-      </div>
-    );
-  }
-  return (
-    // Reading-column cap: the answer prose, the rolled-up step summary AND its
-    // expand chevron all live in here, so capping the container is what keeps
-    // every assistant element off the right edge — they stop "in between"
-    // instead of stretching the full pane width (mirrors the user bubble's
-    // max-w cap, just a touch wider for prose + code).
-    <div className="relative group agent-text max-w-[680px]">
-      {/* No per-message "Aura" identity row — the brand is carried by the tab,
-          not stamped before every reply. Provenance (which model ran the
-          turn) lives quietly in the action row below, beside copy + time. */}
-      {/* Settled-turn step-run — rolled up Conductor-style into one quiet
-          summary line that expands to a flat list of the same compact step
-          rows. The answer prose below stays always-visible; only the steps
-          collapse. The LIVE in-flight turn still streams through
-          StreamingBubble (with its ExploringGroup/LiveToolStatus batching) —
-          this roll-up is the FINISHED-turn treatment only. */}
-      {(() => {
-        // A settled turn's step-run splits in two: a question the brain asked
-        // you or a plan it proposed surfaces as its own PROMINENT card in the
-        // main flow (never buried), while reads / edits / commands / reasoning
-        // fold into the quiet "Worked through N steps" roll-up.
-        const all = persistedTurnBlocks(turn);
-        if (all.length === 0) return null;
-        const { interactive, rest } = partitionInteractive(all);
-        return (
-          <>
-            {rest.length > 0 && (
-              <div className="mb-1.5">
-                <TurnActivity blocks={rest} />
-              </div>
-            )}
-            {interactive.length > 0 && (
-              <div className="mb-2">
-                <InteractiveBlocks blocks={interactive} />
-              </div>
-            )}
-          </>
-        );
-      })()}
-      <AgentMessageBody source={turn.text} />
-      {/* Per-round "what changed" receipt (Antigravity-style) — a small block
-          at the foot of the turn tallying the files this round actually wrote,
-          with a Review that opens the same inline before/after diffs. Derived
-          from the turn's persisted tool calls; absent when nothing changed. */}
-      {(() => {
-        const changes = extractTurnChanges(persistedTurnBlocks(turn));
-        return changes ? <TurnChanges summary={changes} /> : null;
-      })()}
-      {showActions && (
-        <div className="aura-msg-actions">
-          {durationSec != null && (
-            // The time taken is the handle for the turn's cost: hover it for what
-            // this message billed, what the chat has billed, what every key has
-            // billed — then the model, the window and the tokens behind those
-            // figures. Same card the coding-agent transcript hangs off its own
-            // elapsed time, so "what did that reply cost me" is answered the same
-            // way wherever you are.
-            <TurnCostTip
-              cost={buildTurnCost({
-                // The exact model id when the turn recorded one; the brain that
-                // ran it either way, so history from before turns carried a model
-                // still reads "Gemini" rather than going blank.
-                model: turn.model ?? null,
-                agent: turn.brain ? humanizeBrainId(turn.brain) : null,
-                // `at` is epoch SECONDS here, and the duration is the gap back to
-                // the prompt this turn answered.
-                startMs: (turn.at - durationSec) * 1000,
-                endMs: turn.at * 1000,
-                inputTokens: turn.input_tokens,
-                outputTokens: turn.output_tokens,
-                // Stamped on the turn when it settled — the very figure that went
-                // into the spend ledger, never a re-pricing of the counts above.
-                costUsd: turn.cost_usd,
-                costEstimated: turn.cost_estimated,
-                sessionCostUsd: chatSpend.sessionUsd,
-                sessionEstimated: chatSpend.sessionEstimated,
-                sessionPartial: chatSpend.sessionPartial,
-                totalCostUsd: chatSpend.totalUsd,
-                totalEstimated: chatSpend.totalEstimated,
-                billing: billingForBrain(turn.brain),
-              })}
-            >
-              <span className="dur cursor-default">
-                {formatDuration(durationSec)}
-              </span>
-            </TurnCostTip>
-          )}
-          {/* AURA-1296 — WHEN it finished, next to how long it took. */}
-          {durationSec != null && <TurnCompletedAt atSec={turn.at} />}
-          {showSavings &&
-            typeof turn.saved_tokens === "number" &&
-            turn.saved_tokens > 0 && (
-              <span
-                className="saved"
-                title="Estimated tokens saved by using Aura's code map and Q&A instead of reading whole files. An estimate, not an exact count."
-              >
-                Saved ~{compactNumber(turn.saved_tokens)} tokens
-              </span>
-            )}
-          {showMsgTokens &&
-            (typeof turn.input_tokens === "number" ||
-              typeof turn.output_tokens === "number") && (
-              <span
-                className="msg-tokens"
-                title="Tokens this reply actually used, reported by the model. Input (context sent in) and output (text generated back)."
-              >
-                {typeof turn.input_tokens === "number" &&
-                  `${compactNumber(turn.input_tokens)} in`}
-                {typeof turn.input_tokens === "number" &&
-                  typeof turn.output_tokens === "number" &&
-                  " · "}
-                {typeof turn.output_tokens === "number" &&
-                  `${compactNumber(turn.output_tokens)} out`}
-              </span>
-            )}
-          <button
-            type="button"
-            onClick={copyText}
-            title={copied ? "Copied" : "Copy"}
-            aria-label={copied ? "Copied message" : "Copy message"}
-          >
-            {copied ? (
-              <Check size={13} aria-hidden="true" />
-            ) : (
-              <Copy size={13} aria-hidden="true" />
-            )}
-          </button>
-          {/* Model provenance lives here now — small + minimal, kept in the
-            same left cluster as the time-taken + copy so it reads as one
-            compact group, not a loud suffix on a brand line. Suppressed inside
-            a group: the group header already brands the run once, so repeating
-            "Claude" on every segment's footer is the noise the user flagged. */}
-          {turn.brain && !inGroup && (
-            <span className="model" title="Model that ran this turn">
-              <AgentIcon agentId={brainAgentId(turn.brain)} size={11} />
-              {humanizeBrainId(turn.brain)}
-            </span>
-          )}
-          <div className="aura-more" ref={moreRef}>
-            <button
-              type="button"
-              title="More"
-              aria-label="More options"
-              aria-haspopup="menu"
-              aria-expanded={moreOpen}
-              onClick={() => setMoreOpen((v) => !v)}
-            >
-              <MoreHorizontal size={14} aria-hidden="true" />
-            </button>
-            {moreOpen && (
-              <div className="aura-more-menu" role="menu">
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={!canFork}
-                  onClick={() => fork("tab")}
-                >
-                  <GitBranch size={13} />
-                  Fork to new tab
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={!canFork}
-                  onClick={() => fork("workspace")}
-                >
-                  <SquareArrowOutUpRight size={13} />
-                  Fork to new window
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-});
-
-// Agent message body — pre-processes the text so structured event lines
-// (Wave N dispatched/shipped/waiting, Hook blocked, …) render as compact
-// blocks instead of plain prose. Everything else falls through to
-// regular markdown rendering. The detection runs paragraph-by-paragraph
-// so an event line interleaved with prose still works.
-// A compaction / handover summary, drawn as a calm collapsible contextual
-// card instead of a user bubble. Collapsed by default (these run thousands
-// of characters) with a one-line gist; expanded it renders the full markdown
-// through the chat's own MarkdownBody so embedded code + entities read the
-// same as any agent turn. Mirrors Trace's `HandoverCard` treatment so the
-// "this is carried-over context, not something you typed" signal is
-// consistent across the app.
-function ChatHandoverCard({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
-  const gist = useMemo(() => summaryGist(text), [text]);
-  const lines = useMemo(() => text.split("\n").length, [text]);
-  return (
-    <div
-      className="overflow-hidden rounded-lg border"
-      style={{
-        borderColor:
-          "color-mix(in srgb, var(--color-accent) 26%, var(--color-line))",
-        background:
-          "color-mix(in srgb, var(--color-accent) 5%, var(--color-bg-1))",
-      }}
-    >
-      <button
-        type="button"
-        onClick={() => setOpen((s) => !s)}
-        aria-expanded={open}
-        className="flex w-full items-start gap-2.5 px-3 py-2.5 text-left hover:bg-state-hover"
-      >
-        <span
-          className="mt-px flex h-4 w-4 shrink-0 items-center justify-center"
-          style={{ color: "var(--color-accent)" }}
-          aria-hidden
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path
-              d="M8 2.5l5 2.5-5 2.5-5-2.5 5-2.5Z"
-              stroke="currentColor"
-              strokeWidth="1.2"
-              strokeLinejoin="round"
-            />
-            <path
-              d="M3 8l5 2.5L13 8M3 11l5 2.5L13 11"
-              stroke="currentColor"
-              strokeWidth="1.2"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="flex items-baseline gap-1.5">
-            <span
-              className="t-sm font-semibold"
-              style={{ color: "var(--color-text-1)" }}
-            >
-              Context carried over
-            </span>
-            <span className="t-xs" style={{ color: "var(--color-text-4)" }}>
-              continued from a previous session
-            </span>
-          </span>
-          {!open ? (
-            <span
-              className="mt-0.5 block truncate t-sm"
-              style={{ color: "var(--color-text-3)" }}
-            >
-              {gist}
-            </span>
-          ) : null}
-        </span>
-        <span className="flex shrink-0 items-center gap-2">
-          <span
-            className="font-mono t-xs"
-            style={{ color: "var(--color-text-4)" }}
-          >
-            {lines} lines
-          </span>
-          <ChevronDown
-            size={13}
-            style={{
-              color: "var(--color-text-4)",
-              transform: open ? "rotate(180deg)" : "none",
-              transition: "transform 120ms",
-            }}
-          />
-        </span>
-      </button>
-      {open ? (
-        <div
-          className="border-t"
-          style={{
-            borderColor: "var(--color-line-soft)",
-            background: "var(--color-bg-0)",
-          }}
-        >
-          <div className="max-h-[min(520px,calc(100dvh-100px))] overflow-auto px-3.5 py-3">
-            <MarkdownBody source={text} />
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function AgentMessageBody({ source }: { source: string }) {
-  const segments = useMemo(
-    // Wave events are intentionally filtered — they aggregate into the
-    // session-level WaveTimeline so each wave renders as ONE entity that
-    // progresses through states, not N separate blocks per status change.
-    () => splitAgentSegments(source).filter((s) => s.kind !== "wave"),
-    [source],
-  );
-  if (segments.length === 0) return null;
-  if (segments.length === 1 && segments[0].kind === "prose") {
-    return <MarkdownBody source={segments[0].text} />;
-  }
-  return (
-    <div className="flex flex-col gap-1.5">
-      {segments.map((seg, i) =>
-        seg.kind === "hook" ? (
-          <HookEventBlock key={i} text={seg.text} />
-        ) : seg.kind === "prover" ? (
-          <ProverBlock key={i} report={seg.report} />
-        ) : seg.kind === "prose" ? (
-          <MarkdownBody key={i} source={seg.text} />
-        ) : null,
-      )}
-    </div>
-  );
-}
-
-type WaveStatus =
-  | "dispatched"
-  | "shipped"
-  | "running"
-  | "waiting"
-  | "blocked"
-  | "firing"
-  | "info";
-
-type WaveEvent = {
-  wave: number;
-  status: WaveStatus;
-  detail: string;
-  /** Agent attribution parsed from `Wave N (<agent>)`. */
-  agent?: string;
-  /** Optional commit short-hash extracted from `(commit 775ee7b)`. */
-  commit?: string;
-  /** Optional next wave reference parsed from "Firing Wave N (...)". */
-  next?: { wave: number; note?: string };
-};
-
-type AgentSegment =
-  | { kind: "prose"; text: string }
-  | { kind: "wave"; event: WaveEvent }
-  | { kind: "hook"; text: string }
-  | { kind: "prover"; report: ProverReport };
-
-// Split an agent message into structured segments. Each non-empty
-// paragraph is tested against the wave-event pattern; matching ones
-// become structured events. Prose paragraphs are coalesced so the
-// renderer doesn't insert extra gaps between successive non-event
-// sentences.
-function splitAgentSegments(source: string): AgentSegment[] {
-  // Aura Prover spans many lines (header + bullets + report). Extract
-  // it first as a whole multi-line block so the per-paragraph loop
-  // doesn't shred it into prose.
-  const { stripped, prover } = extractProverBlock(source);
-  const paragraphs = stripped.split(/\n\s*\n/);
-  const out: AgentSegment[] = [];
-  if (prover) out.push({ kind: "prover", report: prover });
-  for (const para of paragraphs) {
-    const trimmed = para.trim();
-    if (!trimmed) continue;
-    const wave = parseWaveEvent(trimmed);
-    if (wave) {
-      out.push({ kind: "wave", event: wave });
-      continue;
-    }
-    if (/^hook\s+blocked\b/i.test(trimmed)) {
-      out.push({ kind: "hook", text: trimmed });
-      continue;
-    }
-    const last = out[out.length - 1];
-    if (last && last.kind === "prose") {
-      last.text += `\n\n${trimmed}`;
-    } else {
-      out.push({ kind: "prose", text: trimmed });
-    }
-  }
-  return out;
-}
-
-// ─── Aura Prover formatting ───────────────────────────────────────────
-// `aura prove` dumps a colored terminal report — header, analyzing
-// bullets, "SEMANTIC PROOF REPORT" section, per-requirement lines.
-// When it lands in agent prose it's a wall of mojibake-looking text.
-// Parse it into a structured report so we can render a proper card.
-
-type ProverCheckStatus = "passed" | "stub" | "missing" | "unwired";
-type ProverCheck = {
-  status: ProverCheckStatus;
-  node_type: string;
-  node_name: string;
-  /** Optional wiring detail line, e.g. "Properly wired to bar". */
-  wiring?: { status: "passed" | "missing"; target: string };
-};
-type ProverReport = {
-  goal: string;
-  checks: ProverCheck[];
-  passed: number;
-  total: number;
-};
-
-/** Pull a contiguous Aura Prover block out of `source`. Returns the
- *  stripped source (with the block removed) plus the parsed report. */
-function extractProverBlock(source: string): {
-  stripped: string;
-  prover: ProverReport | null;
-} {
-  const headerRe = /(?:🧪|🪄)\s*Aura Prover:\s*Verifying Goal Achievement:\s*(.+)/;
-  const hm = source.match(headerRe);
-  if (!hm) return { stripped: source, prover: null };
-  const startIdx = source.indexOf(hm[0]);
-  // Block ends at next blank line *after* we've seen the report
-  // section, or at EOF. We greedily consume lines until a blank line
-  // following a "SEMANTIC PROOF REPORT" marker is reached.
-  const tail = source.slice(startIdx);
-  const lines = tail.split("\n");
-  let endLine = lines.length;
-  let seenReport = false;
-  for (let i = 0; i < lines.length; i++) {
-    if (/SEMANTIC PROOF REPORT/.test(lines[i])) {
-      seenReport = true;
-      continue;
-    }
-    if (seenReport && lines[i].trim() === "") {
-      endLine = i;
-      break;
-    }
-  }
-  const block = lines.slice(0, endLine).join("\n");
-  const stripped = source.slice(0, startIdx) + source.slice(startIdx + block.length);
-  const prover = parseProverBlock(block, hm[1].trim());
-  return { stripped, prover };
-}
-
-function parseProverBlock(block: string, goal: string): ProverReport {
-  const checks: ProverCheck[] = [];
-  const lines = block.split("\n");
-  let last: ProverCheck | null = null;
-  for (const raw of lines) {
-    const line = raw.replace(/\s+$/, "");
-    // Top-level requirement line: "✓ Function 'foo' exists and is substantive."
-    const ok = line.match(/^[\s]*✓\s+(\w+)\s+'([^']+)'\s+exists/);
-    if (ok) {
-      last = { status: "passed", node_type: ok[1], node_name: ok[2] };
-      checks.push(last);
-      continue;
-    }
-    const stub = line.match(
-      /^[\s]*(?:⚠️|⚠)\s+(\w+)\s+'([^']+)'\s+exists but is a STUB/i,
-    );
-    if (stub) {
-      last = { status: "stub", node_type: stub[1], node_name: stub[2] };
-      checks.push(last);
-      continue;
-    }
-    const missing = line.match(
-      /^[\s]*✗\s+(\w+)\s+'([^']+)'\s+(MISSING|not found)/i,
-    );
-    if (missing) {
-      last = {
-        status: "missing",
-        node_type: missing[1],
-        node_name: missing[2],
-      };
-      checks.push(last);
-      continue;
-    }
-    // Wiring sub-line: "  ↳ Properly wired to 'bar'" / "  ↳ ✗ NOT wired to 'bar'"
-    const wiredOk = line.match(/↳\s+Properly wired to\s+'?([^'\s]+)'?/);
-    if (wiredOk && last) {
-      last.wiring = { status: "passed", target: wiredOk[1] };
-      continue;
-    }
-    const wiredBad = line.match(/↳\s+✗?\s*NOT wired to\s+'?([^'\s]+)'?/);
-    if (wiredBad && last) {
-      last.wiring = { status: "missing", target: wiredBad[1] };
-      if (last.status === "passed") last.status = "unwired";
-      continue;
-    }
-  }
-  const passed = checks.filter(
-    (c) => c.status === "passed" && c.wiring?.status !== "missing",
-  ).length;
-  return { goal, checks, passed, total: checks.length };
-}
-
-function ProverBlock({ report }: { report: ProverReport }) {
-  const pct = percent(report.passed, report.total);
-  return (
-    <div
-      className="aura-block flex flex-col"
-      style={{ background: "var(--color-bg-1)" }}
-    >
-      <div
-        className="flex items-center justify-between gap-2 px-2.5 py-1.5"
-        style={{ borderBottom: "1px solid var(--color-line-soft)" }}
-      >
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="aura-block-label">AURA PROVER</span>
-          <span
-            className="truncate text-sm"
-            style={{ color: "var(--color-text-2)" }}
-            title={report.goal}
-          >
-            {report.goal}
-          </span>
-        </div>
-        <span
-          className="shrink-0"
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: "10.5px",
-            // Green off the counts, never off the percent. A rounded 100
-            // on 199 of 200 painted this line green and called it all passed.
-            color:
-              report.total > 0 && report.passed === report.total
-                ? "var(--color-accent-green)"
-                : "var(--color-text-3)",
-            letterSpacing: "0.04em",
-          }}
-        >
-          {report.passed}/{report.total} PASSED · {pct}%
-        </span>
-      </div>
-      <div className="flex flex-col">
-        {report.checks.map((c, i) => (
-          <ProverCheckRow key={i} check={c} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ProverCheckRow({ check }: { check: ProverCheck }) {
-  const palette: Record<ProverCheckStatus, { color: string; label: string; mark: string }> = {
-    passed: { color: "var(--color-accent-green)", label: "PASS", mark: "✓" },
-    stub: { color: "var(--color-amber)", label: "STUB", mark: "!" },
-    missing: { color: "var(--color-red)", label: "MISSING", mark: "✗" },
-    unwired: { color: "var(--color-red)", label: "UNWIRED", mark: "✗" },
-  };
-  const p = palette[check.status];
-  return (
-    <div
-      className="flex items-center gap-2 px-2.5 py-1.5"
-      style={{ borderTop: "1px solid var(--color-line-soft)" }}
-    >
-      <span
-        className="shrink-0 inline-flex items-center justify-center"
-        style={{
-          width: 14,
-          height: 14,
-          borderRadius: 3,
-          background: accentTint(p.color, 18),
-          color: p.color,
-          fontFamily: "var(--font-mono)",
-          fontSize: "10.5px",
-          fontWeight: 600,
-        }}
-      >
-        {p.mark}
-      </span>
-      <span
-        className="shrink-0"
-        style={{
-          fontFamily: "var(--font-mono)",
-          fontSize: "10.5px",
-          letterSpacing: "0.04em",
-          color: p.color,
-          minWidth: 64,
-        }}
-      >
-        {p.label}
-      </span>
-      <span
-        className="shrink-0 px-1 py-[1px]"
-        style={{
-          fontFamily: "var(--font-mono)",
-          fontSize: "10px",
-          color: "var(--color-text-3)",
-          border: "1px solid var(--color-line-soft)",
-          borderRadius: 3,
-        }}
-      >
-        {check.node_type}
-      </span>
-      <span
-        className="min-w-0 truncate"
-        style={{
-          fontFamily: "var(--font-mono)",
-          fontSize: "12px",
-          color: "var(--color-text-1)",
-        }}
-      >
-        {check.node_name}
-      </span>
-      {check.wiring && (
-        <span
-          className="ml-auto shrink-0 text-xs"
-          style={{
-            color:
-              check.wiring.status === "passed"
-                ? "var(--color-text-3)"
-                : "var(--color-red)",
-            fontFamily: "var(--font-mono)",
-          }}
-        >
-          {check.wiring.status === "passed" ? "→ " : "⚠ NOT → "}
-          {check.wiring.target}
-        </span>
-      )}
-    </div>
-  );
-}
-
-// Only treat parens-after-Wave-N as an agent attribution when it looks
-// like one — short, alphabetic, possibly hyphenated (e.g. "gemini",
-// "claude", "cursor-agent"). Pure hex commit hashes and free-form
-// descriptors get rejected so they don't leak into the agent column.
-function looksLikeAgentToken(s: string): boolean {
-  const t = s.trim();
-  if (!t || t.length > 20) return false;
-  if (/^[a-f0-9]+$/i.test(t)) return false; // commit hash
-  return /^[a-zA-Z][a-zA-Z0-9-]*$/.test(t);
-}
-
-function parseWaveEvent(text: string): WaveEvent | null {
-  // Match "Wave N" or "Wave N (gemini)" prefix. Trailing remainder is
-  // free-form prose we further mine for status verbs + commits.
-  const m = text.match(/^Wave\s+(\d+)\b\s*(?:\(([^)]*)\)\s*)?(.*)$/is);
-  if (!m) return null;
-  const wave = Number(m[1]);
-  const agentCandidate = m[2]?.trim();
-  const agent =
-    agentCandidate && looksLikeAgentToken(agentCandidate)
-      ? agentCandidate
-      : undefined;
-  // If the parens weren't an agent attribution, keep them in the prose
-  // (e.g. "Wave 4 (FTS) shipped..." should still read normally).
-  const rest = (
-    agent ? m[3] : agentCandidate ? `(${agentCandidate}) ${m[3]}` : m[3]
-  ).trim();
-  const lower = rest.toLowerCase();
-  let status: WaveStatus = "info";
-  if (/\bship(ped|ping)\b/.test(lower)) status = "shipped";
-  else if (/\bdispatch(ed|ing)\b/.test(lower)) status = "dispatched";
-  else if (/\brunning\b/.test(lower)) status = "running";
-  else if (/\bwait(ing)?\b/.test(lower)) status = "waiting";
-  else if (/\bblock(ed)?\b/.test(lower)) status = "blocked";
-  else if (/\bfir(ed|ing)\b/.test(lower)) status = "firing";
-  // Commit hash forms accepted: "commit abc1234", `abc1234`, or a bare
-  // 7-12 hex in parens right after a status verb (e.g. "shipped
-  // (c0ceddf)"). The bare form lets us pick up commits the brain emits
-  // without the "commit" keyword.
-  const commit =
-    rest.match(/\bcommit\s+`?([a-f0-9]{7,40})`?/i)?.[1] ??
-    rest.match(/\b(?:shipped|landed)\s*\(`?([a-f0-9]{7,12})`?\)/i)?.[1] ??
-    rest.match(/`([a-f0-9]{7,40})`/)?.[1];
-  const nextMatch = rest.match(/Firing\s+Wave\s+(\d+)(?:\s*\(([^)]+)\))?/i);
-  const next = nextMatch
-    ? { wave: Number(nextMatch[1]), note: nextMatch[2]?.trim() }
-    : undefined;
-  return { wave, status, detail: rest, agent, commit, next };
-}
-
-// ─── Live Dispatch Strip ──────────────────────────────────────────────
-// Derives currently-running task dispatches from the ribbon. A task is
-// "in flight" once `task_dispatched` fires and stays in flight until
-// `task_completed` or `task_failed` arrives for the same id. Renders a
-// row of agent chips with a soft pulse; hides itself when nothing is
-// active so it doesn't squat at the top of the chat.
-
-type LiveDispatch = {
-  task_id: number;
-  agent_id: string;
-  channel: string;
-  at: number;
-};
-
-function collectLiveDispatches(ribbon: RibbonEntry[]): LiveDispatch[] {
-  const active = new Map<number, LiveDispatch>();
-  for (const entry of ribbon) {
-    const ev = entry.event;
-    if (ev.kind === "task_dispatched") {
-      active.set(ev.task_id, {
-        task_id: ev.task_id,
-        agent_id: ev.agent_id,
-        channel: ev.channel,
-        at: entry.at,
-      });
-    } else if (ev.kind === "task_completed" || ev.kind === "task_failed") {
-      active.delete(ev.task_id);
-    }
-  }
-  return Array.from(active.values()).sort((a, b) => a.at - b.at);
-}
-
-function LiveDispatchStrip({ ribbon }: { ribbon: RibbonEntry[] }) {
-  const dispatches = useMemo(() => collectLiveDispatches(ribbon), [ribbon]);
-  if (dispatches.length === 0) return null;
-  return (
-    <div
-      className="aura-block flex flex-wrap items-center gap-1.5 px-2.5 py-1.5"
-      style={{ background: "var(--color-bg-1)", margin: "8px 0" }}
-    >
-      <span className="aura-block-label shrink-0">LIVE</span>
-      <span
-        className="shrink-0"
-        style={{
-          fontFamily: "var(--font-mono)",
-          fontSize: "10.5px",
-          color: "var(--color-text-3)",
-          letterSpacing: "0.04em",
-        }}
-      >
-        {dispatches.length} DISPATCHED
-      </span>
-      <span className="flex flex-wrap items-center gap-1 min-w-0">
-        {dispatches.map((d) => (
-          <DispatchChip key={d.task_id} dispatch={d} />
-        ))}
-      </span>
-    </div>
-  );
-}
-
-function DispatchChip({ dispatch }: { dispatch: LiveDispatch }) {
-  const identity = getAgentIdentity(dispatch.agent_id);
-  return (
-    <span
-      className="flex items-center gap-1 px-1.5 py-0.5"
-      style={{
-        background: accentTint(identity.accent, 14),
-        border: `1px solid ${accentTint(identity.accent, 38)}`,
-        borderRadius: 3,
-        fontFamily: "var(--font-mono)",
-        fontSize: "10.5px",
-        letterSpacing: "0.04em",
-        color: "var(--color-text-1)",
-      }}
-      title={`${identity.label} · task #${dispatch.task_id} · ${dispatch.channel}`}
-    >
-      <AgentIcon agentId={identity.id} size={11} />
-      {identity.tag}
-      <span style={{ color: "var(--color-text-3)" }}>#{dispatch.task_id}</span>
-    </span>
-  );
-}
-
-// ─── Wave Timeline ────────────────────────────────────────────────────
-// All wave events emitted across the session aggregate into ONE
-// timeline block. Each wave is a single row that PROGRESSES through
-// states (dispatched → running → shipped) — not a stack of duplicate
-// blocks. Rendered once at the tail of the chat so it always reflects
-// current state. Per-turn wave events are filtered out (see
-// AgentMessageBody) to prevent duplication.
-
-type AggregatedWave = {
-  wave: number;
-  /** Latest status — drives the row color + verb. */
-  status: WaveStatus;
-  /** Chronological history of statuses this wave has been through. */
-  history: WaveStatus[];
-  /** Latest agent attribution (most recent event wins). */
-  agent?: string;
-  /** Commit hash if/when this wave shipped. */
-  commit?: string;
-  /** Latest free-form detail string for tooltip/secondary line. */
-  detail: string;
-  /** Timestamp of latest event. */
-  at: number;
-};
-
-/** Walk chronological chat turns, parse wave events out of agent prose,
- *  and aggregate them into one row per wave number. A wave's `status`
- *  reflects the LATEST event seen; `history` keeps the transition trail
- *  for the timeline dots. */
-function collectWaveTimeline(chat: ChatTurn[]): AggregatedWave[] {
-  const byWave = new Map<number, AggregatedWave>();
-  for (const turn of chat) {
-    if (turn.role !== "manager") continue;
-    const paragraphs = (turn.text ?? "").split(/\n\s*\n/);
-    for (const para of paragraphs) {
-      const evt = parseWaveEvent(para.trim());
-      if (!evt) continue;
-      const existing = byWave.get(evt.wave);
-      if (!existing) {
-        byWave.set(evt.wave, {
-          wave: evt.wave,
-          status: evt.status,
-          history: [evt.status],
-          agent: evt.agent,
-          commit: evt.commit,
-          detail: evt.detail,
-          at: turn.at,
-        });
-      } else {
-        existing.status = evt.status;
-        if (existing.history[existing.history.length - 1] !== evt.status) {
-          existing.history.push(evt.status);
-        }
-        if (evt.agent) existing.agent = evt.agent;
-        if (evt.commit) existing.commit = evt.commit;
-        existing.detail = evt.detail;
-        existing.at = turn.at;
-      }
-    }
-  }
-  return Array.from(byWave.values()).sort((a, b) => a.wave - b.wave);
-}
-
-function WaveTimeline({ chat }: { chat: ChatTurn[] }) {
-  const waves = useMemo(() => collectWaveTimeline(chat), [chat]);
-  if (waves.length === 0) return null;
-  const shipped = waves.filter((w) => w.status === "shipped").length;
-  return (
-    <div
-      className="aura-block flex flex-col"
-      style={{ background: "var(--color-bg-1)", margin: "8px 0" }}
-    >
-      <div
-        className="flex items-center justify-between gap-2 px-2.5 py-1.5"
-        style={{ borderBottom: "1px solid var(--color-line-soft)" }}
-      >
-        <span className="aura-block-label">WAVE TIMELINE</span>
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: "10.5px",
-            color: "var(--color-text-3)",
-            letterSpacing: "0.04em",
-          }}
-        >
-          {shipped}/{waves.length} SHIPPED
-        </span>
-      </div>
-      <div className="flex flex-col">
-        {waves.map((w) => (
-          <WaveTimelineRow key={w.wave} wave={w} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// One compact status indicator per wave — no multi-stop pipeline. The
-// row reads at a glance: ring/spinner/check tells you state, the row
-// content tells you what landed (commit + agent + detail).
-
-function WaveTimelineRow({ wave }: { wave: AggregatedWave }) {
-  // Fall back to the lead-builder identity when the brain didn't tag
-  // the wave with an agent — every wave has a runner, the prose just
-  // doesn't always say which one. Better to show the lead default than
-  // leave the column blank and break row alignment.
-  const identity = getAgentIdentity(wave.agent ?? "claude");
-  return (
-    <div
-      data-wave-row={wave.wave}
-      className="flex items-center gap-2 px-2.5 py-1.5"
-      style={{ borderTop: "1px solid var(--color-line-soft)" }}
-    >
-      <WaveStatusPip status={wave.status} />
-      <span
-        className="shrink-0"
-        style={{
-          fontFamily: "var(--font-mono)",
-          fontSize: "11px",
-          fontWeight: 600,
-          color: "var(--color-text-1)",
-          minWidth: 22,
-        }}
-      >
-        W{wave.wave}
-      </span>
-      <span
-        className="flex items-center gap-1 shrink-0"
-        title={identity.blurb}
-      >
-        <AgentIcon agentId={identity.id} size={11} />
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: "10px",
-            letterSpacing: "0.04em",
-            color: "var(--color-text-2)",
-          }}
-        >
-          {identity.tag}
-        </span>
-      </span>
-      {wave.commit && (
-        <span
-          className="shrink-0"
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: "10.5px",
-            color: "var(--color-accent-green)",
-          }}
-          title={`Commit ${wave.commit}`}
-        >
-          {wave.commit.slice(0, 7)}
-        </span>
-      )}
-      <span
-        className="text-sm leading-snug min-w-0 truncate"
-        style={{ color: "var(--color-text-3)" }}
-        title={wave.detail}
-      >
-        {wave.detail}
-      </span>
-    </div>
-  );
-}
-
-function WaveStatusPip({ status }: { status: WaveStatus }) {
-  const label = status.charAt(0).toUpperCase() + status.slice(1);
-  return (
-    <span
-      className="chat-task-mark"
-      title={label}
-      aria-label={label}
-      style={{ color: status === "blocked" ? "var(--color-red)" : undefined }}
-    >
-      {status === "shipped" ? (
-        <PipTick color="currentColor" />
-      ) : status === "blocked" ? (
-        <PipBang color="currentColor" />
-      ) : ["running", "firing", "dispatched"].includes(status) ? (
-        "−"
-      ) : (
-        ""
-      )}
-    </span>
-  );
-}
-
-function PipTick({ color }: { color: string }) {
-  return (
-    <svg width="9" height="9" viewBox="0 0 12 12" aria-hidden>
-      <path
-        d="M2.5 6.2L5 8.5L9.5 3.5"
-        fill="none"
-        stroke={color}
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function PipBang({ color }: { color: string }) {
-  return (
-    <svg width="9" height="9" viewBox="0 0 12 12" aria-hidden>
-      <path
-        d="M6 3v4.5"
-        stroke={color}
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-      <circle cx="6" cy="9.4" r="0.9" fill={color} />
-    </svg>
-  );
-}
-
-function HookEventBlock({ text }: { text: string }) {
-  return (
-    <div
-      className="aura-block flex items-start gap-2 px-2.5 py-1.5"
-      style={{ background: "var(--color-bg-1)" }}
-    >
-      <span
-        className="aura-block-label shrink-0 mt-[2px]"
-        style={{ color: "var(--color-red)" }}
-      >
-        HOOK
-      </span>
-      <span className="text-sm leading-snug min-w-0" style={{ color: "var(--color-text-2)" }}>
-        {text.replace(/^hook\s+/i, "")}
-      </span>
-    </div>
-  );
-}
-
-/** Hover-only action row pinned to the bubble's bottom-right. Always
- *  shows Copy; Edit appears only when the parent passes a handler (i.e.
- *  the turn is an editable user message). */
-function BubbleActions({
-  onCopy,
-  copied,
-  onEdit,
-}: {
-  onCopy: () => void;
-  copied: boolean;
-  onEdit: (() => void) | null;
-}) {
-  return (
-    <div
-      className="absolute bottom-1 right-1 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-      style={{
-        background: "color-mix(in srgb, var(--color-bg-1) 85%, transparent)",
-        borderRadius: "var(--radius-sm)",
-      }}
-    >
-      <button
-        type="button"
-        onClick={onCopy}
-        title={copied ? "Copied" : "Copy"}
-        className="px-1.5 py-1 rounded hover:bg-state-hover text-text-3 hover:text-text-1"
-      >
-        {copied ? <Check size={12} /> : <Copy size={12} />}
-      </button>
-      {onEdit && (
-        <button
-          type="button"
-          onClick={onEdit}
-          title="Edit & resend"
-          className="px-1.5 py-1 rounded hover:bg-state-hover text-text-3 hover:text-text-1"
-        >
-          <Pencil size={12} />
-        </button>
-      )}
-    </div>
   );
 }

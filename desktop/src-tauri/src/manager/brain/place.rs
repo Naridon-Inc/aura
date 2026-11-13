@@ -182,6 +182,21 @@ impl Place {
         })
     }
 
+    /// A machine, at its home folder rather than at the project its book
+    /// entry names.
+    ///
+    /// For a caller whose every path is its own: a chat keeps its files under
+    /// `~/.aura/chat` and names its workspace's folder outright. Rooted at the
+    /// book's project instead, every one of its commands would fail on the
+    /// `cd` when the machine no longer has that project — a machine replaced
+    /// by a new one behind the same address never had it.
+    pub fn at_machine_home(machine_id: &str) -> Result<Self, String> {
+        Ok(match Self::at_machine(machine_id)? {
+            Place::Box { machine, here, .. } => Place::Box { machine, root: "~".to_string(), here },
+            other => other,
+        })
+    }
+
     /// A machine described but not yet written down.
     ///
     /// The third and last way to name a place, and the narrowest: the connect
@@ -197,6 +212,7 @@ impl Place {
     pub fn at_address(a: &Address) -> Result<Self, String> {
         let machine = Machine {
             id: machine_id(&a.user, &a.host, None),
+            aliases: Vec::new(),
             // Its address, until the wizard is told what to call it.
             name: a.host.trim().to_string(),
             host: a.host.trim().to_string(),
@@ -816,6 +832,26 @@ impl Place {
         }
     }
 
+    /// The same stream as [`Place::stream`], handed back unspawned.
+    ///
+    /// For a caller that must be able to make the connection again: an agent
+    /// protocol client reattaching a chat that outlived a dropped link asks for
+    /// a fresh one at a new offset each time. It does not wake a sleeping box —
+    /// the caller has already reached it to start the chat, and a reattach that
+    /// silently booted a machine would be a bill nobody asked for.
+    pub(crate) fn stream_command(&self, command: &str) -> tokio::process::Command {
+        match self {
+            Place::Here { root } => {
+                let mut cmd = tokio::process::Command::new("sh");
+                cmd.args(["-c", command]).current_dir(crate::spawn_dir::safe_spawn_dir(root));
+                cmd
+            }
+            Place::Box { machine, root, .. } => {
+                crate::cloudbox::stream_command(machine, &remote_stream(root, command))
+            }
+        }
+    }
+
     /// Put a file on this place, with the bytes travelling where a command line
     /// cannot be read.
     ///
@@ -1151,11 +1187,21 @@ fn timed_out(what: &str, wait: Duration) -> String {
 /// running forever on a machine nobody is looking at.
 fn remote_sh(root: &str, command: &str, wait: Duration) -> String {
     format!(
-        "cd {} && timeout {} sh -c {}",
-        quote(root),
+        "{} && timeout {} sh -c {}",
+        cd_line(root),
         wait.as_secs().max(1),
         quote(command)
     )
+}
+
+/// The `cd` into a box's root. A machine with no project recorded roots at
+/// `~`, and only the box can expand that: quoted whole it is a directory
+/// literally called `~`.
+fn cd_line(root: &str) -> String {
+    match root.trim() {
+        "" | "~" => "cd \"$HOME\"".to_string(),
+        r => format!("cd {}", quote(r)),
+    }
 }
 
 /// The same `cd` and the same whole-quoted hand-off as [`remote_sh`], without
@@ -1167,13 +1213,7 @@ fn remote_sh(root: &str, command: &str, wait: Duration) -> String {
 /// fixed length, so a deadline here would be a turn cut off mid-answer on a
 /// slow model and reported as the machine going quiet.
 fn remote_stream(root: &str, command: &str) -> String {
-    // A machine with no project recorded roots at `~`, and only the box can
-    // expand that: quoted whole it is a directory literally called `~`.
-    let cd = match root.trim() {
-        "" | "~" => "cd \"$HOME\"".to_string(),
-        r => format!("cd {}", quote(r)),
-    };
-    format!("{cd} && sh -c {}", quote(command))
+    format!("{} && sh -c {}", cd_line(root), quote(command))
 }
 
 /// A path the way this laptop's tools have always resolved one.
@@ -1537,6 +1577,7 @@ mod tests {
     fn fake_machine() -> Machine {
         Machine {
             id: "u@h:/r".into(),
+            aliases: Vec::new(),
             name: "aura-runner".into(),
             host: "example.invalid".into(),
             user: "ubuntu".into(),

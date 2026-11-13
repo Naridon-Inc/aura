@@ -35,7 +35,7 @@
 // the global backstop for a fifth surface nobody has thought of yet.
 
 import { expect, test, describe } from "bun:test";
-import { stripComments } from "./support/code";
+import { stripComments, strippedSrcTree } from "./support/code";
 
 const SRC = `${import.meta.dir}/../src`;
 
@@ -47,8 +47,7 @@ const literals = (s: string) =>
   s.matchAll(/"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`/g);
 
 async function* userFacingText(): AsyncGenerator<[string, string]> {
-  for await (const rel of new Bun.Glob("**/*.{ts,tsx}").scan({ cwd: SRC })) {
-    const src = stripComments(await Bun.file(`${SRC}/${rel}`).text());
+  for (const [rel, src] of await strippedSrcTree()) {
     for (const lit of literals(src)) {
       // `${…}` prints a value, not a word — strip before reading the prose, or
       // a branch name inside an interpolation reads as vocabulary.

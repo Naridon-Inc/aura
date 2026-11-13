@@ -1,0 +1,82 @@
+/* The team's week, in the settings rhythm it sits among: each day is a
+   settings section, each person or agent under it a row with the reasons
+   they saved. In a workpane it gets the page gutter the settings panel
+   would otherwise give it. */
+
+.ui-standup-pane {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px 32px 48px;
+  background: var(--ui-bg);
+}
+.ui-standup-pane > * {
+  max-width: 720px;
+  margin-inline: auto;
+}
+
+.ui-standup > .ui-settings-row {
+  margin-bottom: 24px;
+}
+.ui-standup-note {
+  margin: -8px 0 24px;
+}
+
+.ui-standup-author {
+  padding-block: 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-standup-author:first-child {
+  padding-top: 0;
+}
+.ui-standup-author-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 450;
+}
+.ui-standup-author-head > small {
+  color: var(--ui-faint);
+  font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-standup-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-standup-list > li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 20px;
+}
+.ui-standup-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-standup-done {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--ui-green);
+}
+.ui-standup-handle {
+  flex-shrink: 0;
+  color: var(--ui-faint);
+  font: 12px/20px var(--font-mono);
+}
+.ui-standup-list > li.ui-standup-more {
+  color: var(--ui-faint);
+  font-size: 12px;
+}

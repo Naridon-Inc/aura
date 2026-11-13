@@ -1,9 +1,9 @@
-// Reaching a model provider is a key you paste. Two shapes, because the two
+// Reaching a model provider is a key you paste. Two rows, because the two
 // halves of the pane ask two different questions:
 //
-//   ProviderKeyEntry    — the store: "I don't have this yet." One field.
-//   ProviderKeyControls — the list:  "I have this." Make it the active one,
-//                         replace it, or take it away.
+//   ProviderStoreRow — the store: "I don't have this yet." Add a key.
+//   ProviderKeyRow   — the list:  "I have this." Make it the active one,
+//                      replace it, or take it away.
 //
 // The key itself is never shown back. It is written to
 // `~/.aura/credentials.json` (mode 0600) and read back only as its last four
@@ -16,28 +16,34 @@ import { useState } from "react";
 import { api } from "../../../lib/api";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
-import type { ServiceId } from "./catalog";
+import { SettingsActions } from "../../ui/settings-blocks";
+import { SettingsRow } from "../../ui/settings-row";
+import { ServiceName } from "./ServiceGlyph";
+import { CardError } from "./trackerParts";
+import type { CatalogEntry, ConnectedService, ServiceId } from "./catalog";
 
-/** Paste a key for a provider that has none. Enter saves, Escape gives up. */
-export function ProviderKeyEntry({
+/** Paste a key. Enter saves, Escape gives up. Drawn in a row's control slot;
+ *  a failure goes back to the row, which prints it under its own title. */
+function KeyEntry({
   provider,
   label,
   onSaved,
   onCancel,
+  onError,
 }: {
   provider: ServiceId;
   label: string;
   onSaved: () => void;
   onCancel: () => void;
+  onError: (msg: string | null) => void;
 }) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const save = async () => {
     if (!value.trim()) return;
     setBusy(true);
-    setError(null);
+    onError(null);
     try {
       await api.settingsSetProviderKey(provider, value);
       setValue("");
@@ -46,53 +52,91 @@ export function ProviderKeyEntry({
       // A rejected key used to vanish silently and leave the row looking
       // unchanged, which reads as "nothing happened" rather than "that
       // didn't work".
-      setError(String(e));
+      onError(String(e));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex items-center gap-1.5">
-        <Input
-          type="password"
-          autoFocus
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder={`Paste your ${label} key…`}
-          aria-label={`${label} API key`}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && value.trim()) void save();
-            if (e.key === "Escape") onCancel();
-          }}
-          className="flex-1 font-mono"
-        />
-        <Button size="sm" onClick={() => void save()} disabled={!value.trim() || busy}>
-          Save
-        </Button>
-        <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
-          Cancel
-        </Button>
-      </div>
-      {error && <p className="text-xs text-red">{error}</p>}
-    </div>
+    <SettingsActions>
+      <Input
+        type="password"
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder={`Paste your ${label} key…`}
+        aria-label={`${label} API key`}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && value.trim()) void save();
+          if (e.key === "Escape") {
+            // Giving up on the key ends here; Settings stays open.
+            e.preventDefault();
+            onCancel();
+          }
+        }}
+      />
+      <Button size="sm" onClick={() => void save()} disabled={!value.trim() || busy}>
+        Save
+      </Button>
+      <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
+        Cancel
+      </Button>
+    </SettingsActions>
   );
 }
 
-/** What you can do to a key you already have. */
-export function ProviderKeyControls({
-  provider,
-  label,
-  active,
+/** A provider with no key yet, in the store. */
+export function ProviderStoreRow({
+  entry,
+  open,
+  onToggle,
+  onSaved,
+}: {
+  entry: CatalogEntry;
+  /** The key field is showing. Held by the pane so leaving the store and
+   *  coming back does not leave a half-typed key behind. */
+  open: boolean;
+  onToggle: () => void;
+  onSaved: () => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <SettingsRow
+      title={<ServiceName entry={entry} />}
+      description={entry.blurb}
+      help={error ? <CardError msg={error} /> : undefined}
+      control={
+        open ? (
+          <KeyEntry
+            provider={entry.id}
+            label={entry.label}
+            onSaved={onSaved}
+            onCancel={() => {
+              setError(null);
+              onToggle();
+            }}
+            onError={setError}
+          />
+        ) : (
+          <Button variant="outline" size="sm" onClick={onToggle}>
+            Add key
+          </Button>
+        )
+      }
+    />
+  );
+}
+
+/** A provider you have a key for, on the connected list. */
+export function ProviderKeyRow({
+  svc,
   onChanged,
 }: {
-  provider: ServiceId;
-  label: string;
-  /** True when this is the provider the app currently asks. */
-  active: boolean;
+  svc: ConnectedService;
   onChanged: () => void;
 }) {
+  const { entry, detail, active } = svc;
   const [replacing, setReplacing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -110,57 +154,54 @@ export function ProviderKeyControls({
     }
   };
 
-  if (replacing) {
-    return (
-      <ProviderKeyEntry
-        provider={provider}
-        label={label}
-        onSaved={() => {
-          setReplacing(false);
-          onChanged();
-        }}
-        onCancel={() => setReplacing(false)}
-      />
-    );
-  }
-
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex flex-wrap items-center gap-2">
-        {!active && (
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={busy}
-            onClick={() => void run(() => api.settingsSetActiveProvider(provider))}
-          >
-            Use this one
-          </Button>
-        )}
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy}
-          onClick={() => setReplacing(true)}
-        >
-          Replace key
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={busy}
-          className="text-red hover:text-red"
-          onClick={() => void run(() => api.settingsSetProviderKey(provider, ""))}
-        >
-          Remove
-        </Button>
-      </div>
-      {active && (
-        <p className="text-xs text-text-4">
-          This is the provider Aura is asking right now.
-        </p>
-      )}
-      {error && <p className="text-xs text-red">{error}</p>}
-    </div>
+    <SettingsRow
+      title={<ServiceName entry={entry} active={active} />}
+      description={
+        active ? `${detail ?? "Key saved"} · the provider Aura is asking right now` : detail
+      }
+      help={error ? <CardError msg={error} /> : undefined}
+      control={
+        replacing ? (
+          <KeyEntry
+            provider={entry.id}
+            label={entry.label}
+            onSaved={() => {
+              setReplacing(false);
+              onChanged();
+            }}
+            onCancel={() => {
+              setError(null);
+              setReplacing(false);
+            }}
+            onError={setError}
+          />
+        ) : (
+          <SettingsActions>
+            {!active && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy}
+                onClick={() => void run(() => api.settingsSetActiveProvider(entry.id))}
+              >
+                Use this one
+              </Button>
+            )}
+            <Button variant="outline" size="sm" disabled={busy} onClick={() => setReplacing(true)}>
+              Replace key
+            </Button>
+            <Button
+              variant="outlineDestructive"
+              size="sm"
+              disabled={busy}
+              onClick={() => void run(() => api.settingsSetProviderKey(entry.id, ""))}
+            >
+              Remove
+            </Button>
+          </SettingsActions>
+        )
+      }
+    />
   );
 }

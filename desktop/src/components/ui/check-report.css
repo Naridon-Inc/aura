@@ -1,0 +1,116 @@
+/* A check that reports back: a verdict line, then what it found as rows of
+   the shared check-run list inside one bordered box. Repository health and
+   the safety check both read this way. The list itself is the library's;
+   added here are the box, a yellow mark for "needs a look", and a quiet mono
+   list a row can open under itself. */
+.ui-check-report {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.ui-check-report[data-scroll] {
+  max-height: 68vh;
+  overflow-y: auto;
+}
+.ui-check-report-when {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+
+.ui-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ui-verdict-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-verdict-line > .ui-badge {
+  margin-left: auto;
+}
+.ui-verdict strong {
+  color: var(--ui-fg);
+  font-size: 14px;
+  font-weight: 500;
+}
+.ui-verdict[data-tone="good"] strong {
+  color: var(--ui-green);
+}
+.ui-verdict[data-tone="attention"] strong,
+.ui-verdict[data-tone="unknown"] strong,
+.ui-verdict[data-tone="warn"] strong {
+  color: var(--ui-yellow);
+}
+.ui-verdict[data-tone="bad"] strong {
+  color: var(--ui-red);
+}
+.ui-verdict > span {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ui-check-box {
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+.ui-log-note-files-head + .ui-check-box {
+  margin-top: 8px;
+}
+.ui-check-box > div > svg {
+  flex-shrink: 0;
+}
+.ui-check-box > div > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ui-check-box > :last-child {
+  border-bottom: 0;
+}
+.ui-check-box [data-status="attention"] > svg {
+  color: var(--ui-yellow);
+}
+.ui-check-box [data-status="pending"] > svg {
+  color: var(--ui-muted-fg);
+}
+.ui-check-box-rows,
+.ui-check-report-list {
+  margin: 0;
+  list-style: none;
+  color: var(--ui-muted-fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.ui-check-box-rows {
+  max-height: 34vh;
+  padding: 8px 12px 10px 34px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-check-report-list {
+  max-height: 40vh;
+  padding: 0;
+  overflow-y: auto;
+}
+.ui-check-report-list li[data-count] {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-family: inherit;
+}
+.ui-check-box-more {
+  font-style: italic;
+}
+.ui-check-report .ui-accordion-content > p {
+  margin: 0 0 8px;
+  font-size: 12px;
+}

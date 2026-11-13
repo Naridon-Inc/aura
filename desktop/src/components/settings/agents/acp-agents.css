@@ -1,0 +1,44 @@
+/* Settings → Agents → Agent registry. Layout comes from the ported settings
+   rows and tabs; this file only adds the agent's mark beside its name, the
+   green that says an agent runs here or has an update out, and the tab
+   counts. */
+
+.ui-acp-agents .ui-tabs-list {
+  margin-top: 16px;
+}
+
+.ui-acp-agents-count {
+  margin-left: 6px;
+  color: var(--ui-muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-acp-agent-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ui-acp-agent[data-state="ready"] .ui-acp-agent-title::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4dc1a4;
+}
+
+.ui-acp-agent[data-state="unavailable"] .ui-acp-agent-title {
+  color: var(--ui-muted-fg);
+}
+
+.ui-acp-agent-update {
+  color: #4dc1a4;
+}
+
+.ui-acp-agent-detail .ui-settings-row {
+  padding-block: 12px;
+}
+
+.ui-acp-agent-detail .ui-settings-row:last-child {
+  border-bottom: 0;
+}

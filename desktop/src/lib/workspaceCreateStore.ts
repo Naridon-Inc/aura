@@ -40,6 +40,8 @@ import {
   type WorkspaceLaunchManifest,
 } from "./api";
 import { appendAgentTabPassive } from "./editorStore";
+import { nestedCopyProblems } from "./nestedRepos";
+import { toast } from "./toast";
 import { whyNotOffered } from "./place";
 import {
   beginInFlight,
@@ -49,6 +51,7 @@ import {
 } from "./workspaceInFlightStore";
 import { buildWorkspacePromptContext } from "./workspacePromptContext";
 import { labelForAgentId } from "./useLiveAgentSessions";
+import { findMachine } from "./machineRef";
 
 export type LaunchWorkspaceRequest = {
   /** Repo the worktree is created FROM. */
@@ -57,6 +60,10 @@ export type LaunchWorkspaceRequest = {
   branch: string;
   /** Start point — branch/sha/"HEAD". Defaults to HEAD. */
   startPoint?: string;
+  /** `branch` already exists on GitHub (a pull request's own branch): check
+   *  it out there instead of making a new one, so pushes land on it. `base`
+   *  is the branch it merges into. */
+  continueBranch?: { base?: string | null } | null;
   /** Agents to spawn inside the worktree, in order. */
   agents: LaunchAgentSpec[];
   /** Opening mission injected into every agent once it has painted. */
@@ -154,13 +161,28 @@ export async function launchWorkspace(req: LaunchWorkspaceRequest): Promise<Laun
 
   let manifest: WorkspaceLaunchManifest;
   try {
-    manifest = await api.workspaceLaunch(req.repoRoot, req.branch, req.startPoint ?? "HEAD", agents);
+    manifest = await api.workspaceLaunch(
+      req.repoRoot,
+      req.branch,
+      req.startPoint ?? "HEAD",
+      agents,
+      undefined,
+      undefined,
+      req.continueBranch ?? null,
+    );
   } catch (e) {
     markInFlightError(key, e instanceof Error ? e.message : String(e));
     throw e;
   }
 
   markInFlightSpawning(key, manifest.worktree.path);
+
+  // Folders that are repositories of their own each get a copy inside the new
+  // one; say which didn't, so a missing folder is never a silent surprise.
+  const nestedProblems = nestedCopyProblems(manifest.worktree.nested);
+  if (nestedProblems.length > 0) {
+    toast.warning("Some separate repositories weren’t copied", nestedProblems.join("; "));
+  }
 
   // Author every launched agent's tab spec once (used for placement here or by
   // the caller post-switch).
@@ -328,7 +350,7 @@ export async function remoteProjectPath(
 
   const machine = await api
     .machinesList()
-    .then((list) => list.find((m) => m.id === machineId) ?? null)
+    .then((list) => findMachine(list, machineId))
     .catch(() => null);
   const recorded = machine?.repo_path?.trim();
   if (recorded) return recorded;

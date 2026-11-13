@@ -49,6 +49,7 @@ import { CrewCanvas } from "./CrewCanvas";
 import type { BoardStepsByTaskId } from "./crewGraphLayout";
 import { CrewTaskDetail } from "./CrewTaskDetail";
 import type { CrewProof } from "./crewProof";
+import "../../ui/crew-sheet.css";
 
 /** Which drawing of the work fills the main area. `list` and `board` are the
  *  shared pair; `graph` is Crew's own extra layout. */
@@ -136,10 +137,10 @@ export function CrewWorkspace({
   };
 
   return (
-    <div className="relative flex h-full min-h-0">
+    <div className="ui-crew-workspace">
       {/* The work, full width. List and Board both read `mission`; only Graph
           reads the raw view. */}
-      <div className="relative min-w-0 flex-1">
+      <div className="ui-crew-workspace-main">
         {lens === "graph" ? (
           <CrewCanvas
             view={view}
@@ -173,18 +174,21 @@ export function CrewWorkspace({
 
       {/* One task's detail, docked over the work — you asked to see it, so it
           shows, and closing it gives the whole width back. A scrim catches
-          stray clicks and closes. No close chrome of our own: the detail
+          stray clicks and closes. It is the library's right-hand sheet, kept
+          in the surface (not portalled over the window) like the Cloud
+          machine sheet beside it. No close chrome of our own: the detail
           carries its own "All tasks" return row and its own Esc handler
           (captured and stopped, so Esc doesn't also close the place under it),
           and a second X beside them would be the same act drawn twice. */}
       {selectedTask ? (
-        <div className="absolute inset-0 z-20">
+        <div className="ui-crew-sheet-layer">
+          <div className="ui-crew-sheet-scrim" aria-hidden onClick={onDeselect} />
           <div
-            className="absolute inset-0 bg-black/25"
-            aria-hidden
-            onClick={onDeselect}
-          />
-          <div className="absolute inset-y-0 right-0 flex w-full max-w-[420px] flex-col overflow-hidden border-l border-line bg-bg-content shadow-[var(--shadow-modal)]">
+            className="ui-sheet ui-crew-task-sheet"
+            data-side="right"
+            role="dialog"
+            aria-label={selectedTask.title}
+          >
             <CrewTaskDetail
               task={selectedTask}
               allTasks={allTasks}

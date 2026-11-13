@@ -98,6 +98,7 @@ impl SessionCard {
     fn from_head(h: SessionHead) -> Self {
         let task_count = h.tasks.len();
         let done = done_count(h.tasks.into_iter().map(|t| t.status));
+        let roots: Vec<String> = h.projects.iter().map(|p| p.root.clone()).collect();
         SessionCard {
             summary: ManagerSummary {
                 id: h.id,
@@ -109,8 +110,10 @@ impl SessionCard {
                 done_count: done,
                 repo_root: h.projects.first().map(|p| p.root.clone()),
                 machine_id: h.machine_id,
+                project_count: roots.len(),
+                projects: roots.clone(),
             },
-            roots: h.projects.into_iter().map(|p| p.root).collect(),
+            roots,
         }
     }
 }
@@ -313,6 +316,10 @@ mod tests {
         let card = SessionCard::of(&sample());
         assert_eq!(card.roots, vec!["/a".to_string(), "/b".to_string()]);
         assert_eq!(card.summary.repo_root.as_deref(), Some("/a"));
+        // The list row carries them too, so a history can name every project
+        // a conversation covers without opening it.
+        assert_eq!(card.summary.projects, card.roots);
+        assert_eq!(card.summary.project_count, 2);
     }
 
     /// The point of the card is not reading the transcript. A session whose

@@ -3,8 +3,8 @@
 // `tasks_list` loads the board and then heals it: sequence ids, the status ↔
 // state_id and label ↔ label_id mirror, first-touch of the cycle and module
 // catalogs, the legacy sprint fold — writing back whenever one of them changed
-// something. Three surfaces ask for it at the same instant (the board, the
-// place rail's groups, BuildNav), and under "All projects" each fans out per
+// something. Two surfaces ask for it at the same instant (the board and the
+// place rail's groups), and under "All projects" each fans out per
 // root.
 //
 // The fix is a coalescer, NOT a cache with a window, and that distinction is
@@ -15,7 +15,7 @@
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { readSrc, stripComments } from "./support/code";
+import { readSrc, stripComments, strippedSrcTree } from "./support/code";
 
 describe("who reads the board", () => {
   const commands = [
@@ -27,12 +27,9 @@ describe("who reads the board", () => {
   ];
 
   it("is only the cache module. Everyone else goes through it", async () => {
-    const glob = new Bun.Glob("**/*.{ts,tsx}");
-    const root = `${import.meta.dir}/../src/`;
     const offenders: string[] = [];
-    for await (const rel of glob.scan(root)) {
+    for (const [rel, body] of await strippedSrcTree()) {
       if (rel === "lib/api.ts" || rel === "lib/tasksCache.ts") continue;
-      const body = stripComments(await Bun.file(root + rel).text());
       if (commands.some((c) => body.includes(c))) offenders.push(rel);
     }
     expect(offenders).toEqual([]);

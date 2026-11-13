@@ -17,7 +17,7 @@ export const TRACE_TOOL_LABEL: Record<TraceToolKind, string> = {
   review: "Safety check",
   rewind: "Time machine",
   attest: "Genuine record",
-  doctor: "Project health",
+  doctor: "Repository health",
   impacts: "Impacts on me",
 };
 

@@ -1,0 +1,43 @@
+/* Set up a repository: one line on what will happen, where to put it (a
+   pick-one list in the shared list box, each host with its real state),
+   then owner, name and the private tick as plain stacked fields. */
+.ui-publish-repo {
+  display: flex;
+  flex-direction: column;
+}
+.ui-publish-repo > * + * {
+  margin-top: 16px;
+}
+.ui-publish-repo-intro {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.ui-publish-repo-hosts {
+  margin-top: 0;
+}
+.ui-publish-repo-hosts .ui-intent-edit-target[data-unusable] strong {
+  color: var(--ui-muted-fg);
+}
+.ui-publish-repo-name,
+.ui-publish-repo-name input {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.ui-publish-repo-verdict {
+  margin-top: -2px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-publish-repo-verdict[data-tone="free"] {
+  color: var(--ui-green);
+}
+.ui-publish-repo-verdict[data-tone="taken"] {
+  color: var(--ui-red);
+}
+.ui-publish-repo-help {
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 1.5;
+}

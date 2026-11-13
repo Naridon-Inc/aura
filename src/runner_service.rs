@@ -366,6 +366,23 @@ pub struct Installed {
     /// memory ceiling with nothing underneath it turns a build that would have
     /// got slow into one that gets killed.
     pub swapless: bool,
+    /// A per-user unit whose account could not be made to linger: it runs
+    /// while someone is signed in and stops at logout, and nothing starts it at
+    /// boot. Said out loud, because "starts on boot" would otherwise be a lie.
+    pub stops_at_logout: bool,
+}
+
+/// Let `user`'s own services outlive their sessions and start at boot.
+///
+/// Turning it on for yourself needs rights most shared boxes don't hand out,
+/// and asking again once an admin has done it is refused the same way — so a
+/// refusal is only a failure when the box doesn't already keep `user` lingering.
+pub fn linger(user: &str) -> Result<(), String> {
+    match run("loginctl", &["enable-linger", user]) {
+        Ok(()) => Ok(()),
+        Err(_) if Path::new("/var/lib/systemd/linger").join(user).exists() => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Resolve the three limit flags against a box that has measured itself.
@@ -497,9 +514,7 @@ pub fn install(opts: InstallOpts) -> Result<Installed, String> {
     // A user unit only survives logout — and therefore only starts at boot —
     // once the user lingers. Without this the whole per-member model silently
     // reduces to "runs while someone is SSH'd in".
-    if scope == Scope::User {
-        let _ = run("loginctl", &["enable-linger", &user]);
-    }
+    let stops_at_logout = scope == Scope::User && linger(&user).is_err();
 
     systemctl(scope, &["daemon-reload"])?;
     systemctl(scope, &["enable", "--now", UNIT_NAME])?;
@@ -507,6 +522,7 @@ pub fn install(opts: InstallOpts) -> Result<Installed, String> {
         path,
         swapless: limits.as_ref().is_some_and(|l| l.swapless),
         limits,
+        stops_at_logout,
     })
 }
 
@@ -548,7 +564,7 @@ pub fn service_status(user_scope: bool) -> Result<String, String> {
     Ok(s.trim().to_string())
 }
 
-fn systemctl(scope: Scope, args: &[&str]) -> Result<(), String> {
+pub(crate) fn systemctl(scope: Scope, args: &[&str]) -> Result<(), String> {
     let mut full: Vec<&str> = Vec::new();
     if scope == Scope::User {
         full.push("--user");
@@ -557,7 +573,7 @@ fn systemctl(scope: Scope, args: &[&str]) -> Result<(), String> {
     run("systemctl", &full)
 }
 
-fn run(bin: &str, args: &[&str]) -> Result<(), String> {
+pub(crate) fn run(bin: &str, args: &[&str]) -> Result<(), String> {
     let out = Command::new(bin)
         .args(args)
         .output()
@@ -675,7 +691,7 @@ fn home_dir() -> Result<PathBuf, String> {
 }
 
 /// The human who invoked us, when we are running under `sudo`.
-fn sudo_user() -> Option<String> {
+pub(crate) fn sudo_user() -> Option<String> {
     std::env::var("SUDO_USER")
         .ok()
         .map(|u| u.trim().to_string())
@@ -685,7 +701,7 @@ fn sudo_user() -> Option<String> {
 /// Look a user's home up in the passwd database rather than guessing
 /// `/home/<name>` — which is wrong on macOS, on NixOS, and for any account
 /// whose home was placed somewhere else.
-fn passwd_home(user: &str) -> Option<PathBuf> {
+pub(crate) fn passwd_home(user: &str) -> Option<PathBuf> {
     let out = Command::new("getent").args(["passwd", user]).output().ok()?;
     if !out.status.success() {
         return None;

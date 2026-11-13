@@ -1,4 +1,4 @@
-/* Floating HUD — a single Apple-glass pill summoned with ⌘⇧A. Collapsed it's
+/* Floating HUD — a single Apple-glass pill summoned with ⌃⌘A. Collapsed it's
    ONE glance row (status · what the agent just said · workspace); on hover or
    composer focus it grows upward into the full surface (the exchange + a docked
    composer). The frameless OS window is transparent; a native NSVisualEffectView
@@ -1371,8 +1371,8 @@ body,
   color: var(--text-1);
 }
 
-/* Ambient composer — a floating rounded-full bar (no chip dock; just input +
-   send), like the reference's "Ask Gemini" pill. */
+/* Ambient composer — a floating rounded-full pill (no chip dock; just input +
+   send). */
 :root[data-hud-mode="ambient"] .hud-toolbar {
   display: none;
 }

@@ -7,6 +7,10 @@
 // The backend (`worktree::resolve_start_point`) understands the
 // `pull/<n>/head:<local>` spelling and does the fetch; this module decides
 // the spelling and the local branch name. PURE, so it is unit tested.
+//
+// A PR from this repo also carries its own branch: the new work goes ON it
+// (checked out as GitHub has it), so what is pushed lands on the same pull
+// request instead of a second branch that needs a second pull request.
 
 import type { PrSummary } from "./api";
 
@@ -40,4 +44,27 @@ export function forkPrLocalBranch(pr: PrStartPointInput): string {
 export function prStartPoint(pr: PrStartPointInput): string {
   if (!pr.is_cross_repository) return pr.head_ref;
   return `pull/${pr.number}/head:${forkPrLocalBranch(pr)}`;
+}
+
+/** A pull request picked as where new work starts. `continues` is its own
+ *  branch when the work can go on it (same repo); a fork's has none here. */
+export type PrStartSelection = {
+  kind: "pr";
+  ref: string;
+  label: string;
+  continues?: { branch: string; base: string | null };
+};
+
+export function prStartSelection(
+  pr: PrStartPointInput & Pick<PrSummary, "title" | "base_ref">,
+): PrStartSelection {
+  const head = pr.head_ref.trim();
+  return {
+    kind: "pr",
+    ref: prStartPoint(pr),
+    label: `#${pr.number} ${pr.title}`,
+    ...(!pr.is_cross_repository && head
+      ? { continues: { branch: head, base: pr.base_ref?.trim() || null } }
+      : {}),
+  };
 }

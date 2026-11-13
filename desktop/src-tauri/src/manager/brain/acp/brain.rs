@@ -30,7 +30,10 @@ use tokio::sync::Mutex;
 use super::host::{AcpHost, HostPolicy};
 use crate::manager::brain::session::{self, Delta, SessionState};
 use super::wire::{self, AcpEvent, BlockCursor, ConfigChoice, ConfigOption, SessionInfo, method};
-use crate::manager::brain::jsonl_stdio::{JsonlChild, classify_jsonrpc, jsonrpc_request};
+use super::tap::{AcpSpawn, Tap, TapEvent, inbound_observer};
+use crate::manager::brain::jsonl_stdio::{
+    JsonlChild, Reattach, SpawnExtras, classify_jsonrpc, jsonrpc_request,
+};
 use crate::manager::brain::types::{
     AgentMode, AgentSurface, BrainCapabilities, BrainError, ChatChunk, ChatMessage, ChatRequest,
     cap_keys,
@@ -92,6 +95,83 @@ pub fn descriptors_for_installed_agents() -> Vec<&'static AcpAgent> {
         .collect()
 }
 
+/// An agent the manager can host as its brain, and how to start it.
+///
+/// Two sources, one list. The [`KNOWN_AGENTS`] entries come first: Aura
+/// has driven those end to end and probes them for the model catalog. Then
+/// every agent in the ACP registry this machine can launch — the list
+/// workspace chat runs from, resolved the same way — so an agent installed
+/// from Settings is a brain too, publishing its models once it is running.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostedAgent {
+    pub id: String,
+    pub label: String,
+    pub blurb: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+impl HostedAgent {
+    fn known(agent: &AcpAgent) -> Option<Self> {
+        Some(Self {
+            id: agent.id.to_string(),
+            label: agent.label.to_string(),
+            blurb: agent.blurb.to_string(),
+            program: resolved_bin(agent)?,
+            args: agent.args.iter().map(|s| s.to_string()).collect(),
+            env: Vec::new(),
+        })
+    }
+
+    fn from_registry(agent: &aura_acp::registry::RegistryAgent, launch: &aura_acp::registry::Launch) -> Self {
+        Self {
+            id: agent.id.clone(),
+            label: agent.name.clone(),
+            blurb: agent
+                .description
+                .clone()
+                .unwrap_or_else(|| "From the ACP registry, with every edit through Aura's gate.".into()),
+            program: launch.program.to_string_lossy().into_owned(),
+            args: launch.args.clone(),
+            env: launch.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        }
+    }
+}
+
+/// [`KNOWN_AGENTS`] that are installed, then the registry's launchable
+/// agents, each id once.
+pub fn hosted_agents() -> Vec<HostedAgent> {
+    merge_hosted(
+        KNOWN_AGENTS.iter().filter_map(HostedAgent::known).collect(),
+        crate::acp_agents::launchable()
+            .iter()
+            .map(|(agent, launch)| HostedAgent::from_registry(agent, launch))
+            .collect(),
+    )
+}
+
+fn merge_hosted(known: Vec<HostedAgent>, registry: Vec<HostedAgent>) -> Vec<HostedAgent> {
+    let mut out = known;
+    for agent in registry {
+        if !out.iter().any(|a| a.id == agent.id) {
+            out.push(agent);
+        }
+    }
+    out
+}
+
+/// The hosted agent called `id`, if this machine can run it.
+pub fn hosted_agent(id: &str) -> Option<HostedAgent> {
+    if let Some(known) = agent_by_id(id).and_then(HostedAgent::known) {
+        return Some(known);
+    }
+    crate::acp_agents::launchable()
+        .iter()
+        .find(|(agent, _)| agent.id == id)
+        .map(|(agent, launch)| HostedAgent::from_registry(agent, launch))
+}
+
 /// How long to wait for the handshake and session setup. An agent that
 /// hasn't answered `initialize` in this long is not going to.
 const SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -106,17 +186,34 @@ pub struct AgentFacts {
     pub models: Vec<ConfigChoice>,
     pub default_model: Option<String>,
     pub auth_methods: Vec<String>,
+    /// `agentCapabilities.loadSession`: the agent can bring back a session
+    /// it held before, history and all.
+    pub load_session: bool,
+}
+
+/// The config option ids this session's agent chose. The protocol lets an
+/// agent name its options anything; the category is what says which one
+/// picks the model.
+#[derive(Debug, Clone)]
+struct ConfigIds {
+    model: String,
+    mode: String,
 }
 
 struct LiveSession {
     child: Arc<JsonlChild>,
     state: SessionState,
+    config_ids: ConfigIds,
     host: Arc<AcpHost>,
     /// What the agent has published about this session — commands, modes,
     /// plan. Shared with the turn's stream, which is where the updates
     /// arrive, and read from outside by
     /// [`session_surface`](Brain::session_surface).
     surface: Arc<StdMutex<AgentSurface>>,
+    /// Brought back by `session/load`, so the agent already holds the
+    /// transcript up to its last reply. The next turn marks that much
+    /// heard before working out what to send, then clears this.
+    loaded: bool,
 }
 
 /// One ACP-speaking agent, wired in as a chat brain.
@@ -124,14 +221,23 @@ pub struct AcpBrain {
     provider_id: String,
     /// aura-agents registry id (`opencode`).
     agent_id: String,
-    /// Executable + the arguments that put it into ACP mode.
-    bin: String,
-    args: Vec<String>,
+    spawn: AcpSpawn,
+    /// What errors call the agent: its binary, or its id for a prepared
+    /// attach whose program is ssh.
+    label: String,
     policy: Arc<dyn HostPolicy>,
+    tap: Option<Tap>,
+    /// Set on a local agent's process, as its registry launch asks.
+    env: Vec<(String, String)>,
     /// One session per working directory: two chats in the same worktree
     /// share an agent process, chats in different worktrees do not.
     sessions: Mutex<HashMap<String, LiveSession>>,
     facts: Arc<StdMutex<AgentFacts>>,
+    /// The agent's own id for the session to load next time one opens.
+    /// Starts as the prepared attach's `resume`; follows whichever session
+    /// a prepared agent last held, so one closed for idling is loaded back
+    /// rather than retold; cleared when the transcript stops matching it.
+    resume: StdMutex<Option<String>>,
 }
 
 impl AcpBrain {
@@ -142,15 +248,90 @@ impl AcpBrain {
         policy: Arc<dyn HostPolicy>,
     ) -> Self {
         let agent_id = agent_id.into();
+        let provider_id = format!("{PROVIDER_PREFIX}{agent_id}");
+        Self::with_spawn(provider_id, agent_id, AcpSpawn::Local { bin: bin.into(), args }, policy)
+    }
+
+    /// A brain whose agent comes up however `spawn` says — a local binary,
+    /// or a prepared attach to an agent on another machine.
+    pub fn with_spawn(
+        provider_id: impl Into<String>,
+        agent_id: impl Into<String>,
+        spawn: AcpSpawn,
+        policy: Arc<dyn HostPolicy>,
+    ) -> Self {
+        let agent_id = agent_id.into();
+        let label = match &spawn {
+            AcpSpawn::Local { bin, .. } => bin.clone(),
+            AcpSpawn::Prepared { .. } => agent_id.clone(),
+        };
+        let resume = match &spawn {
+            AcpSpawn::Prepared { resume, .. } => resume.clone(),
+            AcpSpawn::Local { .. } => None,
+        };
         Self {
-            provider_id: format!("{PROVIDER_PREFIX}{agent_id}"),
+            provider_id: provider_id.into(),
             agent_id,
-            bin: bin.into(),
-            args,
+            spawn,
+            label,
             policy,
+            tap: None,
+            env: Vec::new(),
             sessions: Mutex::new(HashMap::new()),
             facts: Arc::new(StdMutex::new(AgentFacts::default())),
+            resume: StdMutex::new(resume),
         }
+    }
+
+    /// Whether the agent runs on another machine, with its own files and
+    /// shell.
+    fn is_remote(&self) -> bool {
+        matches!(self.spawn, AcpSpawn::Prepared { .. })
+    }
+
+    /// The `cwd` the agent is told for a session. A local agent gets the
+    /// chat's directory, made safe to spawn in; a remote one gets its own
+    /// root exactly as the attach named it, because that path is on the
+    /// other machine and means nothing to this one's filesystem.
+    fn session_cwd(&self, cwd: &str) -> Value {
+        match &self.spawn {
+            AcpSpawn::Prepared { cwd, .. } => json!(cwd),
+            AcpSpawn::Local { .. } => json!(crate::spawn_dir::safe_spawn_dir(cwd)),
+        }
+    }
+
+    /// What the agent is told this client does for it: files and shell
+    /// only for an agent on this machine, forms and links whenever the
+    /// policy has a person to put them to.
+    fn client_capabilities(&self) -> Value {
+        let caps = if self.is_remote() {
+            wire::remote_client_capabilities()
+        } else {
+            wire::client_capabilities()
+        };
+        if self.policy.can_elicit() {
+            wire::with_elicitation(caps)
+        } else {
+            caps
+        }
+    }
+
+    fn resume_id(&self) -> Option<String> {
+        self.resume.lock().ok().and_then(|r| r.clone())
+    }
+
+    fn set_resume(&self, id: Option<String>) {
+        if let Ok(mut r) = self.resume.lock() {
+            *r = id;
+        }
+    }
+
+    /// Report every inbound frame, every answer Aura gives on the person's
+    /// behalf, and every finished turn to `tap`. Set before the first turn;
+    /// an agent already running keeps the tap it was started with.
+    pub fn with_tap(mut self, tap: Tap) -> Self {
+        self.tap = Some(tap);
+        self
     }
 
     /// Build from a [`KNOWN_AGENTS`] entry.
@@ -168,6 +349,13 @@ impl AcpBrain {
         )
     }
 
+    /// Build from a [`HostedAgent`]: a known agent or a registry one.
+    pub fn from_hosted(agent: &HostedAgent, policy: Arc<dyn HostPolicy>) -> Self {
+        let mut brain = Self::new(&agent.id, &agent.program, agent.args.clone(), policy);
+        brain.env = agent.env.clone();
+        brain
+    }
+
     /// The OpenCode wiring: `opencode acp`.
     pub fn opencode(policy: Arc<dyn HostPolicy>) -> Self {
         Self::new("opencode", "opencode", vec!["acp".to_string()], policy)
@@ -182,15 +370,34 @@ impl AcpBrain {
     /// `pub(super)` so [`super::probe`] can bring an agent up just far
     /// enough to read its model list without taking a turn.
     pub(super) async fn spawn(&self, cwd: &str) -> Result<Arc<JsonlChild>, BrainError> {
-        let mut cmd = tokio::process::Command::new(&self.bin);
-        cmd.args(&self.args)
-            .current_dir(crate::spawn_dir::safe_spawn_dir(cwd));
-
-        let child = JsonlChild::spawn(cmd, self.bin.clone(), classify_jsonrpc).map_err(|e| {
-            BrainError::Process {
-                message: e.to_string(),
+        let mut extras = SpawnExtras {
+            observer: self.tap.clone().map(inbound_observer),
+            reattach: None,
+        };
+        let cmd = match &self.spawn {
+            AcpSpawn::Local { bin, args } => {
+                let mut cmd = tokio::process::Command::new(bin);
+                cmd.args(args)
+                    .envs(self.env.iter().cloned())
+                    .current_dir(crate::spawn_dir::safe_spawn_dir(cwd));
+                cmd
             }
-        })?;
+            // The attach decides where the agent runs and in which
+            // directory; the local cwd means nothing on the other machine.
+            AcpSpawn::Prepared { factory, resumable, .. } => {
+                if *resumable {
+                    let factory = factory.clone();
+                    let reattach: Reattach = Arc::new(move |offset| factory(offset));
+                    extras.reattach = Some(reattach);
+                }
+                factory(0)
+            }
+        };
+
+        let child = JsonlChild::spawn_with(cmd, self.label.clone(), classify_jsonrpc, extras)
+            .map_err(|e| BrainError::Process {
+                message: e.to_string(),
+            })?;
 
         let init = self
             .call(
@@ -202,8 +409,10 @@ impl AcpBrain {
                     // out of its process and into ours, which is the only
                     // place Aura can gate it, hold it to the project root,
                     // and end it when the conversation does. Served by
-                    // [`super::terminal`].
-                    "clientCapabilities": wire::client_capabilities(),
+                    // [`super::terminal`]. An agent on another machine is
+                    // offered neither files nor shell: ours are the wrong
+                    // ones for it.
+                    "clientCapabilities": self.client_capabilities(),
                 }),
             )
             .await?;
@@ -225,6 +434,11 @@ impl AcpBrain {
                         .collect()
                 })
                 .unwrap_or_default();
+            facts.load_session = init
+                .get("agentCapabilities")
+                .and_then(|c| c.get("loadSession"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         }
 
         Ok(child)
@@ -243,7 +457,7 @@ impl AcpBrain {
         let body = tokio::time::timeout(SETUP_TIMEOUT, child.request(id, line))
             .await
             .map_err(|_| BrainError::Process {
-                message: format!("{} timed out on {method_name}", self.bin),
+                message: format!("{} timed out on {method_name}", self.label),
             })?
             .map_err(|e| BrainError::Process {
                 message: e.to_string(),
@@ -258,8 +472,8 @@ impl AcpBrain {
             // An agent that isn't logged in says so here. Surfacing it as
             // `AuthRequired` lets the picker offer the sign-in it already
             // knows how to run, instead of an API-key box the user has no
-            // key for.
-            if looks_like_auth(&message) {
+            // key for. Never answered by running a login from here.
+            if is_auth_error(err, &message) {
                 return Err(BrainError::AuthRequired { message });
             }
             return Err(BrainError::Api {
@@ -284,14 +498,53 @@ impl AcpBrain {
             .call(
                 child,
                 method::SESSION_NEW,
-                json!({ "cwd": crate::spawn_dir::safe_spawn_dir(cwd), "mcpServers": [] }),
+                json!({ "cwd": self.session_cwd(cwd), "mcpServers": [] }),
             )
             .await?;
 
         let info = SessionInfo::parse(&result).ok_or_else(|| BrainError::Parse {
             message: "session/new returned no sessionId".into(),
         })?;
+        self.note_models(&info);
+        Ok(info)
+    }
 
+    /// Bring back a session the agent already holds. The agent replays its
+    /// history as `session/update`s before it answers; those reach the tap
+    /// through the transport's observer like every other frame, and are
+    /// handed back here so the caller can keep the session metadata among
+    /// them. None of it is this turn's transcript.
+    async fn load_session(
+        &self,
+        child: &Arc<JsonlChild>,
+        cwd: &str,
+        session_id: &str,
+    ) -> Result<(SessionInfo, Vec<Value>), BrainError> {
+        // Subscribed before asking, so no replayed frame can land first.
+        let mut replay = child.subscribe();
+        let result = self
+            .call(
+                child,
+                method::SESSION_LOAD,
+                json!({ "sessionId": session_id, "cwd": self.session_cwd(cwd), "mcpServers": [] }),
+            )
+            .await?;
+        let info = SessionInfo::loaded(session_id, &result);
+        self.note_models(&info);
+        // One reader delivers lines in order, so every replayed frame was
+        // broadcast before the reply that ends the load.
+        let mut frames = Vec::new();
+        loop {
+            match replay.try_recv() {
+                Ok(v) => frames.push(v),
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        Ok((info, frames))
+    }
+
+    fn note_models(&self, info: &SessionInfo) {
         if let (Ok(mut facts), Some(model)) = (self.facts.lock(), info.model_option()) {
             facts.models = model.options.clone();
             facts.default_model = model
@@ -300,7 +553,6 @@ impl AcpBrain {
                 .and_then(Value::as_str)
                 .map(str::to_string);
         }
-        Ok(info)
     }
 
     /// Point the session at a specific model, if the caller asked for one
@@ -322,12 +574,36 @@ impl AcpBrain {
             return Ok(());
         }
         let child = self.spawn(cwd_key).await?;
-        let info = self.open_session(&child, cwd_key).await?;
-        let host = Arc::new(AcpHost::new(
-            cwd_key,
-            info.session_id.clone(),
-            self.policy.clone(),
-        ));
+        let resume = self.resume_id().filter(|_| self.facts().load_session);
+        let (info, replay, loaded) = match resume {
+            Some(id) => match self.load_session(&child, cwd_key, &id).await {
+                Ok((info, replay)) => (info, replay, true),
+                // A session the agent no longer has is not worth failing
+                // the turn over: start a new one and tell it the history.
+                Err(e) => {
+                    tracing::info!(target: "brain::acp", agent = %self.agent_id, session = %id, error = %e, "could not load the session; starting a new one");
+                    (self.open_session(&child, cwd_key).await?, Vec::new(), false)
+                }
+            },
+            None => (self.open_session(&child, cwd_key).await?, Vec::new(), false),
+        };
+        if self.is_remote() {
+            self.set_resume(Some(info.session_id.clone()));
+        }
+        let mut host = AcpHost::new(cwd_key, info.session_id.clone(), self.policy.clone());
+        if self.is_remote() {
+            host = host.without_local_tools();
+        }
+        if let Some(tap) = self.tap.clone() {
+            host = host.on_resolved(Arc::new(move |kind: &str, payload: Value| {
+                tap(&TapEvent::Resolved { kind: kind.to_string(), payload });
+            }));
+        }
+        let host = Arc::new(host);
+        let config_ids = ConfigIds {
+            model: info.model_option().map(|o| o.id.clone()).unwrap_or_else(|| "model".into()),
+            mode: info.mode_option().map(|o| o.id.clone()).unwrap_or_else(|| "mode".into()),
+        };
         // The modes arrive with the session, in the same reply that carries
         // the model list. Commands and the plan come later, over the update
         // stream, if the agent has any.
@@ -340,32 +616,54 @@ impl AcpBrain {
                 .map(str::to_string),
             ..AgentSurface::default()
         };
+        let surface = Arc::new(StdMutex::new(surface));
+        keep_replayed_metadata(&replay, &info.session_id, &host, &surface);
         sessions.insert(
             cwd_key.to_string(),
             LiveSession {
                 child,
                 state: SessionState::new(info.session_id),
+                config_ids,
                 host,
-                surface: Arc::new(StdMutex::new(surface)),
+                surface,
+                loaded,
             },
         );
         Ok(())
     }
 
-    async fn select_model(
+    /// `session/set_config_option` names the option by `configId` — the id
+    /// the agent gave it, which need not be the word `model`.
+    async fn set_config(
         &self,
         child: &Arc<JsonlChild>,
         session_id: &str,
-        model: &str,
+        config_id: &str,
+        value: &str,
     ) -> Result<(), BrainError> {
-        self.call(
-            child,
-            method::SESSION_SET_CONFIG_OPTION,
-            json!({ "sessionId": session_id, "optionId": "model", "value": model }),
-        )
-        .await
-        .map(|_| ())
+        self.call(child, method::SESSION_SET_CONFIG_OPTION, set_config_params(session_id, config_id, value))
+            .await
+            .map(|_| ())
     }
+}
+
+fn set_config_params(session_id: &str, config_id: &str, value: &str) -> Value {
+    json!({ "sessionId": session_id, "configId": config_id, "value": value })
+}
+
+/// `-32000` is ACP's "authentication required"; older agents only say so
+/// in words.
+fn is_auth_error(err: &Value, message: &str) -> bool {
+    err.get("code").and_then(Value::as_i64) == Some(-32000) || looks_like_auth(message)
+}
+
+/// The plain text of a prompt, for a tap's record of the turn.
+fn prompt_text(blocks: &[Value]) -> String {
+    blocks
+        .iter()
+        .filter_map(|b| b.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Does this error message mean "you aren't signed in"? Matched on the
@@ -470,7 +768,7 @@ impl Brain for AcpBrain {
         let key = crate::spawn_dir::safe_spawn_dir(cwd)
             .to_string_lossy()
             .into_owned();
-        let (child, session_id, surface) = {
+        let (child, session_id, surface, mode_id) = {
             let mut sessions = self.sessions.lock().await;
             // Starting the agent to answer this is the point. Picking plan
             // mode before the first message is exactly when it matters most
@@ -483,6 +781,7 @@ impl Brain for AcpBrain {
                 live.child.clone(),
                 live.state.session_id.clone(),
                 live.surface.clone(),
+                live.config_ids.mode.clone(),
             )
         };
 
@@ -514,12 +813,7 @@ impl Brain for AcpBrain {
         // the protocol and in our method table, but the mode arrives as a
         // config option like any other, and this is the path the agent
         // has actually been observed to answer.
-        self.call(
-            &child,
-            method::SESSION_SET_CONFIG_OPTION,
-            json!({ "sessionId": session_id, "optionId": "mode", "value": mode }),
-        )
-        .await?;
+        self.set_config(&child, &session_id, &mode_id, mode).await?;
 
         // Recorded only once the agent accepted it. The agent also
         // announces the change over the update stream, but not always
@@ -535,6 +829,11 @@ impl Brain for AcpBrain {
             .iter()
             .map(|c| c.value.clone())
             .collect();
+        let choices: Vec<Value> = facts
+            .models
+            .iter()
+            .map(|c| json!({ "id": c.value, "name": c.name }))
+            .collect();
         BrainCapabilities::default()
             .with(cap_keys::SUPPORTS_STREAMING, true)
             // Not a claim any more: tool calls arrive as real events and
@@ -546,6 +845,7 @@ impl Brain for AcpBrain {
                 json!(facts.default_model.unwrap_or_default()),
             )
             .with(cap_keys::SUPPORTED_MODELS, json!(models))
+            .with(cap_keys::MODEL_CHOICES, json!(choices))
     }
 
     async fn chat(
@@ -566,14 +866,15 @@ impl Brain for AcpBrain {
         }
 
         // Does the live session (if any) still match the transcript?
-        let reuse = match sessions.get(&cwd_key) {
-            Some(live) => !matches!(live.state.delta(&request.messages), Delta::Restart),
-            None => false,
-        };
-        if !reuse {
+        let diverged = sessions
+            .get(&cwd_key)
+            .is_some_and(|live| matches!(live.state.delta(&request.messages), Delta::Restart));
+        if diverged {
             // Dropping the entry kills the child: a session whose history
-            // no longer exists has nothing left to say.
+            // no longer exists has nothing left to say — and is not one to
+            // load back either.
             sessions.remove(&cwd_key);
+            self.set_resume(None);
         }
 
         self.ensure_session(&mut sessions, &cwd_key).await?;
@@ -585,12 +886,16 @@ impl Brain for AcpBrain {
         let child = live.child.clone();
         let host = live.host.clone();
         let surface = live.surface.clone();
+        if std::mem::take(&mut live.loaded) {
+            live.state.mark_delivered(heard_before_load(&request.messages));
+        }
 
         // Per-turn model override rides through to the agent's own
         // selector, which is the same control its UI uses.
         if let Some(model) = request.model.as_deref() {
             if live.state.model.as_deref() != Some(model) {
-                self.select_model(&child, &session_id, model).await?;
+                let model_id = live.config_ids.model.clone();
+                self.set_config(&child, &session_id, &model_id, model).await?;
                 live.state.model = Some(model.to_string());
             }
         }
@@ -619,6 +924,15 @@ impl Brain for AcpBrain {
         // emit its first chunk before `request()` has even returned.
         let mut events = child.subscribe();
 
+        let tap = self.tap.clone();
+        let user_text = prompt_text(&blocks);
+        if let Some(tap) = &tap {
+            tap(&TapEvent::TurnStarted {
+                user_text: user_text.clone(),
+                acp_session_id: session_id.clone(),
+            });
+        }
+
         let req_id = child.next_id();
         let line = jsonrpc_request(
             &req_id,
@@ -632,7 +946,7 @@ impl Brain for AcpBrain {
         });
 
         let stream_session_id = session_id.clone();
-        let bin_label = self.bin.clone();
+        let bin_label = self.label.clone();
         let stream = try_stream! {
             let mut guard = TurnGuard {
                 child: child.clone(),
@@ -641,6 +955,8 @@ impl Brain for AcpBrain {
             };
             let mut cursor = BlockCursor::default();
             let mut done_rx = done_rx;
+            // What the agent said this turn, for the tap's record of it.
+            let mut said = String::new();
             // Carried out of the `select!` because `?` can't be used inside
             // one of its arms — the arm body isn't the enclosing try block.
             let mut outcome: Option<Result<Value, String>> = None;
@@ -660,6 +976,7 @@ impl Brain for AcpBrain {
                                     &mut cursor,
                                     &surface,
                                 ) {
+                                    note_text(&mut said, &chunk);
                                     yield chunk;
                                 }
                             }
@@ -684,6 +1001,7 @@ impl Brain for AcpBrain {
                                 &mut cursor,
                                 &surface,
                             ) {
+                                note_text(&mut said, &chunk);
                                 yield chunk;
                             }
                         }
@@ -706,14 +1024,23 @@ impl Brain for AcpBrain {
                             .and_then(Value::as_str)
                             .unwrap_or("prompt failed")
                             .to_string();
-                        Err(if looks_like_auth(&message) {
+                        Err(if is_auth_error(err, &message) {
                             BrainError::AuthRequired { message }
                         } else {
                             BrainError::Api { status: 0, message }
                         })?;
                     }
                     let result = body.get("result").cloned().unwrap_or_else(|| json!({}));
-                    yield ChatChunk::End { stop_reason: wire::stop_reason(&result) };
+                    let stop_reason = wire::stop_reason(&result);
+                    if let Some(tap) = &tap {
+                        tap(&TapEvent::TurnFinished {
+                            user_text: user_text.clone(),
+                            assistant_text: std::mem::take(&mut said),
+                            stop_reason: stop_reason.clone(),
+                            acp_session_id: stream_session_id.clone(),
+                        });
+                    }
+                    yield ChatChunk::End { stop_reason };
                 }
                 Some(Err(message)) => Err(BrainError::Process { message })?,
                 // The event feed closed before the agent answered — the
@@ -725,6 +1052,54 @@ impl Brain for AcpBrain {
         };
 
         Ok(Box::pin(stream))
+    }
+}
+
+/// How much of `messages` a loaded session already holds: everything up to
+/// and including the agent's last reply. What follows it is new.
+fn heard_before_load(messages: &[ChatMessage]) -> &[ChatMessage] {
+    match messages.iter().rposition(|m| m.role != "user") {
+        Some(i) => &messages[..=i],
+        None => &[],
+    }
+}
+
+/// From a loaded session's replayed history, keep only what describes the
+/// session now — its commands, mode and plan. The replayed prose and tool
+/// calls are the past; the tap has them, the transcript already does.
+fn keep_replayed_metadata(
+    replay: &[Value],
+    session_id: &str,
+    host: &Arc<AcpHost>,
+    surface: &Arc<StdMutex<AgentSurface>>,
+) {
+    let mut cursor = BlockCursor::default();
+    for value in replay {
+        if value.get("method").and_then(Value::as_str) != Some(method::SESSION_UPDATE) {
+            continue;
+        }
+        let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
+        if params.get("sessionId").and_then(Value::as_str).is_some_and(|sid| sid != session_id) {
+            continue;
+        }
+        let Some(update) = params.get("update") else {
+            continue;
+        };
+        let Ok(mut s) = surface.lock() else {
+            return;
+        };
+        match wire::map_session_update_with(update, &mut cursor, host.as_ref()) {
+            AcpEvent::Commands(commands) => s.commands = commands,
+            AcpEvent::ModeChanged(mode) => s.current_mode = Some(mode),
+            AcpEvent::Plan(entries) => s.plan = entries,
+            AcpEvent::Chunk(_) | AcpEvent::Ignored => {}
+        }
+    }
+}
+
+fn note_text(said: &mut String, chunk: &ChatChunk) {
+    if let ChatChunk::Text { text, .. } = chunk {
+        said.push_str(text);
     }
 }
 
@@ -957,6 +1332,48 @@ mod tests {
             "the agent should say which mode it starts in, so the chip \
              opens showing the truth rather than a guess"
         );
+    }
+
+    fn hosted(id: &str) -> HostedAgent {
+        HostedAgent {
+            id: id.into(),
+            label: id.into(),
+            blurb: String::new(),
+            program: format!("/bin/{id}"),
+            args: vec!["acp".into()],
+            env: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_registry_agent_joins_the_list_once_and_a_known_one_wins_its_id() {
+        let mut from_registry = hosted("opencode");
+        from_registry.program = "/registry/opencode".into();
+        let merged = merge_hosted(vec![hosted("opencode")], vec![from_registry, hosted("gemini"), hosted("goose")]);
+        let ids: Vec<_> = merged.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["opencode", "gemini", "goose"]);
+        assert_eq!(merged[0].program, "/bin/opencode", "the vetted wiring is kept");
+    }
+
+    #[test]
+    fn a_registry_launch_carries_its_program_args_and_env() {
+        let agent: aura_acp::registry::RegistryAgent = serde_json::from_value(json!({
+            "id": "goose", "name": "Goose", "version": "1.0.0",
+            "description": "An agent", "distribution": {}
+        }))
+        .unwrap();
+        let launch = aura_acp::registry::Launch {
+            registry_id: "goose".into(),
+            program: "/opt/goose".into(),
+            args: vec!["acp".into()],
+            env: [("GOOSE_MODE".to_string(), "acp".to_string())].into_iter().collect(),
+            source: aura_acp::registry::LaunchSource::Path,
+        };
+        let h = HostedAgent::from_registry(&agent, &launch);
+        assert_eq!((h.id.as_str(), h.label.as_str(), h.program.as_str()), ("goose", "Goose", "/opt/goose"));
+        assert_eq!(h.args, ["acp"]);
+        assert_eq!(h.env, [("GOOSE_MODE".to_string(), "acp".to_string())]);
+        assert_eq!(h.blurb, "An agent");
     }
 
     #[test]

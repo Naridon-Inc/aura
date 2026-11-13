@@ -45,7 +45,7 @@ import {
   type StatedIntent,
 } from "../src/components/workpanes/IntentStory";
 import type { ClaudeSession } from "../src/lib/api";
-import { stripComments } from "./support/code";
+import { stripComments, strippedSrcTree } from "./support/code";
 
 const SRC = `${import.meta.dir}/../src`;
 const CLI = `${import.meta.dir}/../../aura-cli/src`;
@@ -150,9 +150,8 @@ describe("no surface reaches a verdict without asking what it's checking", () =>
     expect(EXEMPT.length).toBe(1);
 
     const missing: string[] = [];
-    for await (const rel of new Bun.Glob("**/*.{ts,tsx}").scan({ cwd: SRC })) {
+    for (const [rel, src] of await strippedSrcTree()) {
       if (EXEMPT.includes(rel)) continue;
-      const src = stripComments(await Bun.file(`${SRC}/${rel}`).text());
       if (!/=== "aligned"/.test(src)) continue;
       if (!/basisCanBeChecked\(|reportBasis\(/.test(src)) missing.push(rel);
     }
@@ -160,8 +159,7 @@ describe("no surface reaches a verdict without asking what it's checking", () =>
   });
 
   test("the words 'Matches task' are only written next to the basis check", async () => {
-    for await (const rel of new Bun.Glob("**/*.{ts,tsx}").scan({ cwd: SRC })) {
-      const src = stripComments(await Bun.file(`${SRC}/${rel}`).text());
+    for (const [, src] of await strippedSrcTree()) {
       for (const m of src.matchAll(/Matches task/g)) {
         // Scope to the enclosing function rather than a byte window: the
         // guard clause has to run before the label, however long the arms get.

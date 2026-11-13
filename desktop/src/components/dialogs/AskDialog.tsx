@@ -11,7 +11,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Dialog } from "../Dialog";
 import { Button } from "../ui/button";
-import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Kbd } from "../ui/kbd";
+import { ChatStatus, Message, MessageBody } from "../ui/message";
+import { Textarea } from "../ui/textarea";
+import "../ui/ask-aura.css";
 import { ask as runAsk, relativeTime, type AskResult } from "../../lib/askEngine";
 
 type AskTurn = {
@@ -37,10 +40,6 @@ type AskDialogProps = {
   initialQuery?: string;
   onClose: () => void;
 };
-
-const BLUE = "var(--color-blue)";
-const BLUE_TINT = "color-mix(in oklab, var(--color-blue) 9%, transparent)";
-const BLUE_EDGE = "color-mix(in oklab, var(--color-blue) 40%, transparent)";
 
 export function AskDialog({ open, repoRoot, initialQuery, onClose }: AskDialogProps) {
   const [draft, setDraft] = useState(initialQuery ?? "");
@@ -98,77 +97,63 @@ export function AskDialog({ open, repoRoot, initialQuery, onClose }: AskDialogPr
       width={720}
       footer={
         <>
-          <span className="text-text-4 text-xs mr-auto">⌘↵ to ask · esc to close</span>
-          <Button variant="ghost" size="xs" onClick={() => setTurns([])} disabled={turns.length === 0}>
+          <p className="ui-ask-aura-keys">
+            <Kbd>⌘↵</Kbd> to ask · <Kbd>Esc</Kbd> to close
+          </p>
+          <Button variant="outline" onClick={() => setTurns([])} disabled={turns.length === 0}>
             Clear
           </Button>
-          <Button variant="default" size="xs" onClick={ask} disabled={!draft.trim()}>
+          <Button onClick={ask} disabled={!draft.trim()}>
             Ask
           </Button>
         </>
       }
     >
-      <div ref={scrollRef} className="overflow-y-auto pr-0.5" style={{ maxHeight: "56vh" }}>
+      <div ref={scrollRef} className="ui-ask-aura-thread">
         {turns.length === 0 && (
-          <div className="py-8 px-1">
-            <div className="flex items-center gap-2 justify-center mb-2">
-              <span className="h-1.5 w-1.5 rounded-full" style={{ background: BLUE }} />
-              <span className="text-text-2 text-base font-medium">Ask about this project</span>
-            </div>
-            <div className="text-text-4 text-sm text-center mb-4 max-w-[440px] mx-auto leading-relaxed">
-              Aura remembers what was built here and why. Ask in plain words. How a
-              part works, what changed, or why it was done that way.
-            </div>
-            <div className="flex flex-wrap gap-1.5 justify-center">
+          <div className="ui-pattern-empty ui-ask-aura-empty">
+            <strong>Ask about this repository</strong>
+            <p>
+              Aura remembers what was built here and why. Ask in plain words. How a part works,
+              what changed, or why it was done that way.
+            </p>
+            <div className="ui-ask-aura-examples">
               {EXAMPLES.map((q) => (
-                <button
+                <Button
                   key={q}
+                  variant="outline"
+                  size="sm"
                   onClick={() => {
                     setDraft(q);
                     inputRef.current?.focus();
                   }}
-                  className="text-sm text-text-2 bg-bg-1 border border-line rounded-lg px-3 py-1.5 transition-colors"
-                  onMouseEnter={(e) => (e.currentTarget.style.borderColor = BLUE_EDGE)}
-                  onMouseLeave={(e) => (e.currentTarget.style.borderColor = "")}
                 >
                   {q}
-                </button>
+                </Button>
               ))}
             </div>
           </div>
         )}
 
         {turns.map((t, ti) => (
-          <div key={ti} className="mb-5 last:mb-1">
-            {/* The question */}
-            <div className="flex items-baseline gap-2 mb-2.5">
-              <span className="section-label shrink-0 mt-0.5">
-                You asked
-              </span>
-              <span className="text-text-1 text-base font-medium leading-snug">{t.q}</span>
-            </div>
-
+          <section key={ti} className="ui-ask-aura-turn" aria-label={`Question ${ti + 1}`}>
+            <Message role="user">
+              <MessageBody tone="user">{t.q}</MessageBody>
+            </Message>
             {t.loading ? (
-              <div className="flex items-center gap-2 text-text-4 text-sm py-2 pl-0.5">
-                <AsciiSpinner />
-                <span>Looking through your project's history…</span>
-              </div>
+              <ChatStatus state="working">Looking through your repository's history…</ChatStatus>
             ) : t.err ? (
-              <div role="alert" className="text-red text-sm py-1">{t.err}</div>
+              <ChatStatus state="error">{t.err}</ChatStatus>
             ) : t.result ? (
-              <AnswerBlock
-                result={t.result}
-                turnIdx={ti}
-                expanded={expanded}
-                onToggle={toggle}
-              />
+              <AnswerBlock result={t.result} turnIdx={ti} expanded={expanded} onToggle={toggle} />
             ) : null}
-          </div>
+          </section>
         ))}
       </div>
 
-      <textarea
+      <Textarea
         ref={inputRef}
+        className="ui-ask-aura-input"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
@@ -177,9 +162,9 @@ export function AskDialog({ open, repoRoot, initialQuery, onClose }: AskDialogPr
             ask();
           }
         }}
-        placeholder="Ask anything about this project…"
+        aria-label="Your question"
+        placeholder="Ask anything about this repository…"
         rows={2}
-        className="mt-3 w-full resize-none rounded-lg bg-bg-1 border border-line text-text-1 text-base px-3 py-2.5 outline-none focus:border-line"
       />
     </Dialog>
   );
@@ -198,94 +183,86 @@ function AnswerBlock({
 }) {
   if (result.kind === "empty") {
     return (
-      <div className="rounded-lg border border-line bg-bg-1 px-3.5 py-3">
-        <div className="text-text-2 text-base leading-relaxed">
-          This project doesn't have any saved history yet.
-        </div>
-        <div className="text-text-4 text-sm leading-relaxed mt-1">
-          Once agents make changes here, Aura remembers what changed and why. 
-          then you can ask and get real answers.
-        </div>
-      </div>
+      <Message role="assistant">
+        <MessageBody>
+          <p>This repository doesn't have any saved history yet.</p>
+          <p className="ui-ask-aura-muted">
+            Once agents make changes here, Aura remembers what changed and why. Then you can ask
+            and get real answers.
+          </p>
+        </MessageBody>
+      </Message>
     );
   }
 
   if (result.kind === "no-match") {
     return (
-      <div className="rounded-lg border border-line bg-bg-1 px-3.5 py-3">
-        <div className="text-text-2 text-base leading-relaxed">
-          I looked through {result.total.toLocaleString()} saved{" "}
-          {result.total === 1 ? "decision" : "decisions"} but nothing matched that.
-        </div>
-        <div className="text-text-4 text-sm leading-relaxed mt-1">
-          Try naming the part you mean, like “email”, “login”, or “payments”.
-        </div>
-      </div>
+      <Message role="assistant">
+        <MessageBody>
+          <p>
+            I looked through {result.total.toLocaleString()} saved{" "}
+            {result.total === 1 ? "decision" : "decisions"} but nothing matched that.
+          </p>
+          <p className="ui-ask-aura-muted">
+            Try naming the part you mean, like “email”, “login”, or “payments”.
+          </p>
+        </MessageBody>
+      </Message>
     );
   }
 
   const { answer, sources } = result;
   return (
-    <div>
+    <>
       {/* The answer — plain language, grounded in the record. */}
-      <div
-        className="rounded-lg px-3.5 py-3"
-        style={{
-          background: BLUE_TINT,
-          border: `1px solid ${BLUE_EDGE}`,
-          borderLeft: `2px solid ${BLUE}`,
-        }}
-      >
-        <div className="section-label mb-1.5">
-          What your project's history shows
-        </div>
-        <div className="text-text-1 text-md leading-relaxed">{answer}</div>
-      </div>
+      <Message role="assistant">
+        <MessageBody>
+          <p className="ui-ask-aura-label">What your repository's history shows</p>
+          <p>{answer}</p>
+        </MessageBody>
+      </Message>
 
       {/* Where it came from — the trail of past decisions. */}
-      <div className="mt-3">
-        <div className="section-label mb-2 pl-0.5">
+      <section className="ui-ask-aura-sources" aria-label="Where this comes from">
+        <h4>
           Where this comes from · {sources.length} past{" "}
           {sources.length === 1 ? "decision" : "decisions"}
-        </div>
-        <div className="flex flex-col gap-1.5">
+        </h4>
+        <ul>
           {sources.map((s, si) => {
             const key = `${turnIdx}:${si}`;
             const isOpen = expanded.has(key);
             const when = relativeTime(s.ts);
             const hasMore = s.text.trim().length > s.title.trim().length + 8;
+            const body = (
+              <>
+                <span>{isOpen ? s.text : s.title}</span>
+                <small>
+                  {s.agent}
+                  {when && ` · ${when}`}
+                  {hasMore && <em>{isOpen ? " · less" : " · the full story"}</em>}
+                </small>
+              </>
+            );
             return (
-              <button
-                key={key}
-                onClick={() => hasMore && onToggle(key)}
-                className="text-left rounded-lg border border-line bg-bg-1 px-3 py-2 transition-colors"
-                style={{ cursor: hasMore ? "pointer" : "default" }}
-                onMouseEnter={(e) => (e.currentTarget.style.borderColor = BLUE_EDGE)}
-                onMouseLeave={(e) => (e.currentTarget.style.borderColor = "")}
-              >
-                <div className="text-text-2 text-sm leading-snug">
-                  {isOpen ? s.text : s.title}
-                </div>
-                <div className="flex items-center gap-1.5 mt-1.5 text-text-4 text-2xs">
-                  <span>{s.agent}</span>
-                  {when && (
-                    <>
-                      <span aria-hidden>·</span>
-                      <span>{when}</span>
-                    </>
-                  )}
-                  {hasMore && (
-                    <>
-                      <span aria-hidden>·</span>
-                      <span style={{ color: BLUE }}>{isOpen ? "less" : "the full story"}</span>
-                    </>
-                  )}
-                </div>
-              </button>
+              <li key={key}>
+                {hasMore ? (
+                  <button
+                    type="button"
+                    className="ui-ask-aura-source"
+                    aria-expanded={isOpen}
+                    onClick={() => onToggle(key)}
+                  >
+                    {body}
+                  </button>
+                ) : (
+                  <div className="ui-ask-aura-source">{body}</div>
+                )}
+              </li>
             );
           })}
-        </div>
-      </div>
-    </div>
+        </ul>
+      </section>
+    </>
   );
 }

@@ -99,3 +99,68 @@ export async function readSrc(rel: string): Promise<string> {
   }
   return stripped;
 }
+
+// A whole-tree scan is the most common shape in tests/: walk every source
+// file under `src` and assert that nothing outside one module says a
+// particular thing. Two dozen of them, each opening the glob itself and
+// awaiting one `Bun.file(...).text()` per file in sequence.
+//
+// That is a few hundred serial round trips per test, and it was running on
+// bun's default 5 second budget. Enough on an idle machine; not enough with
+// the whole suite running beside a dev server, so a rotating handful of them
+// failed every run at 5000-something milliseconds with an empty offenders
+// list underneath — red because the machine was busy, not because they found
+// anything. Tests that go red on load stop being read, which is the real
+// cost.
+//
+// So the tree is read ONCE per process, in parallel, and memoized: the
+// second scan in a file is free, and the first is I/O-bound rather than
+// round-trip-bound. Each caller still applies its own predicate — this
+// shares the reading, not the judgment.
+
+/** Memoized by glob pattern plus whether comments were stripped. */
+const trees = new Map<string, Promise<ReadonlyMap<string, string>>>();
+
+async function readTree(
+  pattern: string,
+  strip: boolean,
+): Promise<ReadonlyMap<string, string>> {
+  const root = `${import.meta.dir}/../../src`;
+  const rels: string[] = [];
+  for await (const rel of new Bun.Glob(pattern).scan({ cwd: root })) {
+    rels.push(rel);
+  }
+  const texts = await Promise.all(
+    rels.map((rel) => Bun.file(`${root}/${rel}`).text()),
+  );
+  return new Map(
+    rels.map((rel, i) => [rel, strip ? stripComments(texts[i]) : texts[i]]),
+  );
+}
+
+function tree(pattern: string, strip: boolean) {
+  const key = `${strip ? "s" : "r"}:${pattern}`;
+  let found = trees.get(key);
+  if (found === undefined) {
+    found = readTree(pattern, strip);
+    trees.set(key, found);
+  }
+  return found;
+}
+
+/** Every file under `src` matching `pattern`, verbatim, keyed by its path
+ *  relative to `src`. Use this when the scan has to see comments too. */
+export function srcTree(
+  pattern = "**/*.{ts,tsx}",
+): Promise<ReadonlyMap<string, string>> {
+  return tree(pattern, false);
+}
+
+/** The same tree with comments removed — the right default for a scan that
+ *  pins what the app SAYS, since most of these files carry a comment naming
+ *  the exact string they stopped writing. */
+export function strippedSrcTree(
+  pattern = "**/*.{ts,tsx}",
+): Promise<ReadonlyMap<string, string>> {
+  return tree(pattern, true);
+}

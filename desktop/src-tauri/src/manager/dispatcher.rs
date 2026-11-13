@@ -524,6 +524,7 @@ fn build_request(spec: &LaneSpec) -> ChatRequest {
         }],
         cwd: String::new(),
         machine_id: None,
+        linked_dirs: Vec::new(),
         system: system_prompt,
         tools: vec![],
         max_tokens: None,

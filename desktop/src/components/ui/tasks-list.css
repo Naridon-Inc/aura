@@ -1,0 +1,118 @@
+/* Task list sections and rows. */
+.ui-tasks-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--ui-bg);
+}
+.ui-tasks-group-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 12px 0 10px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-sheet);
+}
+.ui-tasks-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ui-muted-fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ui-tasks-group-toggle h2 {
+  margin: 0;
+  color: var(--ui-fg);
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-tasks-group-toggle > span:last-child {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-tasks-group-toggle:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+.ui-tasks-row {
+  outline: none;
+}
+.ui-tasks-row:focus-visible {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-tasks-row .ui-home-title {
+  color: var(--ui-fg);
+}
+.ui-tasks-row-trailing {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.ui-tasks-handle {
+  width: 76px;
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-tasks-empty {
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  padding: 80px 24px;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+  text-align: center;
+}
+.ui-tasks-empty p {
+  margin: 0;
+}
+.ui-tasks-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-tasks-empty-copy {
+  display: grid;
+  gap: 4px;
+  max-width: 420px;
+}
+.ui-tasks-empty-title {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-tasks-empty-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 2px 4px;
+  max-width: 520px;
+  color: var(--ui-faint);
+  font-size: 12px;
+}

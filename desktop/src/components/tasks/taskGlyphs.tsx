@@ -1,25 +1,21 @@
-// Task-side adapters onto the shared board glyph vocabulary.
+// Task-side adapters onto the shared status glyphs.
 //
-// The board design system speaks in generic terms — a state *group* and a
-// priority *level* — because Mission Control's stages and the Workspaces
-// board's copy statuses aren't task statuses. These two helpers translate the
-// task domain into that vocabulary, and are the only place that mapping
-// exists. The board view, the list view and the sprint grid all go through
-// them, so a status can never draw one shape in one view and another shape in
-// the next.
+// Statuses draw with the dashboard's lifecycle glyphs and priority with the
+// board's three-bar signal. This is the only place the task domain is mapped
+// onto them, so a status can never draw one shape in the list and another on
+// the board.
 
 import type { JSX } from "react";
 
-import { BoardCardPriority, StateGlyph } from "../board";
-import { StatePill } from "./StatePill";
-import { TASK_STATUS_LABEL } from "./taskColumns";
+import { TASK_PRIORITY_LABEL, TASK_STATUS_LABEL } from "./taskColumns";
 import { TASK_STATUS_ORDER } from "../../lib/taskStatus";
+import { WorkspaceStageIcon, type WorkspaceStage } from "../ui/workspace-preview-card";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../ui/dropdown-menu";
+  TaskPriorityGlyph,
+  TaskStatusBadge,
+  TaskStatusMenu,
+  type TaskStatusOption,
+} from "../ui/tasks-status";
 import type {
   TaskPriority,
   TaskState,
@@ -27,41 +23,55 @@ import type {
   TaskViewGroupBy,
 } from "../../lib/api";
 
-/** Which shape a legacy `status` gets, and what colour it carries.
- *
- *  The shape is the signal, so only the one genuinely live state ("In
- *  Progress") spends a colour; the rest sit on the neutral ramp instead of
- *  each owning a hue. That colour is amber — work in flight — matching
- *  CrewCanvas's working dot and the Automations run dot. Deliberately not the
- *  accent: on a board the accent belongs to the card you have *selected*, and
- *  a ring that borrowed it made every running task look picked. */
-const STATUS_GLYPH: Record<TaskStatus, { group: string; color: string }> = {
-  backlog: { group: "backlog", color: "var(--color-text-4)" },
-  in_progress: { group: "started", color: "var(--color-amber)" },
-  in_review: { group: "started", color: "var(--color-text-3)" },
-  done: { group: "completed", color: "var(--color-text-3)" },
+/** The lifecycle glyph each pipeline status wears. The board's four statuses
+ *  are the dashboard's first four stages, in the same order. */
+const STATUS_STAGE: Record<TaskStatus, WorkspaceStage> = {
+  backlog: "backlog",
+  in_progress: "in-progress",
+  in_review: "in-review",
+  done: "done",
 };
 
-/** The 12px status ring shown in board column headers, list group headers and
- *  on cards without a custom state. */
-export function TaskStateRing({
-  statusId,
-  size = 12,
-}: {
-  statusId: TaskStatus;
-  size?: number;
-}): JSX.Element {
-  const g = STATUS_GLYPH[statusId] ?? STATUS_GLYPH.backlog;
-  return <StateGlyph group={g.group} color={g.color} size={size} />;
+/** A named state's glyph comes from the group it belongs to, so a renamed
+ *  "Doing" still reads as work in flight and a cancelled card reads as
+ *  cancelled rather than done. */
+const GROUP_STAGE: Record<string, WorkspaceStage> = {
+  backlog: "backlog",
+  unstarted: "backlog",
+  started: "in-progress",
+  completed: "done",
+  cancelled: "canceled",
+};
+
+export function stageForStatus(status: TaskStatus): WorkspaceStage {
+  return STATUS_STAGE[status] ?? "backlog";
 }
 
-/** Whether a card or row should wear its status at all.
+/** The glyph stage for a state bucket ("started", "completed", …). */
+export function stageForGroup(group: string): WorkspaceStage {
+  return GROUP_STAGE[group] ?? "backlog";
+}
+
+export function stageForTask(
+  status: TaskStatus,
+  state: TaskState | null | undefined,
+): WorkspaceStage {
+  if (state && !state.is_default) return GROUP_STAGE[state.group] ?? stageForStatus(status);
+  if (state?.group === "cancelled") return "canceled";
+  return stageForStatus(status);
+}
+
+/** The status glyph shown in column headers, list section headers and on
+ *  every card and row. */
+export function TaskStateRing({ statusId }: { statusId: TaskStatus }): JSX.Element {
+  return <WorkspaceStageIcon stage={stageForStatus(statusId)} />;
+}
+
+/** Whether a card or row should name its status in words.
  *
- *  Grouped by status, the lane header — which is sticky in both layouts — says
- *  it already, so a chip repeating it is the same fact twice within a few
- *  pixels. Grouped any other way there is no header saying it, and the status
- *  is the most useful thing a card can tell you. A state the user renamed
- *  always shows, because no header carries that name. */
+ *  Grouped by status, the section header above already says it. Grouped any
+ *  other way nothing does. A state the user renamed always shows, because no
+ *  header carries that name. */
 export function shouldShowStateChip(
   state: TaskState | null | undefined,
   groupBy: TaskViewGroupBy,
@@ -70,104 +80,73 @@ export function shouldShowStateChip(
   return groupBy !== "status";
 }
 
-/** The status chip a card or a list row wears.
- *
- *  There are two state vocabularies in here and they don't line up. Lanes,
- *  group headers, counts, the rail and the filter menu all speak the canonical
- *  four — Backlog / In progress / In review / Done (lib/taskStatus). The state
- *  catalog seeds five — Backlog / Todo / In progress / Done / Cancelled — and
- *  the mirror between them is lossy in both directions: `unstarted` ("Todo")
- *  maps down to the Backlog lane, `in_review` has no state of its own so it
- *  resolves up to "In progress", and `cancelled` lands in Done. Rendering the
- *  catalog name meant a card in the Backlog lane said "Todo", a card in the In
- *  review lane said "In progress", and a Done card said "Cancelled" — each one
- *  contradicting the header a few pixels above it. On this repo that was 40 of
- *  141 cards.
- *
- *  So a *seeded* state has nothing to add over the status and defers to it. A
- *  state the user actually created or renamed does have something to say, and
- *  keeps its own name and colour. */
+/** The status a card or a row names: the user's own state name when they
+ *  created or renamed one, the pipeline's word otherwise. A seeded state
+ *  ("Todo", "Cancelled") defers to the pipeline so a card never contradicts
+ *  the column it sits in. */
 export function TaskStateChip({
   state,
   status,
-  dense = false,
 }: {
   state: TaskState | null | undefined;
   status: TaskStatus;
-  dense?: boolean;
 }): JSX.Element {
   if (state && !state.is_default) {
-    return <StatePill state={state} dense={dense} />;
+    return (
+      <TaskStatusBadge
+        stage={stageForTask(status, state)}
+        label={state.name}
+        color={state.color || undefined}
+      />
+    );
   }
-  const label = TASK_STATUS_LABEL[status] ?? TASK_STATUS_LABEL.backlog;
-  const pad = dense ? "pl-[5px] pr-[7px] py-px" : "pl-[7px] pr-[9px] py-[2px]";
   return (
-    <span
-      className={`inline-flex items-center gap-[5px] ${pad} text-xs rounded-full border-[0.5px] border-line-soft bg-bg-2 text-text-2 whitespace-nowrap font-medium`}
-      title={label}
-    >
-      <TaskStateRing statusId={status} size={dense ? 9 : 11} />
-      <span className="truncate max-w-[120px]">{label}</span>
-    </span>
+    <TaskStatusBadge
+      stage={stageForStatus(status)}
+      label={TASK_STATUS_LABEL[status] ?? TASK_STATUS_LABEL.backlog}
+    />
   );
 }
 
-/** The status tag on a list row: the same chip, and a way to change it.
- *
- *  This is where the kanban's one irreplaceable verb went. Lanes could say the
- *  status and let you drag a card into another one; a list can say it on every
- *  row, which the lanes could not, but until now it could only say it. So the
- *  tag opens the four statuses and sets the one you pick — the whole of "move
- *  this card to In progress", without a drawing whose only job was to hold the
- *  lanes you dragged between.
- *
- *  Only the canonical four. A state the user created has a name of its own and
- *  is set from the task's detail, where the full catalog lives; offering half
- *  the catalog here would make the menu's silence about the rest look like the
- *  rest don't exist. */
+/** The pipeline's four statuses as menu options. A state the user created is
+ *  set from the task's detail, where the full catalog lives. */
+export const TASK_STATUS_MENU: TaskStatusOption[] = TASK_STATUS_ORDER.map((id) => ({
+  id,
+  label: TASK_STATUS_LABEL[id],
+  stage: stageForStatus(id),
+}));
+
+/** The status glyph on a row or a card, and the way to change it. Without
+ *  `onStatus` it is only the glyph. With `named`, the trigger carries the
+ *  status's name as well. */
 export function TaskStatusTag({
   state,
   status,
   onStatus,
-  dense = false,
+  named = false,
 }: {
   state: TaskState | null | undefined;
   status: TaskStatus;
-  /** Omit for a read-only row — then this is exactly `TaskStateChip`. */
   onStatus?: (next: TaskStatus) => void;
-  dense?: boolean;
+  named?: boolean;
 }): JSX.Element {
-  const chip = <TaskStateChip state={state} status={status} dense={dense} />;
-  if (!onStatus) return chip;
+  const face = named ? (
+    <TaskStateChip state={state} status={status} />
+  ) : (
+    <span title={state && !state.is_default ? state.name : TASK_STATUS_LABEL[status]}>
+      <WorkspaceStageIcon stage={stageForTask(status, state)} />
+    </span>
+  );
+  if (!onStatus) return face;
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          // The row underneath opens the task. Without this, picking a status
-          // would also open the thing whose status you just set.
-          onClick={(e) => e.stopPropagation()}
-          onPointerDown={(e) => e.stopPropagation()}
-          title="Change status"
-          aria-label={`Status: ${TASK_STATUS_LABEL[status]}. Change it`}
-          className="rounded-full focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-        >
-          {chip}
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-44">
-        {TASK_STATUS_ORDER.map((id) => (
-          <DropdownMenuItem
-            key={id}
-            disabled={id === status}
-            onSelect={() => onStatus(id)}
-          >
-            <TaskStateRing statusId={id} size={10} />
-            {TASK_STATUS_LABEL[id]}
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <TaskStatusMenu
+      value={status}
+      options={TASK_STATUS_MENU}
+      onChange={(id) => onStatus(id as TaskStatus)}
+      label={`Status: ${TASK_STATUS_LABEL[status]}. Change it`}
+    >
+      {face}
+    </TaskStatusMenu>
   );
 }
 
@@ -180,15 +159,9 @@ const PRIORITY_LEVEL: Record<TaskPriority, 0 | 1 | 2 | 3 | 4> = {
   urgent: 4,
 };
 
-/** Plain name for a priority — exported because the sub-task table has a
- *  column literally headed "Priority" and needs the word beside the bars. */
-export const TASK_PRIORITY_LABEL: Record<TaskPriority, string> = {
-  none: "None",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  urgent: "Urgent",
-};
+// Plain names for priorities live with the other plain task names, in a
+// module tests and pure helpers can load without the glyphs.
+export { TASK_PRIORITY_LABEL };
 
 export function TaskPriorityBars({
   priority,
@@ -196,7 +169,7 @@ export function TaskPriorityBars({
   priority: TaskPriority;
 }): JSX.Element {
   return (
-    <BoardCardPriority
+    <TaskPriorityGlyph
       level={PRIORITY_LEVEL[priority] ?? 0}
       label={TASK_PRIORITY_LABEL[priority] ?? "None"}
     />

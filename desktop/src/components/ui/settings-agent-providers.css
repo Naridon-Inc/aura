@@ -1,0 +1,48 @@
+/* The agents page carries every coding agent on the machine, not four, so
+   the tab strip scrolls sideways instead of squeezing labels. Each tab keeps
+   its whole name. */
+.ui-agent-provider-tabs {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.ui-agent-provider-tabs::-webkit-scrollbar {
+  display: none;
+}
+.ui-agent-provider-tabs .ui-tabs-trigger {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* An install problem sits between the sign-in line and the rows. */
+.ui-agent-provider-notice {
+  margin: 24px 0;
+}
+.ui-agent-provider-notice code,
+.ui-provider-login-status code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ui-agent-provider-notice p + p {
+  margin-top: 4px;
+}
+
+/* The form for an agent declared by hand: two short fields share a line,
+   the capability switches sit tighter than a full settings page row. */
+.ui-agent-editor-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 16px 0;
+}
+.ui-agent-editor-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.ui-agent-editor .ui-settings-row {
+  padding-block: 12px;
+}
+.ui-agent-editor .ui-settings-row:last-child {
+  border-bottom: 0;
+}

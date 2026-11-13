@@ -1,0 +1,30 @@
+/* The pull request's Checks tab: a bar with the tally and what to do about
+   it, then the shared check-run rows grouped under captions. */
+
+.ui-pr-checks {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.ui-pr-checks-bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-pr-checks-summary {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ui-pr-checks-spacer {
+  flex: 1;
+}
+.ui-pr-checks .ui-details-checks {
+  padding: 4px 12px 16px;
+}

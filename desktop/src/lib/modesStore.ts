@@ -42,34 +42,9 @@ type StoreShape = {
    *  sentence a failed check must never produce. */
   updatesError: string | null;
   updatesLoading: boolean;
-
-  /** Active mode the composer chip injects into every turn. `null` =
-   *  no mode (default brain behaviour). Persists in localStorage. */
-  activeSlug: string | null;
 };
 
-const ACTIVE_SLUG_KEY = "aura.modes.activeSlug";
-
-function loadActiveSlug(): string | null {
-  try {
-    return (
-      window.localStorage.getItem(ACTIVE_SLUG_KEY) || null
-    );
-  } catch {
-    return null;
-  }
-}
-
-function saveActiveSlug(slug: string | null) {
-  try {
-    if (slug) window.localStorage.setItem(ACTIVE_SLUG_KEY, slug);
-    else window.localStorage.removeItem(ACTIVE_SLUG_KEY);
-  } catch {
-    // ignore
-  }
-}
-
-const state: StoreShape = {
+let state: StoreShape = {
   installed: [],
   installedLoadedAt: null,
   installedError: null,
@@ -82,12 +57,15 @@ const state: StoreShape = {
   updatesLoadedAt: null,
   updatesError: null,
   updatesLoading: false,
-  activeSlug: loadActiveSlug(),
 };
 
 const listeners = new Set<() => void>();
 
+// useSyncExternalStore compares snapshots by identity, so every change hands
+// it a new object. Mutating `state` in place and returning the same object
+// meant React never redrew: the list stayed empty after modes loaded.
 function emit() {
+  state = { ...state };
   for (const cb of listeners) cb();
 }
 
@@ -166,23 +144,11 @@ export async function refreshUpdates(): Promise<void> {
   }
 }
 
-export function setActiveMode(slug: string | null) {
-  state.activeSlug = slug;
-  saveActiveSlug(slug);
-  emit();
-}
-
 export function useModes(): StoreShape {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 // ── derived selectors ────────────────────────────────────────────────
-
-/** Active mode descriptor, or `null` if no mode is selected. */
-export function selectActiveMode(s: StoreShape): ModeDescriptor | null {
-  if (!s.activeSlug) return null;
-  return s.installed.find((m) => m.id === s.activeSlug) ?? null;
-}
 
 /** Marketplace entries that are NOT yet installed locally. The card
  *  list uses this to render "Install" vs "Installed" affordances. */

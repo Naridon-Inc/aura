@@ -15,16 +15,13 @@
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { readSrc } from "./support/code";
+import { readSrc, srcTree } from "./support/code";
 
 describe("who reads the session list", () => {
   it("is only the cache module. Everyone else goes through it", async () => {
     const hits: string[] = [];
-    const glob = new Bun.Glob("**/*.{ts,tsx}");
-    const root = `${import.meta.dir}/../src`;
-    for await (const rel of glob.scan(root)) {
+    for (const [rel, src] of await srcTree()) {
       if (rel === "lib/api.ts" || rel === "lib/sessionsCache.ts") continue;
-      const src = await Bun.file(`${root}/${rel}`).text();
       if (src.includes("claudeListSessions(")) hits.push(rel);
     }
     expect(hits).toEqual([]);

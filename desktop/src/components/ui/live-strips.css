@@ -1,0 +1,118 @@
+/* The live strips beside the composer are the chat's own parts: dispatches and
+   the running command are the working status line, the agent's plan and the
+   wave timeline are step rows with a to-do list, and the running command docked
+   on the composer is the queued-messages strip's frame. Added here: dispatch
+   badges, the wave row's number, agent, commit and truncating detail, and a
+   running line whose command truncates beside a tabular clock.
+*/
+
+.ui-live-dispatch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ui-live-dispatch-chip {
+  gap: 4px;
+}
+.ui-live-dispatch-chip small {
+  color: var(--ui-muted-fg);
+  font-family: var(--font-mono);
+}
+
+.ui-wave-timeline li {
+  min-width: 0;
+}
+.ui-wave-timeline li[data-status="blocked"] {
+  color: var(--ui-fg);
+}
+.ui-wave-blocked {
+  color: var(--ui-red);
+}
+.ui-wave-number {
+  flex-shrink: 0;
+  min-width: 24px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.ui-wave-agent {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  color: var(--ui-muted-fg);
+}
+.ui-wave-commit {
+  flex-shrink: 0;
+  /* A hash is case-sensitive; the badge's capitals would print one that
+     doesn't exist. */
+  text-transform: none;
+}
+.ui-wave-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-muted-fg);
+}
+
+.ui-running-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-chat-status > div:has(> .ui-running-status) {
+  min-width: 0;
+}
+.ui-running-verb {
+  flex-shrink: 0;
+  color: var(--ui-fg);
+}
+.ui-running-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-running-detail[data-mono] {
+  font-family: var(--font-mono);
+}
+.ui-running-clock {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--ui-faint);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+/* Docked, what is running is the composer's lip: the box's own corners and
+   tone, a full border whose bottom edge is the line between them (the box
+   under it drops its top edge), and the box's lip padding. */
+.ui-message-queue.ui-running-docked {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--ui-border);
+  border-radius: 12px 12px 0 0;
+  padding: 8px 16px 8px 18px;
+  background: var(--ui-composer);
+  transition:
+    background-color 200ms cubic-bezier(0.25, 0.1, 0.25, 1),
+    padding 200ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+/* On a plan-mode composer the strip takes the box's plan tint, so the two
+   still read as one piece. */
+.ui-composer-wrap[data-plan-mode] > .ui-running-docked,
+.ui-running-docked:has(+ .ui-composer-wrap[data-plan-mode]),
+.ui-running-docked:has(+ [data-os-drop="composer"] > .ui-composer-wrap[data-plan-mode]) {
+  background: var(--ui-plan-fill);
+}
+.ui-running-docked > .ui-queue-caption {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+}

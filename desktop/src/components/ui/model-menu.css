@@ -1,0 +1,18 @@
+/* The model menu with a long list. With no loadout chosen every model the
+   chat can route through is a row, and when the whole surface scrolled, the
+   Effort and Fast rows sat under the last of them — out of view, in a menu
+   whose point is to set them. The list scrolls on its own instead, between
+   the search above it and the turn's settings below it, which stay put. */
+
+.ui-model-menu-surface {
+  overflow: hidden;
+}
+.ui-model-menu-surface > .ui-model-options {
+  flex: 0 1 auto;
+  min-height: 64px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ui-model-menu-surface > :not(.ui-model-options) {
+  flex-shrink: 0;
+}

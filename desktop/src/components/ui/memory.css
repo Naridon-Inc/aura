@@ -1,0 +1,153 @@
+/* Memory: a one-line explainer, a search field, the category switch, then
+   the facts in Team knowledge's bordered list (each opens in place to say
+   where it came from). Added here: a fact may wrap to two lines where a
+   question is one, the plain detail lines under an open fact, and a closed
+   (history) fact drawn quieter. */
+.ui-memory {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+.ui-memory[data-scroll] {
+  max-height: 68vh;
+}
+.ui-memory[data-fill] {
+  flex: 1;
+  height: 100%;
+}
+.ui-memory > .ui-knowledge-list {
+  flex: 0 1 auto;
+}
+.ui-memory-head > p {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.ui-memory-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-memory-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.ui-memory-notice > .ui-alert-description {
+  flex: 1;
+  min-width: 0;
+}
+.ui-memory-notice > .ui-button {
+  flex-shrink: 0;
+  margin: -2px -8px -2px 0;
+}
+.ui-memory-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-memory-search > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+.ui-memory-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-memory-toolbar > .ui-button {
+  margin-left: auto;
+}
+.ui-memory-identity > strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-memory-count {
+  margin-left: 4px;
+  color: var(--ui-muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+.ui-memory-caption {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+
+.ui-memory-row {
+  padding-block: 6px;
+}
+/* The category reads as a column, so the facts beside it line up. */
+.ui-memory-row > .ui-badge {
+  justify-content: center;
+  min-width: 104px;
+}
+.ui-memory-fact {
+  display: -webkit-box;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.ui-memory-row[aria-expanded="true"] .ui-memory-fact {
+  display: block;
+  white-space: pre-wrap;
+}
+.ui-memory-row[data-static] {
+  cursor: default;
+}
+.ui-memory-row[data-static]:hover {
+  background: transparent;
+}
+.ui-memory-marks {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+.ui-memory-entry[data-closed] > .ui-memory-row {
+  color: var(--ui-muted-fg);
+}
+
+.ui-memory-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.ui-memory-details > li[data-tone="warn"] {
+  color: var(--ui-yellow);
+}
+.ui-memory-details > li[data-tone="danger"] {
+  color: var(--ui-red);
+}
+.ui-memory-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-memory-edit .ui-knowledge-actions > small {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-memory-hint {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-memory-history {
+  margin-right: auto;
+  font-size: 13px;
+  cursor: pointer;
+}

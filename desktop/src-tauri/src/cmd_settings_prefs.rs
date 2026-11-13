@@ -238,14 +238,14 @@ impl Default for FlagPrefs {
     }
 }
 
-/// The floating HUD's (⌘⇧A) presentation prefs. Fully frontend-owned — the
+/// The floating HUD's (⌃⌘A) presentation prefs. Fully frontend-owned — the
 /// HUD's React side reads `mode` synchronously at mount (shared localStorage)
 /// and drives both the CSS shape and the native window via `hud_set_mode` /
 /// `hud_set_opacity`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HudPrefs {
-    /// Master on/off for the floating HUD. When false, ⌘⇧A / the menu-bar tray
+    /// Master on/off for the floating HUD. When false, ⌃⌘A / the menu-bar tray
     /// / programmatic summons are all no-ops (the HUD never appears). Default
     /// on. Seeded into `hud::HUD_ENABLED` at startup and flipped live via
     /// `hud_set_enabled`.

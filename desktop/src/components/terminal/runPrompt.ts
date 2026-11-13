@@ -29,11 +29,11 @@ export async function promptForRunCommand(repoRoot: string): Promise<string | nu
     ? `This project suggests: ${candidates
         .map((c) => `${c.command} (${c.source})`)
         .join(", ")}`
-    : "Nothing in this project said how to run it, so there is nothing to suggest.";
+    : "Nothing in this repository said how to run it, so there is nothing to suggest.";
 
   const current = await resolveRunCommand(repoRoot);
   const next = await askText({
-    title: "How should this project run?",
+    title: "How should this repository run?",
     body,
     label: "Command",
     value: current ?? "",

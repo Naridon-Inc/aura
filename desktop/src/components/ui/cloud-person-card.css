@@ -1,0 +1,67 @@
+/* The card a face in a cloud workspace's header opens. Small on purpose: a
+   name, a line of presence, one line of access, one action. */
+.ui-cloud-person-card.aura-menu-surface {
+  width: 248px;
+  padding: 10px 12px 12px;
+  max-width: calc(100vw - 24px);
+}
+.ui-cloud-person > header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.ui-cloud-person > header .ui-cloud-avatar {
+  width: 28px;
+  height: 28px;
+  font-size: 10px;
+}
+.ui-cloud-person > header > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ui-cloud-person strong {
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-cloud-person > header span:not(.ui-cloud-avatar) {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ui-muted-fg);
+}
+.ui-cloud-person > header span[data-here]::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #72b99a;
+}
+.ui-cloud-person dl {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--ui-border);
+  font-size: 11px;
+}
+.ui-cloud-person dt {
+  color: var(--ui-muted-fg);
+}
+.ui-cloud-person dd {
+  margin: 0;
+}
+.ui-cloud-person > .ui-button {
+  width: 100%;
+  margin-top: 10px;
+}
+.ui-cloud-person > p {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--ui-muted-fg);
+}

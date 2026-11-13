@@ -74,6 +74,7 @@ import {
 import type { SoundboardClip } from "../../lib/api";
 import { useDismiss } from "../../lib/useDismiss";
 import { Kbd } from "../ui/kbd";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { basename } from "../../lib/paths";
 
 export function VoiceDockPanel({
@@ -218,12 +219,8 @@ export function VoiceDockPanel({
         className="flex min-w-0 flex-1 items-center gap-2 text-left transition-opacity hover:opacity-90"
         title={`Open call view. ${channelLabel}${repoLabel ? ` / ${repoLabel}` : ""}`}
       >
-        <span
-          className={`flex shrink-0 ${connecting ? "animate-pulse" : ""}`}
-          style={{ color: accent }}
-          aria-hidden
-        >
-          <Rss size={15} />
+        <span className="flex shrink-0" style={{ color: accent }} aria-hidden>
+          {connecting ? <AsciiSpinner size={15} /> : <Rss size={15} />}
         </span>
         <span className="flex min-w-0 flex-col leading-tight">
           <span

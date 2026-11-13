@@ -12,6 +12,10 @@
 
 import { useEffect, useState } from "react";
 import { Button } from "../ui/button";
+import { TraceMark } from "../ui/trace-list";
+import { TraceItem, TraceLine } from "../ui/trace-report";
+import { VERDICT_MARK, VERDICT_TONE } from "./verdictTone";
+import "./goals.css";
 import { runProveStructured, type ProveOutcome } from "../../lib/prove";
 import {
   fetchProveOutcome,
@@ -174,176 +178,111 @@ export function GoalProbe({
   }, [autoExplain, goal.text, repoRoot, atCommit]);
 
   return (
-    <div className="rounded-lg border border-line-soft bg-bg-1">
-      {/* Verdict + goal text + actions. */}
-      <div className="flex items-start gap-3 px-3.5 py-3">
-        <span
-          aria-hidden
-          className="mt-[5px] h-2 w-2 shrink-0 rounded-full"
-          style={{ background: tone.color }}
-        />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium" style={{ color: tone.color }}>
+    <div className="ui-goal">
+      <TraceItem
+        tone={VERDICT_TONE[r.verdict]}
+        title={goal.text}
+        marks={
+          <>
+            <TraceMark tone={VERDICT_MARK[r.verdict]} title={tone.hint}>
               {tone.label}
-            </span>
-            {r.total > 0 ? (
-              <span className="text-xs text-text-4 tabular-nums">
-                {r.ok}/{r.total} in place
-              </span>
-            ) : null}
-            {r.at != null ? (
-              <span className="text-xs text-text-5">· checked {relativeAge(r.at)}</span>
-            ) : null}
+              {r.total > 0 ? ` · ${r.ok}/${r.total} in place` : ""}
+            </TraceMark>
+            {r.at != null ? <span className="ui-goal-meta">checked {relativeAge(r.at)}</span> : null}
             {measuredAt ? (
-              <span
-                className="font-mono text-2xs text-text-5"
-                title="The version of the code this verdict was measured against"
-              >
+              <code className="ui-goal-meta" title="The version of the code this verdict was measured against">
                 {shortRevision(measuredAt)}
-              </span>
+              </code>
             ) : null}
             {staleness.stale ? (
-              <span
-                className="shrink-0 rounded px-1.5 py-px text-2xs"
-                title={staleness.reason}
-                style={{
-                  color: "var(--color-amber)",
-                  background: "color-mix(in oklab, var(--color-amber) 12%, transparent)",
-                  border: "0.5px solid color-mix(in oklab, var(--color-amber) 32%, transparent)",
-                }}
-              >
+              <TraceMark tone="warn" title={staleness.reason}>
                 Out of date
-              </span>
+              </TraceMark>
             ) : null}
-            <div className="ml-auto flex items-center gap-1">
-              <Button
-                type="button"
-                variant="subtle"
-                size="xs"
-                onClick={() => void verify()}
-                disabled={busy}
-                className="text-text-3"
-              >
-                {busy ? "Checking…" : r.at != null ? "Re-verify" : "Verify"}
+          </>
+        }
+        actions={
+          <>
+            <Button type="button" variant="secondary" size="sm" onClick={() => void verify()} disabled={busy}>
+              {busy ? "Checking…" : r.at != null ? "Re-verify" : "Verify"}
+            </Button>
+            {onEdit ? (
+              <Button type="button" variant="ghost" size="sm" onClick={onEdit}>
+                Edit
               </Button>
-              {onEdit ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="xs"
-                  onClick={onEdit}
-                  title="Edit goal"
-                  className="text-text-4"
-                >
-                  Edit
-                </Button>
-              ) : null}
-              {onRemove ? (
-                <button
-                  type="button"
-                  onClick={onRemove}
-                  title="Remove goal"
-                  className="rounded px-1.5 py-0.5 text-xs text-text-5 hover:bg-state-hover hover:text-red"
-                >
-                  ✕
-                </button>
-              ) : null}
-            </div>
-          </div>
-          <p className="mt-1 text-base leading-snug text-text-1">{goal.text}</p>
-          {/* The verdict above describes the code it ran on, and that is not
-              always the code on screen. Said in full rather than left to the
-              chip, because "checked 1h ago" is the sentence people believe. */}
-          {staleness.stale ? (
-            <p
-              className="mt-1.5 text-sm leading-snug"
-              style={{ color: "var(--color-amber)" }}
-            >
-              {staleness.reason} Check it again to know where this stands.
-            </p>
-          ) : null}
-          {/* Why it's not there yet, and whether the agent called it done when
-              the code says otherwise — both in plain words, real signals only. */}
-          <ClaimBand reason={reason} claim={claim} />
-        </div>
+            ) : null}
+            {onRemove ? (
+              <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
+                Remove
+              </Button>
+            ) : null}
+          </>
+        }
+      >
+        {/* The verdict above describes the code it ran on, and that is not
+            always the code on screen. Said in full rather than left to the
+            mark, because "checked 1h ago" is the sentence people believe. */}
+        {staleness.stale ? (
+          <TraceLine tone="warn">{staleness.reason} Check it again to know where this stands.</TraceLine>
+        ) : null}
+        {/* Why it's not there yet, and whether the agent called it done when
+            the code says otherwise — both in plain words, real signals only. */}
+        <ClaimLines reason={reason} claim={claim} />
+        {err ? <TraceLine tone="danger">{err}</TraceLine> : null}
+        {/* The task this goal sits under. The run-by-run thread is below. */}
+        {goal.taskId ? (
+          <TraceLine tone="note">
+            Under {goal.taskSeq != null && goal.taskSeq > 0 ? <code>AURA-{goal.taskSeq}</code> : "a linked task"}
+          </TraceLine>
+        ) : null}
+      </TraceItem>
+
+      <div className="ui-goal-parts">
+        {/* The feature at a glance — Confidence / Risk / Drift + the overall
+            "is it finished" line. Shown once there's real proof to weigh; an
+            unchecked goal has no signal and the verdict above already says so. */}
+        {signals.rated ? (
+          <section className="ui-goal-part">
+            <FeatureGates signals={signals} driftOverride={driftReal} headline={!reason} />
+          </section>
+        ) : null}
+
+        {/* The plain-language verify plan — what to test, written when the goal
+            was set. Distinct from the run-derived "What's missing" below: this
+            is the intent of the check, that is the current result of running it. */}
+        {goal.acceptance && goal.acceptance.length > 0 ? (
+          <AcceptanceChecklist
+            repoRoot={repoRoot}
+            runKey={runKey ?? "adhoc"}
+            lines={goal.acceptance}
+            revision={atCommit ?? null}
+            underReview={underReview}
+          />
+        ) : null}
+
+        {/* The proof, broken open — how it was checked, what's in place, what's
+            still missing, and (on demand) the code behind each check. Filled by
+            a Verify, or auto-filled on the Summary. */}
+        {!err && outcome && outcome.checks.length > 0 ? (
+          <section className="ui-goal-part">
+            <ProofBreakdown outcome={outcome} />
+          </section>
+        ) : null}
+
+        {/* The feature's thread — every check across its sessions & commits.
+            A single check is the verdict at the top already, so the thread
+            starts at the second. */}
+        {goal.runs.length > 1 ? <FeatureHistory runs={goal.runs} currentRunKey={currentRunKey} /> : null}
+
+        {/* Who worked it + the feature's shape — only once this goal spread
+            across parties, sessions, or commits. */}
+        <FeatureRoles runs={goal.runs} />
       </div>
-
-      {/* The feature at a glance — Confidence / Risk / Drift + the overall
-          "is it finished" line. Shown once there's real proof to weigh; an
-          unchecked goal has no signal and the verdict above already says so. */}
-      {signals.rated ? (
-        <div className="border-t border-line-soft px-3.5 py-3">
-          <FeatureGates signals={signals} driftOverride={driftReal} />
-        </div>
-      ) : null}
-
-      {/* The plain-language verify plan — what to test, written when the goal
-          was set (Manager brain on Build, or by hand). Distinct from the
-          run-derived "What's missing" below: this is the intent of the check,
-          that is the current result of running it. */}
-      {goal.acceptance && goal.acceptance.length > 0 ? (
-        <AcceptanceChecklist
-          repoRoot={repoRoot}
-          runKey={runKey ?? "adhoc"}
-          lines={goal.acceptance}
-          revision={atCommit ?? null}
-          underReview={underReview}
-        />
-      ) : null}
-
-      {/* The proof, broken open — how it was checked, what's in place, what's
-          still missing, and (on demand) the code behind each check. Filled by a
-          Verify, or auto-filled on the Summary. This is the "what does 4/4 in
-          place actually mean" answer, in the user's own words. */}
-      {err ? (
-        <div className="border-t border-line-soft px-3.5 py-2 font-mono text-xs text-red break-words">
-          {err}
-        </div>
-      ) : outcome && outcome.checks.length > 0 ? (
-        <div className="border-t border-line-soft px-3.5 py-3">
-          <ProofBreakdown outcome={outcome} />
-        </div>
-      ) : null}
-
-      {/* Associations — the task this goal sits under. The run-by-run thread is
-          the history rail below. */}
-      {goal.taskId ? (
-        <div className="flex flex-wrap items-center gap-1.5 border-t border-line-soft px-3.5 py-2">
-          {goal.taskSeq != null && goal.taskSeq > 0 ? (
-            <span className="rounded border border-line-soft px-1.5 py-0.5 font-mono text-2xs text-text-3">
-              AURA-{goal.taskSeq}
-            </span>
-          ) : (
-            <span className="rounded border border-line-soft px-1.5 py-0.5 text-2xs text-text-3">
-              linked task
-            </span>
-          )}
-        </div>
-      ) : null}
-
-      {/* The feature's thread — every check across its sessions & commits, so
-          the whole arc of the feature coming together is readable at once. */}
-      {goal.runs.length > 0 ? (
-        <div className="border-t border-line-soft px-3.5 py-3">
-          <FeatureHistory runs={goal.runs} currentRunKey={currentRunKey} />
-        </div>
-      ) : null}
-
-      {/* Who worked it + the feature's shape — shown only once this goal spread
-          across parties, sessions, or commits (a single ad-hoc check has nothing
-          worth a panel; the thread above already carries it). */}
-      <FeatureRoles runs={goal.runs} className="border-t border-line-soft px-3.5 py-3" />
     </div>
   );
 }
 
-// The goal-level honesty band: one plain line for *why* it's not there yet, and
-// — when the agent committed this as done — whether the code actually agrees.
-// The "agent said done, code says not yet" case is the one that matters most, so
-// a claim gets a tone-tinted callout (amber = gap, teal = agree); a bare reason
-// with no claim stays a quiet muted line.
-function ClaimBand({
+function ClaimLines({
   reason,
   claim,
 }: {
@@ -351,36 +290,16 @@ function ClaimBand({
   claim: { text: string; tone: "gap" | "agree" | "context" } | null;
 }) {
   if (!reason && !claim) return null;
-  if (!claim) {
-    return <p className="mt-2 text-sm leading-snug text-text-3">{reason}</p>;
-  }
-  const accent =
-    claim.tone === "gap"
-      ? "var(--color-amber)"
-      : claim.tone === "agree"
-        ? "var(--color-accent-green)"
-        : "var(--color-blue)";
-  const icon = claim.tone === "gap" ? "⚠" : claim.tone === "agree" ? "✓" : "•";
   return (
-    <div
-      className="mt-2 flex items-start gap-2 rounded-md px-2.5 py-2"
-      style={{
-        background: `color-mix(in oklab, ${accent} 10%, transparent)`,
-        border: `1px solid color-mix(in oklab, ${accent} 22%, transparent)`,
-      }}
-    >
-      <span aria-hidden className="mt-px shrink-0 text-sm" style={{ color: accent }}>
-        {icon}
-      </span>
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium leading-snug" style={{ color: accent }}>
-          {claim.text}
-        </p>
-        {reason ? (
-          <p className="mt-0.5 text-sm leading-snug text-text-3">{reason}</p>
-        ) : null}
-      </div>
-    </div>
+    <>
+      {claim ? (
+        // A "done" the code doesn't back is the one claim that must not read
+        // like the rest; agreement and context are said plainly.
+        <TraceLine tone={claim.tone === "gap" ? "warn" : undefined}>
+          <strong className="ui-goal-claim">{claim.text}</strong>
+        </TraceLine>
+      ) : null}
+      {reason ? <TraceLine>{reason}</TraceLine> : null}
+    </>
   );
 }
-

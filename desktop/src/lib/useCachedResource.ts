@@ -18,11 +18,32 @@
 // Deliberately not react-query: no new dependency, and the store is a plain
 // module-scoped Map that dies with the window, which is the right lifetime —
 // it kills within-session reload flicker without letting stale data survive a
-// relaunch.
+// relaunch. The exception is `persist`, for the few answers that describe this
+// machine and cost seconds to compute (see resourceCache).
+//
+// Three more things it does, so a pane does not have to:
+//
+//   - `freshMs`: an answer younger than this is shown and *not* re-read on
+//     open. For reads that spawn processes or servers, such as every installed
+//     agent CLI or every MCP server, revalidating on each open is the cost the
+//     cache exists to avoid.
+//   - Every surface showing a key hears a write to it from anywhere. "Look
+//     again" in one pane updates the list another pane is showing.
+//   - `cloud:` keys follow the account: an org switch or sign-in change drops
+//     them and re-reads, and a read from before the change is never stored or
+//     shown.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { peekCache, writeCache } from "./resourceCache";
+import {
+  accountEpoch,
+  cacheAge,
+  isAccountScoped,
+  onAccountScopeChanged,
+  peekCache,
+  watchCache,
+  writeCache,
+} from "./resourceCache";
 
 export type ResourceState<T> = {
   /** The value on screen: fresh, or the last one we managed to read. */
@@ -89,10 +110,63 @@ function sharedRead<T>(key: string, load: () => Promise<T>): Promise<T> {
 /** Exposed for tests — the two halves of the de-dup rule, without a DOM. */
 export const readSharing = { freshRead, sharedRead };
 
+// A read in flight for a `cloud:` key was asked as the previous account; the
+// next caller must not join it.
+onAccountScopeChanged(() => {
+  for (const key of [...inflight.keys()]) {
+    if (isAccountScoped(key)) inflight.delete(key);
+  }
+});
+
+/** True when what is cached under `key` is young enough to show without
+ *  asking again. */
+export function isFresh(key: string, freshMs: number | undefined): boolean {
+  if (!freshMs) return false;
+  const age = cacheAge(key);
+  return age !== undefined && age < freshMs;
+}
+
+export type ReadOptions = {
+  /** Serve a cached answer younger than this without reading. */
+  freshMs?: number;
+  /** Keep the answer across restarts (never for `cloud:` keys). */
+  persist?: boolean;
+  /** Read now, even inside the freshness window, and don't join a read that
+   *  started before: for a caller that just changed what is being read. */
+  force?: boolean;
+};
+
+/**
+ * The cached-read rule for code that is not a component: a slash command, a
+ * workspace opening, a store. Same cache, same in-flight sharing and same
+ * account rule as the hook, so a pane and a plain function asking the same
+ * question share one read.
+ */
+export async function readCached<T>(
+  key: string,
+  load: () => Promise<T>,
+  opts: ReadOptions = {},
+): Promise<T> {
+  if (!opts.force && isFresh(key, opts.freshMs)) {
+    const cached = peekCache<T>(key);
+    if (cached !== undefined) return cached;
+  }
+  const started = accountEpoch();
+  const value = opts.force ? await freshRead(key, load) : await sharedRead(key, load);
+  if (!(isAccountScoped(key) && accountEpoch() !== started)) {
+    writeCache(key, value, { persist: opts.persist });
+  }
+  return value;
+}
+
 type Options = {
   /** Skip the read entirely (e.g. the panel is closed). The cached value is
    *  still seeded, so reopening paints rather than flashing empty. */
   enabled?: boolean;
+  /** An answer younger than this is shown and not re-read on open. */
+  freshMs?: number;
+  /** Keep the answer across restarts (never for `cloud:` keys). */
+  persist?: boolean;
 };
 
 /**
@@ -110,7 +184,7 @@ export function useCachedResource<T>(
   load: () => Promise<T>,
   opts: Options = {},
 ): ResourceState<T> & { reload: () => Promise<void> } {
-  const { enabled = true } = opts;
+  const { enabled = true, freshMs, persist = false } = opts;
   const [state, setState] = useState<ResourceState<T>>(() => seedState<T>(key));
 
   // The load function changes identity on most renders (inline closures over
@@ -124,27 +198,52 @@ export function useCachedResource<T>(
   const forKey = useRef(key);
   forKey.current = key;
 
+  const persistRef = useRef(persist);
+  persistRef.current = persist;
+
   const run = useCallback(async (mode: "join" | "fresh") => {
     const mine = forKey.current;
     if (mine === null) return;
+    const started = accountEpoch();
+    // Asked as an account that is no longer the one in use.
+    const outdated = () => isAccountScoped(mine) && accountEpoch() !== started;
     try {
       const value =
         mode === "join"
           ? await sharedRead(mine, loadRef.current)
           : await freshRead(mine, loadRef.current);
-      if (forKey.current !== mine) return;
-      writeCache(mine, value);
-      setState(loadedState(value));
+      if (forKey.current !== mine || outdated()) return;
+      // Watchers, this hook among them, take the value from the write.
+      writeCache(mine, value, { persist: persistRef.current });
+      setState((prev) => (prev.data === value && !prev.loading && !prev.staleError ? prev : loadedState(value)));
     } catch (e) {
-      if (forKey.current !== mine) return;
+      if (forKey.current !== mine || outdated()) return;
       setState((prev) => failedState(prev, String(e)));
     }
   }, []);
 
   useEffect(() => {
     setState(seedState<T>(key));
-    if (!enabled || key === null) return;
-    void run("join");
+    if (key === null) return;
+    // Another surface wrote this key: show its answer.
+    const unwatch = watchCache<T>(key, (value) => {
+      if (forKey.current !== key) return;
+      setState((prev) => (prev.data === value && !prev.loading && !prev.staleError ? prev : loadedState(value)));
+    });
+    // The account changed: what was shown belonged to the previous one.
+    const unscope = isAccountScoped(key)
+      ? onAccountScopeChanged(() => {
+          setState(seedState<T>(key));
+          if (enabled) void run("fresh");
+        })
+      : () => undefined;
+    if (enabled && !isFresh(key, freshMs)) void run("join");
+    return () => {
+      unwatch();
+      unscope();
+    };
+    // `freshMs` is read once per key: a changing window is not a new question.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, enabled, run]);
 
   // Mounting joins a read already in flight; asking again on purpose does not.

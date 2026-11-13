@@ -17,6 +17,8 @@
 // `useState`, so the whole "which places am I in" rule set is testable without
 // mounting a workspace, a terminal or an ssh connection.
 
+import type { BoxSession } from "./api";
+
 /** A request to be somewhere that isn't this laptop.
  *
  *  A *request*, not an answer: `machineId` may be absent (entering from a cloud
@@ -95,6 +97,39 @@ export function remotePlaceKey(place: RemotePlace): string {
   // Names neither — "open my machine", from the fleet page. Still a place, and
   // still one per project, so a second such click doesn't stack a duplicate.
   return `machine${SEP}*${SEP}${root}${at}`;
+}
+
+// Places asked to open a shell as soon as they are entered — "Open via SSH"
+// from a cloud workspace's details. Held here rather than on the entry: an
+// entry outlives the click (a refocus remounts the workspace), and a shell
+// opened again on every remount would be a tab nobody asked for.
+const shellWanted = new Set<string>();
+
+/** Ask the place to open a shell tab once, when it is next shown. */
+export function wantShellAt(place: RemotePlace): void {
+  shellWanted.add(remotePlaceKey(place));
+}
+
+/** True once for a place a shell was asked for, then false. */
+export function takeShellWanted(key: string): boolean {
+  return shellWanted.delete(key);
+}
+
+// Sessions already started on the machine that a place is asked to show as a
+// tab when it is next entered — the Run panel's command, opened from a cloud
+// workspace. Held the same way, for the same reason.
+const sessionWanted = new Map<string, BoxSession>();
+
+/** Ask the place to open this session as a tab once, when it is next shown. */
+export function wantSessionAt(place: RemotePlace, session: BoxSession): void {
+  sessionWanted.set(remotePlaceKey(place), session);
+}
+
+/** The session a place was asked to show, once, then null. */
+export function takeSessionWanted(key: string): BoxSession | null {
+  const s = sessionWanted.get(key) ?? null;
+  sessionWanted.delete(key);
+  return s;
 }
 
 /** Walk into a place, and look at it.

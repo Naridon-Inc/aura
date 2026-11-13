@@ -1,0 +1,102 @@
+/* Rows a pull request's details list adds: actions pushed to the row's end,
+   label chips, the stack chain and linked issues. Unlayered — imported by
+   the module that renders them. */
+
+.ui-pr-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.ui-pr-details dd {
+  flex-wrap: wrap;
+}
+.ui-pr-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--ui-card);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ui-pr-label[data-bare] {
+  height: auto;
+  padding: 0;
+  background: none;
+}
+.ui-pr-label i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ui-muted-fg);
+  flex-shrink: 0;
+}
+.ui-pr-stack-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ui-muted-fg);
+}
+.ui-pr-stack-link {
+  font: 12px var(--font-mono);
+  color: var(--ui-link);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.ui-pr-stack-link:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.ui-pr-stack-link[data-current] {
+  color: var(--ui-fg);
+  cursor: default;
+}
+.ui-pr-stack-link[data-state="merged"],
+.ui-pr-stack-link[data-state="closed"] {
+  color: var(--ui-muted-fg);
+}
+.ui-pr-issue {
+  color: var(--ui-link);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.ui-pr-issue:hover {
+  text-decoration: underline;
+}
+.ui-pr-issue[data-state="closed"] {
+  color: var(--ui-muted-fg);
+}
+.ui-pr-section {
+  border-top: 1px solid var(--ui-border);
+  padding: 20px 0 24px;
+}
+.ui-pr-section > header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.ui-pr-section > header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+}
+.ui-pr-section > header span {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-pr-section-part {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ui-border);
+}
+.ui-pr-empty {
+  color: var(--ui-muted-fg);
+}

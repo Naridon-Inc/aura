@@ -12,8 +12,8 @@ import {
   remotePlaceKey,
 } from "./remotePlaces";
 
-const BOX = "ubuntu@18.196.118.42";
-const OTHER = "ubuntu@3.122.52.150";
+const BOX = "ubuntu@203.0.113.10";
+const OTHER = "ubuntu@198.51.100.20";
 
 describe("what makes two entries the same place", () => {
   test("the same box on the same project is one place", () => {

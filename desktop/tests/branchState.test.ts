@@ -26,7 +26,7 @@ import {
   type ReviewStateInput,
 } from "../src/components/rightrail/reviewState";
 import { getPrimaryAction } from "../src/components/rightrail/getPrimaryAction";
-import { readSrc, stripComments } from "./support/code";
+import { readSrc, stripComments, strippedSrcTree } from "./support/code";
 
 const SRC = `${import.meta.dir}/../src`;
 
@@ -235,10 +235,8 @@ describe("nobody writes their own", () => {
 
   test("no attribute hand-writes an ahead/behind string", async () => {
     const offenders: string[] = [];
-    const glob = new Bun.Glob("**/*.{ts,tsx}");
-    for await (const rel of glob.scan({ cwd: SRC })) {
+    for (const [rel, src] of await strippedSrcTree()) {
       if (rel.endsWith("rightrail/reviewState.ts")) continue;
-      const src = stripComments(await Bun.file(`${SRC}/${rel}`).text());
       for (const at of src.matchAll(ATTR)) {
         for (const lit of literals(attrValue(src, at))) {
           // Test the PROSE, not the code: `Shared copy: ${b.upstream}` prints
@@ -527,18 +525,16 @@ describe("'up to date' means both halves of what it says", () => {
     expect(branchStateDetail("clean").toLowerCase()).toContain("uncommitted");
   });
 
-  test("the Checks row that draws it actually checks that", async () => {
+  test("the Checks tab never draws a level branch as a tick", async () => {
     // `inSync` was `has_upstream && ahead === 0 && behind === 0` — the working
     // tree wasn't in it. So a branch level with the remote drew a green
     // "Up to date" tick, whose hover said nothing was uncommitted, directly
-    // under a row counting fifteen changed files.
-    const src = stripComments(await readSrc("components/rightrail/ChecksPanel.tsx"));
-    const i = src.indexOf("const inSync");
-    expect(i).toBeGreaterThan(-1);
-    const expr = src.slice(i, src.indexOf(";", i)).replace(/\s+/g, "");
-    expect(expr).toContain("changedCount===0");
-    expect(expr).toContain("ab.ahead===0");
-    expect(expr).toContain("ab.behind===0");
+    // under a row counting fifteen changed files. Git status now says only
+    // what needs doing and hides itself when nothing does, so there is no
+    // "clean" row left to get wrong.
+    const src = stripComments(await readSrc("components/rightrail/ChecksStatus.tsx"));
+    expect(src).not.toContain('branchStateLabel("clean")');
+    expect(src).toContain("if (rows.length === 0) return null;");
   });
 });
 

@@ -38,7 +38,7 @@ export function DiskLowWarning({
           variant="outline"
           size="xs"
           onClick={cleanUp}
-          title="Show the folder Aura keeps project copies in, so you can throw out old ones"
+          title="Show the folder Aura keeps workspace copies in, so you can throw out old ones"
         >
           <FolderOpen />
           Clean up

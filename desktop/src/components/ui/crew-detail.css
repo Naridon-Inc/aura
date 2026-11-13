@@ -1,0 +1,151 @@
+/* A crew task's detail, in the sheet over the work. The reading column is the
+   task detail's own (subject, muted status line, property rows, small section
+   headings, dependency rows); added here are the sheet around it — the back
+   row, the scroll, the footer — the folds the long lists sit in, the ticks on
+   the task's own timeline, and the files a finished task touched. */
+
+.ui-crew-detail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-crew-detail-back {
+  flex-shrink: 0;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-crew-detail-back > .ui-button {
+  color: var(--ui-muted-fg);
+}
+.ui-crew-detail-back > .ui-button:hover {
+  color: var(--ui-fg);
+}
+.ui-crew-detail-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px 32px;
+}
+.ui-crew-detail-main.ui-task-details {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+}
+.ui-crew-detail-main > header {
+  align-items: flex-start;
+}
+.ui-crew-detail-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 550;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.ui-crew-detail-main .ui-tasks-detail-section {
+  margin-top: 24px;
+}
+.ui-crew-detail-main .ui-tasks-detail-meta + .ui-tasks-detail-section {
+  margin-top: 16px;
+}
+.ui-crew-detail-value {
+  min-width: 0;
+  padding-block: 5px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+/* The task's own life: a finished step wears a tick, a stopped run a cross. */
+.ui-crew-detail .ui-timeline {
+  padding: 4px 0 0;
+}
+.ui-crew-detail .ui-timeline-marker:has(> svg) {
+  display: grid;
+  place-items: center;
+}
+.ui-crew-detail .ui-timeline-marker > svg {
+  width: 8px;
+  height: 8px;
+  stroke-width: 3;
+}
+.ui-crew-detail .ui-timeline-marker:has(> svg[data-mark="done"]) {
+  border-color: var(--ui-green);
+  color: var(--ui-green);
+}
+.ui-crew-detail .ui-timeline-marker:has(> svg[data-mark="failed"]) {
+  border-color: var(--ui-red);
+  color: var(--ui-red);
+}
+
+/* Long lists fold: the heading is the section's small label with its count. */
+.ui-crew-detail-folds {
+  margin-top: 8px;
+}
+.ui-crew-detail-folds .ui-accordion-item {
+  border-bottom: 0;
+}
+.ui-crew-detail-folds .ui-accordion-trigger {
+  padding: 4px 0;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  font-weight: 500;
+}
+.ui-crew-detail-folds .ui-accordion-trigger:hover {
+  color: var(--ui-fg);
+}
+.ui-crew-detail-folds .ui-accordion-trigger > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-crew-detail-folds .ui-accordion-trigger > svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-crew-detail-folds .ui-accordion-content {
+  padding-bottom: 8px;
+  color: var(--ui-fg);
+  font-size: 13px;
+}
+.ui-crew-detail-folds .ui-task-dependency {
+  width: calc(100% + 16px);
+  margin-left: -8px;
+}
+.ui-tasks-crew-deps > .ui-crew-detail-folds {
+  margin-top: 4px;
+}
+
+/* What a finished task touched. */
+.ui-crew-detail-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--ui-muted-fg);
+  font: 11px/16px var(--font-mono);
+}
+.ui-crew-detail-files > li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-crew-detail-files > .ui-crew-detail-more {
+  color: var(--ui-faint);
+  font-family: inherit;
+}
+
+.ui-crew-detail-foot {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--ui-border);
+}

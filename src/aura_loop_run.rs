@@ -67,6 +67,8 @@ pub struct RunOpts {
     /// Which machine this process is — `local` or `cloud`. Nodes placed on the
     /// other machine stay in the graph untouched; see `scoped_ready`.
     pub place: String,
+    /// Which board tasks this run may take; see [`CloudTasks`].
+    pub cloud_task: CloudTasks,
 }
 
 impl RunOpts {
@@ -79,18 +81,72 @@ impl RunOpts {
     }
 }
 
+/// Which board tasks a run may take.
+///
+/// A box acting for a member runs each board task on the sign-in of the member
+/// who started it, and the cloud hands that sign-in out for one live task at a
+/// time. So the box drains board tasks one run each (`Only`), then the nodes
+/// that never came from the board on its own setup (`OffTheBoard`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CloudTasks {
+    /// No filter: every node, from the board or not.
+    #[default]
+    Any,
+    /// Only the node mirroring this board task.
+    Only(String),
+    /// Only nodes that never came from the board.
+    OffTheBoard,
+}
+
+impl CloudTasks {
+    /// `--cloud-task <id>` takes one board task; `--cloud-task none` takes none.
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(str::trim) {
+            None | Some("") => CloudTasks::Any,
+            Some(v) if v.eq_ignore_ascii_case("none") => CloudTasks::OffTheBoard,
+            Some(id) => CloudTasks::Only(id.to_string()),
+        }
+    }
+
+    fn admits(&self, task: &LoopTask) -> bool {
+        match self {
+            CloudTasks::Any => true,
+            CloudTasks::Only(id) => task.remote_id.as_deref() == Some(id.as_str()),
+            CloudTasks::OffTheBoard => task.remote_id.is_none(),
+        }
+    }
+}
+
+/// Board tasks ready to run on `place`, in the order a drain would take them,
+/// each with the agent it runs under. What a box acting for a member works
+/// through one task at a time.
+pub fn board_tasks_ready(repo_root: &Path, place: &str, default_agent: &str) -> Vec<(String, String)> {
+    board_tasks_in(&LoopGraph::at(repo_root).list(), place, default_agent)
+}
+
+fn board_tasks_in(nodes: &[LoopTask], place: &str, default_agent: &str) -> Vec<(String, String)> {
+    aura_loop::ready_set(nodes)
+        .into_iter()
+        .filter(|t| aura_loop::runs_here(t, place))
+        .filter_map(|t| {
+            let agent = t.agent_kind.clone().filter(|a| !a.is_empty()).unwrap_or_else(|| default_agent.to_string());
+            t.remote_id.clone().map(|id| (id, agent))
+        })
+        .collect()
+}
+
 /// The ready set narrowed to a run's scope AND to what this machine may run.
 ///
 /// Readiness (dependency satisfaction) is always computed over the WHOLE graph
 /// — a node's deps may live in another goal/crew, or on the other machine — then
 /// filtered down. A cloud-placed node blocking a local one still counts as a
 /// dependency here; it just isn't ours to claim.
-fn scoped_ready(graph: &LoopGraph, scope: &RunScope, place: &str) -> Vec<LoopTask> {
+fn scoped_ready(graph: &LoopGraph, scope: &RunScope, place: &str, only: &CloudTasks) -> Vec<LoopTask> {
     let ready = aura_loop::ready_set(&graph.list());
     let scoped = if scope.is_unscoped() { ready } else { scope.filter(&ready) };
     scoped
         .into_iter()
-        .filter(|t| aura_loop::runs_here(t, place))
+        .filter(|t| aura_loop::runs_here(t, place) && only.admits(t))
         .collect()
 }
 
@@ -189,7 +245,7 @@ pub fn run(repo_root: &Path, opts: &RunOpts) -> Result<(), Box<dyn std::error::E
     if opts.dry_run {
         // Preview the SAME slice a live run would drain — honor --crew/--goal
         // instead of printing the whole board (which misled scoped previews).
-        let ready = scoped_ready(&graph, &opts.scope(), &opts.place);
+        let ready = scoped_ready(&graph, &opts.scope(), &opts.place, &opts.cloud_task);
         if opts.json {
             let plan: Vec<serde_json::Value> = ready
                 .iter()
@@ -271,7 +327,7 @@ pub fn run(repo_root: &Path, opts: &RunOpts) -> Result<(), Box<dyn std::error::E
         }
 
         // 2. Take the highest-priority ready node within this run's scope.
-        let Some(task) = scoped_ready(&graph, &scope, &opts.place).into_iter().next() else {
+        let Some(task) = scoped_ready(&graph, &scope, &opts.place, &opts.cloud_task).into_iter().next() else {
             if opts.watch {
                 if !opts.json {
                     eprintln!("{}", "ready set empty — watching (Ctrl-C to stop)…".dimmed());
@@ -509,7 +565,7 @@ fn run_parallel(
 
                 // A node still claimed/working (one we just dispatched) is no
                 // longer ready, so this never re-hands the same node out.
-                let Some(task) = scoped_ready(graph, scope, &opts.place).into_iter().next() else {
+                let Some(task) = scoped_ready(graph, scope, &opts.place, &opts.cloud_task).into_iter().next() else {
                     break;
                 };
                 let claimed = match graph.claim(&task.id, runner, opts.lease_secs) {
@@ -1334,5 +1390,72 @@ mod tests {
     #[test]
     fn an_agent_that_ran_as_asked_is_named_once() {
         assert_eq!(who_ran("claude", "claude"), "agent 'claude'");
+    }
+
+    fn node(graph: &LoopGraph, title: &str, agent: Option<&str>, board: Option<&str>, place: Option<&str>) -> LoopTask {
+        let mut t = graph
+            .create(
+                title.to_string(),
+                format!("do {title}"),
+                "medium".to_string(),
+                aura_loop::KIND_TASK.to_string(),
+                vec![],
+                Some(format!("{title} is done")),
+                agent.map(str::to_string),
+                vec![],
+            )
+            .unwrap();
+        t.remote_id = board.map(str::to_string);
+        t.place = place.map(str::to_string);
+        graph.save(&t).unwrap();
+        t
+    }
+
+    #[test]
+    fn cloud_task_takes_one_board_task_or_none_of_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = LoopGraph::at(dir.path());
+        let a = node(&graph, "a", None, Some("task-a"), None);
+        let b = node(&graph, "b", None, Some("task-b"), None);
+        let own = node(&graph, "own", None, None, None);
+
+        assert_eq!(CloudTasks::parse(None), CloudTasks::Any);
+        assert_eq!(CloudTasks::parse(Some(" none ")), CloudTasks::OffTheBoard);
+        let only_a = CloudTasks::parse(Some("task-a"));
+        assert_eq!(only_a, CloudTasks::Only("task-a".into()));
+
+        let ids = |only: &CloudTasks| -> Vec<String> {
+            let mut v: Vec<String> = scoped_ready(&graph, &RunScope::default(), aura_loop::PLACE_CLOUD, only)
+                .into_iter()
+                .map(|t| t.id)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(ids(&only_a), vec![a.id.clone()]);
+        assert_eq!(ids(&CloudTasks::OffTheBoard), vec![own.id.clone()]);
+        let mut all = vec![a.id, b.id, own.id];
+        all.sort();
+        assert_eq!(ids(&CloudTasks::Any), all);
+    }
+
+    #[test]
+    fn a_box_lists_the_board_tasks_it_may_run_with_their_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = LoopGraph::at(dir.path());
+        node(&graph, "codex work", Some("codex"), Some("task-codex"), Some("cloud"));
+        node(&graph, "default", None, Some("task-default"), None);
+        node(&graph, "kept on a laptop", None, Some("task-local"), Some("local"));
+        node(&graph, "not from the board", None, None, None);
+
+        let mut got = board_tasks_ready(dir.path(), aura_loop::PLACE_CLOUD, "claude");
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("task-codex".to_string(), "codex".to_string()),
+                ("task-default".to_string(), "claude".to_string()),
+            ]
+        );
     }
 }

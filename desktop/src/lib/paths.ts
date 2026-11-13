@@ -15,6 +15,13 @@
 // file tokens with the same care; this stays its local address.
 export { basename } from "@shared/paths";
 
+/** The folder part of a forward-slash path: "src/lib/a.ts" → "src/lib",
+ *  and "" for a file at the root. */
+export function dirname(p: string): string {
+  const i = p.lastIndexOf("/");
+  return i > 0 ? p.slice(0, i) : "";
+}
+
 /** A path cut down to its last few segments and marked as cut —
  *  "/Users/mo/code/aura" → "…/code/aura". Returned untouched when it is
  *  already that short, so the leader never lies about what was removed. */

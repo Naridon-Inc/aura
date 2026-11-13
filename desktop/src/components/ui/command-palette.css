@@ -1,0 +1,223 @@
+/* The ⌘K palette's rows inside the shared command list. The item, its
+   selection, the group headings and the shortcut are the library's; these
+   only lay out what a palette row carries beyond a label: a dimmed detail
+   on the right, a mono label for code, the matched text, and the note
+   under the list when a code search was cut short. */
+.ui-command-item .ui-command-palette-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-command-item .ui-command-palette-label small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-sans);
+}
+.ui-command-item .ui-command-palette-mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.ui-command-palette-glyph {
+  width: 16px;
+  flex-shrink: 0;
+  text-align: center;
+  font-family: var(--font-mono);
+  color: var(--ui-muted-fg);
+}
+.ui-command-palette-detail {
+  display: block;
+  min-width: 0;
+  max-width: 50%;
+  margin-inline-start: auto;
+  padding-left: 16px;
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ui-command-item .ui-command-palette-detail svg {
+  display: inline;
+  width: 12px;
+  height: 12px;
+  margin-right: 4px;
+  vertical-align: -2px;
+}
+.ui-command-item .ui-badge {
+  flex-shrink: 0;
+}
+.ui-command-palette-hit {
+  background: transparent;
+  color: var(--ui-fg);
+  font-weight: 600;
+}
+.ui-command-search .ui-badge {
+  flex-shrink: 0;
+}
+.ui-command-palette-note {
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--ui-border);
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+
+/* The palette's dialog, its tabs row and its workspace rows. */
+.ui-command-dialog.ui-command-palette-dialog {
+  width: min(672px, calc(100vw - 32px));
+}
+.ui-command-palette-tabs {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  height: 40px;
+  padding: 0 12px;
+}
+.ui-command-palette-tabs .ui-tabs-list.ui-command-palette-tab-list {
+  flex-shrink: 0;
+  justify-content: flex-start;
+  height: 40px;
+  gap: 4px;
+}
+.ui-command-palette-tabs .ui-tabs-trigger.ui-command-palette-tab {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 450;
+  transition: transform 150ms ease-out;
+}
+.ui-command-palette-tabs .ui-tabs-trigger.ui-command-palette-tab:active {
+  transform: scale(0.97);
+}
+.ui-command-palette-tabs .ui-tabs-trigger.ui-command-palette-tab:focus-visible {
+  outline: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-command-palette-tabs .ui-tabs-trigger.ui-command-palette-tab:active {
+    transform: none;
+  }
+}
+.ui-command-palette-tab-actions {
+  min-width: 0;
+  margin-left: auto;
+  padding-left: 8px;
+  overflow-x: auto;
+}
+.ui-command-list.ui-command-palette-list {
+  padding-top: 0;
+}
+.ui-command-palette-dialog .ui-command-item > svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.ui-command-item.ui-command-palette-none {
+  opacity: 1;
+  color: var(--ui-muted-fg);
+}
+
+.ui-command-palette-ws-repo {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.ui-command-palette-ws-name {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+.ui-command-palette-ws-number {
+  width: 60px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-family: var(--font-mono);
+  font-size: 14px;
+}
+.ui-command-palette-ws-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-command-palette-ws-title[data-unread] {
+  color: var(--ui-fg);
+  font-weight: 600;
+}
+.ui-command-palette-ws-title[data-archived],
+.ui-command-palette-ws-number[data-archived],
+.ui-command-palette-ws-time[data-archived] {
+  color: var(--ui-faint);
+}
+.ui-command-palette-ws-time {
+  display: inline-flex;
+  justify-content: flex-end;
+  width: 48px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  text-align: right;
+}
+
+.ui-command-palette-filters {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ui-command-palette-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  max-width: 144px;
+  padding: 0 6px;
+  border-radius: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ui-command-palette-filter > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-command-palette-filter:hover,
+.ui-command-palette-filter[data-state="open"] {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-command-palette-filter svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.ui-command-palette-filter .ui-command-palette-filter-chevron {
+  width: 12px;
+  height: 12px;
+}
+.ui-command-palette-filter-avatar {
+  width: 16px;
+  height: 16px;
+}
+.ui-command-palette-filter-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-command-palette-ws-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 32px 0;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+}

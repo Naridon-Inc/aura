@@ -28,6 +28,10 @@ import "prismjs/components/prism-java";
 import "prismjs/components/prism-c";
 import "prismjs/components/prism-cpp";
 import "prismjs/components/prism-ruby";
+// PHP is written on top of the templating grammar and reaches for it the
+// moment it loads; without it first, the import throws and takes the whole
+// screen down with it.
+import "prismjs/components/prism-markup-templating";
 import "prismjs/components/prism-php";
 import "prismjs/components/prism-markdown";
 import { Extension } from "@tiptap/core";

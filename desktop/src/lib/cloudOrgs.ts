@@ -137,7 +137,7 @@ export function orgLabel(org: CloudOrg): string {
  *  Zero is a real, common answer — an org you were invited to and hold nothing
  *  in yet — and it should read as an invitation rather than as a fault. */
 export function orgSubtitle(org: CloudOrg): string {
-  if (org.repo_count === 1) return "1 project";
-  if (org.repo_count === 0) return "No projects yet";
-  return `${org.repo_count} projects`;
+  if (org.repo_count === 1) return "1 repository";
+  if (org.repo_count === 0) return "No repositories yet";
+  return `${org.repo_count} repositories`;
 }

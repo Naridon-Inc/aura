@@ -31,7 +31,8 @@ import { describe, expect, test } from "bun:test";
 
 import { readSrc } from "./support/code";
 
-const PANE = "components/dialogs/AuraWatchSettingsDialog.tsx";
+const PANE = "components/settings/pages/ChangeReasonsPage.tsx";
+const ROWS = "components/settings/pages/ChangeReasonsBackends.tsx";
 
 describe("change reasons — the pane doesn't answer before it knows", () => {
   test("the mode is seeded from the key App itself reads", async () => {
@@ -46,8 +47,8 @@ describe("change reasons — the pane doesn't answer before it knows", () => {
 
   test("selection reads the seeded mode, not the pending status", async () => {
     const src = await readSrc(PANE);
-    expect(src).toContain("mode === m");
-    expect(src).not.toContain("status?.mode === m");
+    expect(src).toContain("value={mode}");
+    expect(src).not.toContain("status?.mode");
   });
 
   test("status and detection fail independently", async () => {
@@ -68,23 +69,23 @@ describe("change reasons — the pane doesn't answer before it knows", () => {
   test("probing shows the app's one loader, not an empty list", async () => {
     const src = await readSrc(PANE);
     expect(src).toContain("{detecting ? (");
-    expect(src).toContain("<LoadingState");
+    expect(src).toContain("<AsciiSpinner />");
     expect(src).toContain("Looking for what's already on this machine…");
   });
 
   test("a failed probe says so, and can be asked again", async () => {
     const src = await readSrc(PANE);
-    expect(src).toContain("<ErrorNote");
+    expect(src).toContain('<Alert variant="destructive">');
     expect(src).toContain("Aura couldn’t check what’s on this machine.");
     expect(src).toContain("setAttempt((n) => n + 1)");
-    expect(src).toContain('import { ErrorNote, LoadingState } from "../ui/state"');
+    expect(src).toContain('import { Alert, AlertDescription, AlertTitle } from "../../ui/alert"');
   });
 
   test("the switch moves under the finger, and goes back if it didn't take", async () => {
     const src = await readSrc(PANE);
     const fn = src.slice(
       src.indexOf("async function setMode("),
-      src.indexOf("<PaneIntro"),
+      src.indexOf("<SettingsIntro"),
     );
     expect(fn).toContain("const previous = mode;");
     expect(fn).toContain("setModeState(next);");
@@ -99,5 +100,38 @@ describe("change reasons — the pane doesn't answer before it knows", () => {
     const src = await readSrc(PANE);
     expect(src).toContain("a coding agent you already have installed");
     expect(src).toContain("to write the reason for you");
+  });
+});
+
+describe("change reasons — what can write a reason, and picking one", () => {
+  test("settings mounts this page for Change reasons", async () => {
+    const src = await readSrc("components/settings/SettingsPageView.tsx");
+    expect(src).toContain("<ChangeReasonsPage repoRoot={repo.root} />");
+  });
+
+  test("installed agents come first, then a local model and each key", async () => {
+    const src = await readSrc(ROWS);
+    expect(src).toContain("selector: `agent:${a.kind}`");
+    const order = ["...agents", '"ollama"', '"anthropic"', '"openai"', '"gemini"', '"mercury"'];
+    const at = order.map((k) => src.indexOf(k, src.indexOf("return [")));
+    expect(at.every((n) => n > -1)).toBe(true);
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+  });
+
+  test("a row that isn't on this machine says so and offers nothing", async () => {
+    const src = await readSrc(ROWS);
+    expect(src).toContain('description={b.ok ? b.hint : "Not found on this machine."}');
+    expect(src).toContain(") : undefined");
+  });
+
+  test("the chosen row hands the choice back; the one in use is marked", async () => {
+    const page = await readSrc(PANE);
+    // Picking the current choice again clears it back to automatic.
+    expect(page).toContain("const next = pref === selector ? null : selector;");
+    expect(page).toContain("localStorage.removeItem(PREF_KEY)");
+    const rows = await readSrc(ROWS);
+    expect(rows).toContain("pref === b.selector ? (");
+    expect(rows).toContain("Let Aura pick");
+    expect(rows).toContain('<Badge variant="secondary">In use</Badge>');
   });
 });

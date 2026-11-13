@@ -38,7 +38,9 @@ import {
   setSessionTyping,
   useSessionLive,
 } from "../../lib/sessionLiveStore";
-import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Button } from "../ui/button";
+import { ChatComposerArea, ChatTranscript } from "../ui/chat-surface";
+import { LoadingState } from "../ui/state";
 import { fromMsgFrame, mergeSessionStream } from "./collabTypes";
 import { HostFilesPane } from "./HostFilesPane";
 import { ParticipantsStrip } from "./ParticipantsStrip";
@@ -47,6 +49,7 @@ import { SessionStream } from "./SessionStream";
 import { SessionTypingLine } from "./SessionTypingLine";
 import { TunnelChip } from "./share/TunnelChip";
 import { YourAccessBanner } from "./share/YourAccessBanner";
+import "../ui/session-room.css";
 
 export type LiveSessionPaneProps = {
   /** The session's external id — what the share link carries and what the
@@ -140,11 +143,11 @@ export function LiveSessionPane({
   );
 
   return (
-    <div className="flex flex-col h-full min-h-0 bg-bg-0">
+    <div className="ui-session-room">
       {/* Who is in here. The tab strip already carries what this session is
           about, so this row does not repeat it — it carries only what changes
           while you sit here. */}
-      <div className="flex items-center gap-2 h-8 px-3 border-b border-line shrink-0">
+      <div className="ui-session-header">
         <ParticipantsStrip
           participants={live.participants}
           youId={youId}
@@ -154,36 +157,28 @@ export function LiveSessionPane({
           onSelect={setAddressed}
         />
 
-        <div className="flex-1" />
+        <div className="ui-session-header-spacer" />
 
-        {live.connection === "reconnecting" && (
-          <span className="flex items-center gap-1.5 text-2xs text-text-3">
-            <AsciiSpinner size={11} />
-            Reconnecting
-          </span>
-        )}
+        {live.connection === "reconnecting" && <LoadingState label="Reconnecting" />}
 
         {/* A host already has these files open in the editor next door; the
             toggle would only offer them a slower copy of their own disk. */}
         {!isHost && (
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="xs"
+            aria-pressed={showFiles}
             onClick={() => setShowFiles((on) => !on)}
-            className={`px-2 h-5 rounded text-2xs transition-colors ${
-              showFiles
-                ? "text-accent bg-accent/10"
-                : "text-text-3 hover:text-text-1 hover:bg-bg-2"
-            }`}
-            title={`Browse ${host?.name ?? "the host"}'s project. Nothing is cloned — each file is read off their machine as you open it.`}
+            title={`Browse ${host?.name ?? "the host"}'s repository. Nothing is cloned — each file is read off their machine as you open it.`}
           >
             Files
-          </button>
+          </Button>
         )}
 
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="xs"
           onClick={onLeave}
-          className="px-2 h-5 rounded text-2xs text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors"
           title={
             isHost
               ? "Stop taking part in this session. It stays shared. The link still works."
@@ -191,50 +186,54 @@ export function LiveSessionPane({
           }
         >
           Leave
-        </button>
+        </Button>
       </div>
 
-      {/* Only a guest gets this. A host reading "your words reach someone
-          else's computer" about their own machine is noise, and it is the one
-          sentence in the app that must never become noise. */}
-      {!isHost && (
-        <div className="px-3 pt-2 shrink-0">
-          <YourAccessBanner
-            level={access}
-            hostName={host?.name ?? "the host"}
-            hostMachine={live.hostMachine ?? "their machine"}
-            hostOnline={live.hostOnline}
-          />
-        </div>
-      )}
+      {/* Only a guest gets the banner. A host reading "your words reach
+          someone else's computer" about their own machine is noise, and it is
+          the one sentence in the app that must never become noise.
 
-      {/* The host's ports, when they opened any. `null` means nobody has asked
+          The host's ports, when they opened any. `null` means nobody has asked
           the desktop yet, which is not the same as "none open" — so nothing is
           drawn for it rather than an empty row implying a checked-and-empty
           answer. */}
-      {live.tunnels && live.tunnels.length > 0 && (
-        <div className="flex items-center gap-1.5 flex-wrap px-3 pt-2 shrink-0">
-          <span className="text-2xs text-text-4">Open on their machine</span>
-          {live.tunnels.map((t) => (
-            <TunnelChip
-              key={t.code}
-              port={t.port}
-              label={t.label}
-              status="open"
-              onOpen={onOpenPort}
-            />
-          ))}
+      {(!isHost || (live.tunnels && live.tunnels.length > 0)) && (
+        <div className="ui-session-notices">
+          <div>
+            {!isHost && (
+              <YourAccessBanner
+                level={access}
+                hostName={host?.name ?? "the host"}
+                hostMachine={live.hostMachine ?? "their machine"}
+                hostOnline={live.hostOnline}
+              />
+            )}
+            {live.tunnels && live.tunnels.length > 0 && (
+              <div className="ui-session-tunnels">
+                <span>Open on their machine</span>
+                {live.tunnels.map((t) => (
+                  <TunnelChip
+                    key={t.code}
+                    port={t.port}
+                    label={t.label}
+                    status="open"
+                    onOpen={onOpenPort}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
       {/* The stream owns no scroller of its own (it scrolls its last row into
-          view), so the scroll box is here. The file browser sits beside it
-          rather than over it: reading the code and reading the room are the
-          same task, and a guest who has to close one to see the other ends up
-          doing neither. */}
-      <div className="flex-1 min-h-0 flex">
+          view), so the scroll box is the chat's transcript column. The file
+          browser sits beside it rather than over it: reading the code and
+          reading the room are the same task, and a guest who has to close one
+          to see the other ends up doing neither. */}
+      <div className="ui-session-body">
         {showFiles && !isHost && (
-          <div className="w-64 shrink-0 min-h-0 border-r border-line">
+          <div className="ui-session-files">
             <HostFilesPane
               sessionId={sessionId}
               access={access}
@@ -243,7 +242,7 @@ export function LiveSessionPane({
             />
           </div>
         )}
-        <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2">
+        <ChatTranscript>
           <SessionStream
             items={items}
             participants={live.participants}
@@ -251,10 +250,10 @@ export function LiveSessionPane({
             loading={connecting}
             error={failed}
           />
-        </div>
+        </ChatTranscript>
       </div>
 
-      <div className="shrink-0 px-3 pb-2">
+      <ChatComposerArea>
         <SessionTypingLine
           typing={typing}
           working={working}
@@ -274,7 +273,7 @@ export function LiveSessionPane({
           // rather than accepting the keystrokes and dropping them.
           disabled={access === "watch"}
         />
-      </div>
+      </ChatComposerArea>
     </div>
   );
 }

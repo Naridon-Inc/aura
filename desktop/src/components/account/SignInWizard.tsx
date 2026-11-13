@@ -1,16 +1,16 @@
-// SignInWizard — the full-screen welcome surface, opened when someone clicks
-// "Sign in" anywhere in the app (the titlebar avatar, the Settings row, a
-// team-chat nudge). Modelled on the reference editor's calm welcome: the AURA
-// wordmark, "Welcome to Aura", "Sign in to get started", and the provider
-// buttons — far roomier and more inviting than a cramped popover.
+// SignInWizard — the sign-in surface opened when someone clicks "Sign in"
+// anywhere in the app (the titlebar avatar, the Settings row, a team-chat
+// nudge).
 //
-// It reuses the exact onboarding SignInScreen (the real aura-cloud device-code
-// flow via useDeviceSignIn) inside the app's standard focus surface, so there's
-// one set of auth logic and one welcome design. No title — the wordmark carries
-// the identity, matching FullscreenOverlay's contract. Esc, the corner chip, or
-// "Skip" closes; a successful sign-in closes and tells every auth-aware surface.
+// It reuses first run's SignInScreen (the real aura-cloud device-code flow
+// via useDeviceSignIn) on the same setup page, inside the app's standard
+// focus surface, so there's one set of auth logic and one sign-in design. No
+// title — the page's own heading carries it, matching FullscreenOverlay's
+// contract. Esc, the corner chip, or "Skip" closes; a successful sign-in
+// closes and tells every auth-aware surface.
 
 import { FullscreenOverlay } from "../FullscreenOverlay";
+import { OnboardingPage } from "../onboarding/OnboardingShell";
 import { SignInScreen } from "../onboarding/SignInScreen";
 
 export function SignInWizard({ onClose }: { onClose: () => void }) {
@@ -23,9 +23,9 @@ export function SignInWizard({ onClose }: { onClose: () => void }) {
 
   return (
     <FullscreenOverlay onClose={onClose}>
-      <div className="flex-1 min-h-0 overflow-y-auto flex items-center justify-center">
+      <OnboardingPage>
         <SignInScreen onAuthed={done} onSkip={onClose} />
-      </div>
+      </OnboardingPage>
     </FullscreenOverlay>
   );
 }

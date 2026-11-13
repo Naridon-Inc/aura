@@ -27,6 +27,8 @@
 pub mod appearance;
 pub mod attach;
 pub mod clip;
+mod hole;
+pub mod paste;
 pub mod sink;
 pub mod surface;
 pub mod wheel;
@@ -37,12 +39,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aura_term_core::{
-    spawn as pty_spawn, CellMetrics, GridTerminal, Palette, PtyConfig, PtyEvent, Selection,
+    spawn as pty_spawn, CellMetrics, FindResult, GridTerminal, Palette, PtyConfig, PtyEvent,
+    SearchOpts, Selection,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use clip::{ClipPx, ClipRect};
+use paste::paste_bytes;
 use sink::TerminalSink;
 use surface::RectPx;
 
@@ -50,6 +54,10 @@ const MAIN_WINDOW: &str = "main";
 /// Frame budget — the render thread wakes at least this often to service input
 /// and repaints only when the grid is dirty.
 const FRAME_MS: u64 = 16;
+/// How often a parked terminal folds pending output into its grid. Nothing is
+/// on screen, so this only bounds how much output queues; an unpark is not
+/// held behind it, because a parked loop waits on the control channel.
+const PARKED_TICK_MS: u64 = 100;
 
 /// Control messages sent from Tauri commands to a terminal's render thread.
 enum Ctrl {
@@ -66,8 +74,17 @@ enum Ctrl {
         px_h: u32,
         clip: ClipPx,
     },
+    /// The pane went offscreen (see [`hole`]). Keeps the hole, gives back the
+    /// drawable, and stops presenting until the next `Resize` shows it again.
+    Park,
     /// Keystrokes / paste bytes to write to the shell.
     Write(Vec<u8>),
+    /// Pasted text, to be wrapped and written on the render thread.
+    ///
+    /// Separate from [`Ctrl::Write`] because only this thread can see whether
+    /// the child asked for bracketed paste, and the envelope is wrong for one
+    /// that did not.
+    Paste(String),
     /// Scroll the viewport by N lines. Positive goes back into scrollback,
     /// negative returns toward the live prompt — `Grid::scroll_lines`'s sign.
     ///
@@ -107,6 +124,27 @@ enum Ctrl {
         max_lines: usize,
         reply: Sender<String>,
     },
+    /// Clear the screen and the scrollback. A view action handled by the grid,
+    /// not a byte written to the child — see `GridTerminal::clear_all`.
+    Clear,
+    /// Select the whole transcript, scrollback included, so ⌘A then ⌘C hands
+    /// over what the terminal has shown rather than the visible window.
+    SelectAll,
+    /// Run a find over the buffer and report where it landed. `Err` carries the
+    /// message for an unparseable regular expression, which is a different
+    /// thing from a query that matched nothing.
+    Find {
+        query: String,
+        opts: SearchOpts,
+        reply: Sender<Result<FindReport, String>>,
+    },
+    /// Move to the next or previous hit, wrapping, and scroll it into view.
+    FindStep {
+        forward: bool,
+        reply: Sender<FindReport>,
+    },
+    /// Drop the query and its highlights.
+    FindClear,
     /// Tear the render thread down.
     Close,
 }
@@ -163,6 +201,37 @@ impl Default for NativeTermManager {
 #[serde(rename_all = "camelCase")]
 struct ClosedEvent {
     term_id: String,
+}
+
+/// Where a find stands, on its way back to the find widget. The engine's own
+/// `FindResult` stays free of serde, so this is its wire shape.
+#[derive(Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FindReport {
+    /// Zero-based position of the current hit; only meaningful when `total`
+    /// is non-zero. The widget renders "index + 1 of total".
+    index: usize,
+    total: usize,
+}
+
+impl From<FindResult> for FindReport {
+    fn from(r: FindResult) -> Self {
+        Self {
+            index: r.index,
+            total: r.total,
+        }
+    }
+}
+
+/// A find's count changed on its own — new output arrived that the live query
+/// matches, or matched lines scrolled out of the buffer. Emitted so the widget
+/// does not have to poll for its own "N of M".
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct FindEvent {
+    term_id: String,
+    index: usize,
+    total: usize,
 }
 
 /// Get-or-create the shared GPU context. Adapter/device requests are async;
@@ -506,8 +575,12 @@ fn render_loop(
     // of it and only an overlay over the pane ever narrows it.
     let mut clip = ClipPx::full(config.width, config.height);
     configure_clipped(&surface, &device, &config, clip);
+    let mut hole = hole::Hole::new(config.width, config.height);
     let mut dirty = true;
     let mut closed = false;
+    // Last find count reported to the frontend, so a change can be pushed
+    // rather than polled.
+    let mut last_find = FindReport::default();
     // Anchor cell of an in-flight mouse selection (set on SelectStart, cleared
     // on SelectClear / a keystroke). The head follows on each SelectUpdate.
     let mut sel_anchor: Option<(u16, u16)> = None;
@@ -530,16 +603,30 @@ fn render_loop(
         };
 
     loop {
-        // Block briefly on PTY output so idle terminals cost ~nothing.
-        match events.recv_timeout(Duration::from_millis(FRAME_MS)) {
-            Ok(PtyEvent::Output(bytes)) => {
-                grid.apply_output(&bytes);
-                dirty = true;
+        // A control message taken while parked, serviced below with the rest.
+        let mut woke: Option<Ctrl> = None;
+        if hole.is_parked() {
+            // Offscreen: nothing to present, so wait on the control channel —
+            // the unpark that shows this pane again is serviced the moment it
+            // lands — and fold queued output in at a relaxed pace below.
+            match ctrl.recv_timeout(Duration::from_millis(PARKED_TICK_MS)) {
+                Ok(msg) => woke = Some(msg),
+                Err(RecvTimeoutError::Timeout) => {}
+                // Nobody can show or close this terminal any more.
+                Err(RecvTimeoutError::Disconnected) => return,
             }
-            Ok(PtyEvent::Marker(_)) => {}
-            Ok(PtyEvent::Closed) => closed = true,
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => closed = true,
+        } else {
+            // Block briefly on PTY output so idle terminals cost ~nothing.
+            match events.recv_timeout(Duration::from_millis(FRAME_MS)) {
+                Ok(PtyEvent::Output(bytes)) => {
+                    grid.apply_output(&bytes);
+                    dirty = true;
+                }
+                Ok(PtyEvent::Marker(_)) => {}
+                Ok(PtyEvent::Closed) => closed = true,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => closed = true,
+            }
         }
         // Drain any backlog without blocking.
         while let Ok(ev) = events.try_recv() {
@@ -554,7 +641,9 @@ fn render_loop(
         }
 
         // Service control messages.
-        while let Ok(msg) = ctrl.try_recv() {
+        let mut next = woke.take().or_else(|| ctrl.try_recv().ok());
+        while let Some(msg) = next.take() {
+            next = ctrl.try_recv().ok();
             match msg {
                 Ctrl::Write(b) => {
                     // A fresh keystroke dismisses any selection, matching how
@@ -566,12 +655,23 @@ fn render_loop(
                     }
                     pty.write(&b);
                 }
-                Ctrl::Resize { px_w, px_h, clip: next } => {
-                    let hole_changed =
-                        config.width != px_w.max(1) || config.height != px_h.max(1);
+                Ctrl::Paste(text) => {
+                    // Same as a keystroke: pasting over a selection drops it.
+                    if grid.has_selection() {
+                        grid.clear_selection();
+                        sel_anchor = None;
+                        dirty = true;
+                    }
+                    pty.write(&paste_bytes(&text, grid.bracketed_paste()));
+                }
+                Ctrl::Resize { px_w, px_h, clip: next_clip } => {
+                    // Measured against the hole the grid was laid out for, which
+                    // a park leaves alone — so a switch back at the same size is
+                    // not a resize.
+                    let hole_changed = hole.place(px_w, px_h);
                     config.width = px_w.max(1);
                     config.height = px_h.max(1);
-                    clip = next;
+                    clip = next_clip;
                     configure_clipped(&surface, &device, &config, clip);
                     // The grid and the shell only hear about a change to the
                     // HOLE. This guard is the difference between a menu click
@@ -587,6 +687,16 @@ fn render_loop(
                         pty.resize(cols, rows, config.width as u16, config.height as u16);
                     }
                     dirty = true;
+                }
+                Ctrl::Park => {
+                    if !hole.is_parked() {
+                        hole.park();
+                        // Give the drawable back: a parked pane shows nothing,
+                        // and a full-size swapchain is the largest thing a
+                        // terminal holds. `config` keeps the hole, so the next
+                        // `Resize` restores it without telling the shell.
+                        configure_clipped(&surface, &device, &config, ClipPx::full(1, 1));
+                    }
                 }
                 Ctrl::Appearance { raster_font_px, palette } => {
                     grid.set_palette(palette);
@@ -675,14 +785,56 @@ fn render_loop(
                     let start = lines.len().saturating_sub(max_lines);
                     let _ = reply.send(lines[start..].join("\n"));
                 }
+                Ctrl::Clear => {
+                    grid.clear_all();
+                    sel_anchor = None;
+                    dirty = true;
+                }
+                Ctrl::SelectAll => {
+                    grid.select_all();
+                    sel_anchor = None;
+                    dirty = true;
+                }
+                Ctrl::Find { query, opts, reply } => {
+                    let _ = reply.send(grid.find(&query, opts).map(FindReport::from));
+                    dirty = true;
+                }
+                Ctrl::FindStep { forward, reply } => {
+                    let _ = reply.send(grid.find_step(forward).into());
+                    dirty = true;
+                }
+                Ctrl::FindClear => {
+                    grid.clear_find();
+                    dirty = true;
+                }
                 Ctrl::Close => return,
             }
+        }
+
+        // A live find's count moves without anyone touching the widget: new
+        // output matches the query, or matched lines scroll out of the
+        // scrollback. Cheap when no find is open — the engine returns early
+        // without a scan — so this can sit on the frame tick.
+        let find_now = FindReport::from(grid.find_status());
+        if find_now != last_find {
+            last_find = find_now;
+            let _ = app.emit(
+                "native-term:find",
+                FindEvent {
+                    term_id: term_id.clone(),
+                    index: find_now.index,
+                    total: find_now.total,
+                },
+            );
+            dirty = true;
         }
 
         if closed {
             break;
         }
-        if !dirty {
+        // Output still lands in the grid while parked; the frame it dirtied is
+        // drawn once, when the pane is shown again.
+        if !dirty || hole.is_parked() {
             continue;
         }
 
@@ -794,11 +946,16 @@ pub fn native_term_set_bounds(
     }
 
     if let Some(t) = manager.terms.lock().unwrap().get(&term_id) {
-        let _ = t.ctrl.send(Ctrl::Resize {
-            px_w,
-            px_h,
-            clip: clip_px,
-        });
+        let msg = if hole::is_park(width, height) {
+            Ctrl::Park
+        } else {
+            Ctrl::Resize {
+                px_w,
+                px_h,
+                clip: clip_px,
+            }
+        };
+        let _ = t.ctrl.send(msg);
     }
     Ok(())
 }
@@ -849,6 +1006,25 @@ pub fn native_term_write(
 ) -> Result<(), String> {
     if let Some(t) = manager.terms.lock().unwrap().get(&term_id) {
         t.ctrl.send(Ctrl::Write(data)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Paste `text` into the terminal's shell.
+///
+/// Separate from [`native_term_write`] because the frontend holds text, not
+/// bytes, and the encoding depends on a terminal mode only the render thread
+/// can read. Keeping that decision here also means there is one place that
+/// decides what a paste is, instead of each caller assembling an envelope and
+/// drifting; see [`paste::paste_bytes`].
+#[tauri::command]
+pub fn native_term_paste(
+    manager: State<'_, NativeTermManager>,
+    term_id: String,
+    text: String,
+) -> Result<(), String> {
+    if let Some(t) = manager.terms.lock().unwrap().get(&term_id) {
+        t.ctrl.send(Ctrl::Paste(text)).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -924,6 +1100,108 @@ pub fn native_term_copy(
     // keeps a dead thread from hanging the command.
     rx.recv_timeout(Duration::from_millis(500))
         .map_err(|_| "copy timed out".to_string())
+}
+
+/// Clear the screen and the scrollback.
+///
+/// The toolbar and ⌘K reach this. It goes through the render thread like copy
+/// does, because the grid lives there; nothing is written to the child, so a
+/// command running in the pane is not sent a stray byte.
+#[tauri::command]
+pub fn native_term_clear(
+    manager: State<'_, NativeTermManager>,
+    term_id: String,
+) -> Result<(), String> {
+    send_ctrl(&manager, &term_id, Ctrl::Clear)
+}
+
+/// Select the whole transcript — the scrollback as well as the window.
+#[tauri::command]
+pub fn native_term_select_all(
+    manager: State<'_, NativeTermManager>,
+    term_id: String,
+) -> Result<(), String> {
+    send_ctrl(&manager, &term_id, Ctrl::SelectAll)
+}
+
+/// Run a find over the buffer, highlight the hits and scroll the first one at
+/// or after the viewport into view.
+///
+/// Returns the index of that hit and the total count, which is what the widget
+/// shows. An unparseable regular expression comes back as `Err` with its
+/// message: a query that cannot be compiled is not the same as a query that
+/// matched nothing, and the widget says so differently.
+#[tauri::command]
+pub fn native_term_find(
+    manager: State<'_, NativeTermManager>,
+    term_id: String,
+    query: String,
+    case_sensitive: Option<bool>,
+    whole_word: Option<bool>,
+    regex: Option<bool>,
+) -> Result<FindReport, String> {
+    let ctrl = match manager.terms.lock().unwrap().get(&term_id) {
+        Some(t) => t.ctrl.clone(),
+        None => return Ok(FindReport::default()),
+    };
+    let opts = SearchOpts {
+        case_sensitive: case_sensitive.unwrap_or(false),
+        whole_word: whole_word.unwrap_or(false),
+        regex: regex.unwrap_or(false),
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<Result<FindReport, String>>();
+    ctrl.send(Ctrl::Find {
+        query,
+        opts,
+        reply: tx,
+    })
+    .map_err(|e| e.to_string())?;
+    rx.recv_timeout(Duration::from_millis(1000))
+        .map_err(|_| "find timed out".to_string())?
+}
+
+/// Step to the next (`forward`) or previous hit, wrapping at either end.
+#[tauri::command]
+pub fn native_term_find_step(
+    manager: State<'_, NativeTermManager>,
+    term_id: String,
+    forward: bool,
+) -> Result<FindReport, String> {
+    let ctrl = match manager.terms.lock().unwrap().get(&term_id) {
+        Some(t) => t.ctrl.clone(),
+        None => return Ok(FindReport::default()),
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<FindReport>();
+    ctrl.send(Ctrl::FindStep { forward, reply: tx })
+        .map_err(|e| e.to_string())?;
+    rx.recv_timeout(Duration::from_millis(1000))
+        .map_err(|_| "find timed out".to_string())
+}
+
+/// Drop the query and its highlights — the find widget closing.
+#[tauri::command]
+pub fn native_term_find_clear(
+    manager: State<'_, NativeTermManager>,
+    term_id: String,
+) -> Result<(), String> {
+    send_ctrl(&manager, &term_id, Ctrl::FindClear)
+}
+
+/// Send one fire-and-forget control message to a terminal's render thread.
+///
+/// A terminal that is not in the map is not an error: the frontend drops a
+/// pane and tears the terminal down in whichever order the events land, so a
+/// late keystroke for a dead pane is nothing to report.
+fn send_ctrl(
+    manager: &State<'_, NativeTermManager>,
+    term_id: &str,
+    msg: Ctrl,
+) -> Result<(), String> {
+    let ctrl = match manager.terms.lock().unwrap().get(term_id) {
+        Some(t) => t.ctrl.clone(),
+        None => return Ok(()),
+    };
+    ctrl.send(msg).map_err(|e| e.to_string())
 }
 
 /// Return recent visible terminal text for the Manager's `@terminal` context

@@ -19,7 +19,6 @@
 //! with a leading glyph; everything else stays a quiet bordered code chip.
 
 import * as React from "react";
-import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -28,9 +27,12 @@ import { remarkCallouts } from "../../markdown/remarkCallouts";
 import { calloutFromBlockquote } from "../../markdown/Callout";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { openFileImperative } from "../../../lib/editorStore";
+import { looksLikeBranchName } from "../../../lib/branchName";
 import { resolveAgainstRepo, useChatRepoRoot } from "./context";
+import { CodeMessage, MessageMarkdown } from "../../ui/transcript-content";
+import "../../ui/chat-markdown.css";
 import { Code } from "../../ui/code";
-import { CopyButton } from "../../ui/copyButton";
+import { MermaidBlock } from "../../ui/mermaid-block";
 
 // Open an external URL in the system browser. A plain `<a target="_blank">`
 // does NOTHING inside the Tauri WKWebView (no window.open handler), so every
@@ -90,14 +92,28 @@ export function linkifyString(text: string): React.ReactNode[] {
 
 // Shared base style for the linkify chips so Wave/Plan/Commit/File/URL
 // read as one quiet family: a hairline-bordered token chip in mono.
+// The inline chip, at the measured sizes.
+//
+// Its chips are TRANSPARENT with one hairline — the fill is what made three of
+// ours in a row read as three buttons. The hairline is 1.85:1 against the
+// pane, where `--color-line` is 1.26:1, which is under the point where a 1px
+// line reads as an edge at all: the chips were there and you could not see
+// them. `--chat-chip-line` is the mix that lands on 1.85 while staying a
+// derivative of Aura's own ramp.
+//
+// Measured off an inline `living-mesh-moe` span: box 21.5pt tall, ink 9pt in
+// from the inner edge of the border, 5pt radius, and the BODY ink: inline
+// code is not dimmed, it is framed. Outside `.aura-chat` the fallbacks
+// keep the old chrome-scale chip, because those surfaces are not the
+// transcript.
 const CHIP_BASE: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: "12px",
   lineHeight: 1.4,
-  borderRadius: "var(--radius-sm)",
-  border: "1px solid var(--color-line)",
-  background: "var(--color-bg-2)",
-  padding: "0 5px",
+  borderRadius: "var(--chat-code-radius, var(--radius-sm))",
+  border: "1px solid var(--chat-chip-line, var(--color-line))",
+  background: "transparent",
+  padding: "1px var(--chat-chip-pad-x, 5px)",
   margin: "0 1px",
   cursor: "pointer",
 };
@@ -269,14 +285,18 @@ export function splitLineSuffix(text: string): {
   };
 }
 
-// Detects an inline code chip that names a path the user can open.
-// Two patterns count:
+// Detects an inline code chip that names a path the user can open, or a
+// branch. Three patterns count:
 //   - Contains a path separator (`/` or `\`) → folder or nested file.
 //   - Starts with a bare filename that has a whitelisted extension.
+//   - Slash-separated like a folder but named like a branch
+//     (`feat/cloud-parity`, `origin/main`) → branch.
 // A trailing `:line(:col)` location is tolerated (`featureFlags.ts:56`).
 // Whitespace and command-like strings (anything with spaces) are
 // rejected so prose like `cargo build --release` stays a plain chip.
-export function inlineCodeKind(text: string): "file" | "folder" | null {
+export type InlineCodeKind = "file" | "folder" | "branch";
+
+export function inlineCodeKind(text: string): InlineCodeKind | null {
   const t0 = text.trim();
   if (!t0 || /\s/.test(t0)) return null;
   const { base: t } = splitLineSuffix(t0);
@@ -296,6 +316,8 @@ export function inlineCodeKind(text: string): "file" | "folder" | null {
     const ext = stripped.slice(lastDot + 1).toLowerCase();
     if (PATH_EXT_WHITELIST.has(ext)) return "file";
   }
+  // A branch is slash-separated too; its naming is what tells it apart.
+  if (looksLikeBranchName(stripped)) return "branch";
   // Path-shaped string with no extension (folder-ish, e.g. `src/components`).
   if (hasSep) return "folder";
   return null;
@@ -310,11 +332,27 @@ export function isUrlLike(text: string): boolean {
   if (!t || /\s/.test(t)) return false;
   if (t.length > 2048) return false;
   if (/^(https?:\/\/|mailto:|ftp:\/\/|file:\/\/|tel:)/i.test(t)) return true;
-  // Protocol-less hostnames: at least one dot, looks like a domain.
-  // www.example.com, example.com/foo
-  if (/^(www\.|[a-z0-9][a-z0-9-]*\.)([a-z]{2,})(\/.*)?$/i.test(t)) return true;
-  return false;
+  // Protocol-less hostnames: `www.` anything, or a name ending in a web
+  // domain ending (example.com, docs.example.dev/foo). Any word.word is too
+  // loose: code like `Promise.all`, `console.log` or `api.tasksCreate` would
+  // turn into a link to https://Promise.all.
+  if (/^www\.[a-z0-9-]+(\.[a-z0-9-]+)+(\/.*)?$/i.test(t)) return true;
+  const host = /^((?:[a-z0-9][a-z0-9-]*\.)+)([a-z]{2,})(\/.*)?$/i.exec(t);
+  if (host === null) return false;
+  const ending = host[2]!.toLowerCase();
+  // `deploy.sh` is a script before it is a site: a file extension wins.
+  if (!host[3] && PATH_EXT_WHITELIST.has(ending)) return false;
+  return WEB_DOMAIN_ENDINGS.has(ending);
 }
+
+// Domain endings that, on a bare name, read as a web address and not as a
+// property on a code value. Two-letter country endings are left out on
+// purpose (`Object.is`, `Array.at`), except the few that are common in links.
+const WEB_DOMAIN_ENDINGS = new Set([
+  "com", "org", "net", "edu", "gov", "info", "biz",
+  "io", "ai", "co", "dev", "app", "sh", "so", "gg", "me", "xyz", "tech", "cloud",
+  "uk", "de", "in", "fr", "jp", "ca", "au", "nl", "eu",
+]);
 
 export function ensureUrlScheme(url: string): string {
   if (/^[a-z][a-z0-9+.-]*:/i.test(url)) return url;
@@ -376,17 +414,17 @@ export function ClickableCodeChip({
   kind,
 }: {
   text: string;
-  kind: "file" | "folder";
+  kind: InlineCodeKind;
 }) {
   const repoRoot = useChatRepoRoot();
   const { base, line } = splitLineSuffix(text);
   const onClick = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (kind === "folder") {
-      // Folders aren't openable in the editor — surface as a tooltip-only
-      // chip for now. (A future change can route to the FileTree, but
-      // there's no current command for "reveal in tree".)
+    if (kind !== "file") {
+      // Folders and branches aren't openable in the editor — surface as a
+      // tooltip-only chip for now. (A future change can route to the
+      // FileTree, but there's no current command for "reveal in tree".)
       return;
     }
     openFileAtLine(resolveAgainstRepo(repoRoot, base), line);
@@ -401,8 +439,7 @@ export function ClickableCodeChip({
       style={{
         ...CHIP_BASE,
         // Calm at rest — a path reads as a quiet code chip, not a green wall
-        // of links the way the reference keeps inline paths neutral until you
-        // reach for them. The accent (green in chat) is held back for :hover
+        // of links: inline paths stay neutral until you reach for them. The accent (green in chat) is held back for :hover
         // (see .aura-md-file-chip in styles.css), where it signals "clickable".
         color: "var(--color-text-2)",
         cursor: kind === "file" ? "pointer" : "default",
@@ -416,11 +453,13 @@ export function ClickableCodeChip({
           ? line
             ? `Open ${base} at line ${line}`
             : `Open ${base}`
-          : text
+          : kind === "branch"
+            ? `Branch ${text}`
+            : text
       }
     >
       <svg width="11" height="11" aria-hidden="true" style={{ flexShrink: 0 }}>
-        <use href={kind === "file" ? "#i-file" : "#i-folder"} />
+        <use href={kind === "file" ? "#i-file" : kind === "branch" ? "#i-branch" : "#i-folder"} />
       </svg>
       <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>{text}</span>
     </button>
@@ -495,66 +534,42 @@ export function SymbolChip({ text, query }: { text: string; query: string }) {
         if (e.key === "Enter" || e.key === " ") onActivate(e);
       }}
       className="aura-md-symbol cursor-pointer"
-      title={`Find “${query}” in this project`}
+      title={`Find “${query}” in this repository`}
     >
       {text}
     </Code>
   );
 }
 
-// Shared token surface for fenced code blocks: a quiet raised slab on
-// --color-bg-2 ruled with a --color-line hairline. (Inline chips now render
-// through the `Code` primitive, which bakes the same surface in.)
-const CODE_SURFACE: React.CSSProperties = {
-  background: "var(--color-bg-2)",
-  border: "1px solid var(--color-line)",
-  borderRadius: "var(--radius-sm)",
-};
-
-// Pull the plain source text out of a react-markdown code node (usually a
-// single <code> whose child is the string) so the copy button has something
-// to write. Recurses to be safe against nested highlighter spans.
-function nodeText(node: React.ReactNode): string {
-  if (node == null || typeof node === "boolean") return "";
-  if (typeof node === "string") return node;
-  if (typeof node === "number") return String(node);
-  if (Array.isArray(node)) return node.map(nodeText).join("");
-  if (React.isValidElement(node)) {
-    return nodeText((node.props as { children?: React.ReactNode }).children);
-  }
-  return "";
+// A fenced code block: the shared code frame, its header naming the
+// language the fence declared (or "Code") beside a copy button.
+function fenceLanguage(children: React.ReactNode): string | undefined {
+  const child = React.Children.toArray(children)[0];
+  if (!React.isValidElement(child)) return undefined;
+  const className = (child.props as { className?: string }).className ?? "";
+  return /language-([\w-]+)/.exec(className)?.[1];
 }
 
-// A fenced code block with a hover-revealed copy button in the top-right
-// corner (Medusa's code-block affordance). The `<pre>` keeps the quiet
-// slab; the copy chip floats over it and only appears on hover/focus so it
-// never competes with the code at rest.
+// The text inside a fence, as written (without the newline that ends it).
+function fenceText(children: React.ReactNode): string {
+  const child = React.Children.toArray(children)[0];
+  if (!React.isValidElement(child)) return "";
+  const inner = (child.props as { children?: React.ReactNode }).children;
+  return React.Children.toArray(inner)
+    .filter((c): c is string => typeof c === "string")
+    .join("")
+    .replace(/\n$/, "");
+}
+
+// A ```mermaid fence is drawn as its diagram, which can be opened full size.
 function CodeBlock({ children }: { children: React.ReactNode }) {
-  const text = React.useMemo(
-    () => nodeText(children).replace(/\n+$/, ""),
-    [children],
-  );
-  return (
-    <div className="group relative my-2">
-      {text && (
-        <CopyButton
-          content={text}
-          variant="mini"
-          className="absolute right-1.5 top-1.5 z-10 rounded-md bg-bg-1 p-1 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-        />
-      )}
-      <pre
-        className="overflow-x-auto p-2.5 font-mono text-sm leading-relaxed"
-        style={{ ...CODE_SURFACE, color: "var(--color-text-1)" }}
-      >
-        {children}
-      </pre>
-    </div>
-  );
+  const language = fenceLanguage(children);
+  if (language === "mermaid") return <MermaidBlock content={fenceText(children)} />;
+  return <CodeMessage language={language}>{children}</CodeMessage>;
 }
 
 // Hoisted out of the render so the plugin array and the component map keep a
-// stable identity across renders — that's what lets `MarkdownChunk` memoize on
+// stable identity across renders — that's what lets `MessageMarkdown` keep its settled run memoized on
 // its source string alone. Rebuilding the map inline (as this did) meant
 // react-markdown re-ran its whole pipeline on every parent re-render even when
 // the text hadn't changed by a single character.
@@ -562,11 +577,10 @@ const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkCallouts];
 const REHYPE_PLUGINS = [rehypeKatex];
 
 const MD_COMPONENTS: Components = {
-  p: ({ children }) => (
-    <p className="m-0 mb-[9px] first:mt-0 last:mb-0">
-      {applyLinkify(children)}
-    </p>
-  ),
+  // Rhythm, list markers, headings, quotes and tables are the shared message
+  // typography (`.ui-message-markdown`). What stays here is behavior: links
+  // open outside the app, and bare paths and URLs in prose become chips.
+  p: ({ children }) => <p>{applyLinkify(children)}</p>,
   a: ({ href, children }) => (
     <a
       href={href}
@@ -577,77 +591,13 @@ const MD_COMPONENTS: Components = {
         e.stopPropagation();
         if (href) openExternalUrl(ensureUrlScheme(href));
       }}
-      className="underline decoration-dotted underline-offset-2"
-      style={{ color: "var(--color-accent)", cursor: "pointer" }}
     >
       {children}
     </a>
   ),
-  ul: ({ children }) => (
-    <ul className="mt-1.5 mb-[9px] ml-[16px] list-disc last:mb-0 space-y-[3px] marker:text-[var(--color-text-4)]">
-      {children}
-    </ul>
-  ),
-  ol: ({ children }) => (
-    <ol className="mt-1.5 mb-[9px] ml-[16px] list-decimal last:mb-0 space-y-[3px] marker:text-[var(--color-text-4)]">
-      {children}
-    </ol>
-  ),
-  li: ({ children }) => (
-    <li className="pl-0.5" style={{ lineHeight: 1.5 }}>
-      {applyLinkify(children)}
-    </li>
-  ),
-  h1: ({ children }) => (
-    <h1
-      className="text-lg font-[650] mt-4 mb-1.5 first:mt-0"
-      style={{ color: "var(--color-text-1)", lineHeight: 1.3, letterSpacing: "-0.01em" }}
-    >
-      {children}
-    </h1>
-  ),
-  h2: ({ children }) => (
-    <h2
-      className="text-md font-[650] mt-3.5 mb-1 first:mt-0"
-      style={{ color: "var(--color-text-1)", lineHeight: 1.32, letterSpacing: "-0.006em" }}
-    >
-      {children}
-    </h2>
-  ),
-  h3: ({ children }) => (
-    <h3
-      className="text-base font-semibold mt-3 mb-0.5 first:mt-0"
-      style={{ color: "var(--color-text-1)", lineHeight: 1.35 }}
-    >
-      {children}
-    </h3>
-  ),
-  h4: ({ children }) => (
-    <h4
-      className="section-label mt-3 mb-1 first:mt-0"
-      style={{ color: "var(--color-text-3)", letterSpacing: "0.04em" }}
-    >
-      {children}
-    </h4>
-  ),
+  li: ({ children }) => <li>{applyLinkify(children)}</li>,
   blockquote: ({ children, className }) =>
-    calloutFromBlockquote(className, children) ?? (
-      <blockquote
-        className="my-3 pl-3.5 italic"
-        style={{
-          borderLeft: "2px solid var(--color-accent)",
-          color: "var(--color-text-2)",
-        }}
-      >
-        {children}
-      </blockquote>
-    ),
-  hr: () => (
-    <hr
-      className="my-4 border-0"
-      style={{ borderTop: "1px solid var(--color-line)" }}
-    />
-  ),
+    calloutFromBlockquote(className, children) ?? <blockquote>{children}</blockquote>,
   code: ({ className, children, ...rest }: any) => {
     // react-markdown v10 no longer passes the `inline` flag, so we
     // detect block-vs-inline ourselves (otherwise EVERY inline code
@@ -665,11 +615,7 @@ const MD_COMPONENTS: Components = {
       /language-/.test(className ?? "") || (raw != null && /\n/.test(raw));
     if (isBlock) {
       return (
-        <code
-          className={`font-mono text-sm ${className ?? ""}`}
-          style={{ color: "var(--color-text-1)" }}
-          {...rest}
-        >
+        <code className={className} {...rest}>
           {children}
         </code>
       );
@@ -694,50 +640,16 @@ const MD_COMPONENTS: Components = {
     if (raw && symQuery) {
       return <SymbolChip text={raw} query={symQuery} />;
     }
-    // Everything else (flags, commands, identifiers we can't route) —
-    // the quiet bordered token from the `Code` primitive.
-    return <Code {...rest}>{children}</Code>;
+    // Everything else (flags, commands, identifiers we can't route) is the
+    // message typography's own inline code token.
+    return <code {...rest}>{children}</code>;
   },
   pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
   table: ({ children }) => (
-    <div className="my-2 overflow-x-auto">
-      <table
-        className="text-sm border-collapse"
-        style={{ border: "1px solid var(--color-line)" }}
-      >
-        {children}
-      </table>
+    <div className="ui-markdown-table">
+      <table>{children}</table>
     </div>
   ),
-  th: ({ children }) => (
-    <th
-      className="px-2 py-1 text-left font-semibold"
-      style={{
-        background: "var(--color-bg-2)",
-        border: "1px solid var(--color-line)",
-        color: "var(--color-text-1)",
-      }}
-    >
-      {children}
-    </th>
-  ),
-  td: ({ children }) => (
-    <td
-      className="px-2 py-1 align-top"
-      style={{
-        border: "1px solid var(--color-line)",
-        color: "var(--color-text-2)",
-      }}
-    >
-      {children}
-    </td>
-  ),
-  strong: ({ children }) => (
-    <strong className="font-semibold" style={{ color: "var(--color-text-1)" }}>
-      {children}
-    </strong>
-  ),
-  em: ({ children }) => <em className="italic">{children}</em>,
 };
 
 /** One parsed run of markdown. `React.memo` on the source string is the whole
@@ -746,22 +658,6 @@ const MD_COMPONENTS: Components = {
  *  re-parsed. react-markdown renders into a Fragment (no wrapper element), so
  *  two chunks inside one `.aura-md` produce exactly the same DOM children — and
  *  therefore the same `first:`/`last:` margin collapse — as one chunk would. */
-const MarkdownChunk = React.memo(function MarkdownChunk({
-  source,
-}: {
-  source: string;
-}) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={REMARK_PLUGINS}
-      rehypePlugins={REHYPE_PLUGINS}
-      components={MD_COMPONENTS}
-    >
-      {source}
-    </ReactMarkdown>
-  );
-});
-
 // ─── Incremental parse split ──────────────────────────────────────────
 //
 // A streaming reply hands this component a source string that grows a couple
@@ -1000,32 +896,16 @@ export function MarkdownBody({
     prevRef.current = cleaned;
   });
   const split = streaming || liveRef.current ? settledSplitIndex(cleaned) : -1;
-  const head = split > 0 ? cleaned.slice(0, split) : cleaned;
-  const tail = split > 0 ? cleaned.slice(split) : "";
   return (
-    <div
-      className="aura-md"
-      style={{
-        fontFamily: "var(--font-sans)",
-        fontSize: "13px",
-        lineHeight: 1.55,
-        letterSpacing: "0.003em",
-        color: "var(--color-text-1)",
-        overflowWrap: "anywhere",
-        wordBreak: "normal",
-        minWidth: 0,
-        WebkitFontSmoothing: "antialiased",
-        textRendering: "optimizeLegibility",
-      }}
+    <MessageMarkdown
+      content={cleaned}
+      settledAt={split}
+      components={MD_COMPONENTS}
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
+      skipHtml={false}
     >
-      <MarkdownChunk source={head} />
-      {tail ? <MarkdownChunk source={tail} /> : null}
-      {trailingCursor && (
-        <span
-          className="inline-block w-1.5 h-3 ml-0.5 align-text-bottom animate-pulse"
-          style={{ background: "color-mix(in srgb, var(--color-text-2) 60%, transparent)" }}
-        />
-      )}
-    </div>
+      {trailingCursor && <span className="ui-markdown-cursor" aria-hidden />}
+    </MessageMarkdown>
   );
 }

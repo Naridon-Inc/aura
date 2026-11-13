@@ -6,12 +6,12 @@
 // back, not even masked. The bottom half is the project's declared toolchain,
 // checked and installed on the chosen machine in place.
 //
-// A KEY=VALUE paste box is the fast way in for someone holding a `.env` file:
-// each line becomes one kept secret. That is what "environment" means to the
-// person typing, and it is honest about where those lines go.
+// Pasting KEY=VALUE lines into the add dialog's name field is the fast way in
+// for someone holding a `.env` file: each line becomes one kept secret. That
+// is what "environment" means to the person typing, and it is honest about
+// where those lines go.
 
 import { useCallback, useEffect, useState } from "react";
-import { Plus } from "lucide-react";
 import type { Place } from "../../lib/place/contract";
 import {
   forgetSecret,
@@ -19,42 +19,19 @@ import {
   listSecrets,
   type SecretRef,
 } from "../../lib/place/secrets";
-import { AsciiSpinner } from "../ui/ascii-spinner";
 import { askConfirm } from "../ui/ask";
-import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Textarea } from "../ui/textarea";
-import { ErrorNote, LoadingState } from "../ui/state";
-import { Field, PaneIntro, Row, Section } from "./kit";
+import {
+  SettingsEnvironmentDialog,
+  SettingsEnvironmentSecrets,
+  type EnvironmentEntry,
+} from "../ui/settings-environment-secrets";
+import { SettingsRow } from "../ui/settings-row";
 import { PlaceEnvSpecSection } from "./PlaceEnvSpecSection";
 import { PlacePicker, useProjectPlaces } from "./PlacePicker";
 import { PlaceSecretRow } from "./PlaceSecretRow";
 
-/** `KEY=VALUE` lines → pairs. Blank lines and `#` comments are skipped, an
- *  optional leading `export ` is dropped, and one layer of matching quotes
- *  around the value comes off — the three things a real `.env` has in it. */
-export function parseEnvLines(text: string): Array<{ name: string; value: string }> {
-  const out: Array<{ name: string; value: string }> = [];
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const body = line.startsWith("export ") ? line.slice(7).trim() : line;
-    const eq = body.indexOf("=");
-    if (eq <= 0) continue;
-    const name = body.slice(0, eq).trim();
-    let value = body.slice(eq + 1).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
-    if (
-      value.length >= 2 &&
-      ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'")))
-    ) {
-      value = value.slice(1, -1);
-    }
-    out.push({ name, value });
-  }
-  return out;
-}
+export { parseEnvLines } from "../ui/settings-environment-secrets";
 
 export function PlaceEnvPane({ repoRoot }: { repoRoot: string }) {
   const places = useProjectPlaces(repoRoot);
@@ -71,15 +48,9 @@ export function PlaceEnvPane({ repoRoot }: { repoRoot: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyName, setBusyName] = useState<string | null>(null);
-
-  const [name, setName] = useState("");
-  const [value, setValue] = useState("");
+  // undefined = dialog closed, null = adding, a name = replacing that one.
+  const [target, setTarget] = useState<string | null | undefined>(undefined);
   const [gitHost, setGitHost] = useState("");
-  const [adding, setAdding] = useState(false);
-
-  const [bulk, setBulk] = useState("");
-  const [bulkBusy, setBulkBusy] = useState(false);
-  const [bulkNote, setBulkNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -97,44 +68,33 @@ export function PlaceEnvPane({ repoRoot }: { repoRoot: string }) {
     void load();
   }, [load]);
 
-  const add = async () => {
-    const n = name.trim();
-    if (!n || !value) return;
-    setAdding(true);
-    setError(null);
-    try {
-      const host = gitHost.trim();
-      setSecrets(await keepSecret(repoRoot, n, value, host ? { gitHost: host } : undefined));
-      setName("");
-      setValue("");
-      setGitHost("");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setAdding(false);
-    }
+  const open = (name: string | null) => {
+    // A replaced Git token keeps pushing to the host it was kept for unless
+    // the person says otherwise.
+    setGitHost(name ? (secrets.find((s) => s.name === name)?.git_host ?? "") : "");
+    setTarget(name);
   };
 
-  const addMany = async () => {
-    const pairs = parseEnvLines(bulk);
-    if (pairs.length === 0) {
-      setBulkNote("Nothing to add — lines need to look like NAME=value.");
-      return;
-    }
-    setBulkBusy(true);
-    setBulkNote(null);
-    setError(null);
+  /** Keep what the dialog collected. One name may carry a Git host; a pasted
+   *  block is plain variables. A failure part-way reloads the list, so the
+   *  rows show what was actually kept before the dialog reports the error. */
+  const keep = async (entries: EnvironmentEntry[]) => {
+    const host = entries.length === 1 ? gitHost.trim() : "";
+    let last: SecretRef[] = secrets;
     try {
-      let last: SecretRef[] = secrets;
-      for (const p of pairs) last = await keepSecret(repoRoot, p.name, p.value);
+      for (const entry of entries) {
+        last = await keepSecret(
+          repoRoot,
+          entry.name,
+          entry.value,
+          host ? { gitHost: host } : undefined,
+        );
+      }
       setSecrets(last);
-      setBulk("");
-      setBulkNote(pairs.length === 1 ? "Kept 1 secret." : `Kept ${pairs.length} secrets.`);
+      setError(null);
     } catch (e) {
-      setError(String(e));
       void load();
-    } finally {
-      setBulkBusy(false);
+      throw e;
     }
   };
 
@@ -157,98 +117,62 @@ export function PlaceEnvPane({ repoRoot }: { repoRoot: string }) {
     }
   };
 
-  const exists = secrets.some((s) => s.name === name.trim());
-
   return (
-    <div>
-      <PaneIntro text="Secrets your agents can use on this machine — API keys and tokens, kept on this laptop and handed to the work when it starts. Nothing here is ever shown back or sent to a model. Below that, the tools the project says a machine needs." />
-
-      <Row
-        label="Machine"
-        description="Secrets are kept once for the project and reach whichever machine the work runs on. The tools list below is checked per machine."
-      >
-        <PlacePicker places={places} value={place} onChange={setPlace} />
-      </Row>
-
-      <Section title="Secrets">
-        {error && <ErrorNote className="mb-3">{error}</ErrorNote>}
-        {loading ? (
-          <LoadingState label="Reading the vault…" />
-        ) : secrets.length === 0 ? (
-          <p className="py-2 text-[13px] text-text-3">
-            Nothing kept for this project yet. Add one below, or paste a whole set at once.
-          </p>
-        ) : (
-          <div>
-            {secrets.map((s) => (
-              <PlaceSecretRow
-                key={s.name}
-                secret={s}
-                busy={busyName === s.name}
-                onForget={() => void forget(s)}
+    <>
+      <SettingsEnvironmentSecrets
+        description="Configure environment variables passed to agents. Values stay on this laptop and are never shown back."
+        count={secrets.length}
+        loading={loading}
+        loadingLabel="Reading your variables…"
+        error={error}
+        onAdd={() => open(null)}
+        after={
+          <PlaceEnvSpecSection
+            place={place}
+            picker={
+              <SettingsRow
+                title="Machine"
+                description="Variables reach whichever machine the work runs on. The tools below are checked per machine."
+                control={<PlacePicker places={places} value={place} onChange={setPlace} />}
               />
-            ))}
-          </div>
-        )}
-      </Section>
-
-      <Section title="Add or replace one">
-        <Field label="Name" hint="The variable it arrives as, e.g. OPENAI_API_KEY. Using a name that is already kept replaces its value.">
-          <Input
-            value={name}
-            onChange={(e) => setName(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_"))}
-            placeholder="OPENAI_API_KEY"
-            spellCheck={false}
-            className="font-mono"
+            }
           />
-        </Field>
-        <Field label="Value" hint="Kept on this laptop only. You will not be able to read it back from here.">
-          <Input
-            type="password"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="paste the secret"
-            autoComplete="off"
-            spellCheck={false}
+        }
+      >
+        {secrets.map((s) => (
+          <PlaceSecretRow
+            key={s.name}
+            secret={s}
+            busy={busyName === s.name}
+            onReplace={() => open(s.name)}
+            onForget={() => void forget(s)}
           />
-        </Field>
-        <Field label="Pushes to (optional)" hint="Fill this in for a Git token, so pushes to that host go out under your name: github.com, gitlab.com, or your own host.">
-          <Input
-            value={gitHost}
-            onChange={(e) => setGitHost(e.target.value)}
-            placeholder="github.com"
-            spellCheck={false}
-          />
-        </Field>
-        <div className="flex items-center gap-2 py-2">
-          <Button size="sm" onClick={() => void add()} disabled={adding || !name.trim() || !value}>
-            {adding ? <AsciiSpinner /> : <Plus />}
-            {exists ? "Replace" : "Keep secret"}
-          </Button>
-        </div>
-      </Section>
-
-      <Section title="Add several at once">
-        <Field label="Lines" hint="One per line, like a .env file: NAME=value. Comments and blank lines are ignored. Each line becomes one kept secret.">
-          <Textarea
-            value={bulk}
-            onChange={(e) => setBulk(e.target.value)}
-            rows={5}
-            placeholder={"ANTHROPIC_API_KEY=sk-…\nDATABASE_URL=postgres://…"}
-            spellCheck={false}
-            className="font-mono text-xs"
-          />
-        </Field>
-        <div className="flex items-center gap-3 py-2">
-          <Button size="sm" variant="secondary" onClick={() => void addMany()} disabled={bulkBusy || !bulk.trim()}>
-            {bulkBusy ? <AsciiSpinner /> : <Plus />}
-            Keep all
-          </Button>
-          {bulkNote && <span className="text-xs text-text-3">{bulkNote}</span>}
-        </div>
-      </Section>
-
-      <PlaceEnvSpecSection place={place} />
-    </div>
+        ))}
+      </SettingsEnvironmentSecrets>
+      <SettingsEnvironmentDialog
+        target={target}
+        existing={secrets.map((s) => s.name)}
+        onClose={() => setTarget(undefined)}
+        onSave={keep}
+        extra={(block) =>
+          block ? null : (
+            <label className="ui-form-field">
+              Pushes to (optional)
+              <Input
+                aria-label="Pushes to"
+                value={gitHost}
+                onChange={(e) => setGitHost(e.target.value)}
+                placeholder="github.com"
+                spellCheck={false}
+              />
+              <span className="ui-settings-help">
+                For a Git token, so pushes to that host go out under your name: github.com,
+                gitlab.com, or your own host.
+              </span>
+            </label>
+          )
+        }
+      />
+    </>
   );
 }

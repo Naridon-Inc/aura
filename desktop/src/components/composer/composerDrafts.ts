@@ -27,6 +27,11 @@ export const MANAGER_DRAFT_PREFIX = "aura.manager.draft:";
 export const AGENT_DRAFT_PREFIX = "aura.agentchat.draft:";
 /** Window event fired after every draft write; `detail` is the storage key. */
 export const DRAFT_CHANGED_EVENT = "aura:draft-changed";
+/** Prefix the Aura chat composer files its up-arrow recall ring under. Public
+ *  for the places that send a conversation a message without going through
+ *  that composer — the workspace home's first prompt, a starter — which used
+ *  to leave the ring empty, so up-arrow in the chat they opened found nothing. */
+export const MANAGER_HISTORY_PREFIX = "aura.manager.history:";
 
 export function readDraft(key: string): string {
   try {
@@ -83,4 +88,10 @@ export function pushHistory(ring: string[], message: string): string[] {
   if (ring.length > 0 && ring[ring.length - 1] === message) return ring;
   const next = [...ring, message];
   return next.length > HISTORY_CAP ? next.slice(next.length - HISTORY_CAP) : next;
+}
+
+/** Add one sent message to the ring stored under `key` — for a message that
+ *  reached a conversation without its composer seeing it. */
+export function rememberSent(key: string, message: string): void {
+  writeHistory(key, pushHistory(readHistory(key), message));
 }

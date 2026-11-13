@@ -23,7 +23,7 @@ export type FeatureMapData = {
 };
 
 export const EMPTY_AFTER_BUILD =
-  "The map came back empty even after a build — try Rebuild, or check that this folder is a project.";
+  "The map came back empty even after a build — try Rebuild, or check that this folder is a repository.";
 
 export function useFeatureMap(
   repoRoot: string,

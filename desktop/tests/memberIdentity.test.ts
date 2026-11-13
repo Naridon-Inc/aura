@@ -47,8 +47,8 @@ describe("a member row with no address says so in words", () => {
   });
 
   test("the roster and its merge candidates both go through the helper", async () => {
-    const src = await readSrc("components/settings/TeamTab.tsx");
-    expect(src).toContain('from "../../lib/memberIdentity"');
+    const src = await readSrc("components/settings/team/MemberRow.tsx");
+    expect(src).toContain('from "../../../lib/memberIdentity"');
     // Two places a member's identity is rendered: the roster row and the merge
     // candidates under it. A third used to sit in the channel member list,
     // which left with the messaging surface.

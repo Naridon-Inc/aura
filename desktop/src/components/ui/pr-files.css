@@ -1,0 +1,163 @@
+/* The pull request's Files tab: the file list, the bar over a file's patch,
+   and the lane review threads float in. The tree, tabs and aside are the
+   shared parts; this is only how they sit together. */
+
+.ui-pr-files-tab {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── the file list ─────────────────────────────────────────────────── */
+
+.ui-pr-files {
+  display: flex;
+  flex-direction: column;
+  width: 280px;
+  flex-shrink: 0;
+  min-height: 0;
+  border-right: 1px solid var(--ui-border);
+}
+.ui-pr-files-bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 6px 0 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-pr-files-count {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ui-pr-files-viewed {
+  color: var(--ui-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ui-pr-files-spacer {
+  flex: 1;
+}
+.ui-pr-files-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px;
+}
+.ui-pr-files-empty {
+  margin: 0;
+  padding: 16px 12px;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-pr-files .ui-file-tree-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+.ui-pr-files-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-pr-files .ui-file-tree-row[data-viewed] .ui-pr-files-name {
+  color: var(--ui-faint);
+}
+.ui-pr-files-check {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+
+/* ── one file's patch ──────────────────────────────────────────────── */
+
+.ui-pr-file-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.ui-pr-file-bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-pr-file-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-fg);
+  font: 12px/16px var(--font-mono);
+}
+.ui-pr-file-lang {
+  color: var(--ui-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.ui-pr-file-viewed {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-pr-file-none {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-pr-file-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* ── the side column ───────────────────────────────────────────────── */
+
+.ui-pr-thread-lane {
+  position: relative;
+  height: 100%;
+  min-height: 100%;
+}
+
+/* ── the patch's toolbar ───────────────────────────────────────────── */
+
+.ui-pr-diff-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 12px;
+}
+.ui-pr-diff-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.ui-pr-diff-range-label {
+  margin-right: 4px;
+  color: var(--ui-muted-fg);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ui-pr-diff-side {
+  margin-left: auto;
+  color: var(--ui-muted-fg);
+}
+.ui-pr-diff-layout {
+  margin-left: auto;
+}

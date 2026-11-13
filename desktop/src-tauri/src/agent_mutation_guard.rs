@@ -967,6 +967,7 @@ async fn brain_infer_intent(repo_root: &str, rels: &[String]) -> Option<String> 
         // brain has no need of the repo as a working directory.
         cwd: String::new(),
         machine_id: None,
+        linked_dirs: Vec::new(),
     };
 
     let text = match tokio::time::timeout(

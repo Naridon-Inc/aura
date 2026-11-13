@@ -13,7 +13,8 @@
 
 import * as React from "react";
 
-import { Skeleton } from "../ui/skeleton";
+import { SettingsEmpty, SettingsError } from "../ui/settings-blocks";
+import { LoadingState } from "../ui/state";
 import { IdentityRepoRow } from "./IdentityRepoRow";
 import { identityStatusAll, type IdentityStatus } from "../../lib/identityApi";
 import { peekCache, writeCache } from "../../lib/resourceCache";
@@ -72,33 +73,15 @@ export function IdentityPanel({ repoRoots }: IdentityPanelProps) {
     // to the pane's intro, where the rest of the app puts that sentence.
     <section>
       {rows === null ? (
-        <div className="divide-y divide-line-soft">
-          {Array.from({ length: Math.max(1, Math.min(repoRoots.length, 3)) }).map(
-            (_, i) => (
-              <div key={i} className="py-7">
-                <Skeleton className="h-[42px] w-full" />
-              </div>
-            ),
-          )}
-        </div>
+        <LoadingState label="Checking who you are in each repository…" />
       ) : error ? (
-        <p className="py-7 text-[13px] text-text-3" role="alert">
-          {error}
-        </p>
+        <SettingsError>{error}</SettingsError>
       ) : rows.length === 0 ? (
-        <p className="py-7 text-[13px] text-text-3">
-          No git projects open. Open one to confirm your identity.
-        </p>
+        <SettingsEmpty>No repositories open. Open one to confirm your identity.</SettingsEmpty>
       ) : (
-        <div className="divide-y divide-line-soft">
-          {rows.map((status) => (
-            <IdentityRepoRow
-              key={status.repo_root}
-              status={status}
-              onChanged={load}
-            />
-          ))}
-        </div>
+        rows.map((status) => (
+          <IdentityRepoRow key={status.repo_root} status={status} onChanged={load} />
+        ))
       )}
     </section>
   );

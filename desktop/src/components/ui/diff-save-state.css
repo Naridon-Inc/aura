@@ -1,0 +1,49 @@
+/* The small marks an editable diff's bar carries: "Unsaved", the save
+   loader, "Changed on disk" with its Reload, and a failed save. */
+
+.ui-diff-save-state {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-diff-save-state[data-tone="bad"] {
+  color: var(--ui-red);
+}
+
+/* The editor's own diff: a bar of those marks and switches over the diff. */
+.ui-diff-view {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--ui-bg);
+}
+.ui-diff-view-bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 4px 8px 4px 12px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 12px;
+}
+.ui-diff-view-bar > span:first-child {
+  color: var(--ui-muted-fg);
+}
+.ui-diff-view-tools {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.ui-diff-view-body {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}

@@ -22,6 +22,14 @@ import {
 import { clearAgentTerminalTitle } from "./agentTerminalTitles";
 import { forgetAgentRecord } from "./agentRecordStore";
 import { toast } from "./toast";
+import {
+  afterDiskRead,
+  afterEdit,
+  discardMyEdits as discardEditsOf,
+  hasDiskConflict,
+  keepMyEdits as keepEditsOf,
+  SAVE_HELD_MESSAGE,
+} from "./fileDiskConflict";
 import { languageSlugForPath } from "./monacoLanguage";
 import {
   AURA_MANAGER_ENABLED,
@@ -84,6 +92,10 @@ export type OpenFile = {
    *  the IDE control plane (`lib/ideBridge`) and left undefined by
    *  every human-driven opener, which still wants HEAD. */
   diffOriginal?: string;
+  /** The file changed on disk while this tab had unsaved edits, and the
+   *  person hasn't chosen yet between their edits and the new copy. Saving
+   *  waits for that choice (lib/fileDiskConflict). */
+  diskChanged?: boolean;
 };
 
 /** Extras an opener can pass to `open()`. Everything here is optional and
@@ -838,7 +850,7 @@ export type PrTab = {
 
 /** Sub-tabs of the PR detail pane. Mirrors PRDetailPane's own TopTab union;
  *  kept here so callers can request a landing tab without importing the pane. */
-export type PrDetailTab = "overview" | "files" | "checks" | "conversation";
+export type PrDetailTab = "overview" | "files" | "checks";
 
 /** Plan tab — opened from a Manager `PendingPlan`. We snapshot the
  *  plan's contents into the editor store so the tab keeps rendering
@@ -1973,6 +1985,7 @@ export function useEditorStore(): State & {
   setActive: (path: string) => void;
   updateBuffer: (path: string, text: string) => void;
   saveActive: () => Promise<void>;
+  saveFile: (path: string) => Promise<void>;
   isDirty: (path: string) => boolean;
   openAgent: (
     tab: Omit<AgentTab, "view" | "mode"> & {
@@ -2182,7 +2195,7 @@ export function useEditorStore(): State & {
   closeGraph: () => void;
   setActiveGraph: () => void;
   /** Open (or focus) a PR as a full detail tab. `initialTab` lands the pane on
-   *  a specific sub-tab — e.g. a review comment jumps straight to Conversation. */
+   *  a specific sub-tab — e.g. a review comment jumps to the Overview. */
   openPrDetail: (
     repoRoot: string,
     number: number,
@@ -2280,6 +2293,7 @@ export function useEditorStore(): State & {
     setActive,
     updateBuffer,
     saveActive,
+    saveFile,
     isDirty: (path) => {
       const f = state.files.find((x) => x.path === path);
       return !!f && f.current !== f.baseline;
@@ -2411,34 +2425,46 @@ export function setCodeSubPill(pill: "files" | "git" | "prs") {
 
 // Re-read an open file from disk and update both baseline + current
 // when the buffer is clean. If the user has unsaved edits we leave the
-// buffer alone (keeps their work) but refresh baseline so the diff
-// renders against the latest disk content. External-edit collision
-// detection (prompt to merge) can layer on later if it becomes a real
-// problem in practice.
+// buffer alone (keeps their work), refresh baseline so the diff renders
+// against the latest disk content, and mark the tab when the disk really
+// moved: the file view then asks whether to keep the edits or discard
+// them, and a save waits for that answer (lib/fileDiskConflict).
 async function reloadFromDisk(path: string) {
-  const idx = state.files.findIndex((f) => f.path === path);
-  if (idx < 0) return;
-  const cur = state.files[idx];
+  if (!state.files.some((f) => f.path === path)) return;
   let content;
   try {
     content = await readFileWherever(path);
   } catch {
     return;
   }
-  const next = state.files.slice();
-  if (cur.current === cur.baseline) {
-    next[idx] = {
-      ...cur,
-      baseline: content.text,
-      current: content.text,
-      size: content.size,
-      status: content.status,
-      language: content.language,
-    };
-  } else {
-    next[idx] = { ...cur, baseline: content.text };
-  }
+  const latest = state.files.find((f) => f.path === path);
+  if (!latest) return;
+  const read = afterDiskRead(latest, content.text);
+  const next = state.files.map((f) =>
+    f.path !== path
+      ? f
+      : read.current === content.text
+        ? { ...read, size: content.size, status: content.status, language: content.language }
+        : read,
+  );
   setState({ ...state, files: next });
+}
+
+/** "Keep mine": the unsaved edits stay and the next save writes them over
+ *  the copy that changed on disk. */
+export function keepMyEdits(path: string) {
+  setState({
+    ...state,
+    files: state.files.map((f) => (f.path === path ? keepEditsOf(f) : f)),
+  });
+}
+
+/** "Discard my edits": the tab shows the copy now on disk. */
+export function discardMyEdits(path: string) {
+  setState({
+    ...state,
+    files: state.files.map((f) => (f.path === path ? discardEditsOf(f) : f)),
+  });
 }
 
 export async function openFileImperative(path: string, opts?: OpenFileOpts) {
@@ -3255,14 +3281,24 @@ function updateBuffer(path: string, text: string) {
   const idx = state.files.findIndex((f) => f.path === path);
   if (idx < 0) return;
   const next = state.files.slice();
-  next[idx] = { ...next[idx], current: text };
+  next[idx] = afterEdit(next[idx], text);
   setState({ ...state, files: next });
 }
 
 async function saveActive() {
-  const active = state.files.find((f) => f.path === state.activePath);
+  await saveFile(state.activePath ?? "");
+}
+
+/** Write one open file's buffer to disk — the one in focus or any other open
+ *  tab (a split pane saves its own file without taking focus first). */
+async function saveFile(path: string) {
+  const active = state.files.find((f) => f.path === path);
   if (!active) return;
   if (active.current === active.baseline) return;
+  if (hasDiskConflict(active)) {
+    toast.warning(SAVE_HELD_MESSAGE);
+    return;
+  }
   await writeFileWherever(active.path, active.current);
   // Promote current to new baseline so dirty flips off and the diff
   // baseline updates to match disk.
@@ -3585,7 +3621,7 @@ function announceFiledAgent(place: string, tab: AgentTab) {
     tone: "info",
     title: `${tab.agentLabel} is ready in ${where}`,
     message:
-      "You switched projects while it was starting, so it stayed where you started it.",
+      "You switched repositories while it was starting, so it stayed where you started it.",
     actions: root
       ? [
           {
@@ -3819,6 +3855,38 @@ function markAgentAttention(sessionId: string, repoRoot?: string) {
 export function workspaceUnreadCount(repoRoot: string): number {
   const snapshot = loadSnapshot(repoRoot);
   return snapshot?.agentTabs.filter((tab) => tab.attention).length ?? 0;
+}
+
+/** "Mark as read" and "Mark as unread" from the workspace list. Read clears
+ *  every waiting flag on the workspace's agents, live in this window or
+ *  parked in its saved tabs; unread raises the flag on its last agent, the
+ *  one you would come back to. False when the workspace has no agent. */
+export function setWorkspaceRead(repoRoot: string, read: boolean): boolean {
+  const flag = <T extends { sessionId: string; attention?: boolean }>(tabs: T[]): T[] => {
+    const last = tabs[tabs.length - 1]?.sessionId;
+    return tabs.map((tab) =>
+      read
+        ? tab.attention
+          ? { ...tab, attention: false }
+          : tab
+        : tab.sessionId === last
+          ? { ...tab, attention: true }
+          : tab,
+    );
+  };
+  const live = state.agentTabs.filter((t) => t.repoRoot === repoRoot);
+  if (live.length > 0) {
+    const next = new Map(flag(live).map((t) => [t.sessionId, t] as const));
+    setState({ ...state, agentTabs: state.agentTabs.map((t) => next.get(t.sessionId) ?? t) });
+    return true;
+  }
+  const snapshot = loadSnapshot(repoRoot);
+  if (!snapshot || snapshot.agentTabs.length === 0) return false;
+  snapshot.agentTabs = flag(snapshot.agentTabs);
+  saveSnapshot(repoRoot, snapshot);
+  // Nothing in this window changed; the nudge makes the list read it again.
+  setState({ ...state });
+  return true;
 }
 
 function clearAgentAttention(sessionId: string) {

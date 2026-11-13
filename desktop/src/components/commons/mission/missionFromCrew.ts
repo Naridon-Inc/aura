@@ -184,7 +184,7 @@ export function readyViewToMission(
 }
 
 /** Fold several per-project MissionStates into one all-projects board — the
- *  Conductor-style "every workspace across every project" view. Each run already
+ *  the "every workspace across every project" view. Each run already
  *  carries its own `project`/`projectName` (set in `toRun`), so the merged board
  *  can label a card with where it lives; here we only concatenate the lanes and
  *  union the project list. `recent` is re-sorted newest-first across projects so

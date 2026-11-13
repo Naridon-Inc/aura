@@ -13,7 +13,8 @@
 // the backend kicks specialists in parallel, and ScoutCard subscribes
 // to the snapshot push (no separate Tauri commands).
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
+import { ChevronRight, CircleX, Info, TriangleAlert } from "lucide-react";
 import {
   type PendingScout,
   type ScoutFinding,
@@ -23,6 +24,10 @@ import {
   type SpecialistStatus,
 } from "../../lib/api";
 import { listen } from "@tauri-apps/api/event";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+import { StatusChip, type ChipTone } from "../ui/statusChip";
+import "../ui/log-note.css";
+import "../ui/scout-card.css";
 
 const KIND_LABEL: Record<SpecialistKind, string> = {
   architecture: "Architecture",
@@ -36,25 +41,32 @@ const KIND_CHANNEL: Record<SpecialistKind, string> = {
   ux: "ux",
 };
 
-const SEVERITY_TONE: Record<ScoutSeverity, string> = {
-  info: "var(--color-text-3)",
+const SEVERITY_TONE: Record<ScoutSeverity, ChipTone> = {
+  info: "neutral",
   // A warning IS the amber slot — routing it through the accent made every
   // advisory finding look like a link you could follow.
-  warn: "var(--color-amber)",
-  block: "var(--color-red)",
+  warn: "amber",
+  block: "red",
+};
+
+const SEVERITY_ICON: Record<ScoutSeverity, typeof Info> = {
+  info: Info,
+  warn: TriangleAlert,
+  block: CircleX,
 };
 
 // A reviewer that didn't finish (timed out / skipped / claude missing) is a
 // calm amber state — the build proceeds without it, so it must never read as
 // an alarming red failure. Matches the settled SpecialistStatusChip. `running`
-// keeps the accent because it is the live rung the eye should land on while
+// shows the spinner because it is the live rung the eye should land on while
 // the review is in flight; `failed` is the thing that wants your attention
-// afterwards, so it takes amber and the two stay tellable apart.
-const STATUS_DOT: Record<SpecialistStatus, string> = {
-  pending: "var(--color-text-3)",
-  running: "var(--color-accent)",
-  done: "var(--color-accent-green)",
-  failed: "var(--color-amber)",
+// afterwards, so it takes amber and the two stay tellable apart. Values are
+// the shared status dot's states.
+const STATUS_DOT: Record<SpecialistStatus, "working" | "review" | undefined> = {
+  pending: undefined,
+  running: undefined,
+  done: "review",
+  failed: "working",
 };
 
 export function ScoutCard({
@@ -67,6 +79,7 @@ export function ScoutCard({
   // The whole pass collapses to one tool-call row by default; click to
   // expand the per-specialist breakdown + consolidated notes.
   const [open, setOpen] = useState(false);
+  const bodyId = useId();
   const [expanded, setExpanded] = useState<Record<SpecialistKind, boolean>>({
     architecture: false,
     security: false,
@@ -149,42 +162,25 @@ export function ScoutCard({
     setExpanded((prev) => ({ ...prev, [kind]: !prev[kind] }));
 
   return (
-    <div className="mt-1 mb-1">
-      {/* One compact tool-call row — same flat skeleton as every other tool
-          row in the thread (glyph column · verb · count · status · chevron).
-          Not a bordered card; the plan review reads as a quiet step. */}
+    // One compact tool-call row — the shared tool-group disclosure every
+    // other tool row in the thread uses. Not a bordered card; the plan
+    // review reads as a quiet step.
+    <section className="ui-tool-group ui-scout">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="aura-tool-row"
+        className="ui-tool-group-trigger"
+        aria-expanded={open}
+        aria-controls={bodyId}
         title={open ? "Collapse" : "Expand plan review"}
       >
-        <span className="aura-tool-glyph">
-          <span
-            aria-hidden
-            className={`inline-block rounded-full ${running ? "animate-pulse" : ""}`}
-            style={{
-              width: 6,
-              height: 6,
-              background: running
-                ? "var(--color-accent)"
-                : "var(--color-text-4)",
-            }}
-          />
-        </span>
-        <span className="aura-tool-chip-verb">{overallLabel}</span>
-        <span
-          className="aura-tool-chip-subject"
-          style={{ color: "var(--color-text-3)" }}
-        >
-          {reviewerStatus}
-        </span>
-        <span className="ml-auto shrink-0" style={{ color: "var(--color-text-4)" }}>
-          <Chevron dir={open ? "up" : "down"} />
-        </span>
+        <ChevronRight size={14} className={open ? "ui-chevron-open" : ""} />
+        {running && <AsciiSpinner />}
+        <span>{overallLabel}</span>
+        <span className="ui-tool-group-note">{reviewerStatus}</span>
       </button>
       {open && (
-        <div className="aura-tool-substream">
+        <div id={bodyId} className="ui-tool-group-content ui-scout-body">
           {scout.specialists.map((run) => (
             <SpecialistRow
               key={run.kind}
@@ -195,43 +191,11 @@ export function ScoutCard({
             />
           ))}
           {scout.consolidated_notes && (
-            <div
-              className="t-xs mt-1 px-2 py-1.5 rounded"
-              style={{
-                color: "var(--color-text-2)",
-                background: "var(--color-bg-2)",
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {scout.consolidated_notes}
-            </div>
+            <p className="ui-scout-notes">{scout.consolidated_notes}</p>
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-/** Tiny inline chevron — own SVG, currentColor, rotates on open. */
-function Chevron({ dir }: { dir: "up" | "down" }) {
-  return (
-    <svg
-      width={11}
-      height={11}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      style={{
-        transform: dir === "up" ? "rotate(180deg)" : undefined,
-        transition: "transform var(--motion-fast)",
-      }}
-      aria-hidden
-    >
-      <path d="M4 6l4 4 4-4" />
-    </svg>
+    </section>
   );
 }
 
@@ -250,158 +214,80 @@ function SpecialistRow({
   const findings = run.findings ?? [];
   const questions = run.questions ?? [];
   const showTail = run.status === "running" && tail.length > 0;
+  const hasDetail = findings.length > 0 || questions.length > 0;
 
   return (
-    <div>
-      <button
-        type="button"
-        onClick={onToggle}
-        className="w-full py-1.5 flex items-start gap-2.5 text-left hover:bg-[color-mix(in_srgb,var(--color-accent)_4%,transparent)] transition-colors"
-      >
-        <span
-          className="mt-1.5 inline-block w-1.5 h-1.5 rounded-full shrink-0"
-          style={{
-            background: STATUS_DOT[run.status],
-            boxShadow:
-              run.status === "running"
-                ? "0 0 6px color-mix(in srgb, var(--color-accent) 60%, transparent)"
-                : "none",
-          }}
-          aria-hidden
-        />
-        <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-          <div className="flex items-center justify-between gap-2">
-            <span className="t-sm font-medium" style={{ color: "var(--color-text-1)" }}>
-              {KIND_LABEL[run.kind]}
-            </span>
-            {run.status === "failed" ? (
-              <span
-                className="t-2xs t-ui px-1.5 py-0.5 shrink-0"
-                style={{
-                  // Matches STATUS_DOT.failed above — the chip and the dot
-                  // that labels it must never disagree.
-                  color: "var(--color-amber)",
-                  border:
-                    "1px solid color-mix(in srgb, var(--color-amber) 40%, transparent)",
-                  borderRadius: "var(--radius-xs)",
-                }}
-              >
-                Skipped
-              </span>
-            ) : (
-              findings.length > 0 && (
-                <span
-                  className="section-label shrink-0"
-                  style={{
-                    color: "var(--color-text-3)",
-                    letterSpacing: "var(--letter-spacing-wide)",
-                  }}
-                >
-                  {findings.length} finding{findings.length === 1 ? "" : "s"}
-                </span>
-              )
-            )}
-          </div>
-          {summary && (
-            <span className="t-xs" style={{ color: "var(--color-text-2)" }}>
-              {summary}
-            </span>
-          )}
-          {showTail && (
-            <div
-              className="t-2xs font-mono mt-1 px-2 py-1 rounded"
-              style={{
-                color: "var(--color-text-3)",
-                background: "var(--color-bg-2)",
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-all",
-              }}
-            >
-              {tail.join("\n")}
+    <section className="ui-subagent-run ui-scout-run" data-status={run.status}>
+      <button type="button" aria-expanded={expanded} onClick={onToggle} title={summary || undefined}>
+        <ChevronRight size={14} className={expanded ? "ui-chevron-open" : ""} />
+        {run.status === "running" ? (
+          <AsciiSpinner />
+        ) : (
+          <span className="ui-status-dot" data-status={STATUS_DOT[run.status]} aria-hidden />
+        )}
+        <strong>{KIND_LABEL[run.kind]}</strong>
+        <span>{summary}</span>
+        {run.status === "failed" ? (
+          // Matches STATUS_DOT.failed above — the chip and the dot that
+          // label it must never disagree.
+          <small>
+            <StatusChip tone="amber" dense>
+              Skipped
+            </StatusChip>
+          </small>
+        ) : (
+          findings.length > 0 && (
+            <small>
+              {findings.length} finding{findings.length === 1 ? "" : "s"}
+            </small>
+          )
+        )}
+      </button>
+      {showTail && <pre className="ui-scout-tail">{tail.join("\n")}</pre>}
+      {expanded && (summary || hasDetail) && (
+        <div className="ui-scout-detail">
+          {summary && <p className="ui-scout-summary">{summary}</p>}
+          {findings.length > 0 && (
+            <div className="ui-check-runs">
+              {findings.map((f, i) => (
+                <FindingItem key={i} finding={f} />
+              ))}
             </div>
           )}
-        </div>
-        <span
-          className="t-2xs shrink-0 mt-1"
-          style={{ color: "var(--color-text-3)" }}
-          aria-hidden
-        >
-          {expanded ? "▾" : "▸"}
-        </span>
-      </button>
-      {expanded && (findings.length > 0 || questions.length > 0) && (
-        <div className="pl-4 pb-2 pt-1 flex flex-col gap-2">
-          {findings.map((f, i) => (
-            <FindingItem key={i} finding={f} />
-          ))}
           {questions.length > 0 && (
-            <div className="flex flex-col gap-1 mt-1">
-              <div
-                className="section-label"
-                style={{
-                  color: "var(--color-text-3)",
-                  letterSpacing: "var(--letter-spacing-wide)",
-                }}
-              >
-                Open questions
+            <div className="ui-scout-questions">
+              <div className="ui-log-note-files-head">
+                <span>Open questions</span>
+                <span className="ui-log-note-count">{questions.length}</span>
               </div>
-              {questions.map((q) => (
-                <div key={q.id} className="t-xs" style={{ color: "var(--color-text-2)" }}>
-                  • {q.text}
-                </div>
-              ))}
+              <ul>
+                {questions.map((q) => (
+                  <li key={q.id}>{q.text}</li>
+                ))}
+              </ul>
             </div>
           )}
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
 function FindingItem({ finding }: { finding: ScoutFinding }) {
-  const tone = SEVERITY_TONE[finding.severity];
+  const Icon = SEVERITY_ICON[finding.severity];
   return (
-    <div
-      className="px-2 py-1.5 flex flex-col gap-0.5"
-      style={{
-        borderLeft: `2px solid ${tone}`,
-        background: "var(--color-bg-2)",
-        borderRadius: "var(--radius-sm)",
-      }}
-    >
-      <div className="flex items-center gap-2">
-        <span
-          className="section-label"
-          style={{ color: tone, letterSpacing: "var(--letter-spacing-wide)" }}
-        >
-          {finding.severity}
-        </span>
-        <span className="t-xs font-medium" style={{ color: "var(--color-text-1)" }}>
-          {finding.title}
-        </span>
-      </div>
-      {finding.body && (
-        <div className="t-xs" style={{ color: "var(--color-text-2)" }}>
-          {finding.body}
-        </div>
-      )}
-      {finding.file_refs && finding.file_refs.length > 0 && (
-        <div className="flex flex-wrap gap-1 mt-1">
-          {finding.file_refs.map((ref) => (
-            <span
-              key={ref}
-              className="t-2xs font-mono px-1.5 py-0.5 rounded"
-              style={{
-                color: "var(--color-text-3)",
-                background: "var(--color-bg-1)",
-                border: "1px solid var(--color-border)",
-              }}
-            >
-              {ref}
-            </span>
-          ))}
-        </div>
-      )}
+    <div data-severity={finding.severity}>
+      <Icon size={14} />
+      <span>
+        {finding.title}
+        {finding.body && <small>{finding.body}</small>}
+        {finding.file_refs && finding.file_refs.length > 0 && (
+          <small data-loc>{finding.file_refs.join(" · ")}</small>
+        )}
+      </span>
+      <StatusChip tone={SEVERITY_TONE[finding.severity]} dense>
+        {finding.severity}
+      </StatusChip>
     </div>
   );
 }

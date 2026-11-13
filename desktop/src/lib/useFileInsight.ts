@@ -1,71 +1,67 @@
-// Aura-aware metadata for the currently open file. Aggregates four
-// streams the user otherwise has to chase across separate panels:
-//   1. unified diff hunks (which lines moved)
-//   2. semantic outline (which symbols exist) → cross-reference with
-//      hunks to flag which functions/classes were touched
-//   3. recent intent-log entries whose bound changeset touched this file
-//      (or, for legacy rows without a changeset, whose text names it) → the
-//      "why" behind the changes, in the user's own words
-//   4. snapshot count for this file → how many times Aura has saved
-//      a recoverable copy
+// Aura-aware metadata for the currently open file — everything the "What
+// changed" block over the editor's diff draws, gathered from the streams the
+// user otherwise has to chase across separate panels:
+//   1. the file's diff against the last commit (which lines moved)
+//   2. the semantic outline → which pieces the edit added, removed or reworked
+//      (see workingPieces), and for each one the model-written plain line
+//   3. for a data file (JSON / TOML / YAML), both versions read as data and
+//      compared structurally (see dataDiff) — what was added, dropped, changed
+//   4. the file-level "used to / now" account and the reason recorded for it
+//   5. the intent-log notes bound to this file — the "why", in the writer's
+//      own words — with their time normalised to milliseconds as they enter
+//   6. how many recoverable snapshots exist for it
 //
-// Polled lightly (8s) so the strip stays in sync with terminal-driven
-// `aura snapshot` / `aura log-intent` invocations without flooding the
-// CLI bridge.
+// Polled lightly (8s) so the block stays in sync with terminal-driven
+// `aura snapshot` / `aura log-intent` invocations without flooding the bridge.
+// The model-written words are re-asked a few times while they are still being
+// written, then left alone.
 
 import { useEffect, useMemo, useState } from "react";
+import { api, type ChangedSymbol, type IntentEntry, type OutlineNode } from "./api";
 import {
-  api,
-  type AskHit,
-  type ChangeSummary,
-  type IntentEntry,
-  type OutlineNode,
-} from "./api";
+  loadExplanation,
+  loadSymbolExplanations,
+  type ChangeExplanation,
+  type SymbolMeanings,
+} from "./changeExplain";
+import { describeDataChange, type DataChangeRow } from "./dataDiff";
+import { dataFormatOf } from "./dataParse";
+import { noteFromAskHit, noteFromIntent, rankNotes, type InsightNote } from "./insightNotes";
 import { useDocumentVisibility } from "./useDocumentVisibility";
+import { workingPieces } from "./workingPieces";
 
 const POLL_MS = 8000;
-
-export type TouchedSymbol = OutlineNode & { touched: boolean };
+/** How long to keep looking while the model writes the plain words. A cold
+ *  agent-CLI spawn is ~20s per line, so this is a generous window. */
+const WORDS_TRIES = 10;
+const WORDS_POLL_MS = 3500;
 
 export type FileInsight = {
+  /** True until the first read of the diff lands. */
   loading: boolean;
-  /** +/- line counts vs HEAD for the whole file. */
+  /** +/- line counts vs the last commit for the whole file. */
   additions: number;
   deletions: number;
-  /** Plain-language, one-sentence "what changed" — AI-written when a model
-   *  is reachable, deterministic otherwise. This is what leads the panel;
-   *  `symbols` is demoted to a technical-detail toggle. null until loaded or
-   *  when the file has no diff. */
-  whatSummary: ChangeSummary | null;
-  /** Outline nodes; ones whose start line falls inside a diff hunk
-   *  (or are the closest enclosing symbol above one) are flagged. */
-  symbols: TouchedSymbol[];
-  /** Up to 5 recent intent entries attributed to this file — by their bound
-   *  changeset's touched paths, or (legacy rows only) by name in the intent
-   *  text. Most recent first. */
-  relatedIntents: IntentEntry[];
-  /** The single most-recent intent-log entry across the whole repo — the
-   *  current session's stated reason, regardless of which file it touched.
-   *  Used as the session-context fallback for "why it changed" when no note
-   *  is bound to this specific file, so the panel is never a dead-end. */
-  sessionIntent: IntentEntry | null;
-  /** Total snapshot count for this file (file column equality on
-   *  the current snapshot list). */
+  /** Code pieces this edit added, removed or reworked, in file order. */
+  pieces: ChangedSymbol[];
+  /** Per-piece plain lines (model-written), keyed by identifier. */
+  meanings: SymbolMeanings;
+  /** A data file's structural change; null for code, or when either version
+   *  does not read as data. */
+  dataRows: DataChangeRow[] | null;
+  /** The file-level used-to / now / why account; null until it lands. */
+  explanation: ChangeExplanation | null;
+  /** True while the model may still be writing any of the words above. */
+  writing: boolean;
+  /** Notes bound to this file, stated reasons first. Times in milliseconds. */
+  notes: InsightNote[];
+  /** The newest note anywhere in the repo — the session's stated reason, for
+   *  when nothing is bound to this file. */
+  sessionNote: InsightNote | null;
   snapshotCount: number;
-  refresh: () => void;
 };
 
-const EMPTY: FileInsight = {
-  loading: false,
-  additions: 0,
-  deletions: 0,
-  whatSummary: null,
-  symbols: [],
-  relatedIntents: [],
-  sessionIntent: null,
-  snapshotCount: 0,
-  refresh: () => {},
-};
+const NO_MEANINGS: SymbolMeanings = { now: new Map(), before: new Map(), complete: true };
 
 export function useFileInsight(
   repoRoot: string | null | undefined,
@@ -74,11 +70,14 @@ export function useFileInsight(
   const [loading, setLoading] = useState<boolean>(!!absPath);
   const [diffText, setDiffText] = useState<string>("");
   const [outline, setOutline] = useState<OutlineNode[]>([]);
-  const [intents, setIntents] = useState<IntentEntry[]>([]);
-  const [sessionIntent, setSessionIntent] = useState<IntentEntry | null>(null);
-  const [askHits, setAskHits] = useState<IntentEntry[]>([]);
+  const [boundNotes, setBoundNotes] = useState<InsightNote[]>([]);
+  const [askNotes, setAskNotes] = useState<InsightNote[]>([]);
+  const [sessionNote, setSessionNote] = useState<InsightNote | null>(null);
   const [snapshotCount, setSnapshotCount] = useState<number>(0);
-  const [whatSummary, setWhatSummary] = useState<ChangeSummary | null>(null);
+  const [dataRows, setDataRows] = useState<DataChangeRow[] | null>(null);
+  const [explanation, setExplanation] = useState<ChangeExplanation | null>(null);
+  const [explaining, setExplaining] = useState(false);
+  const [meanings, setMeanings] = useState<SymbolMeanings>(NO_MEANINGS);
   const visible = useDocumentVisibility();
 
   const relPath = useMemo(() => {
@@ -92,28 +91,25 @@ export function useFileInsight(
     return relPath.split("/").pop() ?? relPath;
   }, [relPath]);
 
-  // The pass above can only see the newest fifty rows, and the mutation guard
-  // writes one per agent tool call — on a busy repo that is minutes of
-  // history, so anything edited last week reads as "no notes mention this
-  // file" however carefully its reason was written. This asks the whole log
-  // instead, through the same ranking `aura ask` and the MCP tool use, so a
-  // stated reason outranks a hook row that only restates the edit. Keyed on
-  // the path rather than the 8s poll: it reads every row, and the answer for a
-  // file does not change between two ticks.
+  // The bound-changeset pass below only sees the newest fifty rows, and the
+  // mutation guard writes one per agent tool call — on a busy repo that is
+  // minutes of history. This asks the whole log through the same ranking
+  // `aura ask` uses, so a stated reason from last week still shows. Keyed on
+  // the path rather than the poll: the answer for a file does not change
+  // between two ticks.
   useEffect(() => {
     if (!repoRoot || !relPath) {
-      setAskHits([]);
+      setAskNotes([]);
       return;
     }
     let cancelled = false;
     void api
       .auraAsk(repoRoot, relPath, 5)
       .then((answer) => {
-        if (cancelled) return;
-        setAskHits(answer.hits.map((h, i) => askHitToIntent(h, relPath, i)));
+        if (!cancelled) setAskNotes(answer.hits.map((h, i) => noteFromAskHit(h, relPath, i)));
       })
       .catch(() => {
-        if (!cancelled) setAskHits([]);
+        if (!cancelled) setAskNotes([]);
       });
     return () => {
       cancelled = true;
@@ -124,7 +120,6 @@ export function useFileInsight(
     if (!repoRoot || !absPath || !relPath) return;
     let cancelled = false;
     async function tick() {
-      setLoading(true);
       try {
         const [diff, out, page, snaps] = await Promise.all([
           api.gitDiff(repoRoot!, relPath!).catch(() => ""),
@@ -134,40 +129,19 @@ export function useFileInsight(
         ]);
         if (cancelled) return;
         setDiffText(diff);
-        setOutline(out);
+        setOutline((prev) => (sameOutline(prev, out) ? prev : out));
         if (page) {
-          // Attribute a note to this file by its BOUND CHANGESET first: every
-          // note records the exact paths it touched in `changeset.files[].path`,
-          // so "why did this file change" no longer hinges on the free-text
-          // intent happening to spell the filename (which was the norm, leaving
-          // most files with "no notes mention this file"). When a changeset is
-          // present it is authoritative — a note that touched this file shows
-          // even if its prose never names it, and one that merely mentions the
-          // name without touching it does not. Legacy rows written before
-          // changeset binding shipped have no `changeset`; fall back to the old
-          // text-substring match for those alone.
-          const matches = page.entries.filter((e) => {
-            const files = e.changeset?.files;
-            if (files && files.length > 0) {
-              return files.some(
-                (f) => f.path === relPath || f.path.endsWith("/" + relPath!),
-              );
-            }
-            return e.intent.includes(basename!) || e.intent.includes(relPath!);
-          });
-          setIntents(matches.slice(0, 5));
-          // Session context: the newest entry overall (entries are
-          // most-recent-first), used when nothing binds to this file so the
-          // "why" panel can still show the session's stated reason.
-          setSessionIntent(page.entries[0] ?? null);
+          // A note belongs to this file by its BOUND CHANGESET when it has one
+          // — authoritative, whatever its prose names. Legacy rows written
+          // before changeset binding fall back to naming the file in the text.
+          const matches = page.entries.filter((e) => touchesFile(e, relPath!, basename!));
+          setBoundNotes(matches.slice(0, 5).map(noteFromIntent));
+          setSessionNote(page.entries[0] ? noteFromIntent(page.entries[0]) : null);
         }
-        // Snapshots don't always store an absolute path — match by
-        // suffix so both `~/.aura/snapshots/<sha>/<rel>` and bare
-        // relative-path forms count.
-        const count = snaps.filter(
-          (s) => s.file === absPath || s.file.endsWith("/" + relPath!),
-        ).length;
-        setSnapshotCount(count);
+        // Snapshots don't always store an absolute path — match by suffix.
+        setSnapshotCount(
+          snaps.filter((s) => s.file === absPath || s.file.endsWith("/" + relPath!)).length,
+        );
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -183,127 +157,143 @@ export function useFileInsight(
     };
   }, [repoRoot, absPath, relPath, basename, visible]);
 
-  // Plain-language "what changed", computed from the diff by whichever model
-  // the user has (deterministic fallback otherwise). Keyed on `diffText`, so
-  // it only refires when the diff actually changes — an unchanged poll leaves
-  // `diffText` string-equal and React skips the effect. The backend also
-  // caches by diff content-hash, so repeats never hit a model twice.
+  // A data file: read the last commit's version and the one on disk, and
+  // compare them as data. Keyed on the diff, so it only reruns when the file
+  // actually changes.
   useEffect(() => {
-    if (!repoRoot || !absPath || !diffText.trim()) {
-      setWhatSummary(null);
+    if (!repoRoot || !absPath || !relPath || !dataFormatOf(relPath) || !diffText.trim()) {
+      setDataRows(null);
       return;
     }
     let cancelled = false;
-    api
-      .summarizeFileChange(repoRoot, absPath)
-      .then((s) => {
-        if (!cancelled) setWhatSummary(s);
-      })
-      .catch(() => {
-        // Never let a summary failure blank the panel — the deterministic
-        // line-count copy in the strip covers this case.
-        if (!cancelled) setWhatSummary(null);
-      });
+    const isNewFile = /^(new file mode|--- \/dev\/null)/m.test(diffText);
+    void Promise.all([
+      api.gitShowHead(repoRoot, relPath).catch(() => (isNewFile ? "" : null)),
+      api.readFile(absPath).catch(() => null),
+    ]).then(([before, after]) => {
+      if (cancelled) return;
+      if (before === null || !after || after.status !== "ok") {
+        setDataRows(null);
+        return;
+      }
+      setDataRows(describeDataChange(relPath, before, after.text));
+    });
     return () => {
       cancelled = true;
     };
-  }, [repoRoot, absPath, diffText]);
+  }, [repoRoot, absPath, relPath, diffText]);
 
-  // Parse diff into per-hunk new-side ranges. Header looks like:
-  //   @@ -<oldStart>,<oldLen> +<newStart>,<newLen> @@ <ctx>
-  const hunks = useMemo(() => parseHunks(diffText), [diffText]);
-
-  // Aggregate per-file +/-: count "+"/"-" lines (skip header lines
-  // that begin with "+++" / "---").
-  const { additions, deletions } = useMemo(() => {
-    let a = 0;
-    let d = 0;
-    for (const line of diffText.split("\n")) {
-      if (line.startsWith("+++") || line.startsWith("---")) continue;
-      if (line.startsWith("+")) a++;
-      else if (line.startsWith("-")) d++;
+  // The file-level used-to / now / why. The backend answers instantly (cached
+  // model words, or lines mined from the diff) and writes the model's words
+  // off the request path, so this looks again a few times until they land.
+  useEffect(() => {
+    if (!repoRoot || !relPath || !diffText.trim()) {
+      setExplanation(null);
+      setExplaining(false);
+      return;
     }
-    return { additions: a, deletions: d };
-  }, [diffText]);
-
-  // Tag each outline node as touched if any hunk range overlaps its
-  // declared start line OR if it's the closest symbol above a hunk
-  // start (so a small inline edit inside a function still flags the
-  // function as the touched symbol).
-  const symbols: TouchedSymbol[] = useMemo(() => {
-    if (outline.length === 0) return [];
-    const sorted = [...outline].sort((a, b) => a.line - b.line);
-    const touched = new Set<number>();
-    for (const h of hunks) {
-      const hStart = h.newStart;
-      const hEnd = h.newStart + Math.max(h.newLen - 1, 0);
-      // Direct containment: the hunk range straddles a symbol's start.
-      let last = -1;
-      for (let i = 0; i < sorted.length; i++) {
-        const s = sorted[i];
-        if (s.line >= hStart && s.line <= hEnd) {
-          touched.add(i);
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let tries = 0;
+    setExplaining(true);
+    const poll = () => {
+      void loadExplanation(repoRoot, relPath).then((e) => {
+        if (!alive) return;
+        setExplanation(e);
+        const stillWriting = e.source === "fallback" || e.source === "mixed";
+        if (stillWriting && tries < WORDS_TRIES) {
+          tries += 1;
+          timer = setTimeout(poll, WORDS_POLL_MS);
+        } else {
+          setExplaining(false);
         }
-        if (s.line <= hStart) last = i;
-      }
-      // Enclosing symbol: nearest symbol above the hunk start.
-      if (last >= 0) touched.add(last);
+      });
+    };
+    poll();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [repoRoot, relPath, diffText]);
+
+  const { additions, deletions } = useMemo(() => countLines(diffText), [diffText]);
+
+  // Code pieces only — a data file is told by `dataRows` instead.
+  const pieces = useMemo(
+    () => (relPath && dataFormatOf(relPath) ? [] : workingPieces(diffText, outline)),
+    [diffText, outline, relPath],
+  );
+  const piecesKey = pieces.map((p) => `${p.change}:${p.identifier}`).join("|");
+
+  // Each piece's own plain line, model-written; re-asked while it's written.
+  useEffect(() => {
+    if (!repoRoot || !relPath || !pieces.length) {
+      setMeanings(NO_MEANINGS);
+      return;
     }
-    return sorted.map((n, i) => ({ ...n, touched: touched.has(i) }));
-  }, [outline, hunks]);
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let tries = 0;
+    const poll = () => {
+      void loadSymbolExplanations(repoRoot, relPath, pieces).then((m) => {
+        if (!alive) return;
+        setMeanings(m);
+        if (!m.complete && tries < WORDS_TRIES) {
+          tries += 1;
+          timer = setTimeout(poll, WORDS_POLL_MS);
+        }
+      });
+    };
+    poll();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+    // `pieces` is read through its key: a poll that finds the same pieces must
+    // not restart the wait for their words.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoRoot, relPath, piecesKey, diffText]);
 
   return {
     loading,
     additions,
     deletions,
-    whatSummary,
-    symbols,
-    // The bound-changeset match is authoritative when it finds anything: it
-    // knows the note touched this file rather than inferring it. The ranked
-    // answer covers everything older than the window that pass can see.
-    relatedIntents: intents.length > 0 ? intents : askHits,
-    sessionIntent,
+    pieces,
+    meanings,
+    dataRows,
+    explanation,
+    writing: explaining || (pieces.length > 0 && !meanings.complete),
+    // The bound-changeset match is authoritative when it finds anything; the
+    // ranked answer covers everything older than the window it can see.
+    notes: rankNotes(boundNotes.length > 0 ? boundNotes : askNotes),
+    sessionNote,
     snapshotCount,
-    refresh: () => {
-      // Toggling absPath via a state key is overkill — consumers
-      // re-mount on path change, and the 8s poll covers everything else.
-    },
   };
 }
 
-/** Render a ranked answer as the entry shape this panel already draws.
- *  `id` is derived from the record rather than invented, so the same hit keeps
- *  the same key across refreshes and React does not remount the row. */
-function askHitToIntent(hit: AskHit, relPath: string, index: number): IntentEntry {
-  return {
-    id: `ask:${relPath}:${hit.when}:${index}`,
-    timestamp: hit.when,
-    agent: hit.who,
-    intent: hit.what,
-    branch: "",
-    commit: "",
-    status: hit.tier,
-    changeset: null,
-  };
-}
-
-type Hunk = { oldStart: number; oldLen: number; newStart: number; newLen: number };
-
-function parseHunks(diff: string): Hunk[] {
-  const out: Hunk[] = [];
-  for (const line of diff.split("\n")) {
-    if (!line.startsWith("@@")) continue;
-    const m = line.match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
-    if (!m) continue;
-    out.push({
-      oldStart: parseInt(m[1], 10),
-      oldLen: m[2] ? parseInt(m[2], 10) : 1,
-      newStart: parseInt(m[3], 10),
-      newLen: m[4] ? parseInt(m[4], 10) : 1,
-    });
+function touchesFile(e: IntentEntry, relPath: string, basename: string): boolean {
+  const files = e.changeset?.files;
+  if (files && files.length > 0) {
+    return files.some((f) => f.path === relPath || f.path.endsWith("/" + relPath));
   }
-  return out;
+  return e.intent.includes(basename) || e.intent.includes(relPath);
 }
 
-// Re-export for the compat helper that EMPTY uses.
-export const EMPTY_FILE_INSIGHT = EMPTY;
+function sameOutline(a: OutlineNode[], b: OutlineNode[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((n, i) => n.name === b[i].name && n.line === b[i].line && n.kind === b[i].kind)
+  );
+}
+
+/** Per-file +/- from the diff, skipping the `+++` / `---` header lines. */
+function countLines(diff: string): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) additions++;
+    else if (line.startsWith("-")) deletions++;
+  }
+  return { additions, deletions };
+}

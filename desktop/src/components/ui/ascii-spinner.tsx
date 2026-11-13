@@ -1,5 +1,15 @@
-// Moved to aura-shared/ui/ascii-spinner — one source for both the desktop app and the
-// web console, so the two can never drift apart again (the console's copy of
-// the wizard strip had already forked once). This file stays as the local
-// address so no importer had to change.
-export * from "@shared/ui/ascii-spinner";
+import { type CSSProperties } from "react";
+import { cn } from "../../lib/utils";
+export function AsciiSpinner({ className, size = 12 }: { className?: string; size?: number }) {
+  return (
+    <span
+      className={cn("ui-activity-loader", className)}
+      aria-hidden="true"
+      style={{ width: size, height: size }}
+    >
+      {Array.from({ length: 6 }, (_, index) => (
+        <i key={index} style={{ "--activity-phase": index } as CSSProperties} />
+      ))}
+    </span>
+  );
+}

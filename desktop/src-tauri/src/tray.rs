@@ -1,5 +1,5 @@
 //! Menu-bar (system-tray) presence. Keeps Aura resident in the macOS menu
-//! bar so the always-on-top HUD (see `hud.rs`) can be summoned with ⌘⇧A
+//! bar so the always-on-top HUD (see `hud.rs`) can be summoned with ⌃⌘A
 //! even when the main window is hidden.
 //!
 //! Interaction model (chosen by the user):
@@ -59,7 +59,7 @@ pub fn build(app: &App<Wry>) -> tauri::Result<()> {
 fn tray_menu(h: &AppHandle<Wry>) -> tauri::Result<Menu<Wry>> {
     MenuBuilder::new(h)
         .item(&MenuItemBuilder::with_id("tray_open", "Open Aura").build(h)?)
-        .item(&MenuItemBuilder::with_id("tray_hud", "Show HUD  ⌘⇧A").build(h)?)
+        .item(&MenuItemBuilder::with_id("tray_hud", "Show HUD  ⌃⌘A").build(h)?)
         .separator()
         .item(&MenuItemBuilder::with_id("tray_quit", "Quit Aura").build(h)?)
         .build()

@@ -1,9 +1,9 @@
 // v0.2.28 — Project-wide search + replace workpane (⌘⇧F).
 //
-// VSCode-style overlay above the work surface. Left column: query input,
-// optional replace input, regex / case / whole-word toggles, include /
-// exclude glob inputs. Right column: file-grouped result tree with
-// per-match jump, per-file Replace, and global Replace-All.
+// An overlay above the work surface, drawn from the shared page parts. Left
+// column: query input, optional replace input, regex / case / whole-word
+// toggles, include / exclude glob inputs. Right column: matches grouped by
+// file, with per-match jump, per-file Replace, and Replace all.
 //
 // Backed by the Tauri `fs_grep_content` + `fs_replace_in_files` commands
 // in `src-tauri/src/cmd_search.rs`. The replace path runs in-process via
@@ -11,12 +11,20 @@
 // trees — git diff afterwards shows exactly what changed.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FileText, Search as SearchIcon } from "lucide-react";
+import { FileText, Search as SearchIcon, X } from "lucide-react";
 import { api, type GrepHit, type GrepOpts, type ReplaceReport } from "../lib/api";
+import { Alert, AlertDescription } from "./ui/alert";
 import { AsciiSpinner } from "./ui/ascii-spinner";
-import { Kbd } from "./ui/kbd";
-import { Input } from "./ui/input";
 import { askConfirm } from "./ui/ask";
+import { Button } from "./ui/button";
+import { Field } from "./ui/field";
+import { Input } from "./ui/input";
+import { Kbd } from "./ui/kbd";
+import { EmptyState } from "./ui/state";
+import { Toggle } from "./ui/toggle";
+import { TraceList, TraceGroup } from "./ui/trace-list";
+import { TraceHeader } from "./ui/trace-page";
+import "./ui/repo-search.css";
 
 type Props = {
   repoRoot: string;
@@ -126,7 +134,7 @@ function MatchLine({
   return (
     <>
       {text.slice(0, at)}
-      <mark className="rounded-[3px] bg-accent/20 px-0.5 text-accent">
+      <mark className="ui-repo-search-mark">
         {text.slice(at, at + q.length)}
       </mark>
       {text.slice(at + q.length)}
@@ -323,273 +331,245 @@ export function SearchWorkpane({ repoRoot, open, onClose }: Props) {
   const totalHits = hits.length;
   const totalFiles = groups.length;
   const canReplace = showReplace && query.trim().length > 0 && totalHits > 0;
+  const tally =
+    `${totalHits} ${totalHits === 1 ? "match" : "matches"} in ` +
+    `${totalFiles} ${totalFiles === 1 ? "file" : "files"}`;
 
   return (
-    <div className="absolute inset-0 z-40 bg-bg-content flex flex-col">
-      {/* Header */}
-      <div className="h-11 px-4 border-b border-line-soft flex items-center gap-2.5 flex-shrink-0">
-        <SearchIcon size={14} className="text-text-4 shrink-0" />
-        <div className="text-base font-medium text-text-1">
-          Search this project
-        </div>
-        <div className="text-xs text-text-5 font-mono truncate">
-          {shortPath(repoRoot)}
-        </div>
-        <div className="flex-1" />
-        {!searching && query.trim() && totalHits > 0 && (
-          <div className="text-xs text-text-4">
-            {totalHits} {totalHits === 1 ? "match" : "matches"} ·{" "}
-            {totalFiles} {totalFiles === 1 ? "file" : "files"}
-          </div>
-        )}
-        <button
-          type="button"
-          onClick={() => setShowReplace((v) => !v)}
-          className={`text-xs px-2 py-1 rounded ${
-            showReplace
-              ? "bg-bg-2 text-text-1"
-              : "text-text-4 hover:text-text-1"
-          }`}
-          title="Toggle replace input"
-        >
-          Replace
-        </button>
-        <button
-          type="button"
-          onClick={onClose}
-          title="Close (Esc)"
-          className="text-sm text-text-4 hover:text-text-1 px-1.5 py-0.5 rounded hover:bg-state-hover"
-        >
-          ×
-        </button>
-      </div>
+    <div className="ui-repo-search">
+      <TraceHeader
+        leading={<SearchIcon size={16} className="ui-repo-search-glyph" />}
+        title="Search this repository"
+        actions={
+          <>
+            <span className="ui-repo-search-root" title={repoRoot}>
+              {shortPath(repoRoot)}
+            </span>
+            <Toggle
+              size="sm"
+              pressed={showReplace}
+              onPressedChange={setShowReplace}
+              title="Show the replace field"
+            >
+              Replace
+            </Toggle>
+            <Button
+              variant="ghost"
+              size="iconSm"
+              onClick={onClose}
+              title="Close (Esc)"
+              aria-label="Close search"
+            >
+              <X size={14} />
+            </Button>
+          </>
+        }
+      />
 
       {error && (
-        <div className="px-4 py-2 text-sm text-red bg-red/10 border-b border-line-soft">
-          {error}
-        </div>
+        <Alert variant="destructive" className="ui-repo-search-alert">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
 
       {/* A finished replace is a receipt, not an alarm — it reads on the
-          neutral ramp; only the failure banner above carries colour. */}
+          neutral alert; only the failure above carries colour. */}
       {report && (
-        <div className="px-4 py-2 text-sm text-text-2 bg-bg-2 border-b border-line-soft">
-          Replaced {report.total_replacements} occurrence
-          {report.total_replacements === 1 ? "" : "s"} across{" "}
-          {report.files_changed} file{report.files_changed === 1 ? "" : "s"}.
-        </div>
+        <Alert className="ui-repo-search-alert">
+          <AlertDescription>
+            Replaced {report.total_replacements} occurrence
+            {report.total_replacements === 1 ? "" : "s"} across {report.files_changed} file
+            {report.files_changed === 1 ? "" : "s"}.
+          </AlertDescription>
+        </Alert>
       )}
 
-      <div className="flex-1 min-h-0 flex">
-        {/* Left column: query + filters */}
-        <div className="w-[320px] flex-shrink-0 border-r border-line-soft bg-bg-chrome flex flex-col overflow-y-auto">
-          <div className="p-3 flex flex-col gap-2 border-b border-line-soft">
-            <div className="flex items-center gap-1">
-              <Input
-                ref={queryRef}
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search"
-                className="flex-1 min-w-0 h-7 text-sm font-mono"
-              />
-              <button
-                type="button"
-                onClick={() => setCaseSensitive((v) => !v)}
-                title="Match Case (Aa)"
-                className={`text-xs font-mono px-1.5 py-1 rounded border ${
-                  caseSensitive
-                    ? "bg-accent/20 border-accent text-text-1"
-                    : "border-transparent text-text-4 hover:text-text-1 hover:bg-state-hover"
-                }`}
-              >
-                Aa
-              </button>
-              <button
-                type="button"
-                onClick={() => setWholeWord((v) => !v)}
-                title="Whole Word"
-                className={`text-xs font-mono px-1.5 py-1 rounded border ${
-                  wholeWord
-                    ? "bg-accent/20 border-accent text-text-1"
-                    : "border-transparent text-text-4 hover:text-text-1 hover:bg-state-hover"
-                }`}
-              >
-                ab
-              </button>
-              <button
-                type="button"
-                onClick={() => setRegex((v) => !v)}
-                title="Regex"
-                className={`text-xs font-mono px-1.5 py-1 rounded border ${
-                  regex
-                    ? "bg-accent/20 border-accent text-text-1"
-                    : "border-transparent text-text-4 hover:text-text-1 hover:bg-state-hover"
-                }`}
-              >
-                .*
-              </button>
-            </div>
+      <div className="ui-repo-search-body">
+        {/* What to look for, and where. */}
+        <aside className="ui-repo-search-side">
+          <div className="ui-repo-search-section">
+            <Input
+              ref={queryRef}
+              type="text"
+              size="small"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search"
+              aria-label="Search for"
+              className="ui-repo-search-query"
+              suffix={
+                <span className="ui-repo-search-flags">
+                  <Toggle
+                    size="sm"
+                    pressed={caseSensitive}
+                    onPressedChange={setCaseSensitive}
+                    title="Match case"
+                    aria-label="Match case"
+                  >
+                    Aa
+                  </Toggle>
+                  <Toggle
+                    size="sm"
+                    pressed={wholeWord}
+                    onPressedChange={setWholeWord}
+                    title="Whole word"
+                    aria-label="Whole word"
+                  >
+                    ab
+                  </Toggle>
+                  <Toggle
+                    size="sm"
+                    pressed={regex}
+                    onPressedChange={setRegex}
+                    title="Regular expression"
+                    aria-label="Regular expression"
+                  >
+                    .*
+                  </Toggle>
+                </span>
+              }
+            />
 
             {showReplace && (
-              <div className="flex items-center gap-1">
+              <div className="ui-repo-search-replace">
                 <Input
                   type="text"
+                  size="small"
                   value={replacement}
                   onChange={(e) => setReplacement(e.target.value)}
                   placeholder="Replace"
-                  className="flex-1 min-w-0 h-7 text-sm font-mono"
+                  aria-label="Replace with"
+                  className="ui-repo-search-query"
                 />
-                <button
-                  type="button"
+                <Button
+                  variant="secondary"
+                  size="xs"
                   disabled={!canReplace || replacing}
                   onClick={() => replaceInFiles(groups.map((g) => g.path))}
-                  title="Replace All"
-                  className="text-xs px-2 py-1 rounded bg-accent/20 text-text-1 hover:bg-accent/30 disabled:opacity-40 disabled:cursor-not-allowed"
+                  title="Replace in every file that matches"
                 >
-                  All
-                </button>
+                  Replace all
+                </Button>
               </div>
             )}
           </div>
 
-          <div className="p-3 flex flex-col gap-2 border-b border-line-soft">
-            <label className="section-label">
-              files to include
-            </label>
-            <Input
-              type="text"
-              value={include}
-              onChange={(e) => setInclude(e.target.value)}
-              placeholder="src/**/*.ts, *.md"
-              className="h-7 text-sm font-mono"
-            />
-            <label className="section-label">
-              files to exclude
-            </label>
-            <Input
-              type="text"
-              value={exclude}
-              onChange={(e) => setExclude(e.target.value)}
-              placeholder="**/dist/**, **/*.lock"
-              className="h-7 text-sm font-mono"
-            />
+          <div className="ui-repo-search-section">
+            <Field label="Files to include" htmlFor="repo-search-include">
+              <Input
+                id="repo-search-include"
+                type="text"
+                size="small"
+                value={include}
+                onChange={(e) => setInclude(e.target.value)}
+                placeholder="src/**/*.ts, *.md"
+                className="ui-repo-search-query"
+              />
+            </Field>
+            <Field label="Files to exclude" htmlFor="repo-search-exclude">
+              <Input
+                id="repo-search-exclude"
+                type="text"
+                size="small"
+                value={exclude}
+                onChange={(e) => setExclude(e.target.value)}
+                placeholder="**/dist/**, **/*.lock"
+                className="ui-repo-search-query"
+              />
+            </Field>
           </div>
 
-          <div className="p-3 text-xs text-text-5 flex flex-col gap-1">
-            {searching && (
-              <div className="flex items-center gap-1.5 text-text-4">
+          <div className="ui-repo-search-status" aria-live="polite">
+            {searching ? (
+              <>
                 <AsciiSpinner />
                 Searching…
-              </div>
-            )}
-            {!searching && query.trim() && (
-              <div>
-                {totalHits} match{totalHits === 1 ? "" : "es"} in{" "}
-                {totalFiles} file{totalFiles === 1 ? "" : "s"}
+              </>
+            ) : query.trim() ? (
+              <>
+                {tally}
                 {truncated && " · showing the first 2,000"}
-              </div>
-            )}
+              </>
+            ) : null}
           </div>
-        </div>
+        </aside>
 
-        {/* Right column: result tree */}
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          {groups.length === 0 && !searching && (
-            <div className="flex flex-col items-center justify-center gap-2 py-20 text-center">
-              <SearchIcon size={22} className="text-text-5" />
-              {query.trim() ? (
-                <>
-                  <div className="text-base text-text-2">
-                    Nothing matches “{query.trim()}”.
-                  </div>
-                  <div className="text-sm text-text-5">
-                    Try fewer letters, or turn off the match filters above.
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="text-base text-text-2">
-                    Search across every file in this project.
-                  </div>
-                  <div className="text-sm text-text-5">
-                    Type above to begin. Press{" "}
-                    <Kbd>⌘⇧F</Kbd> any time to come back.
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          {groups.map((group) => {
-            const isCollapsed = collapsed.has(group.path);
-            const { dir, base } = splitRelPath(group.path);
-            return (
-              <div key={group.path} className="border-b border-line-soft/60">
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-bg-chrome/40 hover:bg-bg-chrome cursor-pointer group">
-                  <button
-                    type="button"
-                    onClick={() => toggleGroup(group.path)}
-                    className="flex-1 min-w-0 flex items-center gap-2 text-left"
-                  >
-                    <span className="text-2xs text-text-5 w-2.5 shrink-0">
-                      {isCollapsed ? "▸" : "▾"}
-                    </span>
-                    <FileText
-                      size={13}
-                      className="text-text-4 shrink-0"
-                    />
-                    <span className="text-base text-text-1 truncate shrink-0 max-w-[55%]">
-                      {base}
-                    </span>
-                    {dir && (
-                      <span className="text-xs text-text-5 font-mono truncate">
-                        {dir}
+        {/* What it found, by file. */}
+        <div className="ui-repo-search-results">
+          {groups.length === 0 && !searching ? (
+            query.trim() ? (
+              <EmptyState
+                icon={SearchIcon}
+                title={`Nothing matches “${query.trim()}”.`}
+                body="Try fewer letters, or turn off the match filters."
+              />
+            ) : (
+              <EmptyState
+                icon={SearchIcon}
+                title="Search across every file in this repository."
+                body={
+                  <>
+                    Type to begin. Press <Kbd>⌘⇧F</Kbd> any time to come back.
+                  </>
+                }
+              />
+            )
+          ) : (
+            <TraceList label="Matches by file">
+              {groups.map((group) => {
+                const { dir, base } = splitRelPath(group.path);
+                return (
+                  <TraceGroup
+                    key={group.path}
+                    label={
+                      <span className="ui-repo-search-file" title={group.path}>
+                        <FileText size={13} />
+                        <span className="ui-repo-search-base">{base}</span>
+                        {dir && <span className="ui-repo-search-dir">{dir}</span>}
                       </span>
-                    )}
-                  </button>
-                  <span className="shrink-0 rounded-full bg-bg-2 px-1.5 py-px text-2xs text-text-4 tabular-nums">
-                    {group.hits.length}
-                  </span>
-                  {canReplace && (
-                    <button
-                      type="button"
-                      disabled={replacing}
-                      onClick={() => replaceInFiles([group.path])}
-                      title="Replace in this file"
-                      className="opacity-0 group-hover:opacity-100 text-xs px-1.5 py-0.5 rounded bg-bg-2 text-text-3 hover:text-text-1 disabled:opacity-40"
-                    >
-                      Replace
-                    </button>
-                  )}
-                </div>
-                {!isCollapsed && (
-                  <div className="pb-0.5">
+                    }
+                    count={group.hits.length}
+                    collapsed={collapsed.has(group.path)}
+                    onToggle={() => toggleGroup(group.path)}
+                    actions={
+                      canReplace ? (
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          disabled={replacing}
+                          onClick={() => replaceInFiles([group.path])}
+                          title={`Replace in ${group.path}`}
+                        >
+                          Replace
+                        </Button>
+                      ) : undefined
+                    }
+                  >
                     {group.hits.map((hit, idx) => (
-                      <button
-                        type="button"
-                        key={`${hit.path}:${hit.line}:${hit.column}:${idx}`}
-                        onClick={() => openHit(hit)}
-                        className="w-full flex items-baseline gap-3 pl-[34px] pr-4 py-[3px] text-left hover:bg-accent/[0.07] group/hit"
-                      >
-                        <span className="text-xs text-text-5 font-mono w-9 text-right shrink-0 tabular-nums group-hover/hit:text-accent">
-                          {hit.line}
-                        </span>
-                        <span className="text-sm text-text-2 font-mono truncate flex-1">
-                          <MatchLine
-                            text={hit.preview}
-                            query={query}
-                            regex={regex}
-                            caseSensitive={caseSensitive}
-                          />
-                        </span>
-                      </button>
+                      <div role="listitem" key={`${hit.path}:${hit.line}:${hit.column}:${idx}`}>
+                        <button
+                          type="button"
+                          className="ui-repo-search-hit"
+                          onClick={() => openHit(hit)}
+                          title={`${group.path}:${hit.line}`}
+                        >
+                          <span className="ui-repo-search-line">{hit.line}</span>
+                          <span className="ui-repo-search-text">
+                            <MatchLine
+                              text={hit.preview}
+                              query={query}
+                              regex={regex}
+                              caseSensitive={caseSensitive}
+                            />
+                          </span>
+                        </button>
+                      </div>
                     ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                  </TraceGroup>
+                );
+              })}
+            </TraceList>
+          )}
         </div>
       </div>
     </div>

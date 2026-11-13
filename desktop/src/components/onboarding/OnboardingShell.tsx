@@ -1,92 +1,65 @@
-// Shared chrome for the first-run flow. Every screen sits on the same
-// full-bleed near-black surface (Aura's darkest chrome token) with the
-// Aura wordmark centered above the screen's own content. A single optional
-// Back affordance lives top-left; nothing else competes. Modeled on the
-// reference editor's calm sign-in / open-project panes, rendered entirely
-// on Aura tokens.
+// The frame first run sits in. It owns the whole window until setup is done,
+// and inside it the walkthrough is the shared step flow: the steps down the
+// left, one page beside them. A step not reached yet stays shut; one already
+// passed wears a tick, and clicking it goes back.
+//
+// A screen that stands on its own (the one-time support ask, the sign-in
+// surface opened from elsewhere) uses OnboardingPage: the same page, no steps.
 
 import type { ReactNode } from "react";
-import { BackArrow } from "./icons";
-import { AuraMark } from "../AuraMark";
-import { Button } from "../ui/button";
+import { SetupFlow } from "../ui/setup-flow";
+import "../ui/cloud-onboarding.css";
+import "../ui/onboarding.css";
 
-export function AuraWordmark() {
-  // The brand lockup: the blossom mark beside the "Aura" wordmark — the one
-  // piece of brand identity on the surface. The mark is the single-source
-  // AuraMark (tints via currentColor → text-text-1), the word is the system
-  // display face in title case so it reads as the product name, not a shout.
-  return (
-    <div className="select-none text-text-1 inline-flex items-center gap-3">
-      <AuraMark size={34} title="Aura" />
-      <span
-        style={{
-          fontFamily:
-            '"SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, sans-serif',
-          fontWeight: 700,
-          fontSize: "34px",
-          letterSpacing: "-0.01em",
-          lineHeight: 1,
-        }}
-      >
-        Aura
-      </span>
-    </div>
-  );
-}
+/** The walkthrough's steps, in order. New repository is a page of Repository. */
+export const ONBOARDING_STEPS = ["Sign in", "Agents", "Repository"];
 
 export function OnboardingShell({
-  onBack,
+  step,
+  furthest,
+  onStep,
   children,
 }: {
-  /** When set, a quiet Back arrow shows top-left. */
-  onBack?: (() => void) | null;
+  /** The step showing now, or null for a page with no steps beside it. */
+  step: number | null;
+  furthest: number;
+  onStep: (index: number) => void;
   children: ReactNode;
 }) {
   return (
-    // A modal surface: it owns the whole window until first-run finishes, so
+    // A modal surface: it owns the whole window until first run finishes, so
     // screen readers should treat everything behind it as inert.
     // no-escape-dismissal: there is nothing to fall back to until setup is
     // done, so there is nowhere for Escape to go.
     <div
-      className="fixed inset-0 z-[60] bg-bg-1 flex flex-col"
+      className="ui-onboarding"
       role="dialog"
       aria-modal="true"
       aria-label="Set up Aura"
       data-onboarding-v2
     >
-      {onBack ? (
-        <Button
-          type="button"
-          variant="ghost"
-          size="lg"
-          onClick={onBack}
-          className="absolute top-5 left-5"
+      {step === null ? (
+        <OnboardingPage>{children}</OnboardingPage>
+      ) : (
+        <SetupFlow
+          label="Setup steps"
+          steps={ONBOARDING_STEPS}
+          step={step}
+          furthest={furthest}
+          onStep={onStep}
         >
-          <BackArrow />
-          Back
-        </Button>
-      ) : null}
-      <div className="flex-1 min-h-0 flex flex-col items-center justify-center px-6 overflow-y-auto">
-        {children}
-      </div>
+          {children}
+        </SetupFlow>
+      )}
     </div>
   );
 }
 
-/** Wordmark + the wide central column every screen shares. */
-export function OnboardingCenter({
-  children,
-  width = 360,
-}: {
-  children: ReactNode;
-  width?: number;
-}) {
+/** One setup page with no step list beside it. */
+export function OnboardingPage({ children }: { children: ReactNode }) {
   return (
-    <div className="w-full flex flex-col items-center py-12">
-      <AuraWordmark />
-      <div className="mt-10 w-full flex flex-col items-center" style={{ maxWidth: width }}>
-        {children}
-      </div>
+    <div className="ui-cloud-setup">
+      <main className="ui-cloud-setup-page">{children}</main>
     </div>
   );
 }

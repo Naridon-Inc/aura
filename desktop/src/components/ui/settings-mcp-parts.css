@@ -1,0 +1,25 @@
+/* Two pieces the connections page needs beyond a plain settings row. */
+
+/* A connection's name with its state badges after it. The badges carry
+   their own border, so they need the row's 8px gap to read as separate
+   marks rather than part of the name; wrapping keeps a long name and
+   several badges inside the row's text column at narrow widths. */
+.ui-settings-mcp-title {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+/* A page-level toolbar of three labelled buttons sits in the row's
+   control slot, which is capped at 45% of the row. On a narrow window
+   that is less than the buttons need, so they wrap to a second line,
+   still right-aligned, instead of running past the page edge. */
+.ui-settings-mcp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}

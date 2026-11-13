@@ -73,5 +73,15 @@ echo "── xattr: $(command -v xattr) → $(readlink "$SHIM_DIR/xattr") (suppo
 #
 # Overridden per-invocation rather than in tauri.conf.json: the Linux legs run
 # the same config and their AppImage updater artifact IS the shipped one.
-bun run tauri build --target "$TARGET" --bundles app \
-  --config '{"bundle":{"createUpdaterArtifacts":false}}'
+# AURA_REUSE_DIST=1 skips the frontend build and bundles the dist/ already on
+# disk. The frontend is the same on every chip, so the second arch of a release
+# can take the one the first arch just built from the same commit, instead of
+# building it again — that vite build is the step most likely to be killed
+# when the machine is short of memory.
+CONFIG='{"bundle":{"createUpdaterArtifacts":false}}'
+if [ "${AURA_REUSE_DIST:-}" = 1 ]; then
+  [ -f dist/index.html ] || { echo "✗ AURA_REUSE_DIST=1 but there is no dist/index.html to reuse"; exit 3; }
+  echo "── reusing dist/ built $(stat -f '%Sm' dist/index.html), not rebuilding the frontend"
+  CONFIG='{"bundle":{"createUpdaterArtifacts":false},"build":{"beforeBuildCommand":""}}'
+fi
+bun run tauri build --target "$TARGET" --bundles app --config "$CONFIG"

@@ -63,6 +63,11 @@ pub struct ManagedWorktree {
     pub branch: String,
     pub path: String,
     pub start_point: String,
+    /// One entry per nested repository the project holds: each gets its own
+    /// copy at the same folder inside this one, on the same branch name.
+    /// Empty for a project with none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub nested: Vec<crate::nested_repos::NestedWorktreeOutcome>,
 }
 
 /// Stable id for a project root. Same input → same id across restarts.
@@ -383,11 +388,17 @@ pub fn create_managed_worktree(
         return Err(format!("post-create config failed: {e}"));
     }
 
+    // Step 4: a folder in the project that is its own repository is ignored
+    // by this one, so git left it out of the copy. Give each one a copy of its
+    // own in the same place. Never fails the workspace: each reports back.
+    let nested = crate::nested_repos::create_nested_worktrees(&cwd, &target, Some(branch));
+
     Ok(ManagedWorktree {
         project_id,
         branch: branch.to_string(),
         path: target_str,
         start_point,
+        nested,
     })
 }
 
@@ -442,6 +453,10 @@ pub fn remove_managed_worktree(repo_root: &str, worktree_path: &str) -> Result<(
     let tag = Uuid::new_v4().simple().to_string();
     let temp = parent.join(format!(".aura-delete-{}", &tag[..8]));
 
+    // Nested repositories' copies live inside this folder. Note whose they
+    // are now; once the folder is moved there is nothing left to ask.
+    let nested_commons = crate::nested_repos::nested_worktree_commons(&canon_target);
+
     std::fs::rename(&target, &temp)
         .map_err(|e| format!("rename {} → {}: {e}", target.display(), temp.display()))?;
 
@@ -452,6 +467,7 @@ pub fn remove_managed_worktree(repo_root: &str, worktree_path: &str) -> Result<(
         Path::new(repo_root),
         &["worktree", "prune"],
     );
+    crate::nested_repos::prune_nested(&nested_commons);
 
     // Detached rm. Don't wait — large worktrees with .git/objects may
     // take seconds, and the UI shouldn't block on that.

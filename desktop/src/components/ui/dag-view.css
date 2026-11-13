@@ -1,0 +1,78 @@
+/* The manager's plan as a graph in the side aside: waves headed like the log
+   note's file list, task cards in each, the dependency edges drawn over them,
+   the shared tooltip at an edge's midpoint and the handover prompt in the
+   shared dialog. */
+
+.ui-dag {
+  position: relative;
+}
+.ui-dag-edges {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.ui-dag-edge {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.ui-dag-waves {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ui-dag-wave > .ui-log-note-files-head {
+  margin-bottom: 4px;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+}
+.ui-dag-wave-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 48px;
+}
+.ui-tooltip.ui-dag-tooltip {
+  position: absolute;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.ui-dag-tooltip > strong {
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  font-weight: 500;
+}
+.ui-dag-tooltip > p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  white-space: pre-wrap;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+}
+.ui-dag-tooltip > p.ui-dag-tooltip-quiet,
+.ui-dag-tooltip > small {
+  color: var(--ui-muted-fg);
+}
+.ui-dag-tooltip > small {
+  font-size: 11px;
+}
+.ui-dialog-content.ui-dag-prompt {
+  width: min(640px, calc(100vw - 32px));
+  max-width: none;
+}
+.ui-dag-prompt-body {
+  max-height: 60vh;
+  overflow: auto;
+}
+.ui-dag-prompt-body .ui-code-message {
+  margin-block: 0;
+}
+.ui-dag-prompt-body .ui-code-message pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

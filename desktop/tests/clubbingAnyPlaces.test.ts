@@ -93,8 +93,8 @@ const {
 const { remotePlaceKey } = await import("../src/lib/remotePlaces");
 
 // Two boxes and a laptop — the shape the acceptance criterion names.
-const BOX_A = "ubuntu@18.196.118.42";
-const BOX_B = "ubuntu@3.122.52.150";
+const BOX_A = "ubuntu@203.0.113.10";
+const BOX_B = "ubuntu@198.51.100.20";
 const LOCAL_ROOT = "/Users/mo/src/aura";
 const OTHER_ROOT = "/Users/mo/src/aura-web";
 

@@ -1,8 +1,7 @@
 // Shared read-outs for an agent's live event stream (the `StreamEvent`
-// feed from agentStreamStore). Moved out of WorkspaceProgressPopover so the
-// workspace-tile hover card and the per-worktree hover card
-// (WorktreeHoverCard) describe "what is this agent doing right now" the exact
-// same way — one implementation, two surfaces.
+// feed from agentStreamStore). Moved out of WorkspaceProgressPopover so every
+// surface that previews a workspace describes "what is this agent doing right
+// now" the exact same way — one implementation.
 //
 // Pure, real-data-only: `summarizeEvents` reads the actual event stream, the
 // `relAge*` helpers humanize a seconds-ago delta. Nothing is invented — an

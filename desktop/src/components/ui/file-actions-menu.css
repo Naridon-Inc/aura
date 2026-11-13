@@ -1,0 +1,19 @@
+/* "Open in" rows: the app's mark, its name, and the number key that picks it. */
+.ui-menu-app-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.ui-menu-app-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-menu-shortcut.ui-menu-number {
+  width: 12px;
+  padding-left: 8px;
+  box-sizing: content-box;
+  text-align: right;
+  font-family: var(--font-mono);
+}

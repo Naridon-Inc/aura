@@ -1,0 +1,241 @@
+/* What changed in a file, over the editor's diff: one shared accordion row
+   whose body is a short used-to → now account, flat +/−/~ rows (plain line
+   first, the key dim beside it) and one quiet "Why" line. No cards: hairlines,
+   11px faint labels and 12px mono for names, as the Changes view draws. */
+
+.ui-file-insight {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-file-insight .ui-accordion-trigger {
+  padding: 7px 12px;
+  font-size: 13px;
+}
+.ui-file-insight .ui-accordion-trigger:hover {
+  background: var(--ui-hover);
+}
+.ui-file-insight-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 400;
+}
+.ui-story-writing {
+  display: inline-flex;
+  color: var(--ui-faint);
+}
+.ui-file-insight .ui-accordion-content {
+  padding: 0 12px 10px;
+  font-size: 13px;
+}
+
+.ui-story {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* ── used to → now ─────────────────────────────────────────────────── */
+
+.ui-story-head {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+.ui-story-head[data-single] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.ui-story-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ui-story-head dt {
+  color: var(--ui-faint);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+.ui-story-head dd {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 19px;
+}
+.ui-story-head dd[data-now] {
+  color: var(--ui-fg);
+}
+
+/* ── the changed things ────────────────────────────────────────────── */
+
+.ui-story-rows {
+  display: flex;
+  flex-direction: column;
+  margin: 0 -6px;
+  padding: 0;
+  list-style: none;
+}
+.ui-story-row {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+.ui-story-row:hover {
+  background: var(--ui-hover);
+}
+.ui-story-mark {
+  font: 12px/18px var(--font-mono);
+  text-align: center;
+  color: var(--ui-muted-fg);
+}
+.ui-story-row[data-mark="added"] > .ui-story-mark {
+  color: var(--color-accent-green, #4dc1a4);
+}
+.ui-story-row[data-mark="removed"] > .ui-story-mark {
+  color: var(--ui-red);
+}
+.ui-story-row[data-mark="changed"] > .ui-story-mark {
+  color: var(--ui-yellow);
+}
+.ui-story-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ui-story-text {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--ui-fg);
+  font-size: 13px;
+  line-height: 18px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.ui-story-row[data-pending] .ui-story-text {
+  color: var(--ui-muted-fg);
+}
+.ui-story-was {
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-story-key {
+  max-width: 180px;
+  overflow: hidden;
+  color: var(--ui-faint);
+  font: 11px/18px var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-story-more {
+  align-self: flex-start;
+  margin: -4px 0 0 14px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+.ui-story-more:hover {
+  color: var(--ui-fg);
+}
+.ui-story-empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--ui-muted-fg);
+}
+
+/* ── why ───────────────────────────────────────────────────────────── */
+
+.ui-story-why {
+  border-top: 1px solid var(--ui-border);
+  padding-top: 6px;
+}
+.ui-story-why-head {
+  display: grid;
+  grid-template-columns: 12px auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+.ui-story-why-head > svg {
+  align-self: center;
+  color: var(--ui-faint);
+  transition: transform 120ms ease;
+}
+.ui-story-why[data-open] .ui-story-why-head > svg {
+  transform: rotate(90deg);
+}
+.ui-story-why-label {
+  color: var(--ui-faint);
+  font-size: 11px;
+  font-weight: 500;
+}
+.ui-story-why-text {
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-story-why[data-open] .ui-story-why-text {
+  white-space: normal;
+}
+.ui-story-why small,
+.ui-story-why-more small {
+  flex-shrink: 0;
+  color: var(--ui-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.ui-story-why-more {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 0 18px;
+  padding: 0;
+  list-style: none;
+}
+.ui-story-why-more > li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 17px;
+}
+.ui-story-why-more > li > span {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 560px) {
+  .ui-story-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ui-story-key {
+    display: none;
+  }
+}

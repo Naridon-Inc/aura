@@ -11,28 +11,32 @@
 // session detail (landing on its Attestation tab), closing the loop between
 // the ledger and the run.
 //
+// Both views are the trace page's own: the chain is its timeline, the flat
+// list is its row list, and the records' marks are its quiet word-marks.
+//
 // Backend: `aura attest list --json` → array of rows
 //   { id, kind, created_at, signature: bool, rekor: bool,
 //     human_id?: string, intent_type?: string }
 
 import { useEffect, useState } from "react";
+import { Lock, ShieldCheck } from "lucide-react";
 import { Dialog } from "../Dialog";
 import { Button } from "../ui/button";
+import { Segment } from "../ui/segment";
 import { EmptyState, ErrorState, LoadingState } from "../ui/state";
-import { ShieldCheck } from "lucide-react";
+import { TraceList, TraceRow } from "../ui/trace-list";
+import { TraceStoryHead } from "../ui/trace-story";
 import { api, type IntentRow } from "../../lib/api";
 import { fetchIntentRows } from "../../lib/intentCache";
 import { splitIntent } from "../workpanes/IntentProse";
 import { SessionDetailPane } from "../workpanes/SessionDetailPane";
+import { formatAttestWhen, shortBlockId } from "../workpanes/SessionAttestation";
 import {
-  LockGlyph,
-  TrustBadge,
-  UnlockGlyph,
-  formatAttestWhen,
-  humanizeIntentType,
-  shortBlockId,
-} from "../workpanes/SessionAttestation";
-import { ProvenanceChain, type SealedRecord } from "../provenance/ProvenanceChain";
+  ProvenanceChain,
+  RecordMarks,
+  SealMark,
+  type SealedRecord,
+} from "../provenance/ProvenanceChain";
 
 type AttestRow = SealedRecord;
 
@@ -130,16 +134,23 @@ export function AttestationsDialog({ open, repoRoot, onClose, inline }: Attestat
         inline={inline}
         onClose={onClose}
         title="Genuine records"
-        width={640}
+        width={760}
         footer={
-          <>
-            <Button variant="ghost" size="xs" onClick={run} disabled={loading}>
+          // Inline this is a tab whose strip already closes it.
+          inline ? (
+            <Button onClick={run} disabled={loading}>
               {loading ? "Refreshing…" : "Refresh"}
             </Button>
-            <Button variant="default" size="xs" onClick={onClose}>
-              Close
-            </Button>
-          </>
+          ) : (
+            <>
+              <Button variant="outline" onClick={onClose}>
+                Close
+              </Button>
+              <Button onClick={run} disabled={loading}>
+                {loading ? "Refreshing…" : "Refresh"}
+              </Button>
+            </>
+          )
         }
       >
         {error ? (
@@ -159,35 +170,47 @@ export function AttestationsDialog({ open, repoRoot, onClose, inline }: Attestat
             body="Each time the AI changes something, Aura seals it. A record of exactly what happened that nobody can quietly alter later. Some are copied to an independent public logbook too. Make a change to start the record."
           />
         ) : (
-          <div className={`flex flex-col gap-3 ${inline ? "" : "max-h-[64vh]"}`}>
-            <div className="flex items-center gap-2 text-sm text-text-2">
-              <LockGlyph className="text-accent-green" />
-              <span>
-                <span className="text-text-1 font-medium tabular-nums">{signed}</span> sealed
-              </span>
-              <span className="text-text-4">·</span>
-              <span>
-                <span className="text-text-1 font-medium tabular-nums">{logged}</span> with a public
-                copy
-              </span>
-              <ViewToggle view={view} onChange={setView} />
-            </div>
-            <div className="overflow-auto pr-1">
-              {view === "chain" ? (
-                <ProvenanceChain records={rows} resolveTitle={resolveTitle} onOpen={openRecord} />
-              ) : (
-                <ul className="flex flex-col gap-1.5">
-                  {rows.map((r) => (
-                    <AttestRowItem
-                      key={r.id}
-                      row={r}
-                      intent={byBlock[r.id] ?? null}
-                      onOpen={byBlock[r.id] ? () => setOpenRow(byBlock[r.id]) : undefined}
-                    />
-                  ))}
-                </ul>
-              )}
-            </div>
+          <div className="ui-attest" data-scroll={inline ? undefined : ""}>
+            <TraceStoryHead
+              icon={<Lock aria-hidden />}
+              control={
+                <Segment
+                  size="xs"
+                  value={view}
+                  onChange={setView}
+                  ariaLabel="Show the records as"
+                  options={[
+                    { value: "chain", label: "Chain", title: "Each record linked to the one before it" },
+                    { value: "list", label: "List", title: "One row per record" },
+                  ]}
+                />
+              }
+            >
+              <strong>{signed}</strong> sealed · <strong>{logged}</strong> with a public copy
+            </TraceStoryHead>
+            {view === "chain" ? (
+              <ProvenanceChain
+                records={rows}
+                resolveTitle={resolveTitle}
+                canOpen={(r) => !!byBlock[r.id]}
+                onOpen={openRecord}
+              />
+            ) : (
+              <TraceList label="Sealed records">
+                {rows.map((r) => (
+                  <TraceRow
+                    key={r.id}
+                    status={<SealMark record={r} />}
+                    title={resolveTitle(r) || r.kind}
+                    marks={r.signature ? undefined : <RecordMarks record={r} brief />}
+                    where={<span className="ui-chain-id">{shortBlockId(r.id)}</span>}
+                    whereTitle={r.human_id || r.id}
+                    time={formatAttestWhen(r.created_at)}
+                    onOpen={byBlock[r.id] ? () => openRecord(r) : undefined}
+                  />
+                ))}
+              </TraceList>
+            )}
           </div>
         )}
       </Dialog>
@@ -205,118 +228,3 @@ export function AttestationsDialog({ open, repoRoot, onClose, inline }: Attestat
     </>
   );
 }
-
-function AttestRowItem({
-  row,
-  intent,
-  onOpen,
-}: {
-  row: AttestRow;
-  intent: IntentRow | null;
-  onOpen?: () => void;
-}) {
-  // Prefer the run's human intent headline; fall back to the block kind.
-  const title = intent ? splitIntent(intent.intent).headline || intent.intent : row.kind;
-  const clickable = !!onOpen;
-
-  const body = (
-    <>
-      <span className={`shrink-0 mt-0.5 ${row.signature ? "text-accent-green" : "text-text-4"}`}>
-        {row.signature ? <LockGlyph /> : <UnlockGlyph />}
-      </span>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-base text-text-1 truncate" title={title}>
-            {title}
-          </span>
-          {row.intent_type && (
-            <span className="text-2xs px-1.5 py-0.5 rounded border border-line-soft text-text-3">
-              {humanizeIntentType(row.intent_type)}
-            </span>
-          )}
-          <span className="ml-auto text-xs text-text-4 tabular-nums shrink-0">
-            {formatAttestWhen(row.created_at)}
-          </span>
-          {clickable && (
-            <span className="shrink-0 text-text-4 opacity-0 transition-opacity group-hover:opacity-100">
-              <ChevronRight />
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5 mt-1.5">
-          <span className="font-mono text-xs text-text-4" title={row.id}>
-            {shortBlockId(row.id)}
-          </span>
-          <span className="text-text-5">·</span>
-          <TrustBadge ok={row.signature} label={row.signature ? "Sealed" : "Not sealed"} tone="green" />
-          {row.rekor && <TrustBadge ok label="Public copy" tone="blue" />}
-          {row.human_id && (
-            <span className="text-2xs text-text-4 font-mono truncate" title={row.human_id}>
-              {row.human_id}
-            </span>
-          )}
-        </div>
-      </div>
-    </>
-  );
-
-  if (clickable) {
-    return (
-      <li>
-        <button
-          type="button"
-          onClick={onOpen}
-          title="Open the change this record came from"
-          className="group flex w-full items-start gap-2.5 px-2.5 py-2 rounded border border-line-soft bg-bg-1 text-left transition-colors hover:bg-state-hover"
-        >
-          {body}
-        </button>
-      </li>
-    );
-  }
-  return (
-    <li className="flex items-start gap-2.5 px-2.5 py-2 rounded border border-line-soft bg-bg-1">
-      {body}
-    </li>
-  );
-}
-
-function ViewToggle({
-  view,
-  onChange,
-}: {
-  view: LedgerView;
-  onChange: (v: LedgerView) => void;
-}) {
-  return (
-    <div className="ml-auto flex items-center gap-0.5 rounded-md border border-line-soft p-0.5">
-      {(["chain", "list"] as const).map((v) => (
-        <button
-          key={v}
-          type="button"
-          onClick={() => onChange(v)}
-          className={`rounded px-2 py-0.5 text-xs capitalize transition-colors ${
-            view === v ? "bg-bg-2 text-text-1" : "text-text-4 hover:text-text-2"
-          }`}
-        >
-          {v}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function ChevronRight() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path
-        d="M6 4l4 4-4 4"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-

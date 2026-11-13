@@ -1,0 +1,29 @@
+/* A task's description and comments. The type, links, code and tables are
+   the shared message markdown's; added here is how an @mention sits in a
+   line, and the room a task list's checkbox needs. */
+.ui-task-markdown {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ui-task-mention {
+  color: var(--ui-muted-fg);
+  font-weight: 500;
+}
+.ui-task-mention[data-known] {
+  color: var(--ui-link);
+}
+.ui-task-markdown .contains-task-list {
+  padding-left: 4px;
+  list-style: none;
+}
+.ui-task-markdown .task-list-item > input[type="checkbox"] {
+  margin: 0 8px 0 0;
+  vertical-align: -1px;
+  accent-color: var(--ui-fg);
+}
+.ui-task-mention[data-clickable] {
+  cursor: pointer;
+}
+.ui-task-mention[data-clickable]:hover {
+  text-decoration: underline;
+}

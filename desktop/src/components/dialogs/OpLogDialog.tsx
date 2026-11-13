@@ -27,12 +27,15 @@ import { Undo2 } from "lucide-react";
 import { Dialog } from "../Dialog";
 import { relativeAgeFromSecs } from "../../lib/relativeTime";
 import { isUndoable } from "../../lib/opKinds";
+import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { EmptyState, ErrorNote, LoadingState } from "../ui/state";
+import { TraceTimeline } from "../ui/trace-timeline";
 import { api, type IntentRow, type OpEntry } from "../../lib/api";
 import { refreshIntentRows } from "../../lib/intentCache";
 import { describeGroup, groupOps } from "./opLog/describe";
 import { OpGroupRow } from "./opLog/OpGroupRow";
+import "../ui/op-log.css";
 
 type OpLogDialogProps = {
   open: boolean;
@@ -232,19 +235,19 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
         </>
       }
     >
-      <div className="space-y-2 text-sm">
+      <div className="ui-op-log">
         {/* Eight things reach this list and not one of them is an agent editing
             your code. Someone frightened by what an AI just did to their files
             would otherwise read these rows as the edits themselves. */}
-        <div className="text-text-4 text-2xs">
+        <p className="ui-op-log-note">
           Aura's own record: the reasons it wrote down, the copies it kept, the clashes it
           settled. Your agents' edits to your files aren't in this list.
-        </div>
-        {err && <ErrorNote className="text-xs">{err}</ErrorNote>}
+        </p>
+        {err && <ErrorNote>{err}</ErrorNote>}
         {result && (
-          <div className="text-text-2 text-xs bg-bg-2 border border-line-soft rounded px-2 py-1.5">
-            {result}
-          </div>
+          <Alert>
+            <AlertDescription>{result}</AlertDescription>
+          </Alert>
         )}
         {loading && ops.length === 0 && (
           <LoadingState label="Reading what Aura has done…" />
@@ -258,7 +261,7 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
           />
         )}
         {ops.length > 0 && (
-          <div className="max-h-[55vh] overflow-y-auto border border-line-soft rounded">
+          <TraceTimeline label="What Aura did" className="ui-op-log-list">
             {groups.map((g) => {
               const lead = g.lead;
               const isSelected = selected === lead.op_id;
@@ -283,9 +286,9 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
                 />
               );
             })}
-          </div>
+          </TraceTimeline>
         )}
-        <div className="text-text-4 text-2xs">
+        <p className="ui-op-log-note">
           {/* Said "the most recent un-undone op", which was both the engine's
               words and a description of the bug — it targeted the newest row
               whether or not that row could be reversed.
@@ -299,7 +302,7 @@ export function OpLogDialog({ open, repoRoot, onClose }: OpLogDialogProps) {
               Every arm now comes from `undoCopy`, which knows whether the list
               has been read at all — see the note on that function. */}
           {copy.footnote}
-        </div>
+        </p>
       </div>
     </Dialog>
   );

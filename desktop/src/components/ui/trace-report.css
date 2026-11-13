@@ -1,0 +1,220 @@
+/* A run's report column. Body text is 14px like a Home row title; everything
+   secondary drops to 12-13px muted, the same steps the details column uses. */
+
+.ui-trace-report {
+  height: 100%;
+  overflow-y: auto;
+  color: var(--ui-fg);
+}
+.ui-trace-report-column {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 20px 24px 40px;
+}
+
+.ui-trace-section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+  margin-bottom: 4px;
+}
+.ui-trace-section h2 {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--ui-muted-fg);
+}
+.ui-trace-section h2 small {
+  font-size: 12px;
+  color: var(--ui-faint);
+  font-variant-numeric: tabular-nums;
+}
+.ui-trace-section > header > .ui-button-ghost {
+  color: var(--ui-muted-fg);
+}
+.ui-trace-section > header > .ui-button-ghost:hover {
+  color: var(--ui-fg);
+}
+
+.ui-trace-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--ui-faint);
+}
+.ui-trace-glyph svg {
+  width: 14px;
+  height: 14px;
+}
+.ui-trace-glyph[data-tone="good"] {
+  color: var(--ui-green);
+}
+.ui-trace-glyph[data-tone="bad"] {
+  color: var(--ui-destructive);
+}
+.ui-trace-glyph[data-tone="warn"] {
+  color: var(--ui-yellow);
+}
+
+.ui-trace-verdict {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.ui-trace-verdict strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+.ui-trace-verdict[data-tone="bad"] strong {
+  color: var(--ui-destructive);
+}
+.ui-trace-verdict p {
+  margin-top: 2px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ui-muted-fg);
+}
+
+.ui-trace-items > .ui-trace-item + .ui-trace-item {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-trace-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 0;
+}
+.ui-trace-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.ui-trace-item-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-height: 20px;
+}
+.ui-trace-item-title strong {
+  font-size: 14px;
+  font-weight: 450;
+  line-height: 20px;
+}
+.ui-trace-item-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.ui-trace-line {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ui-muted-fg);
+}
+.ui-trace-line[data-tone="note"] {
+  font-size: 12px;
+  color: var(--ui-faint);
+}
+.ui-trace-line[data-tone="danger"] {
+  font-size: 12px;
+  color: var(--ui-destructive);
+}
+.ui-trace-line[data-tone="warn"] {
+  font-size: 12px;
+  color: var(--ui-yellow);
+}
+
+/* Facts in a report wrap: their values are sentences, not single words. */
+.ui-trace-report .ui-trace-fact {
+  align-items: baseline;
+  padding: 6px 0;
+  font-size: 13px;
+}
+.ui-trace-report .ui-trace-fact-label {
+  font-size: 12px;
+}
+.ui-trace-report .ui-trace-fact-value {
+  flex-wrap: wrap;
+  white-space: normal;
+  line-height: 1.5;
+}
+.ui-trace-report .ui-trace-fact + .ui-trace-fact {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-trace-fact-aside {
+  color: var(--ui-muted-fg);
+}
+.ui-trace-fact-code {
+  font: 12px var(--font-mono);
+  color: var(--ui-muted-fg);
+}
+
+.ui-trace-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% + 16px);
+  min-height: 32px;
+  padding: 4px 8px;
+  margin: 0 -8px;
+  border-radius: 6px;
+  font-size: 13px;
+  text-align: left;
+  color: var(--ui-fg);
+}
+.ui-trace-file-row:hover {
+  background: var(--ui-hover);
+}
+.ui-trace-file-row:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+.ui-trace-file-row > svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--ui-faint);
+}
+.ui-trace-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ui-trace-file-path > span {
+  color: var(--ui-faint);
+}
+
+/* The run's own words. Doubled class so it outranks the prose component's own
+   utility classes without reaching into it. */
+.ui-trace-report-prose.ui-trace-report-prose {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ui-fg);
+}
+.ui-trace-report-note {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-faint);
+}

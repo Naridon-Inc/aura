@@ -1,0 +1,25 @@
+/* The Changes tab: the file list and commit box on the left, the picked
+   file's diff (or the summary) filling the rest. */
+
+.ui-changes-tab {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+.ui-changes-tab-list {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 340px;
+  min-height: 0;
+  border-right: 1px solid var(--ui-border);
+}
+.ui-changes-tab-files {
+  flex: 1;
+  min-height: 0;
+}
+.ui-changes-tab-view {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}

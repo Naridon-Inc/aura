@@ -11,7 +11,7 @@
 
 import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test";
 
-import { readSrc, stripComments } from "./support/code";
+import { readSrc, stripComments, strippedSrcTree } from "./support/code";
 
 let abCalls = 0;
 let dsCalls = 0;
@@ -197,11 +197,10 @@ describe("wiring", () => {
   });
 
   it("no rail surface still polls git state straight at the api", async () => {
-    const glob = new Bun.Glob("components/rightrail/**/*.{ts,tsx}");
-    const root = `${import.meta.dir}/../src/`;
     const offenders: string[] = [];
-    for await (const rel of glob.scan(root)) {
-      const body = stripComments(await Bun.file(root + rel).text());
+    for (const [rel, body] of await strippedSrcTree(
+      "components/rightrail/**/*.{ts,tsx}",
+    )) {
       if (body.includes("api.gitAheadBehind") || body.includes("api.gitDiffStats")) {
         offenders.push(rel);
       }

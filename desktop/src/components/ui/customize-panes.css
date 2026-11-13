@@ -1,0 +1,104 @@
+/* The customize panes as settings pages. Added to the settings parts: the
+   page scrolls inside its pane and holds the same readable measure the
+   overview does; a row's mark takes a tone; an agent not on this machine is
+   drawn quieter; the pin carries its state; the rule input stretches beside
+   its button; a rule's remove shows on hover; the facts the agent already
+   knows sit as a short list under their row; a skill's kind word and its
+   two-line description; a plugin's signature mark. */
+
+.ui-customize-pane {
+  height: 100%;
+  overflow-y: auto;
+  background: var(--ui-bg);
+}
+.ui-customize-pane > .ui-settings-page {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.ui-settings-service-mark.ui-customize-mark[data-tone="on"] {
+  color: var(--ui-green);
+}
+.ui-settings-service-mark.ui-customize-mark[data-tone="attention"] {
+  color: var(--ui-yellow);
+}
+
+.ui-settings-row.ui-customize-dim .ui-settings-service-mark {
+  filter: grayscale(1);
+  opacity: 0.7;
+}
+.ui-settings-row.ui-customize-dim .ui-settings-service-title {
+  color: var(--ui-muted-fg);
+}
+
+.ui-customize-pin {
+  color: var(--ui-muted-fg);
+}
+.ui-customize-pin[aria-pressed="true"] {
+  color: var(--ui-fg);
+}
+.ui-customize-pin[aria-pressed="true"] svg {
+  fill: currentColor;
+}
+
+.ui-customize-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.ui-customize-add > .ui-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ui-customize-remove {
+  opacity: 0;
+}
+.ui-settings-row.ui-customize-rule:hover .ui-customize-remove,
+.ui-customize-remove:focus-visible {
+  opacity: 1;
+}
+
+.ui-customize-known {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.ui-customize-kind {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ui-customize-clamp {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.ui-customize-signature {
+  display: inline-flex;
+  align-items: center;
+}
+.ui-customize-signature > svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-customize-signature[data-tone="ok"] {
+  color: var(--ui-green);
+}
+.ui-customize-signature[data-tone="attention"] {
+  color: var(--ui-yellow);
+}
+
+/* A memory section's name is a lower-case key; it reads as a title. */
+.ui-customize-section-name {
+  text-transform: capitalize;
+}

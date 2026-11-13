@@ -28,17 +28,18 @@ import { describe, expect, test } from "bun:test";
 
 import { readSrc } from "./support/code";
 
-const DIALOG = "components/dialogs/SettingsDialog.tsx";
+const TERMINAL_PAGE = "components/settings/pages/TerminalPage.tsx";
+const APPEARANCE_PAGE = "components/settings/pages/AppearancePage.tsx";
 const SHELL_TERM = "components/Terminal.tsx";
 const AGENT_TERM = "components/agent/AgentXtermCanvas.tsx";
 const STORE = "lib/settingsStore.ts";
 const API = "lib/api.ts";
 
 async function terminalTab(): Promise<string> {
-  const src = await readSrc(DIALOG);
-  const start = src.indexOf("function TerminalTab()");
+  const src = await readSrc(TERMINAL_PAGE);
+  const start = src.indexOf("export function TerminalPage()");
   expect(start).toBeGreaterThan(0);
-  return src.slice(start, src.indexOf("\nfunction ", start + 10));
+  return src.slice(start);
 }
 
 describe("terminal settings — the shell is called a shell", () => {
@@ -54,10 +55,9 @@ describe("terminal settings — the shell is called a shell", () => {
     }
   });
 
-  test("it says shell, in the heading, the row and the empty state", async () => {
+  test("it says shell, in the row, its control and the empty state", async () => {
     const tab = await terminalTab();
-    expect(tab).toContain('title="Shell"');
-    expect(tab).toContain('label="Default shell"');
+    expect(tab).toContain('title="Default shell"');
     expect(tab).toContain('aria-label="Default shell"');
     expect(tab).toContain("No shells found");
   });
@@ -69,18 +69,19 @@ describe("terminal settings — the shell is called a shell", () => {
   });
 
   test("the type keeps its name — only the copy changed", async () => {
-    const tab = await terminalTab();
+    const tab = await readSrc(TERMINAL_PAGE);
     expect(tab).toContain("TerminalProfile");
     expect(tab).toContain("terminalProfileSetDefault");
   });
 });
 
 describe("terminal settings — text size", () => {
-  test("the pane offers one", async () => {
-    const tab = await terminalTab();
-    expect(tab).toContain('label="Text size"');
-    expect(tab).toContain("setTerminalFontSize");
-    expect(tab).toContain("defaultTerminalFontSize()");
+  test("Appearance offers one, beside the editor's", async () => {
+    const page = await readSrc(APPEARANCE_PAGE);
+    expect(page).toContain('title="Terminal Font Size"');
+    expect(page).toContain('aria-label="Terminal font size"');
+    expect(page).toContain("setTerminalFontSize");
+    expect(page).toContain("font_size ?? defaultTerminalFontSize()");
   });
 
   test("never-set means the renderer's own default, not an invented number", async () => {
@@ -115,8 +116,8 @@ describe("terminal settings — text size", () => {
   });
 
   test("Appearance stops pointing at a size that had no control", async () => {
-    const src = await readSrc(DIALOG);
+    const src = await readSrc(APPEARANCE_PAGE);
     expect(src).not.toContain("The terminal keeps its own size");
-    expect(src).toContain("Terminals have their own, on the Terminal page");
+    expect(src).toContain("Terminals have their own size");
   });
 });

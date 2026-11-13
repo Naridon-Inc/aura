@@ -1,235 +1,97 @@
-// Markdown rendering for task descriptions / comments. Built on the
-// existing react-markdown + remark-gfm deps so we don't pull a new
-// parser. Mention chips (`@handle`) are preserved by recursively
-// wrapping string children of every inline-bearing component in
-// `MentionedText`.
-//
-// Styling is dense on purpose — these render inside side panels and
-// comment threads where the host text is 12.5px / leading-relaxed.
-// The fuller `MarkdownView` (for *.md file tabs) stays separate so
-// each surface can tune fonts independently.
+// Markdown for a task's description and comments. It is the shared message
+// markdown — the same type, links, code blocks and tables a chat reply reads
+// in — with two things a task adds: `@handle` mentions drawn as chips, and
+// callout blockquotes.
 
-import { Children, type ReactNode } from "react";
-import { onExternalAnchorClick } from "../../lib/openExternal";
-import ReactMarkdown from "react-markdown";
+import { Children, Fragment, useMemo, type ReactNode } from "react";
+import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { remarkCallouts } from "../markdown/remarkCallouts";
-import { calloutFromBlockquote } from "../markdown/Callout";
 
-import { MentionedText } from "../Mentions";
 import type { TeamMember } from "../../lib/api";
+import { membersByHandle, parseMentions } from "../../lib/mentions";
+import { onExternalAnchorClick } from "../../lib/openExternal";
+import { cn } from "../../lib/utils";
+import { calloutFromBlockquote } from "../markdown/Callout";
+import { remarkCallouts } from "../markdown/remarkCallouts";
+import { CodeMessage, MessageMarkdown } from "../ui/transcript-content";
+import "../ui/chat-markdown.css";
+import "../ui/task-markdown.css";
 
 type Props = {
   /** Markdown source. */
   source: string;
-  /** Team members for `@handle` chip resolution. */
+  /** Team members, so a known `@handle` reads as one. */
   members?: TeamMember[];
-  /** Optional class merged onto the wrapping article. */
   className?: string;
 };
 
-export function TaskMarkdown({ source, members = [], className = "" }: Props) {
+const PLUGINS = [remarkGfm, remarkCallouts];
+
+export function TaskMarkdown({ source, members = [], className }: Props) {
+  const components = useMemo(() => taskComponents(membersByHandle(members)), [members]);
   return (
-    <article
-      className={`task-md text-base text-text-2 leading-relaxed break-words ${className}`}
-    >
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkCallouts]}
-        components={mdComponents(members)}
-      >
-        {source}
-      </ReactMarkdown>
-    </article>
+    <div className={cn("ui-task-markdown", className)}>
+      <MessageMarkdown
+        content={source}
+        components={components}
+        remarkPlugins={PLUGINS}
+        skipHtml={false}
+      />
+    </div>
   );
 }
 
-// Walk children once and swap string nodes for mention-aware spans.
-// Non-string children (other React elements like <a>, <code>, <strong>)
-// pass through unchanged — the recursion happens implicitly via the
-// nested element renderer's own children pass.
-function withMentions(children: ReactNode, members: TeamMember[]): ReactNode {
+/** A string run with its `@handle`s as chips. Strings without an `@` pass
+ *  through untouched, which is most of them. */
+function withMentions(children: ReactNode, lookup: Map<string, TeamMember>): ReactNode {
   return Children.map(children, (child) => {
-    if (typeof child === "string") {
-      // Skip the wrapper entirely when the string has no `@` to keep
-      // the DOM tree small in the common case (most paragraphs don't
-      // mention anyone).
-      if (!child.includes("@")) return child;
-      return <MentionedText text={child} members={members} />;
-    }
-    return child;
+    if (typeof child !== "string" || !child.includes("@")) return child;
+    return parseMentions(child).map((tok, i) => {
+      if (tok.kind === "text") return tok.text;
+      const handle = tok.handle;
+      const known = lookup.get(handle);
+      return (
+        <Fragment key={i}>
+          <span
+            className="ui-task-mention"
+            data-known={known ? "" : undefined}
+            title={known ? known.name || known.email || handle : "Not on this team"}
+          >
+            @{handle}
+          </span>
+        </Fragment>
+      );
+    });
   });
 }
 
-function mdComponents(members: TeamMember[]) {
-  const wrap = (children: ReactNode) => withMentions(children, members);
+function taskComponents(lookup: Map<string, TeamMember>): Components {
+  const wrap = (children: ReactNode) => withMentions(children, lookup);
   return {
-    // Headings — tuned a notch smaller than MarkdownView so they don't
-    // dwarf the surrounding side-panel layout.
-    h1: ({ children, ...p }: any) => (
-      <h1
-        {...p}
-        className="text-lg font-semibold text-text-1 mt-4 mb-2 first:mt-0"
-      >
-        {wrap(children)}
-      </h1>
-    ),
-    h2: ({ children, ...p }: any) => (
-      <h2
-        {...p}
-        className="text-md font-semibold text-text-1 mt-4 mb-2 first:mt-0"
-      >
-        {wrap(children)}
-      </h2>
-    ),
-    h3: ({ children, ...p }: any) => (
-      <h3
-        {...p}
-        className="text-md font-semibold text-text-1 mt-3 mb-1.5 first:mt-0"
-      >
-        {wrap(children)}
-      </h3>
-    ),
-    h4: ({ children, ...p }: any) => (
-      <h4
-        {...p}
-        className="text-base font-semibold text-text-1 mt-3 mb-1 first:mt-0"
-      >
-        {wrap(children)}
-      </h4>
-    ),
-    h5: ({ children, ...p }: any) => (
-      <h5
-        {...p}
-        className="section-label mt-3 mb-1 first:mt-0"
-      >
-        {wrap(children)}
-      </h5>
-    ),
-    h6: ({ children, ...p }: any) => (
-      <h6
-        {...p}
-        className="section-label mt-3 mb-1 first:mt-0"
-      >
-        {wrap(children)}
-      </h6>
-    ),
-    p: ({ children, ...p }: any) => (
-      <p {...p} className="my-2 first:mt-0 last:mb-0">
-        {wrap(children)}
-      </p>
-    ),
-    a: ({ children, href, ...p }: any) => (
-      <a
-        {...p}
-        href={href}
-        target="_blank"
-        rel="noreferrer"
-        onClick={onExternalAnchorClick}
-        className="text-accent hover:underline break-all"
-      >
+    a: ({ node: _node, children, ...props }) => (
+      <a {...props} target="_blank" rel="noopener noreferrer" onClick={onExternalAnchorClick}>
         {wrap(children)}
       </a>
     ),
-    ul: ({ children, ...p }: any) => (
-      <ul {...p} className="list-disc pl-5 my-2 space-y-1 marker:text-text-4">
-        {children}
-      </ul>
-    ),
-    ol: ({ children, ...p }: any) => (
-      <ol {...p} className="list-decimal pl-5 my-2 space-y-1 marker:text-text-4">
-        {children}
-      </ol>
-    ),
-    li: ({ children, ...p }: any) => (
-      <li {...p} className="leading-relaxed">
-        {wrap(children)}
-      </li>
-    ),
-    blockquote: ({ children, ...p }: any) =>
-      calloutFromBlockquote(p.className, wrap(children)) ?? (
-        <blockquote
-          {...p}
-          className="border-l-2 border-line-soft pl-3 my-2 text-text-3"
-        >
-          {wrap(children)}
-        </blockquote>
-      ),
-    hr: (p: any) => <hr {...p} className="my-4 border-line-soft" />,
-    strong: ({ children, ...p }: any) => (
-      <strong {...p} className="font-semibold text-text-1">
-        {wrap(children)}
-      </strong>
-    ),
-    em: ({ children, ...p }: any) => (
-      <em {...p} className="italic">
-        {wrap(children)}
-      </em>
-    ),
-    code: ({ inline, className, children, ...rest }: any) => {
-      if (inline ?? !className) {
-        return (
-          <code
-            className="bg-bg-2 text-text-1 px-1 py-px rounded text-sm font-mono"
-            {...rest}
-          >
-            {children}
-          </code>
-        );
-      }
-      return (
-        <code
-          className={`${className ?? ""} block font-mono text-sm`}
-          {...rest}
-        >
-          {children}
-        </code>
-      );
-    },
-    pre: (p: any) => (
-      <pre
-        {...p}
-        className="bg-bg-2 border border-line-soft rounded-md my-2 p-2.5 overflow-x-auto text-sm font-mono"
-      />
-    ),
-    table: ({ children, ...p }: any) => (
-      <div className="my-2 overflow-x-auto">
-        <table
-          {...p}
-          className="border-collapse text-sm border border-line-soft rounded"
-        >
-          {children}
-        </table>
+    pre: ({ children }) => <CodeMessage>{children}</CodeMessage>,
+    blockquote: ({ children, className }) =>
+      calloutFromBlockquote(className, wrap(children)) ?? <blockquote>{wrap(children)}</blockquote>,
+    p: ({ children }) => <p>{wrap(children)}</p>,
+    li: ({ node: _node, children, ...props }) => <li {...props}>{wrap(children)}</li>,
+    h1: ({ children }) => <h1>{wrap(children)}</h1>,
+    h2: ({ children }) => <h2>{wrap(children)}</h2>,
+    h3: ({ children }) => <h3>{wrap(children)}</h3>,
+    h4: ({ children }) => <h4>{wrap(children)}</h4>,
+    h5: ({ children }) => <h5>{wrap(children)}</h5>,
+    h6: ({ children }) => <h6>{wrap(children)}</h6>,
+    strong: ({ children }) => <strong>{wrap(children)}</strong>,
+    em: ({ children }) => <em>{wrap(children)}</em>,
+    table: ({ node: _node, ...props }) => (
+      <div className="ui-markdown-table">
+        <table {...props} />
       </div>
     ),
-    th: ({ children, ...p }: any) => (
-      <th
-        {...p}
-        className="bg-bg-2 border border-line-soft px-2 py-1 font-semibold text-left text-text-1"
-      >
-        {wrap(children)}
-      </th>
-    ),
-    td: ({ children, ...p }: any) => (
-      <td {...p} className="border border-line-soft px-2 py-1">
-        {wrap(children)}
-      </td>
-    ),
-    img: (p: any) => <img {...p} className="max-w-full rounded my-2" />,
-    // GFM task list checkboxes — readonly here. Editing toggles happen
-    // through the TiptapEditor instance, not via the rendered view.
-    input: ({ type, checked, ...p }: any) => {
-      if (type === "checkbox") {
-        return (
-          <input
-            type="checkbox"
-            checked={!!checked}
-            readOnly
-            className="mr-1.5 accent-accent translate-y-[1px]"
-            {...p}
-          />
-        );
-      }
-      return <input type={type} {...p} />;
-    },
+    th: ({ node: _node, children, ...props }) => <th {...props}>{wrap(children)}</th>,
+    td: ({ node: _node, children, ...props }) => <td {...props}>{wrap(children)}</td>,
   };
 }

@@ -15,8 +15,15 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type ClaudeSession } from "../../lib/api";
 import { fetchSessions, peekSessions } from "../../lib/sessionsCache";
 import { peekCache, writeCache } from "../../lib/resourceCache";
+import { RefreshCw, X } from "lucide-react";
 import { IntentStory, useIntentReport, formatRelative } from "./IntentStory";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
+import { TraceMark } from "../ui/trace-list";
+import { TraceToolbar } from "../ui/trace-page";
+import { TraceLine } from "../ui/trace-report";
+import { TraceTimeline, TraceTimelineEntry } from "../ui/trace-timeline";
+import "../trace/change-story.css";
 
 type CommitListEntry = {
   commit_sha: string;
@@ -121,36 +128,24 @@ export function IntentInspector({ repoRoot, onClose }: Props) {
   }, [refreshList]);
 
   return (
-    <div className="h-full w-full flex flex-col bg-bg-content">
-      <header className="h-9 flex items-center px-4 border-b border-line-soft flex-shrink-0 gap-3">
-        <span className="section-label">
-          Change story
-        </span>
-        <span className="text-text-4 text-xs">
-          the story of a change. Asked, said, did
-        </span>
+    <div className="ui-story-page">
+      <TraceToolbar
+        search={
+          <span className="ui-trace-toolbar-meta ui-story-lede">
+            The story of each change: what was asked, what the AI said, and what it did.
+          </span>
+        }
+      >
         <Button
           variant="ghost"
           size="icon-sm"
           type="button"
           onClick={refreshList}
+          disabled={listLoading}
           title="Refresh commits"
-          className="ml-auto text-text-4 hover:text-text-1"
+          aria-label="Refresh commits"
         >
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-            <path
-              d="M3 8a5 5 0 019-3M13 8a5 5 0 01-9 3"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              fill="none"
-            />
-            <path
-              d="M9 5h3V2M7 11H4v3"
-              stroke="currentColor"
-              strokeWidth="1.3"
-              fill="none"
-            />
-          </svg>
+          <RefreshCw />
         </Button>
         <Button
           variant="ghost"
@@ -158,13 +153,13 @@ export function IntentInspector({ repoRoot, onClose }: Props) {
           type="button"
           onClick={onClose}
           title="Close"
-          className="text-text-4 hover:text-text-1"
+          aria-label="Close the change story"
         >
-          ×
+          <X />
         </Button>
-      </header>
+      </TraceToolbar>
 
-      <div className="flex-1 min-h-0 flex">
+      <div className="ui-story-body">
         <Timeline
           commits={commits}
           loading={listLoading}
@@ -200,67 +195,56 @@ function Timeline({
   onSelect: (sha: string) => void;
 }) {
   return (
-    <div className="w-[280px] border-r border-line-soft flex flex-col flex-shrink-0">
-      <div className="section-label h-7 flex items-center px-3 border-b border-line-soft flex-shrink-0">
-        Timeline
-      </div>
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        {loading ? (
-          <div className="text-text-4 text-sm px-4 py-4">loading…</div>
-        ) : error ? (
-          <div className="text-red-400 text-xs font-mono px-4 py-4">
-            {error}
-          </div>
-        ) : commits.length === 0 ? (
-          <div className="text-text-4 text-sm px-4 py-4">No commits yet.</div>
-        ) : (
-          commits.map((c) => {
-            const active = selectedSha === c.commit_sha;
-            return (
-              <button
-                key={c.commit_sha}
-                type="button"
-                onClick={() => onSelect(c.commit_sha)}
-                className={`relative w-full text-left pl-6 pr-3 py-2 hover:bg-state-hover transition-colors border-t border-line-soft/40 ${
-                  active ? "bg-state-selected" : ""
-                }`}
-              >
-                <span
-                  aria-hidden
-                  className={`absolute left-3 top-3 w-1.5 h-1.5 rounded-full ${
-                    active ? "bg-accent" : "bg-line"
-                  }`}
-                />
-                <div className="flex items-baseline gap-2">
-                  <span className="text-xs font-mono text-text-3 flex-shrink-0">
-                    {c.commit_short}
-                  </span>
-                  <span className="text-2xs text-text-4 tabular-nums ml-auto flex-shrink-0">
-                    {formatRelative(c.commit_time)}
-                  </span>
-                </div>
-                <div
-                  className="text-sm text-text-1 mt-0.5 truncate"
-                  title={c.commit_message}
-                >
-                  {c.commit_message || (
-                    <span className="text-text-4">(no message)</span>
-                  )}
-                </div>
-                <div className="text-xs text-text-4 mt-0.5 flex items-center gap-1.5">
-                  <span className="truncate">{c.author}</span>
+    <div className="ui-story-rail">
+      {loading ? (
+        <div className="ui-story-rail-state" role="status">
+          <AsciiSpinner />
+          <span>Reading the commits…</span>
+        </div>
+      ) : error ? (
+        <div className="ui-story-rail-state">
+          <TraceLine tone="danger">Couldn’t read the commits.</TraceLine>
+          <code className="ui-story-error">{error}</code>
+        </div>
+      ) : commits.length === 0 ? (
+        <div className="ui-story-rail-state">
+          <TraceLine tone="note">No commits yet.</TraceLine>
+        </div>
+      ) : (
+        <TraceTimeline label="Commits, newest first">
+          {commits.map((c) => (
+            <TraceTimelineEntry
+              key={c.commit_sha}
+              active={selectedSha === c.commit_sha}
+              onSelect={() => onSelect(c.commit_sha)}
+              // The subject line only: a body folded into two clamped lines
+              // reads as one run-on sentence. The whole message is the tooltip.
+              title={
+                <span title={c.commit_message || undefined}>
+                  {c.commit_message.split("\n")[0] || "(no message)"}
+                </span>
+              }
+              detail={
+                <>
+                  <code className="ui-story-sha">{c.commit_short}</code>
+                  <span aria-hidden>·</span>
+                  <span>{formatRelative(c.commit_time)}</span>
+                  <span aria-hidden>·</span>
+                  <span className="ui-story-author">{c.author}</span>
                   {c.stated_count === 0 && (
-                    <>
-                      <span>·</span>
-                      <span className="text-amber-300/70">no task log</span>
-                    </>
+                    <TraceMark
+                      tone="warn"
+                      title="Nothing was logged about why this commit was made"
+                    >
+                      no task log
+                    </TraceMark>
                   )}
-                </div>
-              </button>
-            );
-          })
-        )}
-      </div>
+                </>
+              }
+            />
+          ))}
+        </TraceTimeline>
+      )}
     </div>
   );
 }

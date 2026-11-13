@@ -1,0 +1,68 @@
+/* The crew strip above the composer is the queued-messages strip: the same
+   frame docked on the composer, the same caption, the same rows. Added here:
+   the caption carries a one-line summary that truncates, a working row is a
+   button you can open, rows centre their agent mark and chips, a finished
+   row dims its title, a failed row says why under it, and a muted foot.
+*/
+
+.ui-crew-strip > .ui-queue-caption > button {
+  min-width: 0;
+  max-width: 100%;
+}
+.ui-crew-strip-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-crew-strip-lead {
+  color: var(--ui-faint);
+}
+.ui-crew-strip-row {
+  align-items: center;
+  /* The tray's rows are inset 12px a side. */
+  width: calc(100% - 24px);
+  text-align: left;
+}
+button.ui-crew-strip-row {
+  cursor: pointer;
+}
+button.ui-crew-strip-row:hover {
+  background: var(--ui-accent);
+}
+.ui-crew-strip-row > .ui-queue-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-crew-strip-row[data-done] > .ui-queue-text {
+  color: var(--ui-muted-fg);
+}
+.ui-crew-strip-row[data-failed] {
+  align-items: flex-start;
+}
+.ui-crew-strip-row[data-failed] > svg {
+  flex-shrink: 0;
+  margin: 4px 2px 0;
+  color: var(--ui-red);
+}
+.ui-crew-strip-row[data-failed] > .ui-queue-text {
+  white-space: normal;
+}
+.ui-crew-strip-row small {
+  display: block;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 18px;
+}
+.ui-crew-strip-foot {
+  margin: 0;
+  padding: 6px 6px 0;
+  border-top: 1px solid var(--ui-border);
+  color: var(--ui-faint);
+  font-size: 12px;
+}
+.ui-crew-strip-foot code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}

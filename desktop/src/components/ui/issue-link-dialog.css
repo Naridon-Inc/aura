@@ -1,0 +1,214 @@
+/* The link-issue dialog: the shared command dialog dropped from the top
+   third of the window, with a borderless search field, padded groups and
+   issue rows that carry a provider mark, the issue's state, its number and
+   its title, and a "Link" hint on the row the keyboard is on. The snippet
+   picker is the same box, wider (its own rows are in snippet-dialogs.css),
+   and so is the link-workspaces dialog (link-workspaces-dialog.css). */
+.ui-dialog-content.ui-command-dialog.ui-snippet-picker,
+.ui-dialog-content.ui-command-dialog.ui-issue-link-dialog,
+.ui-dialog-content.ui-command-dialog.ui-link-workspaces-dialog {
+  top: calc(50% - 250px);
+  left: 0;
+  right: 0;
+  transform: none;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: var(--ui-search-dialog-width, 576px);
+  max-height: 500px;
+  margin-inline: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-sidebar-background);
+  box-shadow:
+    0 20px 25px -5px rgb(0 0 0 / 0.1),
+    0 8px 10px -6px rgb(0 0 0 / 0.1);
+}
+.ui-snippet-picker[data-state="open"],
+.ui-issue-link-dialog[data-state="open"],
+.ui-link-workspaces-dialog[data-state="open"] {
+  animation: ui-issue-link-in 180ms ease-out backwards;
+}
+.ui-snippet-picker[data-state="closed"],
+.ui-issue-link-dialog[data-state="closed"],
+.ui-link-workspaces-dialog[data-state="closed"] {
+  animation: ui-issue-link-out 130ms ease-in forwards;
+}
+@keyframes ui-issue-link-in {
+  from {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes ui-issue-link-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-snippet-picker[data-state],
+  .ui-issue-link-dialog[data-state],
+  .ui-link-workspaces-dialog[data-state] {
+    animation: none;
+  }
+}
+.ui-snippet-picker > .ui-command,
+.ui-issue-link-dialog > .ui-command,
+.ui-link-workspaces-dialog > .ui-command {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.ui-issue-link-search {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--ui-sidebar-border);
+}
+.ui-issue-link-input {
+  width: 100%;
+  height: 48px;
+  padding: 12px 0;
+  border: 0;
+  border-radius: 6px;
+  outline: none;
+  background: transparent;
+  color: var(--ui-fg);
+  font: 16px/24px var(--font-sans);
+}
+.ui-issue-link-input::placeholder {
+  color: var(--ui-muted-fg);
+  font-size: 16px;
+}
+.ui-issue-link-dialog .ui-command-list,
+.ui-link-workspaces-dialog .ui-command-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  padding: 8px 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scroll-padding-block: 8px;
+}
+.ui-issue-link-dialog .ui-command-group,
+.ui-link-workspaces-dialog .ui-command-group {
+  padding: 0 8px 6px;
+  overflow: hidden;
+}
+.ui-issue-link-dialog .ui-command-group:last-child,
+.ui-link-workspaces-dialog .ui-command-group:last-child {
+  padding-bottom: 0;
+}
+.ui-issue-link-dialog .ui-command-group:not([hidden]) ~ .ui-command-group,
+.ui-link-workspaces-dialog .ui-command-group:not([hidden]) ~ .ui-command-group {
+  padding-top: 0;
+}
+.ui-issue-link-dialog .ui-command-group [cmdk-group-heading],
+.ui-link-workspaces-dialog .ui-command-group [cmdk-group-heading] {
+  padding: 6px 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+}
+.ui-issue-link-dialog .ui-command-item.ui-issue-link-row {
+  gap: 8px;
+  padding: 12px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ui-issue-link-dialog .ui-command-item.ui-issue-link-row[data-selected="true"] {
+  background: var(--ui-sidebar-accent);
+}
+.ui-issue-link-row svg.ui-issue-link-provider {
+  width: 14px;
+  height: 14px;
+  margin-right: 8px;
+  color: var(--ui-fg);
+}
+.ui-issue-link-row svg.ui-issue-link-state {
+  width: 16px;
+  height: 16px;
+  margin: 0 8px 0 2px;
+  color: var(--ui-positive);
+}
+.ui-issue-link-row svg.ui-issue-link-state[data-state="closed"] {
+  color: #a855f7;
+}
+.ui-issue-link-number {
+  display: inline-block;
+  min-width: 64px;
+  margin-right: 8px;
+  color: var(--ui-muted-fg);
+  font: 12px/16px var(--font-mono);
+  white-space: nowrap;
+}
+.ui-issue-link-title {
+  flex: 1;
+  min-width: 0;
+  margin-right: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-issue-link-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  opacity: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 16px;
+}
+.ui-issue-link-row[data-selected="true"] .ui-issue-link-hint {
+  opacity: 1;
+}
+.ui-issue-link-row .ui-issue-link-hint svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-issue-link-row svg.ui-issue-link-setup-mark {
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  color: var(--ui-fg);
+}
+.ui-issue-link-row svg.ui-issue-link-setup-arrow {
+  margin-right: 8px;
+}
+.ui-issue-link-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 0;
+  color: var(--ui-muted-fg);
+}
+.ui-issue-link-loading > span:last-child {
+  margin-left: 8px;
+  font-size: 14px;
+  line-height: 20px;
+}
+.ui-issue-link-dialog .ui-command-empty.ui-issue-link-empty,
+.ui-link-workspaces-dialog .ui-command-empty.ui-issue-link-empty {
+  padding: 24px 0;
+  font-size: 12px;
+  line-height: 16px;
+}
+.ui-issue-link-empty p {
+  margin: 0;
+  color: var(--ui-muted-fg);
+}

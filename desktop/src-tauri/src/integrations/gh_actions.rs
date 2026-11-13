@@ -171,6 +171,25 @@ where
         .and_then(|json| reason_from_run_json(&json))
 }
 
+/// PURE: the GitHub Actions runs behind a set of check `detailsUrl`s, each
+/// once and in first-seen order. A check from another service (a status
+/// context with no `/actions/runs/` link) has no run to restart, so it is
+/// left out.
+pub fn run_ids_to_rerun<'a, I>(details_urls: I) -> Vec<u64>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut out: Vec<u64> = Vec::new();
+    for url in details_urls {
+        if let Some(loc) = locate_from_details_url(url) {
+            if !out.contains(&loc.run_id) {
+                out.push(loc.run_id);
+            }
+        }
+    }
+    out
+}
+
 fn join_nonempty(parts: &[&str], sep: &str) -> Option<String> {
     let kept: Vec<&str> = parts.iter().copied().filter(|p| !p.is_empty()).collect();
     if kept.is_empty() {
@@ -183,6 +202,18 @@ fn join_nonempty(parts: &[&str], sep: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rerun_ids_are_the_distinct_actions_runs() {
+        let ids = run_ids_to_rerun([
+            "https://github.com/a/b/actions/runs/7/job/1",
+            "https://github.com/a/b/actions/runs/7/job/2",
+            "https://ci.example.com/build/99",
+            "https://github.com/a/b/actions/runs/8",
+            "",
+        ]);
+        assert_eq!(ids, vec![7, 8]);
+    }
 
     #[test]
     fn locator_reads_run_and_job_from_details_url() {

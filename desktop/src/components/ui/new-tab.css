@@ -1,0 +1,71 @@
+/* A workspace's ＋ menu and the empty pane's starts. */
+
+.ui-new-tab {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+}
+/* "More…" opens the launcher under the ＋, reading rightward from it, unless
+   the ＋ sits too near the window's right edge for it to fit. */
+.ui-new-tab > .ui-popover.ui-launcher-popover {
+  left: 0;
+  right: auto;
+}
+.ui-new-tab[data-end] > .ui-popover.ui-launcher-popover {
+  left: auto;
+  right: 0;
+}
+.ui-new-tab-item {
+  gap: 8px;
+}
+.ui-new-tab-item > svg {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+
+/* The empty pane: its starts as a two-column grid of outlined buttons,
+   centred in the pane. */
+.ui-empty-pane {
+  position: relative;
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--ui-bg);
+}
+.ui-empty-pane-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+  max-width: 448px;
+}
+.ui-button.ui-empty-pane-action {
+  height: auto;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+}
+.ui-empty-pane-action > svg {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--ui-muted-fg);
+}
+.ui-empty-pane-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+}
+/* "More…": the launcher fills the pane, with the way back on the left. */
+.ui-launcher-pane-head.ui-empty-pane-head {
+  justify-content: space-between;
+}
+/* A tab's menu is at least 200px and grows with its longest row. */
+.ui-menu-panel.ui-tab-menu {
+  width: max-content;
+  min-width: 200px;
+}

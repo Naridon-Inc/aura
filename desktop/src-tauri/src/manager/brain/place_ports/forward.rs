@@ -12,7 +12,7 @@
 //! does forgetting the place, and neither of those has a popover open.
 //!
 //! The same port number on this Mac when it is free, else the next free one
-//! above it. Conductor's rule, and the right one: a member who saw `3000` on
+//! above it. The right rule: a member who saw `3000` on
 //! the box should find it at `3000` here whenever this Mac allows it, and
 //! find it one number up rather than somewhere random when it does not.
 
@@ -377,8 +377,20 @@ mod tests {
         let hold = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let taken = hold.local_addr().unwrap().port();
         assert!(!port_is_free(taken));
-        drop(hold);
-        assert!(port_is_free(taken));
+    }
+
+    #[test]
+    fn a_released_port_reads_as_free() {
+        // A port given back can be handed straight to another test running
+        // in parallel, so one released port proves nothing either way. Any
+        // of a handful reading as free is the property.
+        let freed = (0..20).any(|_| {
+            let hold = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = hold.local_addr().unwrap().port();
+            drop(hold);
+            port_is_free(port)
+        });
+        assert!(freed, "a port nobody holds should read as free");
     }
 
     #[test]

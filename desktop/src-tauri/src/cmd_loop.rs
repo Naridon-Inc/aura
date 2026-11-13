@@ -1412,8 +1412,8 @@ fn parse_plan(raw: &str) -> Vec<PlanStep> {
 }
 
 /// Drain the brain's chat stream to a single string of assistant text,
-/// returning the *typed* `BrainError` so the caller can decide on an
-/// entitlement-fallback. The decompose/order turn is plain text-in /
+/// returning the *typed* `BrainError` so the caller can decide on a
+/// fallback. The decompose/order turn is plain text-in /
 /// text-out — no tools — so we only need the `Text` chunks; `End` closes
 /// it, an `Error` chunk or stream error surfaces.
 async fn collect_text_typed(
@@ -1440,17 +1440,15 @@ async fn collect_text_typed(
     Ok(out)
 }
 
-/// Run a planning turn on Aura's own brain, with the SAME entitlement-fallback
-/// the chat surface uses (`cmd_brain_chat`). The user's standing rule is "just
-/// use what's available and work": when the active brain is the zero-config
-/// cloud brain (`aura_pro`) and the cloud can't serve the turn — expired /
-/// absent subscription, quota, a 5xx, or the network being down — we silently
-/// retry on the best installed local brain instead of dead-ending on
-/// "provider: subscription lookup failed". A failure on an explicitly-configured
-/// native brain (the user's own API key) still surfaces — they need to fix that
-/// key, not have it hidden.
+/// Run a planning turn on Aura's own brain, with the SAME fallback the chat
+/// surface uses (`cmd_brain_chat`). The user's standing rule is "just use
+/// what's available and work": when the active brain is rate-limited or hits
+/// a passing failure (a 5xx, the network being down), we silently retry on
+/// the next brain the user has set up instead of dead-ending. Anything the
+/// user has to fix — a rejected key, an expired login — still surfaces, not
+/// hidden behind another brain.
 pub(crate) async fn plan_collect(request: ChatRequest) -> Result<String, String> {
-    use crate::manager::brain::{aura_pro, registry, types::BrainError};
+    use crate::manager::brain::{limits, registry};
 
     let mgr = BrainManager::from_disk();
     let brain = mgr.active().map_err(|e| {
@@ -1461,14 +1459,11 @@ pub(crate) async fn plan_collect(request: ChatRequest) -> Result<String, String>
     match collect_text_typed(brain, request.clone()).await {
         Ok(text) => Ok(text),
         Err(e) => {
-            let eligible = brain_id == aura_pro::PROVIDER_ID
+            let limit = limits::classify_limit(&e);
+            let eligible = limit.failover_worthy
                 && matches!(
-                    e,
-                    BrainError::AuthRequired { .. }
-                        | BrainError::QuotaExceeded { .. }
-                        | BrainError::Provider { .. }
-                        | BrainError::Api { .. }
-                        | BrainError::Network { .. }
+                    limit.class,
+                    limits::LimitClass::RateLimited | limits::LimitClass::Transient
                 );
             if eligible {
                 if let Some(fid) = registry::first_available_fallback(&brain_id) {
@@ -1492,9 +1487,8 @@ pub async fn loop_plan_goal(repo_root: String, goal: String) -> Result<PlanGoalR
     }
 
     // 1. Ask Aura's own brain to decompose the goal into a JSON DAG. Routes
-    //    through `plan_collect`, so a zero-config cloud brain that can't serve
-    //    the turn quietly falls back to the best installed local brain instead
-    //    of dead-ending on "subscription lookup failed".
+    //    through `plan_collect`, so a rate-limited or briefly unreachable
+    //    brain quietly falls back to the next one the user has set up.
     let request = ChatRequest {
         messages: vec![ChatMessage {
             role: "user".into(),
@@ -1502,6 +1496,7 @@ pub async fn loop_plan_goal(repo_root: String, goal: String) -> Result<PlanGoalR
         }],
         cwd: String::new(),
         machine_id: None,
+        linked_dirs: Vec::new(),
         system: Some(DECOMPOSE_SYSTEM.to_string()),
         tools: vec![],
         max_tokens: Some(2048),
@@ -1826,6 +1821,7 @@ pub async fn loop_plan_order(repo_root: String) -> Result<PlanOrderResult, Strin
             }],
             cwd: String::new(),
             machine_id: None,
+            linked_dirs: Vec::new(),
             system: Some(ORDER_SYSTEM.to_string()),
             tools: vec![],
             max_tokens: Some(2048),
@@ -1939,6 +1935,7 @@ pub async fn loop_plan_order(repo_root: String) -> Result<PlanOrderResult, Strin
             }],
             cwd: String::new(),
             machine_id: None,
+            linked_dirs: Vec::new(),
             system: Some(OBJECTIVE_SYSTEM.to_string()),
             tools: vec![],
             max_tokens: Some(1024),
@@ -2160,6 +2157,11 @@ pub async fn loop_cloud_send(
             .arg("--acceptance-criteria")
             .arg(ac);
     }
+    // Name the box. A box is handed your agent sign-in only for work you sent
+    // to it, and `auto` is the org's most recently live one: what "send to my
+    // cloud computer" means when there is one, and a wait for it when it is
+    // asleep.
+    cmd.arg("--dispatch").arg("auto");
     cmd.arg("--json").current_dir(&repo_root);
     let out = cmd
         .output()

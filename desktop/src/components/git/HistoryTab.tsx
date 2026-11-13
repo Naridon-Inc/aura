@@ -11,8 +11,11 @@ import { History } from "lucide-react";
 import type { ClaudeSession, GraphCommit } from "../../lib/api";
 import * as work from "../../lib/place/workApi";
 import { fetchSessions } from "../../lib/sessionsCache";
+import { DetailsCaption } from "../ui/details-panel";
+import { EmptyState } from "../ui/state";
 import { CommitList } from "./CommitList";
 import { CommitDetailPane } from "./CommitDetailPane";
+import "../ui/commit-list.css";
 
 export function HistoryTab({ repoRoot }: { repoRoot: string }) {
   const [commits, setCommits] = useState<GraphCommit[]>([]);
@@ -57,18 +60,14 @@ export function HistoryTab({ repoRoot }: { repoRoot: string }) {
   }, [repoRoot]);
 
   return (
-    <div className="flex h-full min-h-0">
-      <div className="flex w-[360px] min-h-0 shrink-0 flex-col border-r border-line-soft">
-        <div className="section-label flex items-center gap-2 border-b border-line-soft px-3.5 py-2">
-          <History size={13} />
-          Saved versions
-          {commits.length > 0 && (
-            <span className="ml-auto tabular-nums text-text-4/80">
-              {commits.length}
-            </span>
-          )}
+    <div className="ui-history">
+      <div className="ui-history-rail">
+        <div className="ui-details-group-caption ui-history-head">
+          <DetailsCaption>
+            {commits.length > 0 ? `Saved versions ${commits.length}` : "Saved versions"}
+          </DetailsCaption>
         </div>
-        <div className="flex-1 min-h-0 overflow-y-auto">
+        <div className="ui-history-list">
           <CommitList
             commits={commits}
             selected={selected}
@@ -78,12 +77,17 @@ export function HistoryTab({ repoRoot }: { repoRoot: string }) {
         </div>
       </div>
 
-      <div className="min-w-0 min-h-0 flex-1">
+      <div className="ui-history-detail">
         {selected ? (
           <CommitDetailPane repoRoot={repoRoot} sha={selected} sessions={sessions} />
         ) : (
-          <div className="px-6 py-8 text-sm text-text-4">
-            Pick a saved version on the left to read its story.
+          <div className="ui-history-pick">
+            <EmptyState
+              icon={History}
+              title="Pick a saved version"
+              body="Pick a saved version on the left to read its story."
+              size="sm"
+            />
           </div>
         )}
       </div>

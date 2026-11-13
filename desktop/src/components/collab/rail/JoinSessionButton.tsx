@@ -23,6 +23,7 @@
 import { useState, type MouseEvent } from "react";
 
 import { AsciiSpinner } from "../../ui/ascii-spinner";
+import { Button } from "../../ui/button";
 import type { RailAccess } from "./railModel";
 
 export type JoinSessionButtonProps = {
@@ -76,20 +77,13 @@ export function JoinSessionButton({
     }
   };
 
+  // Shown on the row's hover and focus by the sidebar item's actions slot.
   return (
-    <button
-      type="button"
-      className={[
-        "flex-none inline-flex items-center gap-1 rounded px-1.5 h-[17px]",
-        "text-2xs font-medium leading-none transition-opacity",
-        "opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100",
-        error ? "text-red" : "text-accent",
-      ].join(" ")}
-      style={{
-        background: error
-          ? "color-mix(in srgb, var(--color-red) 12%, transparent)"
-          : "color-mix(in srgb, var(--color-accent) 13%, transparent)",
-      }}
+    <Button
+      variant="ghost"
+      size="xs"
+      className="ui-rail-join"
+      data-failed={error ? true : undefined}
       title={hover}
       aria-label={hover}
       onClick={(e) => void go(e)}
@@ -97,6 +91,6 @@ export function JoinSessionButton({
     >
       {busy ? <AsciiSpinner size={10} /> : null}
       <span>{busy ? "Joining" : label}</span>
-    </button>
+    </Button>
   );
 }

@@ -27,15 +27,12 @@ import { describe, expect, test } from "bun:test";
 
 import { readSrc } from "./support/code";
 
-const TEAM = "components/settings/TeamTab.tsx";
+const PANE = "components/settings/team/UsagePane.tsx";
 
 /** The pane, comments stripped — the note above says the words it removed. */
 async function pane(): Promise<string> {
-  const src = await readSrc(TEAM);
-  return src.slice(
-    src.indexOf("function TeamUsagePane("),
-    src.indexOf("function relAge("),
-  );
+  const src = await readSrc(PANE);
+  return src.slice(src.indexOf("function TeamUsagePane("));
 }
 
 describe("team usage — signed out is a state, not an error", () => {
@@ -63,11 +60,13 @@ describe("team usage — signed out is a state, not an error", () => {
 
   test("a real failure keeps the detail, under a sentence", async () => {
     const p = await pane();
-    expect(p).toContain("<ErrorState");
+    expect(p).toContain('role="alert"');
     expect(p).toContain("Couldn’t load token spend");
+    // The detail itself, kept under the sentence rather than swallowed.
+    expect(p).toContain("<code>{error}</code>");
     // Signed in, so this is not something the reader has to go and set up.
     expect(p).toContain("signedIn === null");
-    expect(p).toContain("onRetry={retry}");
+    expect(p).toContain("onClick={retry}");
   });
 
   test("Try again asks the network, not the minute-old cache", async () => {
@@ -81,7 +80,8 @@ describe("team usage — signed out is a state, not an error", () => {
 
   test("and loading uses the one loader the app has", async () => {
     const p = await pane();
-    expect(p).toContain("<LoadingState label=");
+    expect(p).toContain("<AsciiSpinner />");
+    expect(p).toContain('role="status"');
     expect(p).not.toContain("Loading token usage…");
   });
 });

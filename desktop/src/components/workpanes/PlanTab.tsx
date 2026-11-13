@@ -28,10 +28,8 @@ import {
   useState,
 } from "react";
 import { FileText, ListChecks, MessageSquare } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
+import { MarkdownBody } from "../manager/chat/Markdown";
+import { ChatRepoRootContext } from "../manager/chat/context";
 import { type PlanTabData, useEditorStore } from "../../lib/editorStore";
 import { focusAmbientManager } from "../../lib/focusManager";
 import { useManagerSession } from "../../lib/managerStore";
@@ -39,8 +37,26 @@ import { AgentIcon } from "../agent/AgentIcon";
 import { MermaidDiagram } from "../notes/MermaidDiagram";
 import { WizardStepTabs } from "../ui/wizard";
 import { EmptyState } from "../ui/state";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
+import { TaskFact } from "../ui/tasks-board";
+import {
+  TaskDependencyLinks,
+  TaskDetailNote,
+  TaskDetailSection,
+} from "../ui/tasks-detail";
+import { Timeline } from "../ui/timeline";
+import "../ui/plan-document.css";
 import { api, type AgentDescriptor, type PlanParallelism } from "../../lib/api";
 import { useDismiss } from "../../lib/useDismiss";
+import { readAgentsList } from "../../lib/agentsListCache";
 
 export function PlanTab({ plan }: { plan: PlanTabData }) {
   const store = useEditorStore();
@@ -191,119 +207,65 @@ export function PlanDocumentBody({
   const hasBaseline = !!plan.baseline?.trim();
 
   return (
-    <>
-      {lead && (
-        <p
-          className="whitespace-pre-wrap"
-          style={{
-            color: "var(--color-text-2)",
-            fontSize: "14px",
-            lineHeight: 1.6,
-          }}
-        >
-          {lead}
-        </p>
-      )}
+    <div className="ui-task-details ui-plan-doc">
+      {lead && <p className="ui-plan-doc-lead">{lead}</p>}
 
       {hasBaseline && (
-        <PlanSection title="Current baseline">
-          <div className="plan-prose">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm, remarkMath]}
-              rehypePlugins={[rehypeKatex]}
-            >
-              {plan.baseline as string}
-            </ReactMarkdown>
-          </div>
-        </PlanSection>
+        <TaskDetailSection title="Current baseline">
+          <PlanProse source={plan.baseline as string} repoRoot={plan.repoRoot} />
+        </TaskDetailSection>
       )}
 
       {hasArchitecture && (
-        <PlanSection title="Proposed architecture">
+        <TaskDetailSection title="Proposed architecture">
           <MermaidDiagram code={plan.architectureMermaid as string} />
-        </PlanSection>
+        </TaskDetailSection>
       )}
 
       {phases.length > 0 && (
-        <PlanSection title="Implementation plan">
-          <ol className="flex flex-col gap-3">
-            {phases.map((phase, i) => (
-              <li key={`${i}-${phase.title}`} className="flex gap-3">
-                <PhaseNumber n={i + 1} />
-                <div className="flex-1 flex flex-col gap-1.5 min-w-0">
-                  <div className="t-base t-heading text-text-1">
-                    {phase.title}
-                  </div>
-                  {phase.body && (
-                    <div className="plan-prose" style={{ color: "var(--color-text-2)" }}>
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm, remarkMath]}
-                        rehypePlugins={[rehypeKatex]}
-                      >
-                        {phase.body}
-                      </ReactMarkdown>
-                    </div>
-                  )}
-                  {phase.fileRefs && phase.fileRefs.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mt-0.5">
-                      {phase.fileRefs.map((ref) => (
-                        <FileRefChip
-                          key={ref}
-                          path={ref}
-                          onClick={() => onOpenFile(ref)}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ol>
-        </PlanSection>
+        <TaskDetailSection title="Implementation plan" count={phases.length}>
+          {/* The phases in order, numbered on the timeline's own markers. */}
+          <Timeline
+            entries={phases.map((phase, i) => ({
+              id: `${i}-${phase.title}`,
+              title: phase.title,
+              marker: <span className="ui-plan-phase-number">{i + 1}</span>,
+              detail:
+                phase.body || (phase.fileRefs && phase.fileRefs.length > 0) ? (
+                  <>
+                    {phase.body && (
+                      <PlanProse source={phase.body} repoRoot={plan.repoRoot} />
+                    )}
+                    {phase.fileRefs && phase.fileRefs.length > 0 && (
+                      <FileRefList refs={phase.fileRefs} onOpenFile={onOpenFile} />
+                    )}
+                  </>
+                ) : undefined,
+            }))}
+          />
+        </TaskDetailSection>
       )}
 
       {deliverables.length > 0 && (
-        <PlanSection title="Deliverables">
-          <ul
-            className="flex flex-col gap-1 t-base"
-            style={{ color: "var(--color-text-1)" }}
-          >
+        <TaskDetailSection title="Deliverables" count={deliverables.length}>
+          <ul className="ui-plan-doc-list">
             {deliverables.map((d, i) => (
-              <li key={i} className="flex gap-2">
-                <span
-                  style={{ color: "var(--color-text-3)" }}
-                  className="select-none"
-                >
-                  ·
-                </span>
-                <span className="flex-1">{d}</span>
-              </li>
+              <li key={i}>{d}</li>
             ))}
           </ul>
-        </PlanSection>
+        </TaskDetailSection>
       )}
 
       {tests.length > 0 && (
-        <PlanSection title="Tests">
-          <ul
-            className="flex flex-col gap-1 t-base"
-            style={{ color: "var(--color-text-1)" }}
-          >
+        <TaskDetailSection title="Tests" count={tests.length}>
+          <ul className="ui-plan-doc-list">
             {tests.map((t, i) => (
-              <li key={i} className="flex gap-2">
-                <span
-                  style={{ color: "var(--color-text-3)" }}
-                  className="select-none"
-                >
-                  ·
-                </span>
-                <span className="flex-1">{t}</span>
-              </li>
+              <li key={i}>{t}</li>
             ))}
           </ul>
-        </PlanSection>
+        </TaskDetailSection>
       )}
-    </>
+    </div>
   );
 }
 
@@ -323,132 +285,46 @@ export function PlanTasksBody({
 }) {
   const sessionId = plan.sessionId ?? null;
   return (
-    <>
-      <section className="flex flex-col gap-2">
-        <div className="t-sm t-ui" style={{ color: "var(--color-text-3)" }}>
-          {plan.todos.length} {plan.todos.length === 1 ? "Task" : "Tasks"}
-        </div>
-        <div
-          style={{
-            height: 1,
-            background: "var(--color-line-soft)",
-          }}
-        />
+    <div className="ui-task-details ui-plan-doc">
+      <TaskDetailSection title="Tasks" count={plan.todos.length}>
         {plan.todos.length === 0 ? (
-          <div
-            className="t-sm italic py-1"
-            style={{ color: "var(--color-text-4)" }}
-          >
-            No tasks in this plan.
-          </div>
+          <TaskDetailNote>No tasks in this plan.</TaskDetailNote>
         ) : (
-          <ul className="flex flex-col">
+          <ul className="ui-plan-todos">
             {plan.todos.map((todo, i) => (
               <li
                 key={`${i}-${todo.description}`}
-                className="flex items-start gap-2.5 py-1.5 -mx-2 px-2 rounded group hover:bg-[var(--color-bg-2)] transition-colors"
+                className="ui-plan-todo"
+                data-done={todo.done || undefined}
               >
-                <button
-                  type="button"
-                  onClick={() => onToggle(i)}
-                  className="mt-[3px] flex items-center justify-center flex-shrink-0 transition-colors"
+                <Checkbox
+                  checked={todo.done}
+                  onCheckedChange={() => onToggle(i)}
+                  aria-label={todo.done ? "Mark not done" : "Mark done"}
                   title={todo.done ? "Mark not done" : "Mark done"}
-                >
-                  {todo.done ? (
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                      <circle cx="8" cy="8" r="7" fill="var(--color-text-3)" />
-                      <path
-                        d="M4.5 8l2.5 2.5 5-5"
-                        stroke="var(--color-bg-deep)"
-                        strokeWidth="1.5"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  ) : (
-                    <div
-                      className="w-[14px] h-[14px] rounded-full border-[1.5px] transition-colors"
-                      style={{ borderColor: "var(--color-text-4)" }}
-                    />
-                  )}
-                </button>
-                <div className="flex-1 flex flex-col gap-1 min-w-0">
-                  <div
-                    className={`t-md ${todo.done ? "line-through" : ""}`}
-                    style={{
-                      color: todo.done
-                        ? "var(--color-text-4)"
-                        : "var(--color-text-1)",
-                    }}
-                  >
-                    {todo.description}
-                  </div>
+                />
+                <div className="ui-plan-todo-body">
+                  <span className="ui-plan-todo-title">{todo.description}</span>
                   {todo.fileRefs && todo.fileRefs.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {todo.fileRefs.map((ref) => (
-                        <FileRefChip
-                          key={ref}
-                          path={ref}
-                          onClick={() => onOpenFile(ref)}
-                        />
-                      ))}
-                    </div>
+                    <FileRefList refs={todo.fileRefs} onOpenFile={onOpenFile} />
                   )}
-                  {todo.goal && (
-                    <div
-                      className="t-xs t-ui flex items-baseline gap-1"
-                      style={{ color: "var(--color-text-3)" }}
-                    >
-                      <span style={{ color: "var(--color-text-4)" }}>
-                        Done when
-                      </span>
-                      <span>{todo.goal}</span>
-                    </div>
-                  )}
+                  {todo.goal && <DoneWhen goal={todo.goal} />}
                   {todo.acceptance && todo.acceptance.length > 0 && (
                     <VerifyList checks={todo.acceptance} />
                   )}
                   {todo.subtasks && todo.subtasks.length > 0 && (
-                    <ul
-                      className="flex flex-col gap-1.5 mt-1 pl-2.5 border-l"
-                      // `--color-border-1` exists in no pack, so this nesting
-                      // rule drew the browser default (currentColor) instead of
-                      // a hairline. `--color-line` is the real divider token.
-                      style={{ borderColor: "var(--color-line)" }}
-                    >
+                    <ul className="ui-plan-subtasks">
                       {todo.subtasks.map((sub, si) => (
-                        <li
-                          key={`${si}-${sub.description}`}
-                          className="flex flex-col gap-1 min-w-0"
-                        >
-                          <div className="flex items-baseline gap-1.5 min-w-0">
-                            <span
-                              className="t-sm flex-1 min-w-0"
-                              style={{ color: "var(--color-text-2)" }}
-                            >
-                              {sub.description}
-                            </span>
+                        <li key={`${si}-${sub.description}`}>
+                          <div className="ui-plan-subtask-head">
+                            <span>{sub.description}</span>
                             {sub.agent && (
-                              <span
-                                className="flex items-center gap-1 t-xs t-ui flex-shrink-0"
-                                style={{ color: "var(--color-text-3)" }}
-                                title={sub.agent}
-                              >
+                              <span title={sub.agent}>
                                 <AgentIcon agentId={sub.agent} size={11} />
                               </span>
                             )}
                           </div>
-                          {sub.goal && (
-                            <div
-                              className="t-xs t-ui flex items-baseline gap-1"
-                              style={{ color: "var(--color-text-3)" }}
-                            >
-                              <span style={{ color: "var(--color-text-4)" }}>
-                                Done when
-                              </span>
-                              <span>{sub.goal}</span>
-                            </div>
-                          )}
+                          {sub.goal && <DoneWhen goal={sub.goal} />}
                           {sub.acceptance && sub.acceptance.length > 0 && (
                             <VerifyList checks={sub.acceptance} />
                           )}
@@ -457,89 +333,58 @@ export function PlanTasksBody({
                     </ul>
                   )}
                 </div>
-                {todo.agent && (
-                  <div
-                    className="flex items-center gap-1 t-xs t-ui flex-shrink-0 mt-0.5"
-                    style={{ color: "var(--color-text-3)" }}
-                  >
-                    <AgentIcon agentId={todo.agent} size={12} />
-                    <span>{todo.agent}</span>
-                  </div>
-                )}
-                {todo.assignee && (
-                  <div
-                    className="flex items-center gap-1 t-xs t-ui flex-shrink-0 mt-0.5"
-                    style={{ color: "var(--color-text-3)" }}
-                    title={`Assigned to ${todo.assignee}`}
-                  >
-                    <span>@{todo.assignee.split("@")[0]}</span>
-                  </div>
-                )}
-                {todo.suggestedProvider && (
-                  <SkillBadge
-                    suggestion={todo.suggestedProvider}
-                    currentAgent={todo.agent}
-                    canOverride={
-                      plan.sessionId !== null && (plan.pendingPlanId ?? null) !== null
-                    }
-                    onOverride={(agentId) => {
-                      if (!plan.sessionId || !plan.pendingPlanId) return;
-                      void api.managerOverrideTodoAgent(
-                        plan.sessionId,
-                        plan.pendingPlanId,
-                        i,
-                        agentId,
-                      );
-                    }}
-                  />
-                )}
+                <div className="ui-plan-todo-facts">
+                  {todo.agent && (
+                    <TaskFact icon={<AgentIcon agentId={todo.agent} size={12} />}>
+                      {todo.agent}
+                    </TaskFact>
+                  )}
+                  {todo.assignee && (
+                    <TaskFact title={`Assigned to ${todo.assignee}`}>
+                      @{todo.assignee.split("@")[0]}
+                    </TaskFact>
+                  )}
+                  {todo.suggestedProvider && (
+                    <SkillBadge
+                      suggestion={todo.suggestedProvider}
+                      currentAgent={todo.agent}
+                      canOverride={
+                        plan.sessionId !== null && (plan.pendingPlanId ?? null) !== null
+                      }
+                      onOverride={(agentId) => {
+                        if (!plan.sessionId || !plan.pendingPlanId) return;
+                        void api.managerOverrideTodoAgent(
+                          plan.sessionId,
+                          plan.pendingPlanId,
+                          i,
+                          agentId,
+                        );
+                      }}
+                    />
+                  )}
+                </div>
               </li>
             ))}
           </ul>
         )}
-      </section>
+      </TaskDetailSection>
 
       {sessionId && (
-        <div className="flex flex-col gap-2 mt-2">
-          <div className="t-xs t-ui px-1" style={{ color: "var(--color-text-3)" }}>
-            Referenced by 1 Agent
-          </div>
-          <button
-            type="button"
-            onClick={onOpenSession}
-            className="flex items-center gap-2 px-3 py-2 border text-left transition-colors"
-            style={{
-              borderColor: "var(--color-line-soft)",
-              background: "var(--color-bg-card)",
-              borderRadius: "var(--radius-md)",
-            }}
-          >
-            <div
-              className="flex items-center justify-center w-5 h-5"
-              style={{
-                background: "var(--color-bg-2)",
-                color: "var(--color-text-3)",
-                borderRadius: "var(--radius-sm)",
-              }}
-            >
-              <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
-                <path
-                  d="M2 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H6l-3 3v-3H3a1 1 0 0 1-1-1V4z"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </div>
-            <div className="t-sm" style={{ color: "var(--color-text-1)" }}>
-              Manager session
-              <span style={{ color: "var(--color-text-4)" }} className="mx-1.5">·</span>
-              <span style={{ color: "var(--color-text-4)" }}>Open chat</span>
-            </div>
-          </button>
-        </div>
+        <TaskDetailSection title="Referenced by 1 agent">
+          <TaskDependencyLinks
+            items={[
+              {
+                id: "session",
+                label: "Manager session",
+                icon: <MessageSquare />,
+                hint: "Open chat",
+              },
+            ]}
+            onOpen={() => onOpenSession()}
+          />
+        </TaskDetailSection>
       )}
-    </>
+    </div>
   );
 }
 
@@ -600,45 +445,29 @@ function PlanHeader({
   );
 }
 
-function PlanSection({
-  title,
-  children,
+// A markdown passage of the plan, read with the plan's own repository as the
+// root its file links resolve against.
+function PlanProse({
+  source,
+  repoRoot,
 }: {
-  title: string;
-  children: React.ReactNode;
+  source: string;
+  repoRoot: string | null | undefined;
 }) {
   return (
-    <section className="flex flex-col gap-2">
-      <h2
-        style={{
-          fontSize: "15px",
-          fontWeight: 600,
-          lineHeight: 1.3,
-          color: "var(--color-text-1)",
-          letterSpacing: "var(--letter-spacing-tight)",
-        }}
-      >
-        {title}
-      </h2>
-      <div>{children}</div>
-    </section>
+    <div className="ui-plan-prose">
+      <ChatRepoRootContext.Provider value={repoRoot ?? null}>
+        <MarkdownBody source={source} />
+      </ChatRepoRootContext.Provider>
+    </div>
   );
 }
 
-function PhaseNumber({ n }: { n: number }) {
+function DoneWhen({ goal }: { goal: string }) {
   return (
-    <div
-      className="flex-shrink-0 flex items-center justify-center t-xs t-ui mt-0.5"
-      style={{
-        width: 20,
-        height: 20,
-        borderRadius: "999px",
-        background: "var(--color-bg-2)",
-        color: "var(--color-text-3)",
-      }}
-    >
-      {n}
-    </div>
+    <p className="ui-plan-done-when">
+      <span>Done when</span> {goal}
+    </p>
   );
 }
 
@@ -650,22 +479,13 @@ function PhaseNumber({ n }: { n: number }) {
 // verify", never "already passed".
 function VerifyList({ checks }: { checks: string[] }) {
   return (
-    <div className="flex flex-col gap-0.5">
-      <span className="t-xs t-ui" style={{ color: "var(--color-text-4)" }}>
-        Verify
-      </span>
-      <ul className="flex flex-col gap-0.5">
+    <div className="ui-plan-verify">
+      <span>Verify</span>
+      <ul>
         {checks.map((check, ci) => (
-          <li
-            key={`${ci}-${check}`}
-            className="flex items-start gap-1.5 t-xs t-ui"
-            style={{ color: "var(--color-text-3)" }}
-          >
-            <span
-              className="mt-[3px] w-[10px] h-[10px] rounded-[2px] border-[1.5px] flex-shrink-0"
-              style={{ borderColor: "var(--color-text-4)" }}
-            />
-            <span className="min-w-0">{check}</span>
+          <li key={`${ci}-${check}`}>
+            <span className="ui-plan-verify-box" aria-hidden />
+            <span>{check}</span>
           </li>
         ))}
       </ul>
@@ -673,38 +493,30 @@ function VerifyList({ checks }: { checks: string[] }) {
   );
 }
 
-function FileRefChip({
-  path,
-  onClick,
+// The files a phase or a task names, each one opening in the editor.
+function FileRefList({
+  refs,
+  onOpenFile,
 }: {
-  path: string;
-  onClick: () => void;
+  refs: string[];
+  onOpenFile: (ref: string) => void;
 }) {
-  const display = path.split("/").pop() || path;
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={path}
-      className="inline-flex items-center gap-1 px-1.5 py-[2px] t-xs t-ui font-mono transition-colors hover:opacity-80"
-      style={{
-        background: "var(--color-bg-2)",
-        color: "var(--color-text-2)",
-        borderRadius: "var(--radius-sm)",
-        border: "1px solid var(--color-line-soft)",
-      }}
-    >
-      <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
-        <path
-          d="M3 2h6l4 4v8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"
-          stroke="currentColor"
-          strokeWidth="1.2"
-          strokeLinejoin="round"
-        />
-        <path d="M9 2v4h4" stroke="currentColor" strokeWidth="1.2" />
-      </svg>
-      <span className="truncate max-w-[260px]">{display}</span>
-    </button>
+    <div className="ui-plan-files">
+      {refs.map((ref) => (
+        <Button
+          key={ref}
+          variant="outline"
+          size="xs"
+          className="ui-plan-file"
+          title={ref}
+          onClick={() => onOpenFile(ref)}
+        >
+          <FileText />
+          <span>{ref.split("/").pop() || ref}</span>
+        </Button>
+      ))}
+    </div>
   );
 }
 
@@ -727,7 +539,7 @@ export function PlanEmptyState({
   onOpenChat: (() => void) | null;
 }) {
   return (
-    <div className="flex h-full w-full items-center justify-center bg-bg-content">
+    <div className="ui-plan-empty">
       <EmptyState
         icon={ListChecks}
         title={title?.trim() ? title : "No plan yet"}
@@ -771,90 +583,57 @@ function SkillBadge({
 }) {
   const [open, setOpen] = useState(false);
   const [agents, setAgents] = useState<AgentDescriptor[]>([]);
-  const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open || agents.length > 0) return;
     let cancelled = false;
-    void api.agentsList().then((list) => {
-      if (!cancelled) setAgents(list);
-    });
+    void readAgentsList()
+      .then((list) => {
+        if (!cancelled) setAgents(list);
+      })
+      .catch(() => undefined);
     return () => {
       cancelled = true;
     };
   }, [open, agents.length]);
 
-  useDismiss(open, () => setOpen(false), ref);
-
   const matchesSuggestion =
     !currentAgent || currentAgent === suggestion.providerId;
-  const tone = matchesSuggestion
-    ? "var(--color-accent)"
-    : "var(--color-text-3)";
   const label = useMemo(() => {
     return `${suggestion.providerId} • best match`;
   }, [suggestion]);
 
   return (
-    <div ref={ref} className="relative flex-shrink-0 mt-0.5">
-      <button
-        type="button"
-        onClick={() => canOverride && setOpen((v) => !v)}
-        disabled={!canOverride}
-        className="t-xs t-ui px-1.5 py-0.5 border transition-colors"
-        style={{
-          borderColor: tone,
-          color: tone,
-          background: "color-mix(in srgb, var(--color-accent) 6%, transparent)",
-          borderRadius: "var(--radius-sm)",
-          cursor: canOverride ? "pointer" : "default",
-        }}
-        title={
-          canOverride
-            ? `Aura recommends ${suggestion.providerId}, based on ${suggestion.sampleCount} similar tasks it's handled well. Click to pick a different one.`
-            : `Aura recommends ${suggestion.providerId}, based on ${suggestion.sampleCount} similar tasks it's handled well.`
-        }
-      >
-        {label}
-      </button>
-      {open && (
-        <div
-          className="absolute right-0 mt-1 z-10 flex flex-col min-w-[160px]"
-          style={{
-            background: "var(--color-bg-1)",
-            border: "1px solid var(--color-line)",
-            borderRadius: "var(--radius-sm)",
-            boxShadow: "var(--shadow-popover, 0 4px 12px rgba(0,0,0,0.18))",
-          }}
+    <DropdownMenu open={canOverride && open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild disabled={!canOverride}>
+        <Button
+          variant="outline"
+          size="xs"
+          className="ui-plan-skill"
+          data-match={matchesSuggestion || undefined}
+          title={
+            canOverride
+              ? `Aura recommends ${suggestion.providerId}, based on ${suggestion.sampleCount} similar tasks it's handled well. Click to pick a different one.`
+              : `Aura recommends ${suggestion.providerId}, based on ${suggestion.sampleCount} similar tasks it's handled well.`
+          }
         >
-          {agents
-            .filter((a) => a.available)
-            .map((a) => (
-              <button
-                key={a.id}
-                type="button"
-                onClick={() => {
-                  onOverride(a.id);
-                  setOpen(false);
-                }}
-                className="t-xs t-ui px-2 py-1.5 text-left flex items-center gap-2 hover:bg-[var(--color-bg-2)]"
-                style={{ color: "var(--color-text-1)" }}
-              >
-                <AgentIcon agentId={a.id} size={12} />
-                <span className="flex-1">{a.label || a.id}</span>
-                {a.id === suggestion.providerId && (
-                  <span
-                    className="t-2xs"
-                    style={{ color: "var(--color-accent)" }}
-                  >
-                    suggested
-                  </span>
-                )}
-              </button>
-            ))}
-        </div>
-      )}
-    </div>
+          {label}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {agents
+          .filter((a) => a.available)
+          .map((a) => (
+            <DropdownMenuItem key={a.id} onSelect={() => onOverride(a.id)}>
+              <AgentIcon agentId={a.id} size={12} />
+              <span className="ui-plan-skill-name">{a.label || a.id}</span>
+              {a.id === suggestion.providerId && (
+                <Badge variant="outline">suggested</Badge>
+              )}
+            </DropdownMenuItem>
+          ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

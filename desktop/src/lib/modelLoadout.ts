@@ -11,22 +11,25 @@
 // `toggleModelFavorite` has always appended, so what is on disk is already
 // insertion order — the stars somebody set last month become their slots.
 //
-// Two deliberate differences from Conductor's loadout, which this follows in
+// Two deliberate differences from the loadout pattern this follows in
 // shape:
 //
-//   * It is not capped at five. Conductor ships five fixed slots; Aura's list
+//   * It is not capped at five. That pattern ships five fixed slots; Aura's
 //     predates this and some of them are long. Capping would silently drop
 //     models a person had already chosen, so the list stays as long as they
 //     want and only the first few get a chord.
-//   * The chord is ⌘1…⌘5, not Conductor's ^⌘1…^⌘5. The plain ⌘-digit row is
+//   * The chord is ⌘1…⌘5, not ^⌘1…^⌘5. The plain ⌘-digit row is
 //     unclaimed in Aura (`resolveShortcut` has no digit case but ⌘0), it is
 //     the convention for "the Nth of these" everywhere else, and it is one
 //     modifier shorter. Nothing is gained by copying a chord that was picked
 //     around another app's conflicts.
 
-import type { BrainChoice } from "./api";
+import { useSyncExternalStore } from "react";
+import type { BrainChoice, ReasoningEffort } from "./api";
 import { rowKey, type CatalogModel } from "./modelCatalog";
+import { isRetiredRowKey } from "./retiredBrains";
 import {
+  MODEL_FAVORITES_KEY,
   loadModelFavorites,
   saveModelFavorites,
   toggleModelFavorite,
@@ -36,13 +39,124 @@ import {
  *  loadout and still at the top of the picker — just not one key away. */
 export const LOADOUT_CHORD_SLOTS = 5;
 
-/** The loadout, in order. Shares storage with the stars (see the header). */
+// One live copy of the loadout for every reader. Settings sits over the
+// chats rather than replacing them, so a picker that read the list once when
+// it mounted kept leading with — and chording to — the old loadout until the
+// app restarted, and its next star or reorder wrote the old list back.
+// Every write goes through `saveModelLoadout`, which tells every reader; a
+// write from another window arrives as a `storage` event.
+let current: string[] | undefined;
+let currentEfforts: LoadoutEfforts | undefined;
+const readers = new Set<() => void>();
+
+function tell(): void {
+  for (const reader of readers) reader();
+}
+
+function onStorage(event: StorageEvent): void {
+  if (
+    event.key !== null &&
+    event.key !== MODEL_FAVORITES_KEY &&
+    event.key !== LOADOUT_EFFORTS_KEY
+  )
+    return;
+  current = undefined;
+  currentEfforts = undefined;
+  tell();
+}
+
+/** The loadout, in order. Shares storage with the stars (see the header).
+ *  The same array until the loadout changes, so treat it as read-only. */
 export function loadModelLoadout(): string[] {
-  return loadModelFavorites();
+  current ??= loadModelFavorites();
+  return current;
+}
+
+/** Follow the loadout: `reader` runs after every change. */
+export function subscribeModelLoadout(reader: () => void): () => void {
+  readers.add(reader);
+  if (readers.size === 1 && typeof window !== "undefined")
+    window.addEventListener("storage", onStorage);
+  return () => {
+    readers.delete(reader);
+    if (readers.size === 0 && typeof window !== "undefined")
+      window.removeEventListener("storage", onStorage);
+  };
+}
+
+/** The loadout as it is now, kept current while the component is mounted. */
+export function useModelLoadout(): string[] {
+  return useSyncExternalStore(subscribeModelLoadout, loadModelLoadout, loadModelLoadout);
 }
 
 export function saveModelLoadout(next: string[]): void {
   saveModelFavorites(next);
+  current = next.slice();
+  tell();
+}
+
+// ── each slot's effort ───────────────────────────────────────────────────
+//
+// A slot in Settings > Models carries an effort as well as a model, and the
+// chat's picker uses it when that slot's model is picked. It used to be the
+// settings component's own state, so it was gone the moment Settings closed
+// and the chat never saw it.
+//
+// Keyed by the same loadout key as the slot. `null` is a real answer — the
+// slot asks for the model's own depth — and is kept apart from a slot nobody
+// set, which leaves the chat's effort as it is.
+
+/** Where each slot's effort is kept. */
+export const LOADOUT_EFFORTS_KEY = "aura.model.loadoutEfforts.v1";
+
+export type LoadoutEfforts = Readonly<Record<string, ReasoningEffort | null>>;
+
+const EFFORTS: ReadonlySet<unknown> = new Set(["low", "medium", "high", "max", null]);
+
+function readLoadoutEfforts(): LoadoutEfforts {
+  try {
+    const raw = localStorage.getItem(LOADOUT_EFFORTS_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, ReasoningEffort | null> = {};
+    for (const [key, value] of Object.entries(parsed))
+      if (EFFORTS.has(value) && !isRetiredRowKey(key))
+        out[key] = value as ReasoningEffort | null;
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** Every slot's effort. The same object until one changes. */
+export function loadLoadoutEfforts(): LoadoutEfforts {
+  currentEfforts ??= readLoadoutEfforts();
+  return currentEfforts;
+}
+
+/** The effort saved for `key`'s slot: a level, `null` for the model's own
+ *  depth, or `undefined` when nobody set one. */
+export function loadoutEffortFor(key: string): ReasoningEffort | null | undefined {
+  const efforts = loadLoadoutEfforts();
+  return Object.prototype.hasOwnProperty.call(efforts, key) ? efforts[key] : undefined;
+}
+
+/** Save `effort` for `key`'s slot and tell every reader. */
+export function saveLoadoutEffort(key: string, effort: ReasoningEffort | null): void {
+  const next = { ...loadLoadoutEfforts(), [key]: effort };
+  try {
+    localStorage.setItem(LOADOUT_EFFORTS_KEY, JSON.stringify(next));
+  } catch {
+    /* quota or no storage: still live for this window */
+  }
+  currentEfforts = next;
+  tell();
+}
+
+/** Every slot's effort, kept current while the component is mounted. */
+export function useLoadoutEfforts(): LoadoutEfforts {
+  return useSyncExternalStore(subscribeModelLoadout, loadLoadoutEfforts, loadLoadoutEfforts);
 }
 
 /** Add `key` if it is absent, drop it if it is present. New entries land at

@@ -1,0 +1,57 @@
+/* Status badge and status-menu trigger for tasks. */
+.ui-tasks-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ui-tasks-status-glyph {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.ui-tasks-status-glyph:where([style]) .ui-workspace-stage {
+  color: inherit;
+}
+.ui-tasks-status-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+.ui-tasks-status-trigger {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  min-width: 0;
+  padding: 2px;
+  margin: -2px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.ui-tasks-status-trigger:hover {
+  background: var(--ui-hover);
+}
+.ui-tasks-status-trigger:focus-visible {
+  outline: 1px solid var(--ui-ring);
+}
+.ui-tasks-priority {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-tasks-priority rect {
+  fill: currentColor;
+  opacity: 0.3;
+}
+.ui-tasks-priority rect[data-on] {
+  opacity: 1;
+}
+.ui-tasks-priority[data-urgent] {
+  color: var(--ui-red);
+}

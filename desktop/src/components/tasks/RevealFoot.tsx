@@ -8,6 +8,9 @@
 
 import { useEffect, useRef, type JSX } from "react";
 
+import { Button } from "../ui/button";
+import "../ui/tasks-board.css";
+
 export function RevealFoot({
   hidden,
   onReveal,
@@ -36,14 +39,10 @@ export function RevealFoot({
   if (hidden === 0) return null;
 
   return (
-    <div ref={ref} className="flex justify-center py-4">
-      <button
-        type="button"
-        onClick={onReveal}
-        className="rounded border border-border-1 px-3 py-1.5 text-xs text-text-3 transition-colors hover:bg-bg-hover hover:text-text-1"
-      >
+    <div ref={ref} className="ui-tasks-reveal">
+      <Button size="xs" variant="ghost" onClick={onReveal}>
         Show {hidden} more
-      </button>
+      </Button>
     </div>
   );
 }

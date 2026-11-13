@@ -386,6 +386,8 @@ pub fn apply_compaction(session: &mut ManagerSession, plan: &CompactionPlan) -> 
         model: None,
         cost_usd: None,
         cost_estimated: None,
+        cloud_key: None,
+        cloud_id: None,
     };
     let insert_index = insert_at.min(kept.len());
     kept.insert(insert_index, digest_turn);
@@ -416,6 +418,8 @@ mod tests {
             model: None,
             cost_usd: None,
             cost_estimated: None,
+            cloud_key: None,
+            cloud_id: None,
         }
     }
 

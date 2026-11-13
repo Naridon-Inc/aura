@@ -22,6 +22,7 @@ import { buildPrototypePrompt } from "./prototypePrompt";
 import { launchWorkspace } from "./workspaceCreateStore";
 import { placeForNewWork } from "./ambientSession";
 import { relativeAgeFromSecs } from "./relativeTime";
+import { openChatHistory } from "./chatHistoryEvent";
 
 /** One resumable conversation in a `/resume` picker. */
 export type SlashResumeRow = {
@@ -286,7 +287,7 @@ async function runOnAgentCli(
       handled: true,
       tone: "warn",
       output:
-        `\`@${handle} /${command}\` needs an open project so the assistant runs in the right folder. ` +
+        `\`@${handle} /${command}\` needs an open repository so the assistant runs in the right folder. ` +
         "Open a repo first, then try again.",
     };
   }
@@ -305,7 +306,7 @@ async function runOnAgentCli(
         handled: true,
         tone: "info",
         output:
-          `No earlier **${handle}** session found in this project. There's nothing to resume yet. ` +
+          `No earlier **${handle}** session found in this repository. There's nothing to resume yet. ` +
           "Start one from the agent rail, then `@" +
           handle +
           " /resume` will pick it back up.",
@@ -509,7 +510,7 @@ async function buildSafetyLines(repoRoot: string): Promise<string[]> {
     ? "On. Each commit gets saved with its reason"
     : isGit
       ? "Off. Your commits aren't being recorded yet"
-      : "This folder isn't a project yet, so there's nothing to record";
+      : "This folder isn't a repository yet, so there's nothing to record";
 
   const mode = strict?.mode ?? "off";
   const protection =
@@ -573,7 +574,7 @@ async function buildStatusReport(repoRoot: string): Promise<string> {
     sections.push(
       "",
       working.length > 0
-        ? `_${ready.length} connected · ${working.length} working right now in this project._`
+        ? `_${ready.length} connected · ${working.length} working right now in this repository._`
         : `_${ready.length} connected · none mid-task right now._`,
     );
   }
@@ -582,7 +583,7 @@ async function buildStatusReport(repoRoot: string): Promise<string> {
   // ── Your conversations here (sessions) ─────────────────────────────────
   sections.push("**Your conversations here**");
   if (sessions.length === 0) {
-    sections.push("", "_No conversations in this project yet._");
+    sections.push("", "_No conversations in this repository yet._");
   } else {
     const newest = [...sessions].sort(
       (a, b) =>
@@ -647,7 +648,7 @@ async function runResume(
     return {
       handled: true,
       tone: "warn",
-      output: "Open a project first. Past conversations are listed per workspace.",
+      output: "Open a repository first. Past conversations are listed per workspace.",
     };
   }
 
@@ -657,7 +658,7 @@ async function runResume(
   ]);
 
   if (nativeRes.status === "rejected" && claudeRes.status === "rejected") {
-    window.dispatchEvent(new CustomEvent("aura:manager:open-history"));
+    openChatHistory(currentSessionId);
     return {
       handled: true,
       tone: "warn",
@@ -709,7 +710,7 @@ async function runResume(
       handled: true,
       tone: "info",
       output:
-        "**No earlier conversations here yet.** This is your first chat in this project. Once you've had a few (here or in Claude Code), `/resume` lists them with a one-click way back.",
+        "**No earlier conversations here yet.** This is your first chat in this repository. Once you've had a few (here or in Claude Code), `/resume` lists them with a one-click way back.",
     };
   }
 
@@ -740,7 +741,7 @@ async function runCapture(repoRoot: string, rest: string[]): Promise<ChatSlashRe
     return {
       handled: true,
       tone: "warn",
-      output: "Open a project first. Recording is per-folder.",
+      output: "Open a repository first. Recording is per-folder.",
     };
   }
 

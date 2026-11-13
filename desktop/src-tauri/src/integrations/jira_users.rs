@@ -440,6 +440,7 @@ pub async fn reconcile_suggest(repo_root: &str) -> Result<Vec<ReconcileSuggestio
         }],
         cwd: String::new(),
         machine_id: None,
+        linked_dirs: Vec::new(),
         system: Some(RECONCILE_SYSTEM.into()),
         tools: vec![],
         max_tokens: Some(1024),

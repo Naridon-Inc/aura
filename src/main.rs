@@ -21,9 +21,15 @@ mod crew_push;
 mod loop_stranded;
 mod loop_worktree;
 mod runner;
+mod runner_chat;
+mod runner_chat_sweep;
+mod runner_chat_turn;
+mod runner_signin;
 mod runner_creds;
+mod runner_git;
 mod runner_limits;
 mod runner_service;
+mod pair_join;
 mod env_cmd;
 mod egress_cmd;
 mod work;
@@ -56,6 +62,8 @@ mod sync;
 mod repo_slug;
 mod commit_mirror;
 mod redact_paths;
+mod secret_scrub;
+mod runner_guard;
 mod intent_sync;
 mod transcript_sync;
 mod subagents;
@@ -91,6 +99,7 @@ mod history;
 mod dispatch;
 mod import_history;
 mod dialects_cmd;
+mod api_cmd;
 mod recap;
 mod why;
 mod embeddings;
@@ -140,6 +149,7 @@ mod change_note;
 mod atlas;
 mod distill;
 mod acp_client;
+mod acp_proxy;
 mod acp_server;
 mod manifest_sig;
 mod rekor;
@@ -189,6 +199,9 @@ mod meta_refs;
 mod node;
 mod git_remote_aura_helper;
 mod push_credential;
+mod agent_env;
+mod codex_member_home;
+mod cloud_dispatch;
 mod repo_identity;
 mod meta_bundle;
 mod refs_sign;
@@ -1273,6 +1286,49 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// One authenticated call to the cloud this machine is signed in to
+    ///
+    /// For an endpoint no `aura` verb wraps yet, or a script that wants the
+    /// reply verbatim. Aura decides which cloud answers and which credential
+    /// is sent — the same rules every other cloud verb follows — and never
+    /// prints the token or sends it to another host.
+    ///
+    /// A path is relative to the public API surface, so `/workspaces` reaches
+    /// `/api/v2/public/workspaces`; a path that already starts `/api/` is taken
+    /// as written.
+    ///
+    /// These names are filled from the checkout you are standing in, each
+    /// encoded as one path segment: {owner}, {repo}, {repo_slug}, {branch},
+    /// {repo_id}, {checkout_id}, {room_id}. The last two are read from files
+    /// the repo committed, never minted.
+    ///
+    /// Examples:
+    ///   aura api /whoami
+    ///   aura api /projects/{repo_slug}/workspaces -q status=open
+    ///   aura api /workspaces -d '{"repo":"owner/name"}'
+    ///   aura api /workspaces -d @body.json --dry-run
+    Api {
+        /// Path to call, e.g. `/workspaces` or `/projects/{repo_slug}`
+        path: String,
+        /// HTTP method. Defaults to GET, or POST when a body is given
+        #[arg(short = 'X', long)]
+        method: Option<String>,
+        /// JSON body: inline, `@path` to read a file, or `-` for stdin
+        #[arg(short = 'd', long)]
+        data: Option<String>,
+        /// Extra header, `Name: value`. Repeatable. Authorization is Aura's
+        #[arg(short = 'H', long = "header")]
+        header: Vec<String>,
+        /// Query parameter, `name=value`. Repeatable; values are encoded
+        #[arg(short = 'q', long = "query")]
+        query: Vec<String>,
+        /// Print the reply exactly as it arrived instead of pretty JSON
+        #[arg(long)]
+        raw: bool,
+        /// Show the request that would be sent, send nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Bring in the agent history that happened before Aura was installed
     ///
     /// Reads Claude, Codex, Kimi and OpenCode transcripts for work done in this
@@ -1630,7 +1686,7 @@ enum Commands {
         sub: workspace_api::cmd::WorkspaceCmd,
     },
     // end AURA-1295
-    // AURA-1437 — Conductor parity: the two cloud nouns an agent looks for at
+    // AURA-1437 — the two cloud nouns an agent looks for at
     // the top level. Both delegate to what Aura already had rather than
     // reimplementing it; see each module's doc for why the older spellings
     // (`aura connect` / `disconnect` / `whoami`, `aura workspace models`) stay.
@@ -2099,16 +2155,29 @@ enum Commands {
         #[command(subcommand)]
         sub: HostSubcommands,
     },
-    /// Join a team mothership with a single token (simplest way)
+    /// Connect this computer to your Aura team with the code from the app
+    /// (`aura join AURA-XXXX-XXXX`), or join a team mothership with its token
     Join {
-        /// The join token from the mothership (base64 string printed by `aura host start`)
+        /// The code Aura showed you (AURA-XXXX-XXXX), `-` to read that code
+        /// from stdin, or a mothership join token (the base64 string printed by
+        /// `aura host start`)
         token: String,
-        /// Your username
+        /// Your username (mothership only)
         #[arg(long)]
         username: Option<String>,
-        /// Your password
+        /// Your password (mothership only)
         #[arg(long)]
         password: Option<String>,
+        /// Print one line of JSON instead of sentences (for the Aura app)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Disconnect this computer from Aura: it is removed from your team, Aura
+    /// stops running here, and its token is deleted
+    Leave {
+        /// Print one line of JSON instead of sentences (for the Aura app)
+        #[arg(long)]
+        json: bool,
     },
     /// Check connection to mothership — latency, TLS status, online peers
     Ping,
@@ -2279,8 +2348,28 @@ enum Commands {
     Whoami,
     /// Clear the stored cloud token from ~/.aura/config
     Disconnect,
-    /// Serve Aura's semantic layer as a Zed ACP agent over stdio
-    AcpServe,
+    /// Serve Aura as an ACP agent over stdio. With an engine (`--agent <id>`,
+    /// `-- <cmd>`, or AURA_ACP_AGENT) Aura converses through it, guarded;
+    /// without one it answers /prove, /review and /impacts on its own
+    AcpServe {
+        /// The registry agent to converse through, e.g. `gemini`, `opencode`
+        #[arg(long)]
+        agent: Option<String>,
+        /// An engine command instead of a registry id, after `--`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        cmd: Vec<String>,
+    },
+    /// Wrap any ACP agent: snapshot its writes, log an intent per turn and
+    /// gate its permission requests, passing everything else through
+    AcpProxy {
+        /// Who snapshots and intents are attributed to (default: the agent
+        /// program's name)
+        #[arg(long)]
+        agent: Option<String>,
+        /// The agent command, after `--`, e.g. `-- gemini --acp`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        cmd: Vec<String>,
+    },
     /// Run an external agent (claude, gemini, ...) over the Zed ACP protocol
     AcpRun {
         /// Binary to launch as an ACP agent (e.g. "claude-code", "gemini")
@@ -3190,6 +3279,11 @@ enum A2aTaskAction {
         /// queue). Only planning states are accepted at create time.
         #[arg(long = "status")]
         status: Option<String>,
+        /// The cloud computer to run this on: a place id, `auto` (the org's
+        /// most recently live box) or `none`. A box is handed your agent
+        /// sign-in only for work you sent to it. Omit for `none`.
+        #[arg(long = "dispatch", value_name = "PLACE|auto|none")]
+        dispatch: Option<String>,
         /// Print the full JSON envelope instead of a status line.
         #[arg(long)]
         json: bool,
@@ -4211,6 +4305,11 @@ enum LoopSubcommands {
         /// serve` passes. Nodes with no placement run under both.
         #[arg(long, default_value = "local")]
         place: String,
+        /// Take only the node mirroring this board task, or with `none` only
+        /// nodes that never came from the board. A box acting for a member
+        /// runs each board task on its own member's sign-in, one run per task.
+        #[arg(long = "cloud-task", value_name = "ID|none")]
+        cloud_task: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -4336,6 +4435,14 @@ enum LoopSubcommands {
 
 #[derive(Subcommand)]
 enum RunnerSubcommands {
+    /// One prompt of a cloud workspace this machine answers by itself. Started
+    /// by `serve` with the sender named in the environment; reads the prompt
+    /// on stdin.
+    #[command(name = "chat-turn", hide = true)]
+    ChatTurn {
+        #[arg(long)]
+        workspaces_root: std::path::PathBuf,
+    },
     /// Register this account as a cloud runner and mint its token (shown
     /// once). Uses your cloud login; the printed token is what the runner
     /// box exports as AURA_RUNNER_TOKEN.
@@ -5137,6 +5244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Dispatch { .. } => "dispatch",
         Commands::Recap { .. } => "recap",
         Commands::Dialects { .. } => "dialects",
+        Commands::Api { .. } => "api",
         Commands::Import { .. } => "import",
         Commands::Why { .. } => "why",
         Commands::Explain { .. } => "explain",
@@ -5172,6 +5280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Ping => "ping",
         Commands::Outbox { .. } => "outbox",
         Commands::Join { .. } => "join",
+        Commands::Leave { .. } => "leave",
         Commands::Connect { .. } => "connect",
         // Named explicitly rather than falling through to "internal_command",
         // so usage reporting can tell whether agents reach for `auth`/`model`
@@ -5196,7 +5305,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Whoami => "whoami",
         Commands::Disconnect => "disconnect",
         Commands::Usage { .. } => "usage",
-        Commands::AcpServe => "acp-serve",
+        Commands::AcpServe { .. } => "acp-serve",
+        Commands::AcpProxy { .. } => "acp-proxy",
         Commands::AcpRun { .. } => "acp-run",
         Commands::Ws { .. } => "ws",
         Commands::Recall { .. } => "recall",
@@ -8130,6 +8240,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Dialects { json } => {
             std::process::exit(dialects_cmd::cli(*json));
+        }
+        Commands::Api {
+            path,
+            method,
+            data,
+            header,
+            query,
+            raw,
+            dry_run,
+        } => {
+            std::process::exit(api_cmd::cli(&api_cmd::Call {
+                path,
+                method: method.as_deref(),
+                data: data.as_deref(),
+                headers: header,
+                query,
+                raw: *raw,
+                dry_run: *dry_run,
+            }));
         }
         Commands::Import { dialect, since, dry_run, push, json } => {
             std::process::exit(import_history::cli(
@@ -12599,7 +12728,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Join { token, username, password } => {
+        Commands::Join { token, json, .. } if token == "-" => {
+            let code = pair_join::join_from_stdin(*json);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::Join { token, json, .. } if pair_join::looks_like_code(token) => {
+            let code = pair_join::join(token, *json);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::Leave { json } => {
+            let code = pair_join::leave(*json);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::Join { token, username, password, .. } => {
             // Decode the join token
             let join_info = match host::JoinToken::decode(token) {
                 Some(t) => t,
@@ -13192,8 +13339,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        Commands::AcpServe => {
-            acp_server::AcpServer::serve();
+        Commands::AcpServe { agent, cmd } => match acp_server::engine::resolve(agent.as_deref(), cmd) {
+            Ok(Some(engine)) => std::process::exit(acp_server::engine::serve(engine)),
+            Ok(None) => acp_server::AcpServer::serve(),
+            Err(why) => {
+                eprintln!("aura acp-serve: {why}");
+                std::process::exit(2);
+            }
+        },
+        Commands::AcpProxy { agent, cmd } => {
+            std::process::exit(acp_proxy::run(cmd, agent.as_deref()));
         }
         Commands::AcpRun { cmd, args, prompt, timeout, json } => {
             use colored::Colorize;
@@ -14071,8 +14226,10 @@ fn run_a2a_task(action: &A2aTaskAction) -> Result<(), String> {
             tag,
             assignee,
             status,
+            dispatch,
             json,
         } => {
+            let target = cloud_dispatch::Target::parse(dispatch.as_deref())?;
             if agent_kind.trim().is_empty() {
                 return Err("--agent-kind is required".to_string());
             }
@@ -14160,6 +14317,9 @@ fn run_a2a_task(action: &A2aTaskAction) -> Result<(), String> {
                     ));
                 }
                 body_obj.insert("status".into(), serde_json::json!(s));
+            }
+            if let Some(place) = cloud_dispatch::resolve(&client, &cloud_url, &token, &target)? {
+                body_obj.insert("dispatch_place_id".into(), serde_json::json!(place));
             }
             let req_body = serde_json::Value::Object(body_obj);
             let resp = recall_post(&client, &url, &token, &req_body)?;
@@ -15913,6 +16073,7 @@ fn handle_runner_command(sub: &RunnerSubcommands) -> Result<(), Box<dyn std::err
             )
         }
         RunnerSubcommands::Status => runner::status(),
+        RunnerSubcommands::ChatTurn { workspaces_root } => runner_chat_turn::run(workspaces_root),
         RunnerSubcommands::Install {
             user,
             name,
@@ -15969,10 +16130,25 @@ fn handle_runner_command(sub: &RunnerSubcommands) -> Result<(), Box<dyn std::err
                         .dimmed()
                 );
             }
-            println!(
-                "  {}",
-                "It now starts on boot and restarts if it falls over.".dimmed()
-            );
+            if done.stops_at_logout {
+                println!(
+                    "  {} {}",
+                    "!".yellow(),
+                    format!(
+                        "This account isn't allowed to keep its services running after logout, so \
+                         the runner stops when you sign out and doesn't start at boot. Someone with \
+                         sudo can fix that once with: sudo loginctl enable-linger {}",
+                        std::env::var("USER").unwrap_or_else(|_| "<this user>".into())
+                    )
+                    .dimmed()
+                );
+                println!("  {}", "It restarts if it falls over while you're signed in.".dimmed());
+            } else {
+                println!(
+                    "  {}",
+                    "It now starts on boot and restarts if it falls over.".dimmed()
+                );
+            }
             Ok(())
         }
         RunnerSubcommands::Uninstall { user } => {
@@ -16463,6 +16639,7 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
             goal,
             crew,
             place,
+            cloud_task,
             json,
         } => {
             let here = aura_loop::normalize_place(place).ok_or_else(|| {
@@ -16480,6 +16657,7 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                 goal: goal.clone(),
                 crew: crew.clone(),
                 place: here.to_string(),
+                cloud_task: aura_loop_run::CloudTasks::parse(cloud_task.as_deref()),
                 json: *json,
             };
             aura_loop_run::run(&repo_root, &opts)?;
@@ -16618,15 +16796,10 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
             let base = cloud_url.trim_end_matches('/').to_string();
 
             // Scope to the current git remote (owner/repo) unless overridden. A
-            // non-github remote means "org-wide" — no repo filter.
-            let repo_slug = repo.clone().or_else(|| {
-                let r = crate::live_events::repo_name();
-                if r.contains('/') {
-                    Some(r)
-                } else {
-                    None
-                }
-            });
+            // non-github remote means "org-wide" — no repo filter. `repo_name()`
+            // turns any remote into `a/b`, and the cloud answers an unknown repo
+            // with 404, so only a GitHub remote may scope the pull.
+            let repo_slug = repo.clone().or_else(crate::live_events::github_repo_name);
 
             // Neither flag → do both legs (the runner's normal cycle).
             let do_pull = *pull || !*push;
@@ -16644,7 +16817,86 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
 
             // PULL — ready cloud tasks become local graph nodes. Each is claimed
             // on the cloud (→ working) so a second runner won't also pull it.
+            //
+            // A box (it holds a runner token) pulls only its own work: what a
+            // member sent to it, or what it made itself (`pull_takes`). Before
+            // that, it pulled every open row, saved a node for each and claimed
+            // it, so a teammate's task sent nowhere, or sent to another box,
+            // ran here on the box's own setup. A box that cannot say which
+            // place it is takes nothing.
+            let this_place: Result<Option<String>, String> = match crate::push_credential::runner_token() {
+                None => Ok(None),
+                Some(runner) => crate::push_credential::place_id(&client, &base, &runner).map(Some),
+            };
+            if let (true, Err(e)) = (do_pull, &this_place) {
+                let e = format!("this box could not tell which place it is, so it took nothing: {e}");
+                notes.push(format!("pull: {e}"));
+                pull_error = Some(e);
+            }
+            // A box claims, and reports, with its own machine credential
+            // naming a member: the one it acts for, or else the member who
+            // made the task (`cloud_dispatch::claim_as`). The server then
+            // checks the work is this box's and that member's cloud access,
+            // and records the run against this box. Only a laptop uses the
+            // person login.
+            let box_runner: Option<String> = match this_place.as_ref().ok().and_then(Option::as_ref) {
+                Some(_) => crate::push_credential::runner_token(),
+                None => None,
+            };
+            let acting: Option<String> =
+                box_runner.as_ref().and_then(|_| crate::push_credential::acting_member());
+            // SETTLE — work this machine pulled that the board has since
+            // ended. A task cancelled on the board, finished elsewhere or
+            // deleted stayed a ready node here and was tried again every
+            // cycle. The board's answer wins and is not sent back. Nodes this
+            // machine offered (`place: cloud`) are RECONCILE's below.
+            let mut settled = 0usize;
             if do_pull {
+                for mut node in graph.list() {
+                    if node.is_terminal()
+                        || node.place.as_deref().and_then(aura_loop::normalize_place) == Some(aura_loop::PLACE_CLOUD)
+                    {
+                        continue;
+                    }
+                    let Some(rid) = node.remote_id.clone() else { continue };
+                    let gurl = format!("{}/api/v2/a2a/tasks/{}", base, a2a_safe_id(&rid));
+                    let row = match recall_get(&client, &gurl, &token) {
+                        Ok(v) => Some(v),
+                        Err(e) if e.starts_with("HTTP 404") => None,
+                        Err(e) => {
+                            notes.push(format!("settle {}: {e}", node.short_id()));
+                            continue;
+                        }
+                    };
+                    let Some((status, why)) = crate::cloud_dispatch::board_ended(row.as_ref()) else {
+                        continue;
+                    };
+                    let said = |key: &str| {
+                        row.as_ref()
+                            .and_then(|r| r.get(key))
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.trim().is_empty())
+                            .map(str::to_string)
+                    };
+                    node.status = status;
+                    if let Some(sha) = said("commit_sha") {
+                        node.commit_sha = Some(sha);
+                    }
+                    node.error_message = Some(said("error_message").unwrap_or_else(|| why.clone()));
+                    if !node.tags.iter().any(|t| t == "cloud:pushed") {
+                        node.tags.push("cloud:pushed".to_string());
+                    }
+                    match graph.save(&node) {
+                        Ok(_) => {
+                            settled += 1;
+                            notes.push(format!("{} ({rid}): {why}", node.short_id()));
+                        }
+                        Err(e) => notes.push(format!("settle save {}: {e}", node.short_id())),
+                    }
+                }
+            }
+
+            if let (true, Ok(this_place)) = (do_pull, &this_place) {
                 let mut url = format!("{}/api/v2/a2a/tasks", base);
                 let mut sep = '?';
                 recall_push_str(&mut url, &mut sep, "status", Some("submitted"));
@@ -16666,6 +16918,10 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                             };
                             if already.contains(&cid) {
                                 continue; // already mirrored locally
+                            }
+                            let member = acting.as_deref();
+                            if !crate::cloud_dispatch::pull_takes(&ct, this_place.as_deref(), member) {
+                                continue; // another computer's, or nobody's yet
                             }
                             let input = ct
                                 .get("input_text")
@@ -16733,6 +16989,11 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                                 .get("branch")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string());
+                            let speaks_as =
+                                crate::cloud_dispatch::claim_as(box_runner.as_deref(), member, &ct);
+                            if let Some((_, for_member)) = &speaks_as {
+                                node.tags.push(format!("{}{for_member}", crate::cloud_dispatch::CLAIMED_FOR_TAG));
+                            }
                             if let Err(e) = graph.save(&node) {
                                 notes.push(format!("save {cid}: {e}"));
                                 continue;
@@ -16740,8 +17001,36 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                             let purl =
                                 format!("{}/api/v2/a2a/tasks/{}", base, a2a_safe_id(&cid));
                             let pbody = serde_json::json!({ "status": "working" });
-                            if let Err(e) = recall_patch(&client, &purl, &token, &pbody) {
+                            let claimed = match &speaks_as {
+                                Some((runner, for_member)) => {
+                                    match crate::cloud_dispatch::claim_as_place(&client, &purl, runner, for_member) {
+                                        Ok(()) => Ok(()),
+                                        Err(refused) => {
+                                            // Its member has no cloud access: asking
+                                            // again next cycle changes nothing, so
+                                            // the board says why instead.
+                                            if let Some(why) = refused.never_runs_here() {
+                                                let failed = serde_json::json!({ "status": "failed", "error_message": why });
+                                                match crate::cloud_dispatch::patch_as_place(&client, &purl, runner, for_member, &failed) {
+                                                    Ok(()) => notes.push(format!("{cid}: {why} (failed on the board)")),
+                                                    Err(e) => notes.push(format!("failing {cid} on the board: {e}")),
+                                                }
+                                            }
+                                            Err(refused.to_string())
+                                        }
+                                    }
+                                }
+                                None => recall_patch(&client, &purl, &token, &pbody).map(|_| ()),
+                            };
+                            if let Err(e) = claimed {
+                                // Not claimed is not ours to run: drop the node
+                                // so the crew does not start it, and leave the
+                                // row for the next cycle.
+                                if let Err(d) = graph.delete(&node.id) {
+                                    notes.push(format!("drop unclaimed {cid}: {d}"));
+                                }
                                 notes.push(format!("claim {cid}: {e}"));
+                                continue;
                             }
                             pulled += 1;
                         }
@@ -16763,6 +17052,10 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
             // system could not act on. Now placement is the instruction and this
             // is what carries it out.
             let mut offered = 0usize;
+            // The box this machine sends work to, asked for once and only when
+            // there is something to send. A box is handed the member's agent
+            // sign-in only for work dispatched to it, so offered work names one.
+            let mut send_to: Option<Option<String>> = None;
             if do_push {
                 for mut node in graph.list() {
                     if node.place.as_deref().and_then(aura_loop::normalize_place)
@@ -16806,6 +17099,16 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                     }
                     if !node.tags.is_empty() {
                         b.insert("tags".into(), serde_json::json!(node.tags));
+                    }
+                    let place = send_to.get_or_insert_with(|| {
+                        cloud_dispatch::resolve(&client, &base, &token, &cloud_dispatch::Target::Auto)
+                            .unwrap_or_else(|e| {
+                                notes.push(format!("which cloud computer to send to: {e}"));
+                                None
+                            })
+                    });
+                    if let Some(place) = place {
+                        b.insert("dispatch_place_id".into(), serde_json::json!(place));
                     }
                     let curl = format!("{}/api/v2/a2a/tasks", base);
                     match recall_post(&client, &curl, &token, &serde_json::Value::Object(b)) {
@@ -16925,7 +17228,22 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                     if let Some(err) = &node.error_message {
                         pb.insert("error_message".into(), serde_json::json!(err));
                     }
-                    match recall_patch(&client, &purl, &token, &serde_json::Value::Object(pb)) {
+                    let pb = serde_json::Value::Object(pb);
+                    // Reported as the box and member that claimed it, which is
+                    // what closes the run the claim opened on this box. If the
+                    // box cannot say it, the outcome still goes up with the
+                    // saved login: a board left saying `working` is worse.
+                    let sent = match (box_runner.as_deref(), crate::cloud_dispatch::claimed_for(&node.tags)) {
+                        (Some(runner), Some(for_member)) => {
+                            crate::cloud_dispatch::patch_as_place(&client, &purl, runner, for_member, &pb)
+                                .or_else(|refused| {
+                                    notes.push(format!("push {rid} as this computer: {refused}; sent with the saved login"));
+                                    recall_patch(&client, &purl, &token, &pb).map(|_| ())
+                                })
+                        }
+                        _ => recall_patch(&client, &purl, &token, &pb).map(|_| ()),
+                    };
+                    match sent {
                         Ok(_) => {
                             node.tags.push(PUSHED_TAG.to_string());
                             let _ = graph.save(&node);
@@ -16948,6 +17266,8 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                         // pulled/pushed because they move work the other way.
                         "offered": offered,
                         "adopted": adopted,
+                        // Pulled work the board ended, stopped here.
+                        "settled": settled,
                         // Present only when the board could not be read, so a
                         // caller can tell an idle cycle from a broken one
                         // without string-matching the notes.
@@ -16964,6 +17284,9 @@ fn handle_loop_command(sub: &LoopSubcommands) -> Result<(), Box<dyn std::error::
                     });
                     if adopted > 0 {
                         parts.push(format!("heard back on {adopted}"));
+                    }
+                    if settled > 0 {
+                        parts.push(format!("stopped {settled} the board ended"));
                     }
                 }
                 if do_push {

@@ -194,7 +194,7 @@ impl BrainBackend {
 ///     direct mappings, in case an older id reaches here.
 ///
 /// Native-only / cloud brains the legacy path genuinely cannot run
-/// (`gemini_native`, `openai_native`, `aura_pro`, `openai_compat:*`) return
+/// (`gemini_native`, `openai_native`, `openai_compat:*`) return
 /// `None`: the frontend routes those to the native `brain_chat_turn` path,
 /// so they should never land here; if one does, `None` keeps the prior
 /// behaviour (fall back to the session's `brain_backend`) instead of
@@ -851,7 +851,14 @@ fn build_request(state: &Arc<Mutex<ManagerSession>>) -> (Vec<Value>, String) {
         s.projects.first().map(|p| p.root.clone()).unwrap_or_default(),
         s.machine_id.as_deref(),
     );
-    let system = format!("{}{}{}", SYSTEM_PROMPT, context, place_note(&place));
+    // Where the person is looking when it isn't the project above — their
+    // organization's cloud. In the system prompt on this path because it is
+    // rebuilt for every request of a tool loop, whose last user message is a
+    // tool result rather than anything the person said.
+    let view = crate::manager::view_note::get(&s.id)
+        .map(|n| format!("\n\n{n}"))
+        .unwrap_or_default();
+    let system = format!("{}{}{}{}", SYSTEM_PROMPT, context, place_note(&place), view);
     (messages, system)
 }
 
@@ -1705,12 +1712,16 @@ async fn run_cli(
         persist_now(&state);
     }
 
+    // Where the person is looking when it isn't this conversation's project —
+    // their organization's cloud. On the newest question either way: a
+    // resumed CLI reads nothing else. See `view_note`.
+    let view = crate::manager::view_note::get(&session_id);
     let full_prompt = match fresh_messages {
-        Some(messages) => super::cli_wrapper::flatten_messages_to_prompt(
-            Some(CLI_SYSTEM_PREAMBLE),
-            &messages,
-        ),
-        None => last_user_text.clone(),
+        Some(mut messages) => {
+            crate::manager::view_note::onto_last_user(&mut messages, view.as_deref());
+            super::cli_wrapper::flatten_messages_to_prompt(Some(CLI_SYSTEM_PREAMBLE), &messages)
+        }
+        None => crate::manager::view_note::prefixed(view.as_deref(), &last_user_text),
     };
 
     let invocation = match provider.build_invocation(&InvokeRequest {
@@ -1794,6 +1805,9 @@ async fn run_cli(
     // Undo it as the lines come off stdout, before anything is streamed to the
     // bubble or accumulated for the persisted turn.
     let mut transcript = super::plain_cli_transcript::PlainCliTranscript::for_engine(&provider_id);
+    // And when it fails it prints its error event in the same place. Worded
+    // and held, it becomes the turn's error instead of the turn's text.
+    let mut engine_error: Option<String> = None;
 
     if let Some(out) = stdout {
         let mut lines = BufReader::new(out).lines();
@@ -1867,6 +1881,13 @@ async fn run_cli(
                     }
                 }
             } else {
+                if let Some(sentence) = super::plain_cli_transcript::engine_error_sentence(
+                    &line,
+                    &super::engine_errors::engine_label(&invocation.bin),
+                ) {
+                    engine_error.get_or_insert(sentence);
+                    continue;
+                }
                 let line = transcript.line(&line);
                 assistant_text.push_str(&line);
                 assistant_text.push('\n');
@@ -1926,7 +1947,11 @@ async fn run_cli(
             stderr = %truncate(&stderr_buf, 2000),
             "engine CLI turn produced no assistant text"
         );
-        let msg = if exit != 0 {
+        // The engine's own account of its failure beats a guess from its
+        // exit code, and it may have exited 0 after printing it.
+        let msg = if let Some(said) = engine_error {
+            said
+        } else if exit != 0 {
             super::engine_errors::humanize_cli_failure(&invocation.bin, exit, &stderr_buf)
         } else {
             super::engine_errors::humanize_empty_output(&invocation.bin, &stderr_buf)
@@ -1934,6 +1959,19 @@ async fn run_cli(
         append_assistant(&state, msg.clone());
         emit(&app, &event_name, &StreamDelta::Error { message: msg });
     } else {
+        if let Some(said) = engine_error {
+            // It answered and then failed: the answer stands, and the failure
+            // follows it as its own paragraph.
+            assistant_text.push_str(&format!("\n{said}\n"));
+            emit(
+                &app,
+                &event_name,
+                &StreamDelta::TextDelta {
+                    block_idx,
+                    text: format!("\n{said}\n"),
+                },
+            );
+        }
         append_assistant(&state, assistant_text);
     }
 
@@ -2049,6 +2087,7 @@ mod tests {
     fn a_box() -> Machine {
         Machine {
             id: "ubuntu@example.invalid:/home/ubuntu/naridon".into(),
+            aliases: Vec::new(),
             name: "aura-runner".into(),
             host: "example.invalid".into(),
             user: "ubuntu".into(),

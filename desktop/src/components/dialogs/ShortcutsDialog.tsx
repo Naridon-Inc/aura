@@ -1,113 +1,125 @@
-// The ⌘/ keyboard-shortcuts cheat-sheet.
+// The ⌘/ keyboard-shortcuts sheet.
 //
-// A calm, centred overlay you summon from anywhere with ⌘/ (or the command
-// palette) to remember the keys — the thing Conductor pops on the same
-// shortcut. It reads straight from the shared SHORTCUT_GROUPS map, so it can
-// never drift from what the app actually binds. No search, no state, no
-// backend — just a two-column reference you glance at and dismiss with Esc.
+// Summoned from anywhere with ⌘/ (or the command palette, or `?` on the tasks
+// board) and dismissed with Esc. A search box sits under the title: with
+// nothing typed, every shortcut shows under its group; typing turns it into
+// one list of the rows that fit, best first, with the typed letters of each
+// name standing out and the rest dimmed. It reads the one SHORTCUT_GROUPS
+// map Settings → Keyboard shortcuts also reads, so the two list the same keys.
 //
-// It is also the ONLY one now. The tasks board used to open a second sheet of
-// its own on `?`, listing ten card keys this one had never heard of, so the
-// entry reading "Show all shortcuts" was showing about two thirds of them.
-// The board's keys are a scoped group in the shared map and `?` opens this
-// dialog — which is why groups can carry a `note`: a key that only works on
-// a focused task card has to say so.
+// Groups that only apply somewhere (a focused task card, an open plan) say
+// where under their heading: a scoped key with no scope printed is tried on
+// the wrong screen and taken for broken.
 
-import { useEffect } from "react";
+import { Fragment, useMemo, useState } from "react";
+import { Command, Search } from "lucide-react";
 
 import { SHORTCUT_GROUPS, comboKeys } from "../../lib/shortcuts";
+import { searchShortcuts, shortcutRows, type ShortcutRow } from "../../lib/shortcutSearch";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog";
+import { Input } from "../ui/input";
 import { Kbd } from "../ui/kbd";
-import {
-  MODAL_BACKDROP,
-  MODAL_BODY,
-  MODAL_FOOTER,
-  MODAL_HEADER,
-  MODAL_PANEL,
-  MODAL_TITLE,
-} from "../ui/modalSurface";
-import { cn } from "../../lib/utils";
+import "../ui/shortcuts-dialog.css";
 
-export function ShortcutsDialog({
-  open,
-  onClose,
-}: {
-  open: boolean;
-  onClose: () => void;
-}) {
-  // Esc closes — matches the command palette so the two feel like one family.
-  useEffect(() => {
-    if (!open) return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    }
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [open, onClose]);
-
-  if (!open) return null;
-
+/** A name with the matched letters at full strength and the rest dimmed.
+ *  With a query but no letters matched (the group's name did), all dimmed. */
+function MatchedTitle({ title, match, hasQuery }: { title: string; match?: number[]; hasQuery: boolean }) {
+  if (!hasQuery) return <>{title}</>;
+  if (!match || match.length === 0) return <span className="ui-shortcuts-dim">{title}</span>;
+  const hit = new Set(match);
+  const runs: { text: string; on: boolean }[] = [];
+  for (let i = 0; i < title.length; i++) {
+    const on = hit.has(i);
+    const last = runs[runs.length - 1];
+    if (last && last.on === on) last.text += title[i];
+    else runs.push({ text: title[i], on });
+  }
   return (
-    <div
-      className={cn(MODAL_BACKDROP, "z-50 flex items-start justify-center pt-[12vh]")}
-      onMouseDown={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Keyboard shortcuts"
-    >
-      <div
-        className={cn(MODAL_PANEL, "max-w-[620px]")}
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <div className={cn(MODAL_HEADER, "justify-between")}>
-          <span className={MODAL_TITLE}>Keyboard shortcuts</span>
-          <Kbd>esc</Kbd>
-        </div>
+    <span>
+      {runs.map((r, i) => (
+        <span key={i} className={r.on ? undefined : "ui-shortcuts-dim"}>
+          {r.text}
+        </span>
+      ))}
+    </span>
+  );
+}
 
-        <div
-          className={cn(
-            MODAL_BODY,
-            "max-h-[70vh] overflow-y-auto",
-            "grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2",
-          )}
-        >
-          {SHORTCUT_GROUPS.map((group) => (
-            <section key={group.title} className="flex flex-col gap-1.5">
-              <h3 className="section-label pb-0.5">
-                {group.title}
-              </h3>
-              {/* Where a scoped group applies. Without it these read as global
-                  and fail on the wrong screen, which is worse than not
-                  listing them — and not listing them is what the app used to
-                  do. */}
-              {group.note ? (
-                <p className="-mt-1 pb-0.5 text-xs text-text-4">{group.note}</p>
-              ) : null}
-              {group.items.map((s) => (
-                // Keyed by label, not by combo: Enter and Esc each mean two
-                // different things on two different surfaces now.
-                <div
-                  key={s.label}
-                  className="flex items-center justify-between gap-4 py-0.5"
-                >
-                  <span className="text-base text-text-2">{s.label}</span>
-                  <span className="flex shrink-0 items-center gap-0.5">
-                    {comboKeys(s.keys).map((cap, i) => (
-                      <Kbd key={i}>{cap}</Kbd>
-                    ))}
-                  </span>
-                </div>
-              ))}
-            </section>
-          ))}
-        </div>
-
-        <div className={cn(MODAL_FOOTER, "justify-start text-xs text-text-4")}>
-          Press <span className="font-medium text-text-3">⌘/</span> anytime to bring this back.
-        </div>
+function ShortcutLine({ row, match, hasQuery }: { row: ShortcutRow; match?: number[]; hasQuery: boolean }) {
+  return (
+    <div className="ui-shortcuts-row">
+      <span className="ui-shortcuts-name">
+        <MatchedTitle title={row.title} match={match} hasQuery={hasQuery} />
+      </span>
+      <div className="ui-shortcuts-keys">
+        {comboKeys(row.keys).map((cap, i) => (
+          <Fragment key={`${cap}-${i}`}>
+            <Kbd>{cap}</Kbd>
+          </Fragment>
+        ))}
       </div>
     </div>
+  );
+}
+
+export function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [query, setQuery] = useState("");
+  const rows = useMemo(() => shortcutRows(), []);
+  const hits = query.trim() ? searchShortcuts(rows, query) : undefined;
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) return;
+        setQuery("");
+        onClose();
+      }}
+    >
+      <DialogContent className="ui-shortcuts-dialog" aria-describedby={undefined}>
+        <DialogHeader className="ui-shortcuts-head">
+          <DialogTitle className="ui-shortcuts-title">
+            <Command size={20} aria-hidden />
+            Keyboard shortcuts
+          </DialogTitle>
+        </DialogHeader>
+        <div className="ui-shortcuts-search">
+          <Search size={16} aria-hidden />
+          <Input
+            placeholder="Search shortcuts..."
+            aria-label="Search shortcuts"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
+        <div className="ui-shortcuts-body">
+          {hits !== undefined ? (
+            hits.length > 0 ? (
+              <div className="ui-shortcuts-rows">
+                {hits.map((h) => (
+                  <ShortcutLine key={h.row.id} row={h.row} match={h.titleMatch} hasQuery />
+                ))}
+              </div>
+            ) : (
+              <div className="ui-shortcuts-none">No shortcuts found for "{query}"</div>
+            )
+          ) : (
+            SHORTCUT_GROUPS.map((group) => (
+              <div key={group.title}>
+                <h3 className="ui-shortcuts-group">{group.title}</h3>
+                {group.note && <p className="ui-shortcuts-note">{group.note}</p>}
+                <div className="ui-shortcuts-rows">
+                  {rows
+                    .filter((r) => r.category === group.title)
+                    .map((r) => (
+                      <ShortcutLine key={r.id} row={r} hasQuery={false} />
+                    ))}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

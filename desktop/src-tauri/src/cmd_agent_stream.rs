@@ -31,6 +31,9 @@ use uuid::Uuid;
 use crate::cmd_aurawatch::WatchRegistry;
 #[path = "chat_acp.rs"]
 mod chat_acp;
+#[path = "chat_acp_prompts.rs"]
+mod chat_acp_prompts;
+pub(crate) use chat_acp_prompts::elicit_for_brain;
 #[path = "chat_provider_events.rs"]
 mod chat_provider_events;
 
@@ -243,8 +246,13 @@ pub async fn agent_stream_send(
     channel: Option<String>,
     client_turn_id: Option<String>,
     model: Option<String>,
+    linked_dirs: Option<Vec<String>>,
 ) -> Result<TurnHandle, String> {
     let attachments = attachments.unwrap_or_default();
+    // The workspace's linked folders that still exist here. Each agent gets
+    // them through its own extra-directory flag, or not at all.
+    let linked_dirs =
+        crate::manager::brain::linked_dirs::readable(&linked_dirs.unwrap_or_default(), &repo_root);
     // Cross-agent reasoning effort for this launch — `None` keeps the agent
     // at its own default. Mapped onto each provider's real mechanism inside
     // build_invocation (Codex `-c` flag, Claude keyword, prompt-steer for
@@ -291,11 +299,11 @@ pub async fn agent_stream_send(
     // stream-json format; other providers report `stdout_is_stream_json
     // = false` and the parser surfaces their stdout as a single
     // AssistantText block.
-    let reg = aura_agents::registry();
-    let provider = reg
-        .get(&agent_id)
-        .ok_or_else(|| format!("unknown agent: {agent_id}"))?;
-    if matches!(agent_id.as_str(), "kimi" | "gemini" | "opencode") {
+    // Any agent that speaks ACP on this machine chats over ACP: one Aura
+    // installed from the ACP Registry, or its own CLI on PATH. Claude Code
+    // and Codex keep their native streams until their ACP adapter is
+    // installed through Aura.
+    if let Some((agent_name, launch)) = acp_launch(&app, &agent_id) {
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         app.state::<ChildRegistry>()
             .acp_cancel
@@ -307,27 +315,30 @@ pub async fn agent_stream_send(
             topic: topic.clone(),
             done_topic: done_topic.clone(),
         };
-        let bin = provider.bin_name().to_string();
+        let spec = chat_acp::TurnSpec {
+            agent_name,
+            launch,
+            extra_args: crate::manager::brain::linked_dirs::acp_args(&agent_id, &linked_dirs),
+            additional_dirs: linked_dirs.clone(),
+            cwd: repo_root,
+            prompt,
+            resume: resume_session,
+            model,
+            permission_mode,
+            channel: sanitized,
+            turn: turn_id,
+            attachments,
+        };
         tokio::spawn(async move {
             let _lease = lease;
-            chat_acp::run(
-                app,
-                &agent_id,
-                &bin,
-                &repo_root,
-                &prompt,
-                resume_session.as_deref(),
-                model.as_deref(),
-                permission_mode.as_deref(),
-                &sanitized,
-                &turn_id,
-                &attachments,
-                cancel_rx,
-            )
-            .await;
+            chat_acp::run(app, spec, cancel_rx).await;
         });
         return Ok(handle);
     }
+    let reg = aura_agents::registry();
+    let provider = reg
+        .get(&agent_id)
+        .ok_or_else(|| format!("unknown agent: {agent_id}"))?;
     if !attachments.is_empty() && agent_id != "claude" {
         return Err(
             "This agent uses file attachments through its native Terminal controls.".into(),
@@ -352,6 +363,7 @@ pub async fn agent_stream_send(
         .map_err(|e| format!("build invocation for {agent_id}: {e}"))?;
     // Enforce the fleet agent-CLI config policy (e.g. codex service_tier repair).
     crate::agent_policy::apply_to_invocation(&agent_id, &mut inv);
+    crate::manager::brain::linked_dirs::apply(&agent_id, &mut inv.args, &linked_dirs);
     let bin = inv.bin.clone();
 
     let mut cmd = Command::new(&bin);
@@ -592,6 +604,34 @@ pub async fn agent_stream_send(
         topic,
         done_topic,
     })
+}
+
+/// How to start `agent_id` as an ACP agent here, with its display name.
+/// Gemini, Kimi and OpenCode chatted over ACP before the registry; they stay
+/// on it from their known CLI even where the registry lookup misses it.
+fn acp_launch(app: &AppHandle, agent_id: &str) -> Option<(String, aura_acp::registry::Launch)> {
+    let agents = app.state::<crate::acp_agents::AcpAgents>();
+    if let Some((agent, launch)) = crate::acp_agents::chat_launch(&agents, agent_id) {
+        return Some((agent.name, launch));
+    }
+    let flag = match agent_id {
+        "gemini" => "--acp",
+        "kimi" | "opencode" => "acp",
+        _ => return None,
+    };
+    let provider = aura_agents::registry().get(agent_id)?;
+    let registry_id = aura_acp::registry::registry_ids_for(agent_id).first().map(|s| s.to_string())?;
+    let name = agents.snapshot().get(&registry_id).map(|a| a.name.clone()).unwrap_or_else(|| agent_id.to_string());
+    Some((
+        name,
+        aura_acp::registry::Launch {
+            registry_id,
+            program: provider.bin_name().into(),
+            args: vec![flag.to_string()],
+            env: Default::default(),
+            source: aura_acp::registry::LaunchSource::Path,
+        },
+    ))
 }
 
 #[derive(Serialize, Clone, Debug)]

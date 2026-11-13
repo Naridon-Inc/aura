@@ -23,7 +23,7 @@ export const OP_KIND_LABEL: Record<string, string> = {
   conflict_open: "Flagged a clash",
   conflict_resolve: "Settled a clash",
   guard_revert: "Put a file back",
-  zone_claim: "Claimed an area of the project",
+  zone_claim: "Claimed an area of the repository",
 };
 
 /**

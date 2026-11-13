@@ -1,18 +1,19 @@
 // Mounts once at app start. Reads ~/.aura/aura-shell-crashes/ via the
 // crashlytics Tauri commands; if any reports are newer than the
-// last-acknowledged ts in localStorage, surfaces a fixed-bottom toast
-// with the most recent panic message + a "View report" button that opens the
-// raw JSON in a small inline drawer. Dismiss persists ack so the same
-// crash doesn't pop again on the next launch.
+// last-acknowledged ts in localStorage, raises a toast in the shared stack
+// with the most recent panic message + a "View report" button that turns it
+// into the raw JSON. Closing it persists ack so the same crash doesn't pop
+// again on the next launch.
 //
 // Zero network. All open-source. Pairs with `src-tauri/src/crash.rs`.
 
 import { useEffect, useState } from "react";
 import { api, type CrashSummary } from "../lib/api";
 import { relativeAge } from "../lib/relativeTime";
-import { ToastActionButton, ToastCard, ToastStack } from "./ui/toast";
+import { LiveToast } from "./LiveToast";
 
 const ACK_KEY = "aura.crashes.last_acked_ts_ms";
+const TOAST_ID = "crash-recovery";
 
 function readAckedTs(): number {
   const raw = localStorage.getItem(ACK_KEY);
@@ -27,6 +28,17 @@ function setAckedTs(ts: number) {
 function formatAge(ts: number): string {
   // One ladder for the whole app — see lib/relativeTime.
   return relativeAge(ts);
+}
+
+// Two different things land in this directory and they are not the same news.
+// A panic means the shell came apart. A reclaim means macOS took the window's
+// renderer for its memory while the shell kept running and the page reloaded
+// itself — nothing closed, and saying it did sends whoever reads it looking
+// for a bug that is not there. See src-tauri/src/renderer_recovery.rs.
+function headline(kind: string): string {
+  return kind === "renderer_reclaimed"
+    ? "The window was restored"
+    : "Aura closed unexpectedly";
 }
 
 export function CrashRecoveryToast() {
@@ -79,49 +91,48 @@ export function CrashRecoveryToast() {
     }
   };
 
-  return (
-    <ToastStack>
-      {reportText ? (
-        <ToastCard
-          tone="warning"
-          title="Crash report"
-          message={<span className="break-all font-mono text-xs">{reportPath}</span>}
-          onDismiss={dismissAll}
-          dismissTitle="Dismiss"
-        >
-          <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-[var(--radius-sm)] border border-line bg-bg-0 p-2 font-mono text-xs leading-[1.5] text-text-2">
+  // Both shapes share one id, so opening the report turns the toast into it
+  // in place instead of stacking a second one.
+  return reportText ? (
+    <LiveToast
+      id={TOAST_ID}
+      tone="warning"
+      title="Crash report"
+      durationMs={null}
+      message={
+        <>
+          <span className="block break-all font-mono text-xs">{reportPath}</span>
+          <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-[4px] border border-[var(--aura-toast-border)] p-2 font-mono text-xs leading-[1.5] text-[var(--aura-toast-text)]">
             {reportText}
           </pre>
-        </ToastCard>
-      ) : (
-        top && (
-          <ToastCard
-            tone="warning"
-            title="Aura closed unexpectedly"
-            message={
-              <>
-                <span className="text-text-2">{top.panic_message}</span>
-                {top.location && (
-                  <span className="mt-1 block font-mono text-xs text-text-4">
-                    at {top.location}
-                  </span>
-                )}
-                <span className="mt-1 block text-text-4">
-                  {formatAge(top.timestamp_ms)}
-                  {unacked.length > 1 && ` · ${unacked.length - 1} more`}
-                </span>
-              </>
-            }
-            onDismiss={dismissAll}
-            dismissTitle="Dismiss"
-            actions={
-              <ToastActionButton variant="primary" onClick={() => void view(top.path)}>
-                View report
-              </ToastActionButton>
-            }
-          />
-        )
-      )}
-    </ToastStack>
-  );
+        </>
+      }
+      dismissLabel="Dismiss"
+      onDismiss={dismissAll}
+    />
+  ) : top ? (
+    <LiveToast
+      id={TOAST_ID}
+      tone="warning"
+      title={headline(top.kind)}
+      durationMs={null}
+      message={
+        <>
+          <span className="text-[var(--aura-toast-text)]">{top.panic_message}</span>
+          {top.location && (
+            <span className="mt-1 block font-mono text-xs">at {top.location}</span>
+          )}
+          <span className="mt-1 block">
+            {formatAge(top.timestamp_ms)}
+            {unacked.length > 1 && ` · ${unacked.length - 1} more`}
+          </span>
+        </>
+      }
+      dismissLabel="Dismiss"
+      onDismiss={dismissAll}
+      actions={[
+        { label: "View report", variant: "primary", keepOpen: true, onClick: () => view(top.path) },
+      ]}
+    />
+  ) : null;
 }

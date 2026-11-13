@@ -53,10 +53,16 @@ describe("a conversation that didn't open says so", () => {
     expect(src).toContain("This conversation didn’t open");
     // The raw backend line is shown. It is what told us the dev app was
     // reading a different HOME; a headline alone would have hidden that.
-    expect(src).toContain("failure.message");
-    // Two ways out, and neither is "wait longer".
+    const broken = src.slice(src.indexOf("This conversation didn’t open"));
+    expect(broken.slice(0, broken.indexOf("Loading conversation…"))).toContain(
+      "footnote={failure?.message}",
+    );
+    // Two ways out, and neither is "wait longer". Try again is the shared
+    // error state's own button, so what this file owns is the wiring: the
+    // retry it runs, and that it holds still while one is in flight.
     expect(src).toContain("retryManagerSession");
-    expect(src).toContain("Try again");
+    expect(src).toContain("onRetry={retry}");
+    expect(src).toContain("retrying={retrying}");
     expect(src).toContain("closeManager(sessionId)");
   });
 
@@ -143,6 +149,7 @@ describe("a conversation whose file is gone stops coming back", () => {
     const gone = src.slice(src.indexOf("This conversation is gone"));
     const branch = gone.slice(0, gone.indexOf("Close tab"));
     expect(branch).not.toContain("Try again");
+    expect(branch).not.toContain("onRetry");
     expect(branch).toContain("Your other conversations aren’t");
   });
 });

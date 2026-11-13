@@ -3,6 +3,7 @@
 //   node scripts/collab-screens.mjs            # assumes vite on :1431
 //   PORT=1420 OUT=/tmp/shots node scripts/collab-screens.mjs
 //   PAGE=chrome-harness.html OUT=/tmp/chrome node scripts/collab-screens.mjs
+//   PAGE=acp-agents-harness.html WIDTH=1280 node scripts/collab-screens.mjs
 //
 // The page it drives mounts real components with real state — the collab
 // surface from a recorded wire (src/components/collab/__harness__/main.tsx), or
@@ -29,6 +30,8 @@ const PAGE = process.env.PAGE ?? "collab-harness.html";
 // dialling the v4 literal is refused by a server that is up and serving.
 const URL = `http://localhost:${PORT}/${PAGE}`;
 const OUT = process.env.OUT ?? "/tmp/collab-screens";
+// A whole settings page needs more room than a surface does.
+const WIDTH = Number(process.env.WIDTH ?? 900);
 
 const THEMES = ["dark", "light"];
 
@@ -39,7 +42,7 @@ async function main() {
 
   for (const theme of THEMES) {
     const page = await browser.newPage({
-      viewport: { width: 900, height: 1400 },
+      viewport: { width: WIDTH, height: 1400 },
       deviceScaleFactor: 2,
       colorScheme: theme,
     });
@@ -59,6 +62,13 @@ async function main() {
       document.documentElement.setAttribute("data-theme", t);
     }, theme);
     await page.waitForSelector("[data-scene]", { timeout: 15000 });
+    // A scene that presses itself into its state says `data-ready="yes"`
+    // once it is there; one with no `data-ready` is ready as soon as it is up.
+    await page.waitForFunction(
+      () => [...document.querySelectorAll("[data-scene][data-ready]")].every((s) => s.dataset.ready === "yes"),
+      null,
+      { timeout: 15000 },
+    );
 
     const scenes = await page.$$("[data-scene]");
     for (const scene of scenes) {

@@ -1,0 +1,65 @@
+/* The customize landing as a settings page. Added: the page scrolls inside
+   its pane and holds a readable measure, the ask box (textarea above a foot
+   with who picks it up and Send), and the section rows' icon-led title and
+   their count beside Open. */
+
+.ui-customize-overview {
+  height: 100%;
+  overflow-y: auto;
+  background: var(--ui-bg);
+}
+.ui-customize-overview > .ui-settings-page {
+  max-width: 760px;
+  margin: 0 auto;
+}
+.ui-customize-ask {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 32px;
+  border: 1px solid var(--ui-input);
+  border-radius: 8px;
+  background: var(--ui-bg);
+}
+.ui-customize-ask:focus-within {
+  border-color: var(--ui-ring);
+}
+.ui-customize-ask[data-disabled] {
+  opacity: 0.6;
+}
+.ui-customize-ask > .ui-input.ui-textarea {
+  min-height: 56px;
+  border: 0;
+  resize: none;
+  box-shadow: none;
+}
+.ui-customize-ask > .ui-input.ui-textarea:focus {
+  outline: none;
+  box-shadow: none;
+}
+.ui-customize-ask-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 8px 8px 12px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-settings-row.ui-customize-row {
+  padding-block: 16px;
+}
+.ui-customize-row-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-customize-row-title > svg {
+  width: 16px;
+  height: 16px;
+  color: var(--ui-muted-fg);
+}
+.ui-customize-row-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}

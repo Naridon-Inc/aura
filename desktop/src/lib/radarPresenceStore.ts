@@ -14,7 +14,7 @@
 // after PRESENCE_TTL_MS. Committed/paused/abandoned events *clear* an
 // actor's claim on the file instead of contributing presence.
 
-import { useEffect, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { api, type RadarEvent } from "./api";
 
 /** One live "peer is on this file" fact, ready for pips and tooltips. */
@@ -135,19 +135,40 @@ export function presenceForFile(
   });
 }
 
+/** Whether two presence lists say the same thing, entry for entry. */
+export function samePresence(a: FilePresence[], b: FilePresence[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((x, i) => {
+    const y = b[i];
+    return (
+      x.actor === y.actor &&
+      x.file === y.file &&
+      x.kind === y.kind &&
+      x.symbol === y.symbol &&
+      x.ts === y.ts &&
+      x.isAgent === y.isAgent
+    );
+  });
+}
+
 async function refresh(repoRoot: string): Promise<void> {
   const s = stateFor(repoRoot);
   if (s.inFlight) return;
   s.inFlight = true;
+  let next: FilePresence[];
   try {
     const view = await api.auraRadar(repoRoot, false);
-    s.entries = derivePresence(view.events ?? [], view.me, Date.now());
+    next = derivePresence(view.events ?? [], view.me, Date.now());
   } catch {
     // Radar unavailable (old CLI, no .aura) — show nothing rather than stale.
-    s.entries = [];
+    next = [];
   } finally {
     s.inFlight = false;
   }
+  // A read that found what the last one did leaves the snapshot alone, so a
+  // quiet radar doesn't re-render every subscriber on every tick.
+  if (samePresence(s.entries, next)) return;
+  s.entries = next;
   for (const cb of s.subscribers) cb();
 }
 
@@ -184,10 +205,17 @@ const EMPTY: FilePresence[] = [];
  *  the snapshot is a stable array reference that only changes on new data. */
 export function useRadarPresence(repoRoot: string | null | undefined): FilePresence[] {
   const root = repoRoot ?? "";
-  const entries = useSyncExternalStore(
-    (cb) => (root ? subscribe(root, cb) : () => {}),
-    () => (root ? stateFor(root).entries : EMPTY),
+  // Both callbacks are held per root. A fresh subscribe function on each
+  // render makes React unsubscribe and subscribe again; with one subscriber
+  // that stops the poll and starts it, and starting it reads the radar at
+  // once — so every answer re-rendered, resubscribed and asked again, and the
+  // radar was read back to back instead of every POLL_MS.
+  const subscribeRoot = useCallback(
+    (cb: () => void) => (root ? subscribe(root, cb) : () => {}),
+    [root],
   );
+  const snapshot = useCallback(() => (root ? stateFor(root).entries : EMPTY), [root]);
+  const entries = useSyncExternalStore(subscribeRoot, snapshot);
   // Resume immediately when the window becomes visible again — the interval
   // skipped ticks while hidden, so the first foreground frame could be stale.
   useEffect(() => {

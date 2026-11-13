@@ -1,7 +1,6 @@
-// PrThreadColumn — SS.3. Floating speech-bubble pattern (Graphite /
-// Image #9 parity). Each registered diff-row anchor positions a
-// FloatingThreadCard at the EXACT line-top, not stacked into a
-// vertical overflow column. The active card lifts (z-index + ring +
+// PrThreadColumn — review threads float beside their diff lines. Each
+// registered diff-row anchor positions a PrThreadCard at the EXACT
+// line-top, not stacked into a vertical overflow column. The active card lifts (z-index + ring +
 // solid bg), so when several threads cluster on adjacent lines the
 // user can still focus on one. Non-active cards remain visible at
 // their line heights as faint cards behind, so the user perceives
@@ -23,7 +22,9 @@ import {
   useState,
 } from "react";
 import type { PrComment } from "../../lib/api";
-import { FloatingThreadCard, type ThreadGroup } from "./PrDiffBody";
+import { PrThreadCard } from "./thread/PrThreadCard";
+import type { ThreadGroup } from "./thread/prThreads";
+import "../ui/pr-thread.css";
 
 type AnchorEntry = {
   rowEl: HTMLElement;
@@ -47,9 +48,8 @@ type CtxShape = {
   onPosted?: (c: PrComment) => void;
   /** Stage 8L — comment ↔ code highlight. The currently-focused
    *  thread anchor key (`${file.path}@${rightLine}`). When set, the
-   *  matching diff row in the file card draws a teal ring (Graphite
-   *  parity) and the corresponding floating thread card lifts onto a
-   *  solid background. Clicking a floating card or a thread row in
+   *  matching diff row in the file card draws a ring and the
+   *  corresponding floating thread card lifts over its neighbours. Clicking a floating card or a thread row in
    *  the right rail mutates this; clicking outside any card clears
    *  it. */
   activeKey: string | null;
@@ -185,7 +185,7 @@ export function PrThreadColumn() {
     // anti-overlap stacking). When several threads cluster, they
     // visually overlap; the active card lifts via z-index/ring so
     // the user can still focus on one without losing the sense that
-    // "this region has threads here". Matches Graphite / Image #9.
+    // "this region has threads here".
     const next: Placed[] = [];
     for (const [key, { rowEl, thread }] of v.registry.anchors) {
       const rect = rowEl.getBoundingClientRect();
@@ -274,14 +274,14 @@ export function PrThreadColumn() {
 
   if (!v) return null;
   // SS.3 — when an active key is set, render *only* that card so
-  // overlapping anchors don't compete for attention (Image #9 pattern).
+  // overlapping anchors don't compete for attention.
   // When nothing is active, render all cards faintly at their line
   // heights so the user perceives where threads exist. Click activates.
   const visible = v.activeKey
     ? placed.filter((p) => p.key === v.activeKey)
     : placed;
   return (
-    <div ref={columnRef} className="absolute inset-0 pointer-events-none">
+    <div ref={columnRef} className="ui-pr-thread-slots">
       {visible.map(({ key, thread, top }) => {
         const active = v.activeKey === key;
         return (
@@ -292,16 +292,11 @@ export function PrThreadColumn() {
               e.stopPropagation();
               v.setActiveKey(active ? null : key);
             }}
-            className={`pointer-events-auto absolute left-2 right-2 transition-shadow rounded-lg ${
-              active
-                ? "z-10 ring-1 ring-accent/70 shadow-[0_0_0_4px_var(--color-accent-soft),0_10px_28px_rgba(0,0,0,0.45)]"
-                : "opacity-80 hover:opacity-100"
-            }`}
+            className="ui-pr-thread-slot"
+            data-active={active ? "" : undefined}
             style={{ top: Math.max(top, 0) }}
           >
-            <FloatingThreadCard
-              embed
-              top={0}
+            <PrThreadCard
               thread={thread}
               repoRoot={v.repoRoot}
               prNumber={v.prNumber}

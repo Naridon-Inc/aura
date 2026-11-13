@@ -21,6 +21,7 @@ import { AlertTriangle } from "lucide-react";
 
 import { describeActivity } from "./railActivity";
 import type { RailActivity, RailActor } from "./railModel";
+import "../../ui/people-rail.css";
 
 export type ActivityLineProps = {
   /** The one thing worth saying, already chosen. Null renders nothing. */
@@ -34,44 +35,33 @@ export function ActivityLine({ activity, byId }: ActivityLineProps) {
   const copy = describeActivity(activity, byId);
   const isImpact = activity.kind === "impact";
 
+  // A span, not a div: the line sits inside the session row's button.
   return (
-    <div
-      className="flex items-center gap-1 min-w-0 text-2xs leading-[14px]"
+    <span
+      className="ui-rail-activity"
+      data-kind={isImpact ? "impact" : undefined}
       title={copy.full}
     >
       {isImpact ? (
-        // Amber, not red. Someone's agent noticing that you both touch the
-        // same thing is an ask, not a fault — red in this app means broken.
-        <AlertTriangle
-          size={10}
-          className="flex-none text-amber"
-          aria-hidden
-          strokeWidth={2}
-        />
+        <AlertTriangle size={10} aria-hidden strokeWidth={2} />
       ) : (
-        <span
-          aria-hidden
-          className="flex-none rounded-full bg-text-4"
-          style={{ width: 3, height: 3, marginLeft: 3, marginRight: 3 }}
-        />
+        <span aria-hidden className="ui-rail-activity-dot" />
       )}
-      <span className="min-w-0 truncate">
-        <span className={isImpact ? "text-amber" : "text-text-3"}>
-          {copy.who}
-        </span>
+      <span>
+        <span className="ui-rail-activity-who">{copy.who}</span>
         {copy.ref ? (
           <>
             {" "}
-            <code className="font-mono text-accent">{copy.ref}</code>
+            <code>{copy.ref}</code>
           </>
         ) : null}
         {copy.said ? (
           <>
             {" "}
-            <span className="text-text-4">{copy.said}</span>
+            <span className="ui-rail-activity-said">{copy.said}</span>
           </>
         ) : null}
       </span>
-    </div>
+    </span>
   );
 }

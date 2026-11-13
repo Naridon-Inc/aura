@@ -2,14 +2,11 @@
 // per repo root, filled from `repo_worktree_settings_get` and refreshed when
 // the settings pane saves.
 //
-// Why a cache with a sync read: the prompt builders in `worktreeActions.ts`
-// (`createPrPrompt`, `resolveConflictsPrompt`) are synchronous and called
-// from half a dozen buttons that don't know the repo root. Asking every one
-// of them to go async just to append two lines would spread the change
-// across files this cluster doesn't own. So the builders read the ACTIVE
-// repo's instructions synchronously from here, and this module keeps that
-// entry warm: primed on load, re-primed when the active workspace is asked
-// for again, and reloaded on `aura:worktree-settings-saved`.
+// The git chats (lib/gitChatContext) read a repo's texts with
+// `loadRepoInstructions` when their button is pressed. Synchronous callers
+// read the ACTIVE repo's entry from `activeRepoInstructions`, and this module
+// keeps that entry warm: primed on load, re-primed when the active workspace
+// is asked for again, and reloaded on `aura:worktree-settings-saved`.
 
 import { repoWorktreeSettingsGet } from "./api";
 import { getActiveWorkspaceRoot } from "./editorStore";

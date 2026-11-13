@@ -47,16 +47,21 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     title: "Find your way around",
     items: [
-      { label: "Open Aura", keys: "⌘⌥A" },
       { label: "Command palette", keys: "⌘K" },
+      // Bound in lib/keymap.ts (`add_project`): the sidebar's add-project menu.
+      { label: "Add a project", keys: "⌘⌥A" },
       { label: "Search across files", keys: "⌘⇧F" },
-      { label: "Open tasks board", keys: "⌘T" },
+      { label: "Open tasks", keys: "⌘T" },
       { label: "Open the daily standup", keys: "⌘⇧U" },
       { label: "See every parallel copy", keys: "⌘⇧W" },
       { label: "Open settings", keys: "⌘," },
       { label: "Show all shortcuts", keys: "⌘/" },
       { label: "Next workspace", keys: "⌘⌥↓" },
       { label: "Previous workspace", keys: "⌘⌥↑" },
+      // Bound in lib/keymap.ts (`open_in_app`, `open_in_app_back`): hold ⌘⌥,
+      // tap O to step, let go to open. ⇧ steps back while it is open.
+      { label: "Open this workspace in an app", keys: "⌘⌥O" },
+      { label: "Previous app, while choosing", keys: "⌘⌥⇧O" },
     ],
   },
   {
@@ -64,9 +69,13 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     items: [
       { label: "New chat", keys: "⌘N" },
       { label: "New parallel copy", keys: "⌘⇧N" },
+      // Bound in lib/keymap.ts (`archive_workspace`).
+      { label: "Archive this workspace", keys: "⌘⇧A" },
       { label: "Log task intent", keys: "⌘⇧I" },
       // AURA-1296 — bound in lib/keymap.ts (`fork_chat`, `cycle_effort`).
       { label: "Fork this chat", keys: "⌘⌥Enter" },
+      // Bound in lib/keymap.ts (`copy_chat_transcript`).
+      { label: "Copy this chat's transcript", keys: "⌘⌥C" },
       { label: "Change how hard Aura thinks", keys: "⌘⇧/" },
     ],
   },
@@ -92,10 +101,13 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     title: "Panels & tabs",
     items: [
-      { label: "Toggle sidebar", keys: "⌘B" },
+      { label: "Go to Home", keys: "⌘⇧H" },
+      { label: "Toggle left sidebar", keys: "⌘B" },
+      { label: "Toggle right sidebar", keys: "⌘⌥B" },
       { label: "Toggle terminal", keys: "⌘J" },
+      { label: "Run the project", keys: "⌘R" },
       { label: "Toggle review panel", keys: "⌘⌥R" },
-      { label: "Reload the app", keys: "⌘R" },
+      { label: "Reload the app", keys: "⌘⇧R" },
       { label: "New browser tab", keys: "⌘⇧B" },
       { label: "Close tab", keys: "⌘W" },
       { label: "Reopen closed tab", keys: "⌘⇧T" },
@@ -105,6 +117,16 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { label: "Previous tab", keys: "⌘⌥←" },
       { label: "Jump to a tab that needs you", keys: "⌘⌥L" },
       { label: "Show / hide uncommitted changes", keys: "⌘⌥U" },
+    ],
+  },
+  {
+    // components/diff/review/CommentNav.tsx binds these while a diff with
+    // review comments is on screen; the keymap stands back from them.
+    title: "Code review",
+    note: "While a file's changes are open",
+    items: [
+      { label: "Go to previous comment in diff", keys: "⌘⌥K" },
+      { label: "Go to next comment in diff", keys: "⌘⌥J" },
     ],
   },
   {

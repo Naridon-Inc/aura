@@ -14,13 +14,17 @@ const KEY = "aura.workspace.customization.v1";
 // name derived from its branch; `emoji` is the tile glyph; `pinned` floats a
 // workspace to the top of the roster; `archived` (a timestamp, ms) hides it
 // from the roster without touching the branch or files on disk — Restore
-// clears it. All four are per-device UI preferences, never synced, and any
-// absent key means "off".
+// clears it. `linkedWorkspaceIds` (other workspaces, by checkout root) and
+// `linkedDirectoryPaths` (any folder) are what the agents started here may
+// read besides it. All are per-device UI preferences, never synced, and any
+// absent key means "off" (no links).
 type CustomizationEntry = {
   name?: string;
   emoji?: string;
   pinned?: boolean;
   archived?: number;
+  linkedWorkspaceIds?: string[];
+  linkedDirectoryPaths?: string[];
 };
 
 type CustomizationMap = Record<string, CustomizationEntry>;
@@ -117,14 +121,114 @@ export function isWorkspaceArchived(root: string): boolean {
   return typeof cache[root]?.archived === "number";
 }
 
+const archivedHooks = new Set<(root: string) => void>();
+
+/** Called once each time a workspace goes from active to archived, wherever
+ *  the archive was asked for (sidebar, palette, shortcut, review header). */
+export function onWorkspaceArchived(hook: (root: string) => void): () => void {
+  archivedHooks.add(hook);
+  return () => {
+    archivedHooks.delete(hook);
+  };
+}
+
 /** Archive hides a workspace from the roster; the branch + files stay on disk.
  *  Pass `false` (or restore) to bring it back. Archiving also clears any pin. */
 export function setWorkspaceArchived(root: string, archived: boolean, atMs?: number) {
   if (archived) {
+    const was = isWorkspaceArchived(root);
     patchEntry(root, { archived: atMs ?? Date.now(), pinned: undefined });
+    if (!was) for (const hook of archivedHooks) hook(root);
   } else {
     patchEntry(root, { archived: undefined });
   }
+}
+
+// ── Links ──────────────────────────────────────────────────────────────────
+// A workspace can be linked to other workspaces and to plain folders, so the
+// agents started in it can read them too. An entry written before links
+// existed has neither key, which reads as no links.
+
+const NO_LINKS: readonly string[] = Object.freeze([]);
+
+function stringsOf(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return NO_LINKS;
+  return value.every((v) => typeof v === "string" && v.length > 0)
+    ? (value as string[])
+    : value.filter((v): v is string => typeof v === "string" && v.length > 0);
+}
+
+/** The workspaces (checkout roots) linked to this one. */
+export function getLinkedWorkspaceIds(root: string): readonly string[] {
+  return stringsOf(cache[root]?.linkedWorkspaceIds);
+}
+
+/** The folders linked to this workspace. */
+export function getLinkedDirectoryPaths(root: string): readonly string[] {
+  return stringsOf(cache[root]?.linkedDirectoryPaths);
+}
+
+type LinkKey = "linkedWorkspaceIds" | "linkedDirectoryPaths";
+
+function setLinked(root: string, key: LinkKey, next: readonly string[]) {
+  patchEntry(root, { [key]: next.length > 0 ? [...next] : undefined });
+}
+
+function addLink(root: string, key: LinkKey, value: string) {
+  const v = value.trim();
+  const current = stringsOf(cache[root]?.[key]);
+  if (!v || v === root || current.includes(v)) return;
+  setLinked(root, key, [...current, v]);
+}
+
+function removeLink(root: string, key: LinkKey, value: string) {
+  const current = stringsOf(cache[root]?.[key]);
+  if (!current.includes(value)) return;
+  setLinked(root, key, current.filter((v) => v !== value));
+}
+
+export function linkWorkspace(root: string, otherRoot: string) {
+  addLink(root, "linkedWorkspaceIds", otherRoot);
+}
+
+export function unlinkWorkspace(root: string, otherRoot: string) {
+  removeLink(root, "linkedWorkspaceIds", otherRoot);
+}
+
+export function linkDirectory(root: string, path: string) {
+  addLink(root, "linkedDirectoryPaths", path);
+}
+
+export function unlinkDirectory(root: string, path: string) {
+  removeLink(root, "linkedDirectoryPaths", path);
+}
+
+/** The folders an agent started in `root` is handed: linked workspaces that
+ *  aren't archived, then linked folders, each once. A link to something
+ *  deleted since is dropped by the launch itself, which can see the disk. */
+export function linkedDirsForLaunch(root: string): string[] {
+  if (!root) return [];
+  const out: string[] = [];
+  for (const id of getLinkedWorkspaceIds(root)) {
+    if (!isWorkspaceArchived(id) && !out.includes(id)) out.push(id);
+  }
+  for (const path of getLinkedDirectoryPaths(root)) {
+    if (!out.includes(path)) out.push(path);
+  }
+  return out;
+}
+
+/** Both link lists for one workspace, re-read when either changes. */
+export function useWorkspaceLinks(root: string): {
+  workspaceIds: readonly string[];
+  directoryPaths: readonly string[];
+} {
+  const map = useWorkspaceCustomization();
+  const entry = map[root];
+  return {
+    workspaceIds: stringsOf(entry?.linkedWorkspaceIds),
+    directoryPaths: stringsOf(entry?.linkedDirectoryPaths),
+  };
 }
 
 export function useWorkspaceCustomization(): CustomizationMap {

@@ -9,6 +9,8 @@
 // When git can't produce a HEAD blob (untracked file, no repo) we fall
 // back to baseline-vs-current — still useful for unsaved edits.
 //
+// Both sides carry review comments: a ＋ in the gutter opens one on a line.
+//
 // Replaces the CodeMirror @codemirror/merge MergeView. Same DiffViewProps
 // shape so call sites swap without churn.
 
@@ -16,12 +18,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DiffEditor, type DiffOnMount, type Monaco } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 
-import { Churn } from "./diff/Churn";
 import { useEditableDiff } from "./diff/useEditableDiff";
+import { useDiffReview } from "./diff/review/useDiffReview";
+import { useMonacoReview } from "./diff/review/useMonacoReview";
+import { CommentNav } from "./diff/review/CommentNav";
+import { monacoNavSource } from "./diff/review/navSources";
 import { DiskChangedNotice, EditToggle, UnsavedMark } from "./diff/DiffSaveState";
-import { AsciiSpinner } from "./ui/ascii-spinner";
+import { DiffCount } from "./ui/sidebar";
+import { LoadingState } from "./ui/state";
+import { Toggle } from "./ui/toggle";
 import { installMonacoEnvironment } from "../lib/monacoEnv";
 import { languageSlugForPath } from "../lib/monacoLanguage";
+import { workspacePath } from "../lib/diffReview/reviewComments";
 import { configureMonacoDiagnostics } from "../lib/monacoDiagnostics";
 import { useResolvedTheme, useThemeVariant } from "../lib/themeStore";
 import { auraThemeName, ensureAuraThemes } from "../lib/monacoTheme";
@@ -58,6 +66,8 @@ export function DiffView({
 }: DiffViewProps) {
   const editorRef = useRef<editor.IStandaloneDiffEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
+  // Set once the editor exists, so the review hooks get its two sides.
+  const [mounted, setMounted] = useState<editor.IStandaloneDiffEditor | null>(null);
   const [original, setOriginal] = useState<string | null>(null);
   const resolvedTheme = useResolvedTheme();
   const variant = useThemeVariant();
@@ -102,7 +112,28 @@ export function DiffView({
     monacoRef.current = monaco;
     // Dirty tracking + ⌘S, scoped to this editor instance.
     edit.attach(editorInstance, monaco);
+    setMounted(editorInstance);
   };
+
+  // Both buffers hold whole files, so their lines are the file's own.
+  const review = useDiffReview(repoRoot, workspacePath(repoRoot, path));
+  const reviewOld = useMonacoReview(
+    mounted?.getOriginalEditor() ?? null,
+    monacoRef.current,
+    "deletions",
+    review,
+  );
+  const reviewNew = useMonacoReview(
+    mounted?.getModifiedEditor() ?? null,
+    monacoRef.current,
+    "additions",
+    review,
+  );
+
+  const nav = useMemo(
+    () => (mounted && monacoRef.current ? monacoNavSource(mounted, monacoRef.current) : null),
+    [mounted],
+  );
 
   // Re-read tokens + reapply the Aura theme on runtime theme/variant change.
   useEffect(() => {
@@ -151,39 +182,37 @@ export function DiffView({
 
   if (original == null) {
     return (
-      <div className="h-full w-full bg-bg-content flex items-center justify-center gap-1.5 text-sm text-text-4">
-        <AsciiSpinner className="text-2xs" />
-        <span>Reading this change…</span>
+      <div className="ui-diff-view">
+        <LoadingState label="Reading this change…" size="md" />
       </div>
     );
   }
 
   return (
-    <div className="h-full w-full overflow-hidden bg-bg-content flex flex-col">
-      <div className="h-8 px-3 flex items-center gap-3 border-b border-line-soft bg-bg-1 text-xs">
-        <span className="text-text-3 font-mono truncate">{path}</span>
+    <div className="ui-diff-view">
+      {reviewOld}
+      {reviewNew}
+      {/* The file view above already names the file; this bar only says
+          what is compared and carries the diff's own switches. */}
+      <div className="ui-diff-view-bar">
+        <span>Last commit ↔ Now</span>
+        <DiffCount added={stats.added} removed={stats.removed} />
         <UnsavedMark edit={edit} />
-        <Churn additions={stats.added} deletions={stats.removed} />
         <DiskChangedNotice edit={edit} />
-        <span className="ml-auto inline-flex shrink-0">
+        <span className="ui-diff-view-tools">
           <EditToggle on={editPref} onChange={setEditableDiffs} />
+          <Toggle
+            size="sm"
+            pressed={ignoreWs}
+            onPressedChange={setIgnoreWhitespace}
+            title={ignoreWs ? "Whitespace-only changes hidden" : "Hide whitespace-only changes"}
+          >
+            Hide whitespace
+          </Toggle>
         </span>
-        <button
-          type="button"
-          onClick={() => setIgnoreWhitespace(!ignoreWs)}
-          aria-pressed={ignoreWs}
-          title={ignoreWs ? "Showing whitespace changes off" : "Hide whitespace-only changes"}
-          className={`h-5 px-1.5 rounded border text-xs transition-colors ${
-            ignoreWs
-              ? "border-[var(--color-accent)] text-[var(--color-accent)] bg-bg-2"
-              : "border-line-soft text-text-3 hover:text-text-1"
-          }`}
-        >
-          Ignore whitespace
-        </button>
-        <span className="text-text-4">Last commit ↔ Now</span>
       </div>
-      <div className="flex-1 min-h-0 w-full">
+      <div className="ui-diff-view-body">
+        <CommentNav source={nav} comments={review.comments} />
         <DiffEditor
           // Intentionally NOT `key`-remounted per file: reusing the editor and
           // updating the models in place (see effects above) avoids the Monaco
@@ -226,6 +255,8 @@ export function DiffView({
             // Compact gutter; the surrounding chrome already has the
             // header strip so we don't need redundant labels here.
             renderOverviewRuler: true,
+            // Room for the ＋ that opens a review comment on a line.
+            glyphMargin: true,
             ignoreTrimWhitespace: ignoreWs,
             automaticLayout: true,
           }}

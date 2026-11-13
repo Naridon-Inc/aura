@@ -595,6 +595,13 @@ pub async fn aura_radar(
             })
         };
 
+        // The CLI makes a `.aura/` folder wherever it runs. A nested
+        // repository that hasn't been set up with Aura gets none, and has no
+        // feed of its own to show.
+        if crate::nested_repos::aura_stays_out(&cwd) {
+            return Ok(empty());
+        }
+
         // The feed + default (quiet) conflicts come from one call.
         let mut show_cmd = Command::new(crate::agent_event_listener::resolve_aura_bin());
         show_cmd.args(["radar", "show", "--json"]).current_dir(&cwd);

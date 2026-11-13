@@ -137,13 +137,13 @@ export function sessionEvidence(input: SessionEvidenceInput): EvidenceItem[] {
         ? plain(
             "git_fact",
             "pass",
-            `Saved in the project's history as ${shortRevision(input.revision)}.`,
+            `Saved in the repository's history as ${shortRevision(input.revision)}.`,
             input.revision,
           )
         : plain(
             "git_fact",
             "unavailable",
-            "These changes aren't saved to the project's history yet.",
+            "These changes aren't saved to the repository's history yet.",
           ),
     );
   }

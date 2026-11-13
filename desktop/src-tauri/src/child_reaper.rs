@@ -407,13 +407,22 @@ pub fn confine_sigchld() {
     if SIGCHLD_CONFINED.swap(true, Ordering::SeqCst) {
         return;
     }
+    if !confine_sigchld_from_here() {
+        SIGCHLD_CONFINED.store(false, Ordering::SeqCst);
+    }
+}
 
+/// The work behind [`confine_sigchld`], without its once-per-process guard:
+/// block SIGCHLD on the calling thread and start the thread it is delivered
+/// on instead. Returns whether SIGCHLD ended up confined; on `false` the
+/// calling thread's mask is as it was.
+#[cfg(unix)]
+fn confine_sigchld_from_here() -> bool {
     if let Err(e) = mask_sigchld(libc::SIG_BLOCK) {
         // Nothing is confined, but nothing is broken either — this is the
         // behaviour we have shipped until now.
         tracing::warn!(error = %e, "could not block SIGCHLD on the main thread");
-        SIGCHLD_CONFINED.store(false, Ordering::SeqCst);
-        return;
+        return false;
     }
 
     let spawned = std::thread::Builder::new()
@@ -437,8 +446,9 @@ pub fn confine_sigchld() {
         // hang this guards against.
         tracing::warn!(error = %e, "no thread for SIGCHLD; leaving it on the main thread");
         let _ = mask_sigchld(libc::SIG_UNBLOCK);
-        SIGCHLD_CONFINED.store(false, Ordering::SeqCst);
+        return false;
     }
+    true
 }
 
 #[cfg(not(unix))]
@@ -515,9 +525,23 @@ mod tests {
     fn confining_sigchld_takes_it_off_the_calling_thread() {
         // The calling thread is the UI thread in production, and the whole
         // point is that the kernel can no longer choose it for delivery.
-        confine_sigchld();
+        //
+        // `confine_sigchld` runs once per process, and other tests call it
+        // too, so whichever thread got there first is the one it masked. The
+        // work itself is checked here, on a thread of our own that starts
+        // with SIGCHLD deliverable, so the order tests run in cannot matter.
+        let (before, confined, after) = std::thread::spawn(|| {
+            mask_sigchld(libc::SIG_UNBLOCK).expect("unblock SIGCHLD");
+            let before = sigchld_blocked_here();
+            let confined = confine_sigchld_from_here();
+            (before, confined, sigchld_blocked_here())
+        })
+        .join()
+        .expect("test thread");
+        assert!(!before, "the thread had to start with SIGCHLD deliverable");
+        assert!(confined, "SIGCHLD was not confined");
         assert!(
-            sigchld_blocked_here(),
+            after,
             "SIGCHLD can still be delivered to the thread that asked to be left out of it"
         );
     }

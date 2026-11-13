@@ -1,0 +1,56 @@
+/* One project's "this is me" row: a settings row whose help line is the
+   verdict (a green dot when it is settled), with the teammate picker in the
+   row's preview box. Added here are the dot, the strong handle in the
+   sentence, the picker's stacking and the avatar at option size. */
+
+.ui-identity-verdict {
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 20px;
+}
+.ui-identity-verdict[data-tone="ok"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-fg);
+}
+.ui-identity-verdict strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-identity-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ui-green);
+}
+.ui-identity-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-identity-picker > .ui-settings-error {
+  margin: 0;
+}
+.ui-identity-avatar.ui-avatar {
+  width: 18px;
+  height: 18px;
+}
+.ui-identity-avatar .ui-avatar-fallback {
+  font-size: 9px;
+  font-weight: 500;
+}
+.ui-identity-candidate {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+.ui-identity-candidate > small {
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

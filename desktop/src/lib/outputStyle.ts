@@ -7,6 +7,8 @@
 // context, the same way the effort chip's value rides the request. Other
 // brains ignore it — the chip's tooltip says so.
 
+import { useSyncExternalStore } from "react";
+
 export type OutputStyle = "default" | "concise";
 
 export const OUTPUT_STYLE_KEY = "aura.manager.output_style";
@@ -35,8 +37,39 @@ export function readOutputStyle(): OutputStyle {
   }
 }
 
+// Settings and every open composer show this one value. Each composer used
+// to read it once when it opened, so a style picked in Settings left the open
+// chats' Concise chip showing the old one while their next send used the new.
+const readers = new Set<() => void>();
+
+function tell(): void {
+  for (const reader of readers) reader();
+}
+
+function onStorage(event: StorageEvent): void {
+  if (event.key === null || event.key === OUTPUT_STYLE_KEY) tell();
+}
+
+/** Follow the style: `reader` runs after every change, including one made in
+ *  another window. */
+export function subscribeOutputStyle(reader: () => void): () => void {
+  readers.add(reader);
+  if (readers.size === 1 && typeof window !== "undefined")
+    window.addEventListener("storage", onStorage);
+  return () => {
+    readers.delete(reader);
+    if (readers.size === 0 && typeof window !== "undefined")
+      window.removeEventListener("storage", onStorage);
+  };
+}
+
+/** The style as it is now, kept current while the component is mounted. */
+export function useOutputStyle(): OutputStyle {
+  return useSyncExternalStore(subscribeOutputStyle, readOutputStyle, readOutputStyle);
+}
+
 /** Persist the choice; the default clears the key so an untouched profile
- *  stays empty. */
+ *  stays empty. Everything showing the style follows. */
 export function writeOutputStyle(style: OutputStyle): void {
   try {
     if (style === "default") localStorage.removeItem(OUTPUT_STYLE_KEY);
@@ -44,4 +77,5 @@ export function writeOutputStyle(style: OutputStyle): void {
   } catch {
     /* storage disabled */
   }
+  tell();
 }

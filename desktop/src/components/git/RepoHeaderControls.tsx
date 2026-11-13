@@ -20,6 +20,7 @@ import { fetchAheadBehind, invalidateGitState } from "../../lib/gitStateCache";
 // Through the place seam: a workspace standing in a machine publishes and
 // pulls the box's checkout, not the laptop's copy (AURA-1306).
 import { gitFetch, gitPull, gitPush, gitSync } from "../../lib/place/workApi";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
 import { useBranches } from "./branches";
 import { BranchSwitcherModal } from "./BranchSwitcherModal";
@@ -165,10 +166,7 @@ function SyncControl({ repoRoot }: { repoRoot: string }) {
         disabled={busy || action.idle}
         title={action.hint}
       >
-        <RefreshCw
-          size={12}
-          className={busy || action.idle ? "animate-spin" : ""}
-        />
+        {busy || action.idle ? <AsciiSpinner size={12} /> : <RefreshCw size={12} />}
         {busy ? "Working…" : action.label}
       </Button>
       {error && (

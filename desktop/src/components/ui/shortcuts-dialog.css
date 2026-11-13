@@ -1,0 +1,90 @@
+/* The ⌘/ sheet: 768px wide and 80% of the window tall, the title with the
+   command mark, a search box, and the groups (or the matches) scrolling
+   beneath. */
+.ui-dialog-content.ui-shortcuts-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(768px, calc(100vw - 32px));
+  height: 80vh;
+  overflow: hidden;
+}
+.ui-dialog-header.ui-shortcuts-head {
+  margin-bottom: 0;
+}
+.ui-dialog-title.ui-shortcuts-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-shortcuts-search {
+  position: relative;
+  margin-top: 16px;
+}
+.ui-shortcuts-search > svg {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--ui-muted-fg);
+  pointer-events: none;
+}
+.ui-shortcuts-search > input {
+  padding-left: 36px;
+}
+.ui-shortcuts-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 24px;
+  min-height: 0;
+  margin-top: 16px;
+  overflow-y: auto;
+}
+.ui-shortcuts-group {
+  margin: 0 0 12px;
+  color: var(--ui-muted-fg);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 20px;
+}
+/* Aura's groups that only apply somewhere say where, under the heading. */
+.ui-shortcuts-group:has(+ .ui-shortcuts-note) {
+  margin-bottom: 2px;
+}
+.ui-shortcuts-note {
+  margin: 0 0 12px;
+  color: var(--ui-faint);
+  font-size: 12px;
+  line-height: 16px;
+}
+.ui-shortcuts-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ui-shortcuts-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+}
+.ui-shortcuts-name {
+  font-size: var(--text-sm);
+  line-height: 20px;
+}
+.ui-shortcuts-dim {
+  opacity: 0.5;
+}
+.ui-shortcuts-keys {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+}
+.ui-shortcuts-none {
+  padding: 32px 0;
+  color: var(--ui-muted-fg);
+  font-size: var(--text-sm);
+  text-align: center;
+}

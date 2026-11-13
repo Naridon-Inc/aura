@@ -23,11 +23,13 @@
 //! keep a log you may crash halfway through.
 //!
 //! It does not cover a transcript in SQLite, in Protobuf, or spread across
-//! several files that must be joined. An agent shaped like that still needs a
-//! Rust dialect implementing [`History`] directly — the trait is the contract,
-//! and this module is one implementation of it that happens to be data-driven.
-//! Saying so plainly is better than a manifest format that grows a query
-//! language and still cannot do it.
+//! several files that must be joined. Saying so plainly is better than a
+//! manifest format that grows a query language and still cannot do it — and an
+//! agent shaped like that is not stuck: a file in the same directory can name
+//! a **program** instead, which Aura asks the trait's own questions over JSON.
+//! See [`super::external`]. The trait is the contract; this module is the
+//! data-driven implementation of it, and that one is the out-of-process
+//! implementation.
 //!
 //! # Privacy
 //!
@@ -180,9 +182,17 @@ impl Manifest {
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        let m: Manifest = serde_json::from_str(&text)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        m.check().map_err(|e| format!("{}: {e}", path.display()))?;
+        let raw: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        Self::parse(raw).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// [`Manifest::load`] from JSON already read, for a caller that had to look
+    /// at the file to decide what shape it is — see [`super::discovery`]. The
+    /// path is the caller's to add; it is the only one that still knows it.
+    pub fn parse(raw: serde_json::Value) -> Result<Self, String> {
+        let m: Manifest = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+        m.check()?;
         Ok(m)
     }
 
@@ -403,74 +413,6 @@ impl History for ManifestDialect {
             None => newest.map(|p| (p, 0)),
         }
     }
-}
-
-// ─── discovery ──────────────────────────────────────────────────────────────
-
-/// Where manifests live. `AURA_DIALECTS_DIR` overrides it, which is how the
-/// tests get a tree of their own instead of the developer's real one.
-pub fn dialects_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("AURA_DIALECTS_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-    Some(home()?.join(".aura").join("dialects"))
-}
-
-/// Every usable manifest on disk, and every one that isn't, with the reason.
-///
-/// Both halves are returned because a manifest that fails to parse is the
-/// single most likely thing to go wrong for someone writing their first one,
-/// and a dialect that silently does not appear is indistinguishable from one
-/// that appeared and found nothing.
-pub fn discover() -> (Vec<ManifestDialect>, Vec<String>) {
-    match dialects_dir() {
-        Some(dir) => discover_in(&dir),
-        None => (Vec::new(), Vec::new()),
-    }
-}
-
-/// [`discover`], against a named directory. Split out so the tests get a tree
-/// of their own rather than the developer's real one.
-pub fn discover_in(dir: &Path) -> (Vec<ManifestDialect>, Vec<String>) {
-    let mut ok = Vec::new();
-    let mut bad = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return (ok, bad);
-    };
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .collect();
-    // Stable order so output is stable, whatever the filesystem hands back.
-    paths.sort();
-
-    let builtin: Vec<&str> = super::builtin().iter().map(|d| d.id()).collect();
-    for p in paths {
-        match Manifest::load(&p) {
-            Ok(m) => {
-                if builtin.contains(&m.id.as_str()) {
-                    // Refusing rather than overriding: a manifest that shadows
-                    // a compiled dialect would change what `aura why` answers
-                    // with no sign that it had, and the compiled one is the
-                    // one with the agent's edge cases in it.
-                    bad.push(format!(
-                        "{}: `{}` is a built-in dialect and cannot be replaced by a manifest",
-                        p.display(),
-                        m.id
-                    ));
-                    continue;
-                }
-                if ok.iter().any(|d: &ManifestDialect| d.m.id == m.id) {
-                    bad.push(format!("{}: duplicate dialect id `{}`", p.display(), m.id));
-                    continue;
-                }
-                ok.push(ManifestDialect::new(m));
-            }
-            Err(e) => bad.push(e),
-        }
-    }
-    (ok, bad)
 }
 
 // ─── small helpers ──────────────────────────────────────────────────────────
@@ -848,41 +790,5 @@ mod tests {
         assert!(!m.prompt.text_is_theirs("<command-name>/clear</command-name>"));
         assert!(!m.prompt.text_is_theirs("<system-reminder>be careful</system-reminder>"));
         assert!(m.prompt.text_is_theirs("write a <command> parser"));
-    }
-
-    #[test]
-    fn a_manifest_cannot_shadow_a_compiled_dialect() {
-        // Overriding one silently would change what `aura why` answers, and
-        // the compiled dialect is the one with the agent's edge cases in it.
-        let dir = tempfile::tempdir().unwrap();
-        write(
-            &dir.path().join("claude.json"),
-            r#"{"id":"claude","display":"Mine","root":"~/.x",
-                "sessions":{"glob":"*.jsonl"},
-                "prompt":{"when":{"role":"user"},"text":"content"}}"#,
-        );
-        write(
-            &dir.path().join("amp.json"),
-            r#"{"id":"amp","display":"Amp","root":"~/.amp",
-                "sessions":{"glob":"*.jsonl"},
-                "prompt":{"when":{"role":"user"},"text":"content"}}"#,
-        );
-
-        let (ok, bad) = discover_in(dir.path());
-        assert_eq!(ok.iter().map(|d| d.id()).collect::<Vec<_>>(), vec!["amp"]);
-        assert_eq!(bad.len(), 1);
-        assert!(bad[0].contains("built-in"));
-    }
-
-    #[test]
-    fn a_manifest_that_does_not_parse_says_which_file() {
-        // These are hand-written by someone who is not us; "invalid manifest"
-        // with no filename is not a message anyone can act on.
-        let dir = tempfile::tempdir().unwrap();
-        write(&dir.path().join("broken.json"), "{ not json");
-        let (ok, bad) = discover_in(dir.path());
-        assert!(ok.is_empty());
-        assert_eq!(bad.len(), 1);
-        assert!(bad[0].contains("broken.json"));
     }
 }

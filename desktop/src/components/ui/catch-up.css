@@ -1,0 +1,14 @@
+/* What a session did while you were away: the shell notice across the top of
+   a remote terminal, laid out as the work column's inline notices are, with
+   what the session printed under the sentence. The printout scrolls inside
+   the notice rather than pushing the terminal off the screen. */
+
+.ui-catch-up {
+  flex-shrink: 0;
+}
+.ui-catch-up .ui-shell-notice-detail pre {
+  max-height: 224px;
+  overflow: auto;
+  padding-top: 6px;
+  border-top: 1px solid var(--ui-border);
+}

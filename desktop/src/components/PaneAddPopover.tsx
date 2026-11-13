@@ -20,6 +20,9 @@ import {
 } from "../lib/editorStore";
 import { Launcher } from "./launcher/Launcher";
 import { useDismiss } from "../lib/useDismiss";
+import { cn } from "../lib/utils";
+import { MENU_SURFACE_CLASS } from "./ui/menuSurface";
+import "./ui/launcher.css";
 
 export function PaneAddPopover({
   leaf,
@@ -38,7 +41,10 @@ export function PaneAddPopover({
 
   // Outside-click + Esc close. The launcher's own flyouts render inside this
   // element, so opening one never counts as clicking away.
-  useDismiss(true, onClose, ref);
+  // Its menus (repository, place, profiles, lanes) are portalled out of this
+  // element, so they are named as inside too — choosing from one is not
+  // clicking away.
+  useDismiss(true, onClose, ref, { insideSelector: "[data-radix-popper-content-wrapper]" });
 
   return (
     <div
@@ -52,13 +58,11 @@ export function PaneAddPopover({
       // attribute is what `openOverlayRects` reads to take the surface away
       // while the panel is up.
       data-over-native-surface=""
-      // No `overflow-hidden`: the launcher's footer menus open upward, out of
-      // this box on purpose, and a clipped flyout is a menu you can't read.
-      // The list inside does its own scrolling.
-      className="absolute right-0 top-full mt-1 z-30 w-[360px] rounded-lg border border-line-soft bg-bg-1 shadow-[var(--shadow-flyout)]"
+      // The list inside does its own scrolling; the footer's menus are
+      // portalled, so nothing here needs to overflow.
+      className={cn(MENU_SURFACE_CLASS, "ui-popover ui-launcher-popover")}
     >
       <Launcher
-        className="max-h-[460px]"
         currentRepoRoot={currentRepoRoot}
         present={leaf?.tabs ?? []}
         place={(r: WorkPaneRef) =>

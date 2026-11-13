@@ -68,4 +68,9 @@ pub struct NewSession {
     pub branch: Option<String>,
     /// The first thing to say to the agent. Absent leaves it at its own prompt.
     pub prompt: Option<String>,
+    /// For a shell session: the project's own command to start first — its
+    /// dev server, its run script — in the login shell, with the shell left
+    /// behind when it ends. Absent is a plain shell.
+    #[serde(default)]
+    pub run: Option<String>,
 }

@@ -90,9 +90,9 @@ function fromEvidence(e: EvidenceItem): OutstandingItem | null {
     case "executed_check":
       return checkItem(e, {
         action: { kind: "run_checks" },
-        failTitle: "The project's checks came back with a problem",
+        failTitle: "The repository's checks came back with a problem",
         failNeed: "Fix what they caught, then run them again.",
-        notRunTitle: "The project's checks have never been run on this",
+        notRunTitle: "The repository's checks have never been run on this",
         notRunNeed: "Run them to find out whether any of this works.",
         staleNeed: "Run them again against this version.",
       });

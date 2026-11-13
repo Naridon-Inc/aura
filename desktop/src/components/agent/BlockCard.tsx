@@ -1,12 +1,11 @@
-// Card render of a single Block envelope. Mirrors the layout of
-// aura-term/src/ui/block_card.rs:
-//   header  — 7px state dot · STATE label · kind · anchor · actor … ts · dur
-//   body    — intent summary (when present) + payload row + captured output
-//   border  — tinted by state, brighter when focused
+// Render of a single Block envelope, on the chat's step row: the state's icon
+// and the block's kind as the row, a state chip, the block id, when it started
+// and how long it took; under it the prompt, the captured output as a code
+// listing, or how the run ended.
 //
 // The shell-side BlockEnvelope is simpler than aura-blocks::Block (3 kinds
 // only: prompt / output / exit). We synthesise a BlockState from the kind
-// + finished_at + exit_code so the visual language matches the term build.
+// + finished_at + exit_code so a prompt, its output and its exit agree.
 //
 // Each card carries a stable Block id (`b.id`) and exposes:
 //   • collapse / expand (output cards) — saves vertical space when triaging
@@ -15,7 +14,17 @@
 // The parent AgentSurface routes the re-run event to its Composer.
 
 import { memo, useState } from "react";
+import { Check, ChevronRight, CircleAlert, Copy, RotateCcw } from "lucide-react";
+
 import type { BlockEnvelope } from "../../lib/api";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { ChatStatus } from "../ui/message";
+import { StatusChip, type ChipTone } from "../ui/statusChip";
+import { CodeMessage } from "../ui/transcript-content";
+import "../ui/chat-tool-detail.css";
+import "../ui/block-card.css";
 
 type BlockState = "running" | "done" | "failed";
 
@@ -48,9 +57,6 @@ export const BlockCard = memo(function BlockCard({
   onToggleCollapsed,
 }: Props) {
   const state = synthState(block, exit);
-  const tone = stateTone(state);
-  const label = stateLabel(state);
-  const failed = state === "failed";
   const [selfCollapsed, setSelfCollapsed] = useState(false);
   const collapsed = collapsedProp ?? selfCollapsed;
   const [copied, setCopied] = useState(false);
@@ -60,8 +66,9 @@ export const BlockCard = memo(function BlockCard({
   const dur = relDuration(Math.max(0, finishedMs - startedMs));
   const ts = clockHm(startedMs);
 
-  const { prefix, prefixColor, payload } = payloadRow(block);
   const shortId = block.id ? block.id.slice(0, 6) : null;
+  const canCollapse = block.kind === "output" && !!block.text;
+  const canRerun = block.kind === "prompt" && !!block.text;
 
   function copyAsMarkdown() {
     const md = blockToMarkdown(block);
@@ -90,125 +97,144 @@ export const BlockCard = memo(function BlockCard({
     );
   }
 
+  const title = (
+    <>
+      {canCollapse && (
+        <ChevronRight size={14} className={collapsed ? undefined : "ui-chevron-open"} />
+      )}
+      <StateIcon state={state} />
+      <span>{KIND_TITLE[block.kind] ?? block.kind}</span>
+    </>
+  );
+
   return (
     <div
-      className="rounded-md p-3 flex flex-col gap-2.5 transition-colors group/block"
-      style={{
-        background: failed ? "color-mix(in srgb, var(--color-red) 10%, var(--color-bg-3))" : "var(--color-bg-3)",
-        border: `1px solid ${focused ? tone : "var(--color-line)"}`,
-      }}
+      className="ui-tool-call ui-block"
+      data-status={STATE_STATUS[state]}
+      data-focused={focused || undefined}
     >
-      <div className="section-label flex items-center gap-2">
-        <span
-          className="inline-block rounded-full"
-          style={{ background: tone, width: 7, height: 7 }}
-        />
-        <span style={{ color: tone }} className="font-medium">{label}</span>
-        <span className="text-text-3">{block.kind}</span>
-        {block.kind === "exit" && block.exit_code != null && (
-          <span className="text-text-3 tabular-nums">stopped with error {block.exit_code}</span>
-        )}
-        {shortId && (
-          <span
-            className="text-text-4 font-mono normal-case px-1.5 py-px rounded bg-bg-1/60 border border-line-soft"
-            title={`Block id ${block.id}`}
+      <div className="ui-block-head">
+        {canCollapse ? (
+          <button
+            type="button"
+            className="ui-tool-trigger"
+            aria-expanded={!collapsed}
+            title={collapsed ? "Expand output" : "Collapse output"}
+            onClick={toggleCollapsed}
           >
-            #{shortId}
-          </span>
+            {title}
+          </button>
+        ) : (
+          <div className="ui-tool-trigger">{title}</div>
         )}
-        <span className="ml-auto text-text-3 font-mono tabular-nums normal-case">{ts}</span>
-        <span className="text-text-3 font-mono tabular-nums normal-case">· {dur}</span>
-        <BlockActions
-          canCollapse={block.kind === "output" && !!block.text}
-          collapsed={collapsed}
-          onToggleCollapsed={toggleCollapsed}
-          canRerun={block.kind === "prompt" && !!block.text}
-          onRerun={rerun}
-          onCopy={copyAsMarkdown}
-          copied={copied}
-        />
+        <StatusChip tone={STATE_TONE[state]} dense>
+          {STATE_LABEL[state]}
+        </StatusChip>
+        {shortId && (
+          <Badge variant="outline" className="ui-block-id" title={`Block id ${block.id}`}>
+            #{shortId}
+          </Badge>
+        )}
+        <small className="ui-block-meta ui-block-time">
+          {ts} · {dur}
+        </small>
+        <span className="ui-block-actions">
+          {canRerun && (
+            <Button
+              variant="ghost"
+              size="iconXs"
+              aria-label="Re-run this prompt"
+              title="Re-run this prompt"
+              onClick={rerun}
+            >
+              <RotateCcw />
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="iconXs"
+            aria-label={copied ? "Copied" : "Copy as markdown"}
+            title={copied ? "Copied" : "Copy as markdown"}
+            onClick={copyAsMarkdown}
+          >
+            {copied ? <Check /> : <Copy />}
+          </Button>
+        </span>
       </div>
 
-      {payload && (
-        <div className="flex items-start gap-2.5 font-mono">
-          <span style={{ color: prefixColor }} className="text-base">
-            {prefix}
-          </span>
-          <span className="text-text-1 text-base whitespace-pre-wrap break-words flex-1 leading-relaxed">
-            {payload}
-          </span>
-        </div>
-      )}
-
-      {block.kind === "output" && !collapsed && (
-        <OutputView block={block} state={state} />
-      )}
-      {block.kind === "output" && collapsed && block.text && (
-        <div className="text-text-4 text-xs font-mono italic">
-          {linesOf(block.text)} lines collapsed · click ▸ to expand
-        </div>
-      )}
+      <BlockBody block={block} state={state} collapsed={collapsed} />
     </div>
   );
 });
 
-function BlockActions({
-  canCollapse,
-  collapsed,
-  onToggleCollapsed,
-  canRerun,
-  onRerun,
-  onCopy,
-  copied,
-}: {
-  canCollapse: boolean;
-  collapsed: boolean;
-  onToggleCollapsed: () => void;
-  canRerun: boolean;
-  onRerun: () => void;
-  onCopy: () => void;
-  copied: boolean;
-}) {
-  return (
-    <span className="ml-2 flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover/block:opacity-100 normal-case tracking-normal">
-      {canCollapse && (
-        <ActionButton
-          title={collapsed ? "Expand output" : "Collapse output"}
-          onClick={onToggleCollapsed}
-        >
-          {collapsed ? "▸" : "▾"}
-        </ActionButton>
-      )}
-      {canRerun && (
-        <ActionButton title="Re-run this prompt" onClick={onRerun}>
-          ↻
-        </ActionButton>
-      )}
-      <ActionButton title="Copy as markdown" onClick={onCopy}>
-        {copied ? "✓" : "⎘"}
-      </ActionButton>
-    </span>
-  );
+const KIND_TITLE: Record<string, string> = {
+  prompt: "Prompt",
+  output: "Output",
+  exit: "Exit",
+};
+
+const STATE_STATUS: Record<BlockState, "running" | "done" | "error"> = {
+  running: "running",
+  done: "done",
+  failed: "error",
+};
+
+const STATE_TONE: Record<BlockState, ChipTone> = {
+  running: "amber",
+  done: "green",
+  failed: "red",
+};
+
+const STATE_LABEL: Record<BlockState, string> = {
+  running: "Running",
+  done: "Done",
+  failed: "Failed",
+};
+
+function StateIcon({ state }: { state: BlockState }) {
+  if (state === "running") return <AsciiSpinner />;
+  if (state === "failed") return <CircleAlert size={14} />;
+  return <Check size={14} />;
 }
 
-function ActionButton({
-  children,
-  title,
-  onClick,
+function BlockBody({
+  block,
+  state,
+  collapsed,
 }: {
-  children: React.ReactNode;
-  title: string;
-  onClick: () => void;
+  block: BlockEnvelope;
+  state: BlockState;
+  collapsed: boolean;
 }) {
+  if (block.kind === "prompt") {
+    if (!block.text) return null;
+    return (
+      <div className="ui-tool-content">
+        <p className="ui-block-prompt">{block.text}</p>
+      </div>
+    );
+  }
+  if (block.kind === "exit") {
+    const ok = (block.exit_code ?? 0) === 0;
+    return (
+      <div className="ui-tool-content">
+        <p className="ui-block-exit" data-ok={ok || undefined}>
+          {ok ? "Finished without errors" : `Stopped with error ${block.exit_code ?? 0}`}
+        </p>
+      </div>
+    );
+  }
+  if (collapsed && block.text) {
+    return (
+      <div className="ui-tool-content">
+        <p className="ui-tool-quiet">{linesOf(block.text)} lines folded</p>
+      </div>
+    );
+  }
   return (
-    <button
-      type="button"
-      title={title}
-      onClick={onClick}
-      className="text-text-4 hover:text-text-1 hover:bg-state-hover rounded px-1.5 py-0.5 text-xs leading-none"
-    >
-      {children}
-    </button>
+    <div className="ui-tool-content">
+      <OutputView block={block} state={state} />
+    </div>
   );
 }
 
@@ -235,36 +261,16 @@ function OutputView({
   state: BlockState;
 }) {
   if (!block.text) {
-    if (state === "running") {
-      return (
-        <div
-          className="flex items-center gap-2 px-3 py-1.5 rounded-sm text-xs font-mono"
-          style={{
-            background: "var(--color-bg-0)",
-            border: "1px solid var(--color-line-soft)",
-          }}
-        >
-          <span
-            className="inline-block rounded-full animate-pulse"
-            style={{ background: "var(--color-amber)", width: 6, height: 6 }}
-          />
-          <span className="text-text-3">streaming…</span>
-        </div>
-      );
-    }
+    if (state === "running") return <ChatStatus state="working">Streaming…</ChatStatus>;
     return null;
   }
   return (
-    <pre
-      className="rounded-sm px-3 py-2 text-sm font-mono leading-relaxed text-text-1 whitespace-pre-wrap break-words overflow-auto max-h-[420px]"
-      style={{
-        background: "var(--color-bg-0)",
-        border: "1px solid var(--color-line-soft)",
-      }}
-    >
-      {block.text}
-      {state === "running" && <span className="text-text-4">▌</span>}
-    </pre>
+    <div className="ui-tool-output ui-tool-terminal">
+      <CodeMessage language="Output">
+        {block.text}
+        {state === "running" && <span className="ui-tool-quiet">▌</span>}
+      </CodeMessage>
+    </div>
   );
 }
 
@@ -277,56 +283,6 @@ function synthState(b: BlockEnvelope, exit: BlockEnvelope | null): BlockState {
   }
   if (b.finished_at == null) return "running";
   return "done";
-}
-
-function stateLabel(s: BlockState): string {
-  switch (s) {
-    case "running":
-      return "RUNNING";
-    case "done":
-      return "DONE";
-    case "failed":
-      return "FAILED";
-  }
-}
-
-function stateTone(s: BlockState): string {
-  switch (s) {
-    case "running":
-      return "var(--color-amber)";
-    case "done":
-      return "var(--color-accent-green)";
-    case "failed":
-      return "var(--color-red)";
-  }
-}
-
-function payloadRow(b: BlockEnvelope): {
-  prefix: string;
-  prefixColor: string;
-  payload: string | null;
-} {
-  if (b.kind === "prompt") {
-    return {
-      prefix: "›",
-      prefixColor: "var(--color-violet)",
-      payload: b.text || null,
-    };
-  }
-  if (b.kind === "exit") {
-    const ok = (b.exit_code ?? 0) === 0;
-    return {
-      prefix: ok ? "✓" : "✗",
-      prefixColor: ok ? "var(--color-accent-green)" : "var(--color-red)",
-      payload: ok
-      ? "Finished without errors"
-      : `Stopped with error ${b.exit_code ?? 0}`,
-    };
-  }
-  // output — payload row only renders when there's a one-line summary
-  // worth showing above the captured output. We keep it empty so the
-  // <pre> below carries the bytes.
-  return { prefix: "$", prefixColor: "var(--color-accent-green)", payload: null };
 }
 
 function clockHm(ms: number): string {

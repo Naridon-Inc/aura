@@ -11,15 +11,16 @@
 // tooltip says exactly what happens in human words, never "re-arm node".
 
 import type { JSX } from "react";
-import { RotateCcw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 
 import type { MissionRun } from "../../../lib/api";
+import { Button } from "../../ui/button";
 
 export function MissionRetryButton({
   runs,
   onRetry,
   label,
-  className = "",
+  className,
 }: {
   runs: MissionRun[];
   onRetry?: (runs: MissionRun[]) => void;
@@ -29,26 +30,24 @@ export function MissionRetryButton({
   const armable = runs.filter((r) => r.nodeId);
   if (!onRetry || armable.length === 0) return null;
   return (
-    <button
+    <Button
       type="button"
+      variant="outline"
+      size="xs"
+      className={className}
       onMouseDown={(e) => e.stopPropagation()}
       onClick={(e) => {
         e.stopPropagation();
         onRetry(armable);
       }}
-      className={`inline-flex flex-shrink-0 items-center gap-1 rounded-[5px] border border-line-soft px-1.5 py-[3px] text-xs font-medium text-text-3 transition-colors hover:border-accent/60 hover:bg-accent/[0.06] hover:text-accent ${className}`}
       title={
         armable.length > 1
           ? `Re-queue ${armable.length} failed tasks`
           : "Re-queue this task"
       }
     >
-      <RotateCcw
-        className="h-3 w-3 flex-shrink-0"
-        strokeWidth={1.5}
-        aria-hidden
-      />
+      <RefreshCw strokeWidth={2} aria-hidden />
       {label}
-    </button>
+    </Button>
   );
 }

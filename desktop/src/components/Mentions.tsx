@@ -27,6 +27,7 @@ import {
   membersByHandle,
   parseMentions,
 } from "../lib/mentions";
+import "./ui/task-markdown.css";
 
 // ─── Input ─────────────────────────────────────────────────────────────
 
@@ -287,16 +288,23 @@ export function MentionedText({
         return (
           <span
             key={i}
+            className="ui-task-mention"
+            data-known={known ? "" : undefined}
+            data-clickable={clickable ? "" : undefined}
             role={clickable ? "button" : undefined}
+            tabIndex={clickable ? 0 : undefined}
             onClick={clickable ? () => onMentionClick(tok.handle) : undefined}
-            title={known ? `${known.name || known.email}` : "unknown handle"}
-            className={`inline-flex items-baseline px-1 rounded font-medium ${
-              clickable ? "cursor-pointer" : ""
-            } ${
-              known
-                ? `text-accent bg-accent/10 ${clickable ? "hover:bg-accent/20" : ""}`
-                : "text-text-4 bg-bg-2 border border-line-soft"
-            }`}
+            onKeyDown={
+              clickable
+                ? (e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onMentionClick(tok.handle);
+                    }
+                  }
+                : undefined
+            }
+            title={known ? known.name || known.email || tok.handle : "Not on this team"}
           >
             @{tok.handle}
           </span>

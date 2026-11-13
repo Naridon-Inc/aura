@@ -1,0 +1,76 @@
+/* Watching an agent build a crew task: the library's right-hand sheet with
+   the agent's own output streaming in the shared code block. The sheet is a
+   column here so the output, not the sheet, is what scrolls. */
+
+.ui-sheet.ui-crew-live {
+  display: flex;
+  flex-direction: column;
+  width: min(440px, calc(100vw - 24px));
+  overflow: hidden;
+}
+.ui-crew-live > .ui-dialog-header {
+  gap: 4px;
+  margin-bottom: 16px;
+  padding-right: 32px;
+}
+.ui-crew-live .ui-dialog-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-crew-live-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.ui-crew-live-kicker svg {
+  width: 14px;
+  height: 14px;
+}
+.ui-crew-live-kicker[data-live] svg {
+  color: var(--ui-green);
+}
+.ui-crew-live-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-crew-live-state span {
+  color: var(--ui-faint);
+}
+
+.ui-crew-live-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.ui-crew-live-body > .ui-state {
+  flex: 1;
+  justify-content: center;
+}
+.ui-crew-live-body > .ui-code-message {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+}
+.ui-crew-live-body > .ui-code-message pre {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ui-crew-live > .ui-dialog-footer {
+  justify-content: space-between;
+  margin-top: 16px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}

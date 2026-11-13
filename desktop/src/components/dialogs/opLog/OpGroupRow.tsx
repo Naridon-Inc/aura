@@ -7,7 +7,10 @@
 // used to print — that payload is the engine's data structure, and nobody
 // opening this window is asking to read JSON.
 
+import { TraceMark } from "../../ui/trace-list";
+import { TraceTimelineEntry } from "../../ui/trace-timeline";
 import { outsideCount, type OpFile, type OpStory } from "./describe";
+import "../../ui/op-log.css";
 
 /** Names shown inline before the row is opened. */
 const FILES_INLINE = 3;
@@ -26,19 +29,24 @@ type Props = {
   onToggle: () => void;
 };
 
+// Spans, not a list: the whole moment is one button, and a button can only
+// hold inline content.
 function FileList({ files }: { files: readonly OpFile[] }) {
   return (
-    <ul className="mt-1 space-y-0.5">
+    <span className="ui-op-log-line ui-op-log-files">
       {files.map((f) => (
-        <li key={f.path} className="text-2xs text-text-3 truncate" title={f.path}>
-          <span className="text-text-2">{f.name}</span>
-          {f.outside && <span className="text-text-4"> · outside this project</span>}
-        </li>
+        <span key={f.path} title={f.path}>
+          <span className="ui-op-log-file">{f.name}</span>
+          {f.outside && " · outside this repository"}
+        </span>
       ))}
-    </ul>
+    </span>
   );
 }
 
+/** One moment on the timeline. The moment the Undo button would act on — the
+ *  one you opened, or the newest reversible one when you haven't — carries the
+ *  filled marker. */
 export function OpGroupRow({
   story,
   age,
@@ -53,64 +61,53 @@ export function OpGroupRow({
   const rest = story.files.length - inline.length;
   const outside = outsideCount(story.files);
   return (
-    <button
-      type="button"
-      onClick={onToggle}
+    <TraceTimelineEntry
+      title={story.title}
+      active={selected || isUndoTarget}
       disabled={inert}
-      className={[
-        "w-full text-left px-2.5 py-2 border-b border-line-soft last:border-b-0 transition-colors",
-        inert
-          ? "opacity-50 cursor-not-allowed"
-          : selected
-            ? "bg-bg-3"
-            : isUndoTarget
-              ? "bg-bg-2 hover:bg-bg-3"
-              : "hover:bg-state-hover",
-      ].join(" ")}
-    >
-      <div className="flex items-baseline gap-2">
-        <span className="text-text-1 text-sm flex-1 truncate">{story.title}</span>
-        <span className="text-text-4 text-2xs shrink-0">{age}</span>
-        {undone ? (
-          <span className="section-label shrink-0">undone</span>
-        ) : !reversible ? (
-          <span className="section-label shrink-0">can’t be undone</span>
-        ) : null}
-      </div>
+      onSelect={onToggle}
+      detail={
+        <>
+          <span>{age}</span>
+          {undone ? (
+            <TraceMark>undone</TraceMark>
+          ) : !reversible ? (
+            <TraceMark>can’t be undone</TraceMark>
+          ) : null}
 
-      {story.reason && (
-        <div className="mt-1 border-l-2 border-line pl-2 text-xs text-text-3 line-clamp-2">
-          {story.reason}
-        </div>
-      )}
+          {story.reason && (
+            <span className="ui-op-log-line ui-op-log-reason">{story.reason}</span>
+          )}
 
-      {story.note && <div className="mt-1 text-xs text-text-3 truncate">{story.note}</div>}
+          {story.note && <span className="ui-op-log-line ui-op-log-clip">{story.note}</span>}
 
-      {story.files.length > 0 &&
-        (selected ? (
-          <FileList files={story.files} />
-        ) : (
-          <div className="mt-1 text-2xs text-text-4 truncate">
-            {inline.map((f) => f.name).join(" · ")}
-            {rest > 0 && ` +${rest} more`}
-          </div>
-        ))}
+          {story.files.length > 0 &&
+            (selected ? (
+              <FileList files={story.files} />
+            ) : (
+              <span className="ui-op-log-line ui-op-log-clip">
+                {inline.map((f) => f.name).join(" · ")}
+                {rest > 0 && ` +${rest} more`}
+              </span>
+            ))}
 
-      {selected && outside > 0 && (
-        <div className="mt-1 text-2xs text-text-4">
-          {outside === story.files.length
-            ? outside === 1
-              ? "This file isn’t in this project — it’s a scratch or notes file the step was recorded against."
-              : "None of these are in this project — they’re scratch or notes files the steps were recorded against."
-            : `${outside} of these aren’t in this project.`}
-        </div>
-      )}
+          {selected && outside > 0 && (
+            <span className="ui-op-log-line">
+              {outside === story.files.length
+                ? outside === 1
+                  ? "This file isn’t in this repository — it’s a scratch or notes file the step was recorded against."
+                  : "None of these are in this repository — they’re scratch or notes files the steps were recorded against."
+                : `${outside} of these ${outside === 1 ? "isn’t" : "aren’t"} in this repository.`}
+            </span>
+          )}
 
-      {selected && story.steps > 1 && (
-        <div className="mt-1 text-2xs text-text-4">
-          Aura recorded this as {story.steps} steps. Undo takes back the most recent one.
-        </div>
-      )}
-    </button>
+          {selected && story.steps > 1 && (
+            <span className="ui-op-log-line">
+              Aura recorded this as {story.steps} steps. Undo takes back the most recent one.
+            </span>
+          )}
+        </>
+      }
+    />
   );
 }

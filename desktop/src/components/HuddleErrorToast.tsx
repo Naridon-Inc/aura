@@ -8,20 +8,14 @@
 // API key / secret unset, or the SFU unreachable) — `api.callsToken` now throws
 // a plain-language reason, and this tiny host makes it visible.
 //
-// Deliberately minimal: one dismissible card, bottom-right, danger tone. It
-// sticks until dismissed (a start failure is worth reading, not auto-vanishing)
-// and is mounted once at the app root next to the plugin/crash toast hosts.
+// Deliberately minimal: one error toast in the shared stack. It stays until
+// closed (a start failure is worth reading, not auto-vanishing). Renders
+// nothing itself; mounted once at the app root.
 
-import { useEffect, useState } from "react";
-import { ToastCard, ToastStack } from "./ui/toast";
-
-type ActiveError = { message: string; key: number };
-
-let nextKey = 1;
+import { useEffect } from "react";
+import { toast } from "../lib/toast";
 
 export function HuddleErrorToast() {
-  const [errors, setErrors] = useState<ActiveError[]>([]);
-
   useEffect(() => {
     const onError = (e: Event) => {
       const detail = (e as CustomEvent<{ message?: string }>).detail;
@@ -29,36 +23,18 @@ export function HuddleErrorToast() {
         detail && typeof detail.message === "string" && detail.message.trim()
           ? detail.message.trim()
           : "The huddle server didn't answer. Try again in a moment.";
-      // Collapse a repeated identical error (double-fire from the CallPanel +
-      // HuddleUI listeners) into the one card instead of stacking duplicates.
-      setErrors((prev) =>
-        prev.some((x) => x.message === message)
-          ? prev
-          : [{ message, key: nextKey++ }, ...prev].slice(0, 3),
-      );
+      // The id is the reason, so a repeated identical error (double-fire from
+      // the CallPanel + HuddleUI listeners) lands on the one toast instead of
+      // stacking a duplicate.
+      toast.danger("The huddle didn't start", message, {
+        id: `huddle-error:${message}`,
+        durationMs: null,
+      });
     };
     window.addEventListener("aura:huddle-error", onError as EventListener);
     return () =>
       window.removeEventListener("aura:huddle-error", onError as EventListener);
   }, []);
 
-  if (errors.length === 0) return null;
-
-  const dismiss = (key: number) =>
-    setErrors((prev) => prev.filter((x) => x.key !== key));
-
-  return (
-    <ToastStack zIndex={10000}>
-      {errors.map((err) => (
-        <ToastCard
-          key={err.key}
-          tone="danger"
-          role="alert"
-          title="The huddle didn't start"
-          message={err.message}
-          onDismiss={() => dismiss(err.key)}
-        />
-      ))}
-    </ToastStack>
-  );
+  return null;
 }

@@ -6,15 +6,15 @@
 // The dot on each avatar is what they are *doing*; hovering says it in words.
 //
 // Overflow collapses to "+N", which opens the same list as a menu rather than
-// a second bespoke panel — the rows use the shared menuSurface recipe.
+// a second bespoke panel. The hover card is the shared hover card, and the
+// "+N" is the shared menu.
 
-import { useState } from "react";
 import type { JSX } from "react";
 
 import type { Participant } from "../../lib/sessionLive";
 import { Avatar } from "../team/presentation/Avatar";
 import { AgentIcon } from "../agent/AgentIcon";
-import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Button } from "../ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -22,14 +22,16 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "../ui/hover-card";
+import { LoadingState } from "../ui/state";
 import {
   activitySentence,
   agentIconId,
   participantLabel,
-  presenceDotStyle,
   sinceWords,
   sortParticipants,
 } from "./collabPresence";
+import "../ui/session-room.css";
 
 export type ParticipantsStripProps = {
   participants: readonly Participant[];
@@ -55,38 +57,29 @@ export function ParticipantsStrip({
   onRetry,
   onSelect,
 }: ParticipantsStripProps): JSX.Element {
-  const [hovered, setHovered] = useState<string | null>(null);
-
   if (error) {
     return (
-      <div className="flex items-center gap-2 h-7 px-2 text-xs text-red">
-        <span className="truncate">{error}</span>
+      <div className="ui-session-strip" role="alert">
+        <span className="ui-session-strip-note" data-tone="error">
+          {error}
+        </span>
         {onRetry && (
-          <button
-            type="button"
-            onClick={onRetry}
-            className="px-1.5 py-0.5 rounded border border-red/30 text-red hover:bg-red/10 text-2xs leading-none"
-          >
+          <Button variant="ghost" size="xs" onClick={onRetry}>
             Try again
-          </button>
+          </Button>
         )}
       </div>
     );
   }
 
   if (loading) {
-    return (
-      <div className="flex items-center gap-2 h-7 px-2 text-xs text-text-3">
-        <AsciiSpinner size={12} />
-        <span>Seeing who else is here…</span>
-      </div>
-    );
+    return <LoadingState label="Seeing who else is here…" className="ui-session-strip" />;
   }
 
   if (participants.length === 0) {
     return (
-      <div className="flex items-center h-7 px-2 text-xs text-text-4">
-        Nobody has joined this session yet.
+      <div className="ui-session-strip">
+        <span className="ui-session-strip-note">Nobody has joined this session yet.</span>
       </div>
     );
   }
@@ -96,42 +89,38 @@ export function ParticipantsStrip({
   const rest = ordered.slice(max);
 
   return (
-    <div className="relative flex items-center gap-1.5 h-7 px-2">
+    <div className="ui-session-strip" aria-label="People in this session">
       {shown.map((p) => (
-        <div
-          key={p.id}
-          className="relative"
-          onMouseEnter={() => setHovered(p.id)}
-          onMouseLeave={() => setHovered((cur) => (cur === p.id ? null : cur))}
-        >
-          <button
-            type="button"
-            onFocus={() => setHovered(p.id)}
-            onBlur={() => setHovered((cur) => (cur === p.id ? null : cur))}
-            onClick={onSelect ? () => onSelect(p) : undefined}
-            aria-label={activitySentence(p, ordered, youId)}
-            className="block rounded-md focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-          >
-            <ParticipantFace p={p} />
-          </button>
-          {hovered === p.id && (
-            <ParticipantHoverCard p={p} all={ordered} youId={youId} />
-          )}
-        </div>
+        <HoverCard key={p.id} openDelay={150} closeDelay={60}>
+          <HoverCardTrigger asChild>
+            <button
+              type="button"
+              className="ui-session-presence-face"
+              onClick={onSelect ? () => onSelect(p) : undefined}
+              aria-label={activitySentence(p, ordered, youId)}
+            >
+              <ParticipantFace p={p} />
+            </button>
+          </HoverCardTrigger>
+          <HoverCardContent side="bottom" sideOffset={6} className="ui-session-hover-card">
+            <ParticipantCard p={p} all={ordered} youId={youId} />
+          </HoverCardContent>
+        </HoverCard>
       ))}
 
       {rest.length > 0 && (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className="h-[22px] min-w-[22px] px-1 rounded-md border border-line-soft bg-bg-2 text-text-3 hover:text-text-1 hover:border-line text-2xs font-medium tabular-nums"
+            <Button
+              variant="ghost"
+              size="xs"
+              className="ui-session-presence-more"
               title={`${rest.length} more in this session`}
             >
               +{rest.length}
-            </button>
+            </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-64">
+          <DropdownMenuContent align="start" className="ui-session-presence-menu">
             <DropdownMenuLabel>Also in this session</DropdownMenuLabel>
             {rest.map((p) => (
               <DropdownMenuItem
@@ -139,13 +128,9 @@ export function ParticipantsStrip({
                 onSelect={onSelect ? () => onSelect(p) : undefined}
               >
                 <ParticipantFace p={p} size={18} />
-                <span className="min-w-0 flex-1 leading-tight">
-                  <span className="block truncate text-text-1">
-                    {participantLabel(p, ordered, youId)}
-                  </span>
-                  <span className="block truncate text-2xs text-text-4">
-                    {activitySentence(p, ordered, youId)}
-                  </span>
+                <span className="ui-session-person">
+                  <span>{participantLabel(p, ordered, youId)}</span>
+                  <small>{activitySentence(p, ordered, youId)}</small>
                 </span>
               </DropdownMenuItem>
             ))}
@@ -158,7 +143,11 @@ export function ParticipantsStrip({
 
 /** The face itself — human disc or agent brand tile, with the state dot.
  *  Exported because the message row and the mention picker need the exact
- *  same mark beside a name. */
+ *  same mark beside a name.
+ *
+ *  Who hosts is said in words (the hover card, and first place in every
+ *  list), not by a second dot: a mark in the corner of a face sat outside
+ *  its box and read as a stray pixel in the menus. */
 export function ParticipantFace({
   p,
   size = 22,
@@ -169,46 +158,31 @@ export function ParticipantFace({
   const dot = Math.max(7, Math.round(size * 0.33));
   return (
     <span
-      className="relative inline-flex flex-shrink-0"
+      className="ui-session-face"
+      data-kind={p.kind}
+      data-host={p.role === "host" ? "" : undefined}
       style={{ width: size, height: size }}
     >
       {p.kind === "agent" ? (
-        <span
-          className="flex items-center justify-center w-full h-full rounded-md border border-line-soft bg-bg-2"
-          aria-hidden
-        >
+        <span className="ui-session-face-tile" aria-hidden>
           <AgentIcon agentId={agentIconId(p)} label={p.name} size={Math.round(size * 0.72)} />
         </span>
       ) : (
         <Avatar name={p.name} size={size} src={p.avatar} title="" />
       )}
       <span
-        className="absolute rounded-full"
-        style={{
-          width: dot,
-          height: dot,
-          right: -2,
-          bottom: -2,
-          ...presenceDotStyle(p.state),
-        }}
+        className="ui-session-face-dot"
+        data-state={p.state}
+        style={{ width: dot, height: dot }}
         aria-hidden
       />
-      {p.role === "host" && (
-        <span
-          className="absolute -top-1 -left-1 w-1.5 h-1.5 rounded-full"
-          style={{ background: "var(--color-accent)" }}
-          aria-hidden
-          title="Runs the agent for this session"
-        />
-      )}
     </span>
   );
 }
 
-/** Hover card: the name, then what they're doing, in a sentence. Built from
- *  the shared flyout look rather than a native `title` so the sentence can be
- *  two lines and still read as one calm surface. */
-function ParticipantHoverCard({
+/** Hover card: what they're doing in a sentence, then their part in the
+ *  session and for how long. */
+function ParticipantCard({
   p,
   all,
   youId,
@@ -219,17 +193,12 @@ function ParticipantHoverCard({
 }): JSX.Element {
   const duration = sinceWords(p.since);
   return (
-    <div
-      role="tooltip"
-      className="absolute left-1/2 top-full z-50 mt-1.5 w-max max-w-[240px] -translate-x-1/2 rounded-lg border border-line-soft bg-bg-float px-2.5 py-1.5 shadow-[var(--shadow-flyout)]"
-    >
-      <div className="text-xs font-medium text-text-1 leading-tight">
-        {activitySentence(p, all, youId)}
-      </div>
-      <div className="text-2xs text-text-4 leading-tight mt-0.5">
+    <>
+      <strong>{activitySentence(p, all, youId)}</strong>
+      <small>
         {p.role === "host" ? "Runs the agent for this session" : "Joined from another machine"}
         {duration ? ` · ${duration}` : ""}
-      </div>
-    </div>
+      </small>
+    </>
   );
 }

@@ -14,10 +14,8 @@
 // `repoWorktreeSettingsSet`); until the Rust side ships they simply reject, and
 // the load/save error lines surface that honestly rather than swallowing it.
 
-import { useCallback, useEffect, useState } from "react";
-import { Check, Plus, X } from "lucide-react";
-import { AsciiSpinner } from "../ui/ascii-spinner";
-import { LoadingState } from "../ui/state";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Check } from "lucide-react";
 
 import {
   api,
@@ -26,10 +24,12 @@ import {
   type GitBranchRich,
   type RepoWorktreeSettings,
 } from "../../lib/api";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
-import { Input } from "../ui/input";
-import { Textarea } from "../ui/textarea";
-import { Field, PaneIntro, Section, SelectField, Toggle } from "./kit";
+import { SettingsActions, SettingsError, SettingsIntro } from "../ui/settings-blocks";
+import { type RepoSection } from "./nav";
+import { RepoActionsRows, RepoMiscRows, RepoScriptsRows } from "./repo/RepoSectionRows";
+import { REPO_SCRIPTS_CHANGED } from "../terminal/terminalStrip";
 
 const EMPTY: RepoWorktreeSettings = {
   setup: null,
@@ -53,7 +53,18 @@ function nullable(text: string): string | null {
   return t.length > 0 ? t : null;
 }
 
-export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
+export function RepoWorktreeSettingsPane({
+  repoRoot,
+  section,
+  landing,
+}: {
+  repoRoot: string;
+  /** Which of the repository's pages to draw. Save writes every page's settings. */
+  section: RepoSection;
+  /** A row that is yours rather than the repo's (where a new copy opens),
+   *  drawn first among the new-copy settings it belongs with. */
+  landing?: ReactNode;
+}) {
   const [form, setForm] = useState<RepoWorktreeSettings>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -189,6 +200,8 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
         ghHost: nullable(form.ghHost ?? ""),
       };
       await repoWorktreeSettingsSet(repoRoot, payload);
+      // The terminal panel's Setup and Run tabs read these; let them re-read.
+      window.dispatchEvent(new CustomEvent(REPO_SCRIPTS_CHANGED, { detail: { repoRoot } }));
       setForm(payload);
       setSaved(true);
       // Let live consumers (the header Run/Setup button) re-read without a
@@ -213,186 +226,50 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
 
   return (
     <>
-      <PaneIntro text="When you hand work to an agent it gets its own private copy of this project, so its edits never touch your live files. These settings control how those copies are made and run." />
+      {section === "scripts" && (
+        <SettingsIntro>
+          When you hand work to an agent it gets its own private copy of this repository, so its
+          edits never touch your live files. These scripts run in those copies.
+        </SettingsIntro>
+      )}
 
       {loading ? (
-        <LoadingState label="Loading this project's settings…" className="px-0 py-3" />
+        <p className="ui-settings-status" role="status">
+          <AsciiSpinner />
+          Loading this repository's settings…
+        </p>
       ) : (
         <>
-          {loadError && (
-            <div className="mb-3 text-sm text-red" role="alert">
-              Couldn't load these settings: {loadError}
-            </div>
+          {loadError && <SettingsError>Couldn't load these settings: {loadError}</SettingsError>}
+
+          {section === "scripts" && <RepoScriptsRows form={form} patch={patch} />}
+          {section === "actions" && (
+            <RepoActionsRows
+              form={form}
+              patch={patch}
+              onAddScript={addNamedScript}
+              onChangeScript={updateNamedScript}
+              onRemoveScript={removeNamedScript}
+            />
+          )}
+          {section === "misc" && (
+            <RepoMiscRows
+              repoRoot={repoRoot}
+              form={form}
+              patch={patch}
+              landing={landing}
+              branchOptions={branchOptions}
+              onAddCopyFile={addCopyFile}
+              onRemoveCopyFile={removeCopyFile}
+            />
           )}
 
-          <Section title="Scripts">
-            <Field
-              label="Startup script"
-              hint="Runs once when an agent's copy is first created (e.g. install dependencies)."
-            >
-              <Textarea
-                value={form.setup ?? ""}
-                onChange={(e) => patch({ setup: e.target.value })}
-                spellCheck={false}
-                rows={3}
-                placeholder="npm install"
-                className="font-mono text-sm"
-              />
-            </Field>
-            <Field
-              label="Run script"
-              hint="How to start the app inside a copy (e.g. npm run dev)."
-            >
-              <Textarea
-                value={form.run ?? ""}
-                onChange={(e) => patch({ run: e.target.value })}
-                spellCheck={false}
-                rows={3}
-                placeholder="npm run dev"
-                className="font-mono text-sm"
-              />
-            </Field>
-            <Field
-              label="Archive script"
-              hint="Runs when a copy is cleaned up."
-            >
-              <Textarea
-                value={form.archive ?? ""}
-                onChange={(e) => patch({ archive: e.target.value })}
-                spellCheck={false}
-                rows={3}
-                placeholder="docker compose down"
-                className="font-mono text-sm"
-              />
-            </Field>
-            <Field
-              label="Named scripts"
-              hint="Extra commands you can launch by name from the project header."
-            >
-              <div className="flex flex-col gap-2">
-                {form.namedScripts.map((script, index) => (
-                  <div key={index} className="flex items-center gap-2">
-                    <Input
-                      value={script.name}
-                      onChange={(event) => updateNamedScript(index, "name", event.target.value)}
-                      placeholder="Dev"
-                      className="w-32"
-                    />
-                    <Input
-                      value={script.command}
-                      onChange={(event) => updateNamedScript(index, "command", event.target.value)}
-                      placeholder="npm run dev"
-                      className="flex-1 font-mono text-sm"
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={`Remove ${script.name || "script"}`}
-                      onClick={() => removeNamedScript(index)}
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                ))}
-                <Button type="button" variant="secondary" size="sm" onClick={addNamedScript}>
-                  <Plus className="h-3.5 w-3.5" />
-                  Add script
-                </Button>
-              </div>
-            </Field>
-          </Section>
-
-          <Section title="New copies">
-            <Field
-              label="Start new copies from"
-              // "Blank = current branch" outlived the text input it was
-              // written for. There is no blank to leave any more — the first
-              // option in the list IS "Current branch" — so the hint asked for
-              // something the control cannot do.
-              hint="The branch a new copy starts from. Current branch means whatever you have checked out when the copy is made."
-            >
-              <SelectField
-                value={form.base || "__current__"}
-                onChange={(v) => patch({ base: v === "__current__" ? null : v })}
-                options={branchOptions}
-                widthClass="w-full"
-                placeholder="Current branch"
-              />
-            </Field>
-
-            <CopyFilesField
-              files={form.copyFiles}
-              onAdd={addCopyFile}
-              onRemove={removeCopyFile}
-            />
-            <Toggle
-              label="Copy binary files too"
-              hint="Off, files that look binary (images, archives, anything over 20 MB) are left out of the copy and noted in the log. Turn this on if a copy genuinely needs them."
-              value={form.copyFilesIncludeBinaries === true}
-              onChange={(v) => patch({ copyFilesIncludeBinaries: v })}
-            />
-          </Section>
-
-          <Section title="Instructions for the agent">
-            <Field
-              label="How the agent should review this repo"
-              hint="Added to every review the agent runs here. Say what to look for, what to ignore, and what always blocks."
-            >
-              <Textarea
-                value={form.reviewInstructions ?? ""}
-                onChange={(e) => patch({ reviewInstructions: e.target.value })}
-                rows={3}
-                placeholder="Flag any database change without a migration. Ignore formatting-only diffs."
-                className="text-sm"
-              />
-            </Field>
-            <Field
-              label="How to write pull requests here"
-              hint="Added when the agent opens a pull request: title style, what the description must include, who to tag."
-            >
-              <Textarea
-                value={form.prInstructions ?? ""}
-                onChange={(e) => patch({ prInstructions: e.target.value })}
-                rows={3}
-                placeholder="Start the title with the ticket id. Link the design doc in the description."
-                className="text-sm"
-              />
-            </Field>
-            <Field
-              label="How to resolve conflicts here"
-              hint="Added when the agent resolves merge conflicts: which side wins for which files, what to never merge by hand."
-            >
-              <Textarea
-                value={form.conflictInstructions ?? ""}
-                onChange={(e) => patch({ conflictInstructions: e.target.value })}
-                rows={3}
-                placeholder="Generated files under gen/ always take the main branch's version."
-                className="text-sm"
-              />
-            </Field>
-          </Section>
-
-          <Section title="GitHub">
-            <Field
-              label="GitHub host"
-              hint="Leave empty for github.com. Set your company's GitHub Enterprise address (for example github.mycompany.com) so pull requests and checks for this project come from there."
-            >
-              <Input
-                value={form.ghHost ?? ""}
-                onChange={(e) => patch({ ghHost: e.target.value })}
-                spellCheck={false}
-                placeholder="github.com"
-                className="font-mono text-sm"
-              />
-            </Field>
-          </Section>
-
-          <div className="mt-1 flex items-center gap-3">
+          {saveError && <SettingsError>Couldn't save: {saveError}</SettingsError>}
+          <SettingsActions>
             <Button onClick={() => void save()} disabled={saving}>
               {saving ? (
                 <>
-                  <AsciiSpinner className="text-sm leading-none" />
+                  <AsciiSpinner />
                   Saving…
                 </>
               ) : (
@@ -400,110 +277,14 @@ export function RepoWorktreeSettingsPane({ repoRoot }: { repoRoot: string }) {
               )}
             </Button>
             {saved && !saveError && (
-              <span className="flex items-center gap-1 text-sm text-accent-green">
-                <Check className="h-3.5 w-3.5" />
+              <span className="ui-settings-status">
+                <Check size={14} />
                 Saved
               </span>
             )}
-            {saveError && (
-              <span className="text-sm text-red" role="alert">
-                Couldn't save: {saveError}
-              </span>
-            )}
-          </div>
+          </SettingsActions>
         </>
       )}
     </>
-  );
-}
-
-// ── Files-to-copy editor ──────────────────────────────────────────────────
-// An editable list of out-of-git filenames (chips + add row). Files like
-// `.env` aren't committed but an agent's copy still needs them to run, so
-// this seeds them into each fresh copy. A one-tap "Add .env" affordance
-// covers the overwhelmingly common case.
-function CopyFilesField({
-  files,
-  onAdd,
-  onRemove,
-}: {
-  files: string[];
-  onAdd: (name: string) => void;
-  onRemove: (name: string) => void;
-}) {
-  const [draft, setDraft] = useState("");
-
-  function commit() {
-    onAdd(draft);
-    setDraft("");
-  }
-
-  return (
-    <div className="flex flex-col gap-1.5 py-3">
-      <span className="text-sm font-medium text-text-2">
-        Files to copy into each new copy
-      </span>
-
-      {files.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {files.map((f) => (
-            <span
-              key={f}
-              className="inline-flex items-center gap-1.5 rounded-md border border-line-soft bg-bg-2 px-2 py-1 text-sm text-text-1"
-            >
-              <span className="font-mono">{f}</span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label={`Remove ${f}`}
-                onClick={() => onRemove(f)}
-                className="h-auto w-auto text-text-4 hover:text-red"
-              >
-                <X className="h-3 w-3" />
-              </Button>
-            </span>
-          ))}
-        </div>
-      )}
-
-      <div className="flex items-center gap-2">
-        <Input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              commit();
-            }
-          }}
-          placeholder=".env"
-          spellCheck={false}
-          className="h-7 flex-1 font-mono text-sm"
-        />
-        <Button
-          variant="subtle"
-          size="sm"
-          onClick={commit}
-          disabled={!draft.trim()}
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Add
-        </Button>
-        {!files.includes(".env") && (
-          <Button variant="ghost" size="sm" onClick={() => onAdd(".env")}>
-            Add .env
-          </Button>
-        )}
-      </div>
-
-      {/* "Supports .env*" ended the sentence on a bare asterisk, which reads
-          as a footnote marker with no footnote. It is a wildcard, and saying
-          so costs one clause. */}
-      <span className="text-sm leading-snug text-text-4">
-        Files like .env that aren't in git but an agent's copy needs to run. End
-        a name with * to match a family — .env* also brings .env.local.
-      </span>
-    </div>
   );
 }

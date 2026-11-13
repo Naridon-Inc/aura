@@ -1,0 +1,113 @@
+/* The computer Aura runs for the team: the cloud setup's page rules
+   (make-place.css) plus three plain facts, a progress line, and the sizes it
+   can run at. Rows, not cards. */
+
+.ui-aura-computer-lede {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--ui-muted-fg);
+}
+
+.ui-aura-computer-facts {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  list-style: none;
+}
+.ui-aura-computer-facts li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 18px;
+}
+.ui-aura-computer-facts li + li {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-aura-computer-facts svg {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  color: var(--color-accent-green, #4dc1a4);
+}
+
+.ui-aura-computer-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.ui-aura-computer-progress .ui-progress-indicator {
+  background: var(--color-accent-green, #4dc1a4);
+}
+.ui-aura-computer-progress > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+/* The sizes: one row each — a radio, the size and who it fits, the price. */
+.ui-aura-computer-sizes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+.ui-aura-computer-sizes > [role="radiogroup"] {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+}
+.ui-aura-computer-sizes label {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.ui-aura-computer-sizes label + label {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-aura-computer-sizes label[data-off] {
+  cursor: default;
+  opacity: 0.6;
+}
+.ui-aura-computer-sizes label[data-picked] strong {
+  color: var(--color-accent-green, #4dc1a4);
+}
+.ui-aura-computer-sizes input {
+  margin: 0;
+  accent-color: var(--color-accent-green, #4dc1a4);
+}
+.ui-aura-computer-sizes label > span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ui-aura-computer-sizes strong {
+  font-weight: 500;
+}
+.ui-aura-computer-sizes small,
+.ui-aura-computer-sizes em {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-style: normal;
+}
+.ui-aura-computer-sizes em {
+  white-space: nowrap;
+}

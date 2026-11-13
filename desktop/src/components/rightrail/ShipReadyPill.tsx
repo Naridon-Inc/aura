@@ -1,6 +1,6 @@
 // ShipReadyPill — the ambient ship-readiness signal at the commit moment.
 //
-// Lives in the branch row of CommitInput, right where you commit/push. It used
+// Lives beside the commit button in CommitInput, right where you commit/push. It used
 // to be a dedicated "Ready to ship" row in the Trace rail; it's now a live
 // status, not a place you navigate to. A green dot means the fast safety gates
 // pass (no leaked secrets, no half-finished code); amber/red means something

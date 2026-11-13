@@ -1,0 +1,83 @@
+/* First run: the shared step flow, given the whole window. The page and the
+   step list are the cloud setup's own rules; this only frames them and
+   covers the states those rules leave out. */
+
+.ui-onboarding {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+/* Clear the window controls that sit over the top-left corner. */
+.ui-onboarding > .ui-cloud-setup {
+  padding-top: 56px;
+}
+
+/* A row that can't be pressed right now: connected already, or waiting on
+   another row's sign-in. */
+.ui-onboarding-rows > button:disabled {
+  cursor: default;
+}
+.ui-onboarding-rows > button:disabled:hover {
+  background: none;
+}
+.ui-onboarding-rows > button[data-blocked] > * {
+  opacity: 0.5;
+}
+.ui-onboarding-rows > button > small {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* A command to run by hand, with its copy button beside it. */
+.ui-onboarding-command {
+  width: 100%;
+}
+.ui-onboarding-command > code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: pre;
+  font-family: var(--font-mono);
+}
+
+.ui-onboarding-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+.ui-onboarding-form .ui-cloud-segments {
+  margin-bottom: 0;
+}
+.ui-onboarding-form .ui-cloud-inline > :first-child {
+  flex: 1;
+}
+.ui-onboarding-code {
+  font-family: var(--font-mono);
+  color: var(--ui-fg);
+  letter-spacing: 0.06em;
+}
+.ui-onboarding-alert {
+  width: 100%;
+}
+/* A recent folder's full path: it gives way before the name does. */
+.ui-onboarding-rows > button > small.ui-onboarding-path {
+  display: block;
+  min-width: 0;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A small label over the list it names. */
+.ui-onboarding-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}

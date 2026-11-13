@@ -1,0 +1,142 @@
+/* The clash resolver: the open clashes as a list on the left (the same
+   bordered box the note dialog and the Dashboard's repository list use),
+   the chosen clash on the right with a toggle group for which version to
+   keep, both versions side by side, and an optional combined version. */
+.ui-conflicts-show-resolved {
+  margin-right: auto;
+  font-size: 13px;
+  cursor: pointer;
+}
+.ui-conflicts-alert {
+  margin-bottom: 16px;
+}
+.ui-conflicts-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 12px 8px;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-conflicts {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 16px;
+  max-height: 60vh;
+  min-height: 0;
+}
+.ui-conflicts-list {
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+.ui-conflicts-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ui-fg);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.ui-conflicts-row:hover {
+  background: var(--ui-accent);
+}
+.ui-conflicts-row[aria-pressed="true"] {
+  background: var(--ui-accent);
+}
+.ui-conflicts-row:focus-visible {
+  outline: 2px solid var(--ui-ring);
+  outline-offset: -2px;
+}
+.ui-conflicts-row-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-conflicts-row-title > strong {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-conflicts-row-title > svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--ui-green);
+}
+.ui-conflicts-row > small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-conflicts-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+.ui-conflicts-sides {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+.ui-conflicts-side {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+.ui-conflicts-side > h3 {
+  margin: 0;
+  padding: 6px 8px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--ui-border);
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-conflicts-side > pre {
+  max-height: 240px;
+  margin: 0;
+  padding: 8px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+}
+.ui-conflicts-custom {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ui-conflicts-meta {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}

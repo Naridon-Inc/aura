@@ -30,17 +30,39 @@
 //     machine + tab id, so a restored tab re-attaches rather than dialling a
 //     second client into the same pane.
 //
-// Schema is versioned via `v`. Mismatch on load = treat as no snapshot, so a
-// tab list comes back empty rather than corrupt.
+// Schema is versioned via `v`. An unreadable blob is treated as no snapshot, so
+// a tab list comes back empty rather than corrupt — but a blob from an OLDER
+// schema we still understand is migrated instead of dropped, because the only
+// copy of "you had three agents open on that box" is not worth throwing away
+// over a field it predates.
 
 import type { BoxSession } from "./api";
 import { setDurable } from "./localStore";
+import { carryForward, knownIdsOf } from "./machineRef";
+import {
+  addPaneBeside,
+  parsePaneTree,
+  prunePanes,
+  paneCount,
+  paneHolds,
+  paneLeaf,
+  paneTabIds,
+  MAX_REMOTE_PANES,
+  type RemotePaneDirection,
+  type RemotePaneTree,
+} from "./remotePaneTree";
 import { normalizeRoot, remotePlaceKey } from "./remotePlaces";
 
-const SCHEMA_VERSION = 1;
+/** 2 added `layout` — which of the open tabs are on screen together. v1 blobs
+ *  are read and carried forward with no layout, which is exactly what they
+ *  meant. */
+const SCHEMA_VERSION = 2;
 
-/** A tab is either the conversation about this machine, or a session the
- *  machine itself is holding.
+/** Schemas whose blobs can still be read. */
+const READABLE_VERSIONS: readonly number[] = [1, 2];
+
+/** A tab is the conversation about this machine, a session the machine
+ *  itself is holding, or a file or diff the frame's right panel opened.
  *
  *  Terminal tabs used to be invented by the workspace — a local id, a locally
  *  chosen tmux name, and one saved directory for all of them. That made every
@@ -48,38 +70,27 @@ const SCHEMA_VERSION = 1;
  *  box a single-project machine. Now the box names its own sessions and a tab
  *  only ever attaches to one, which is what lets the CLI, yesterday's laptop and
  *  a teammate all show up in the same list. */
-/** The work surfaces a remote workspace can open — the same five a local
- *  workspace has beside its chat and terminals. One tab of each kind at most:
- *  the files of a project are one thing, however many times you ask. */
-export type RemoteWorkKind = "files" | "changes" | "git" | "prs" | "run";
-
-export const REMOTE_WORK_KINDS: readonly RemoteWorkKind[] = [
-  "files",
-  "changes",
-  "git",
-  "prs",
-  "run",
-];
-
-function isWorkKind(v: unknown): v is RemoteWorkKind {
-  return typeof v === "string" && (REMOTE_WORK_KINDS as readonly string[]).includes(v);
-}
-
-/** The tab id for a work surface. Prefixed so a tmux session that happens to
- *  be named `files` cannot be mistaken for the file tree. */
-export function workTabId(kind: RemoteWorkKind): string {
-  return `work:${kind}`;
-}
-
 export type RemoteTab =
   | { id: "cloud"; kind: "cloud"; label: string }
   | {
-      /** `workTabId(work)`. */
+      /** `fileTabId(path)`. */
       id: string;
-      kind: "work";
-      /** Which surface: the local pane of that name, mounted on the project
-       *  where it stands — files, changes and git read off the machine. */
-      work: RemoteWorkKind;
+      kind: "file";
+      /** Local-spelled absolute path under the project; the wire re-roots it
+       *  onto the machine. Opened from the right panel's All files or Changes. */
+      path: string;
+    }
+  | {
+      /** `diffTabId(sha)`. One per scope, the way the workspace names its
+       *  diff tab after what it compares: "Uncommitted changes", or one
+       *  commit. Opening another file of the same scope re-points it. */
+      id: string;
+      kind: "diff";
+      /** The commit, or null for the working tree against HEAD. */
+      sha: string | null;
+      /** The file in view, relative to the project; null shows the scope's
+       *  summary. */
+      path: string | null;
     }
   | {
       id: string;
@@ -93,6 +104,21 @@ export type RemoteTab =
        *  attached read-only cannot be talked into accepting input. */
       readOnly: boolean;
     };
+
+/** The tab id for a file opened to edit. */
+export function fileTabId(path: string): string {
+  return `file:${path}`;
+}
+
+/** The tab id for a diff scope — the working tree, or one commit. */
+export function diffTabId(sha: string | null): string {
+  return sha ? `diff:${sha}` : "diff:uncommitted";
+}
+
+/** What a diff tab is called: the scope it compares. */
+export function diffTabLabel(sha: string | null): string {
+  return sha ? `Commit ${sha.slice(0, 7)}` : "Uncommitted changes";
+}
 
 /** The tab id for a session, given how you're joining it. */
 export function tabIdFor(session: string, readOnly: boolean): string {
@@ -110,14 +136,22 @@ function chatTab(): RemoteTab {
 export type RemoteWorkspaceSnapshot = {
   v: number;
   tabs: RemoteTab[];
-  /** Which tab is in front. Always names one of `tabs`. */
+  /** Which tab is in front. Always names one of `tabs`, and when a layout is in
+   *  view it is also which PANE holds the keyboard. */
   activeId: string;
+  /** Which open tabs are shown together, and how they divide the body. Null —
+   *  the usual case — means the body is whatever tab is in front.
+   *
+   *  A view of the strip, never a second place a tab can live: every leaf is a
+   *  tab id that is also in `tabs`, so closing a tab removes the pane and there
+   *  is no way to be in a pane and off the strip. */
+  layout: RemotePaneTree | null;
 };
 
 /** A place you have opened but not yet done anything in: the machine's own
  *  conversation, and nothing else. */
 export function emptyRemoteSnapshot(): RemoteWorkspaceSnapshot {
-  return { v: SCHEMA_VERSION, tabs: [chatTab()], activeId: CHAT_TAB_ID };
+  return { v: SCHEMA_VERSION, tabs: [chatTab()], activeId: CHAT_TAB_ID, layout: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -188,35 +222,59 @@ export function sameRemoteSlot(
  *  list) is a worse outcome than a slot that reads as fresh. */
 function rehydrate(parsed: RemoteWorkspaceSnapshot): RemoteWorkspaceSnapshot {
   const tabs = Array.isArray(parsed.tabs) ? parsed.tabs : [];
-  const seenWork = new Set<RemoteWorkKind>();
+  const seenIds = new Set<string>();
   const opened = tabs.flatMap((t): RemoteTab[] => {
     if (t?.kind === "session") {
       return !!t.session?.name && typeof t.id === "string" ? [t] : [];
     }
-    if (t?.kind === "work" && isWorkKind(t.work) && !seenWork.has(t.work)) {
-      // One of each, and its id re-spelled here rather than trusted: the id
-      // is derived, and a blob that disagrees with the derivation is a blob
-      // whose focus would point at a tab that is not there.
-      seenWork.add(t.work);
-      return [{ id: workTabId(t.work), kind: "work", work: t.work }];
+    if (t?.kind === "file" && typeof t.path === "string" && t.path) {
+      const id = fileTabId(t.path);
+      if (seenIds.has(id)) return [];
+      seenIds.add(id);
+      return [{ id, kind: "file", path: t.path }];
     }
+    if (t?.kind === "diff") {
+      const sha = typeof t.sha === "string" && /^[0-9a-f]{7,64}$/.test(t.sha) ? t.sha : null;
+      const id = diffTabId(sha);
+      if (seenIds.has(id)) return [];
+      seenIds.add(id);
+      return [{ id, kind: "diff", sha, path: typeof t.path === "string" ? t.path : null }];
+    }
+    // Anything else — the files/changes/git/PRs/run tabs older builds opened,
+    // whose work the frame's right panel and header now do — is dropped.
     return [];
   });
   const out = [chatTab(), ...opened];
   const activeId = out.some((t) => t.id === parsed.activeId)
     ? parsed.activeId
     : CHAT_TAB_ID;
-  return { v: SCHEMA_VERSION, tabs: out, activeId };
+  // The arrangement is checked against the tabs that survived rather than
+  // trusted: a pane naming a tab this slot no longer has would be a terminal
+  // with nothing behind it. A v1 blob has no `layout` at all and `parsePaneTree`
+  // says so by returning null — which is what v1 meant.
+  const ids = new Set(out.map((t) => t.id));
+  const layout = parsePaneTree(parsed.layout, (id) => ids.has(id));
+  return { v: SCHEMA_VERSION, tabs: out, activeId, layout };
 }
 
 export function loadRemoteSnapshot(
   slot: RemoteSlot,
 ): RemoteWorkspaceSnapshot | null {
   try {
-    const raw = localStorage.getItem(remoteSlotKey(slot));
+    // A strip saved under an id this machine had before — the address key it
+    // was renamed from, or the id it was reconnected as — is this machine's
+    // strip, and is moved to the id it goes by now as it is read.
+    const raw = carryForward(
+      localStorage,
+      (machineId) => remoteSlotKey({ ...slot, machineId }),
+      knownIdsOf(slot.machineId),
+    );
     if (!raw) return null;
     const parsed = JSON.parse(raw) as RemoteWorkspaceSnapshot;
-    if (parsed?.v !== SCHEMA_VERSION) return null;
+    // Older-but-readable is migrated, not discarded. Dropping a v1 blob would
+    // empty the strip of everyone who had tabs open on a box the day they
+    // updated, to save reading one field we already treat as optional.
+    if (!READABLE_VERSIONS.includes(parsed?.v)) return null;
     return rehydrate(parsed);
   } catch {
     return null;
@@ -282,7 +340,10 @@ function carryInto(
   const activeId = tabs.some((t) => t.id === current.activeId)
     ? current.activeId
     : held.activeId;
-  return { v: SCHEMA_VERSION, tabs, activeId };
+  // The slot's own arrangement wins. Tabs opened while the box was still
+  // nameless are carried in as tabs, not as panes: how the body was divided is
+  // a thing about this place, and the place is the one we are folding into.
+  return { v: SCHEMA_VERSION, tabs, activeId, layout: held.layout };
 }
 
 /** Serialize the slot you are leaving, then read the one you are entering back.
@@ -345,21 +406,39 @@ export function openSessionTab(
         t.id === id && t.kind === "session" ? { ...t, session } : t,
       )
     : [...snap.tabs, { id, kind: "session" as const, session, readOnly }];
-  return { v: SCHEMA_VERSION, tabs, activeId: id };
+  return { ...snap, v: SCHEMA_VERSION, tabs, activeId: id };
 }
 
-/** Open a work surface, and look at it. Already open is a focus: there is one
- *  file tree of a project, and a second tab of it would be the same tree
- *  drawn twice. */
-export function openWorkTab(
+/** Open a file to edit, and look at it. Already open is a focus. */
+export function openFileTab(
   snap: RemoteWorkspaceSnapshot,
-  kind: RemoteWorkKind,
+  path: string,
 ): RemoteWorkspaceSnapshot {
-  const id = workTabId(kind);
+  const id = fileTabId(path);
   if (snap.tabs.some((t) => t.id === id)) return focusRemoteTab(snap, id);
   return {
+    ...snap,
     v: SCHEMA_VERSION,
-    tabs: [...snap.tabs, { id, kind: "work", work: kind }],
+    tabs: [...snap.tabs, { id, kind: "file", path }],
+    activeId: id,
+  };
+}
+
+/** Open a scope's diff tab on `path`, and look at it. The scope's tab is
+ *  re-pointed when it is already open, so a run of clicks down the Changes
+ *  list reads in one tab rather than leaving a trail of them. */
+export function openDiffTab(
+  snap: RemoteWorkspaceSnapshot,
+  sha: string | null,
+  path: string | null,
+): RemoteWorkspaceSnapshot {
+  const id = diffTabId(sha);
+  const tab: RemoteTab = { id, kind: "diff", sha, path };
+  const open = snap.tabs.some((t) => t.id === id);
+  return {
+    ...snap,
+    v: SCHEMA_VERSION,
+    tabs: open ? snap.tabs.map((t) => (t.id === id ? tab : t)) : [...snap.tabs, tab],
     activeId: id,
   };
 }
@@ -378,11 +457,96 @@ export function closeRemoteTab(
   if (id === CHAT_TAB_ID) return snap;
   const tabs = snap.tabs.filter((t) => t.id !== id);
   if (tabs.length === snap.tabs.length) return snap;
+  // A pane of a closed tab is a pane with nothing behind it, so the
+  // arrangement loses it here rather than on the next read. Closing one half of
+  // a split leaves the other half as the body, which is what one pane means.
+  const layout = snap.layout ? prunePanes(snap.layout, (t) => t !== id) : null;
+  const nextLayout = layout && paneCount(layout) > 1 ? layout : null;
+  // Focus follows the split before it follows the strip: closing a pane of an
+  // arrangement you are working in should land you in the pane beside it, not
+  // on whatever tab happens to be last in the list.
+  const neighbour = nextLayout ? paneTabIds(nextLayout)[0] : null;
   const activeId =
     snap.activeId === id
-      ? (tabs[tabs.length - 1]?.id ?? CHAT_TAB_ID)
+      ? (neighbour ?? tabs[tabs.length - 1]?.id ?? CHAT_TAB_ID)
       : snap.activeId;
-  return { v: SCHEMA_VERSION, tabs, activeId };
+  return { v: SCHEMA_VERSION, tabs, activeId, layout: nextLayout };
+}
+
+/** The arrangement the body should draw right now, or null for the plain
+ *  one-tab body.
+ *
+ *  A layout is only in view while you are standing in it. Focusing a tab that
+ *  is not one of its panes shows that tab alone and LEAVES the arrangement
+ *  recorded, so clicking back into any of its panes restores it — the same way
+ *  a window you minimised is still arranged. Flattening it on every excursion
+ *  would mean looking at the file tree costs you the split you just built. */
+export function panesInView(
+  snap: RemoteWorkspaceSnapshot,
+): RemotePaneTree | null {
+  if (!snap.layout) return null;
+  return paneHolds(snap.layout, snap.activeId) ? snap.layout : null;
+}
+
+/** Put another open tab beside one that is on screen.
+ *
+ *  This is what "split" means on a machine that isn't yours. Locally, splitting
+ *  makes a second terminal, because a shell is free. A session on a box is a
+ *  thing someone started on purpose and it already has a tab, so splitting here
+ *  cannot mean "make me another one" — ＋ does that, deliberately, with a
+ *  project and an agent to choose. It means: show me these two at once.
+ *
+ *  `beside` is the pane doing the asking, named rather than taken from
+ *  `activeId`: every pane of a split carries its own toolbar, and the one you
+ *  opened the menu on is the one the new pane belongs next to.
+ *
+ *  Unchanged — the same object back — when there is nothing to do: an unknown
+ *  tab, the tab it would sit beside, a tab already on screen, or a body that is
+ *  already as divided as a laptop screen can usefully hold. */
+export function showPaneBeside(
+  snap: RemoteWorkspaceSnapshot,
+  beside: string,
+  tabId: string,
+  direction: RemotePaneDirection,
+): RemoteWorkspaceSnapshot {
+  if (tabId === beside) return snap;
+  if (!snap.tabs.some((t) => t.id === tabId)) return snap;
+  const shown = panesInView(snap);
+  const base = shown && paneHolds(shown, beside) ? shown : paneLeaf(beside);
+  if (paneHolds(base, tabId)) return snap;
+  if (paneCount(base) >= MAX_REMOTE_PANES) return snap;
+  const layout = addPaneBeside(base, beside, tabId, direction);
+  if (layout === base) return snap;
+  // Focus moves to what you just asked for. Asking to see a build log beside
+  // an agent and then having to click the log is a step with no decision in it.
+  return { ...snap, v: SCHEMA_VERSION, layout, activeId: tabId };
+}
+
+/** Give the body back to the tab in front, dropping the arrangement.
+ *
+ *  Not a close: every pane of it is a tab on the strip and stays there, which
+ *  is the whole reason the layout is allowed to be a view. */
+export function showPaneAlone(
+  snap: RemoteWorkspaceSnapshot,
+): RemoteWorkspaceSnapshot {
+  if (!snap.layout) return snap;
+  return { ...snap, v: SCHEMA_VERSION, layout: null };
+}
+
+/** Which other open tabs could be put beside `beside` — the split menu's rows,
+ *  in strip order. Panes already on screen are left out because they are
+ *  already there, and the answer is empty when the body is as divided as it can
+ *  be, so a full split says "no room" by having nothing to offer rather than by
+ *  silently doing nothing. */
+export function paneCandidates(
+  snap: RemoteWorkspaceSnapshot,
+  beside: string,
+): RemoteTab[] {
+  const shown = panesInView(snap);
+  if (shown && paneCount(shown) >= MAX_REMOTE_PANES) return [];
+  return snap.tabs.filter(
+    (t) => t.id !== beside && !(shown && paneHolds(shown, t.id)),
+  );
 }
 
 /** Look at a tab you already have open. Unknown ids change nothing. */

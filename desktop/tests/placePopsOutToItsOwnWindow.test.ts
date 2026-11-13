@@ -66,6 +66,7 @@ import {
   type PopoutSpec,
 } from "../src/lib/popout";
 import { readSrc } from "./support/code";
+import { readRosterSrc } from "./support/roster";
 
 const LOCAL = "/Users/me/code/aura";
 const BOX = "me@build-01";
@@ -422,7 +423,10 @@ describe("the popped window survives what the parent does next", () => {
 const main = await readSrc("main.tsx");
 const app = await readSrc("App.tsx");
 const remote = await readSrc("components/cloud/RemoteWorkspace.tsx");
-const roster = await readSrc("components/WorkspaceRoster.tsx");
+// The machine's menu (open in its own window, leave) lives in its details
+// popover at the end of the strip.
+const machineDetails = await readSrc("components/cloud/MachineDetails.tsx");
+const roster = await readRosterSrc();
 
 describe("the popped window boots standing in its place", () => {
   test("main hands the place to App, not just the root", () => {
@@ -486,10 +490,10 @@ describe("popping a place out does not take it off the window you clicked", () =
   });
 
   test("the menu row is a window, and Leave is still the only way out", () => {
-    const row = between(remote, "{onPopOut && (", "Open in its own window");
-    expect(row).toContain("onPopOut();");
+    const row = between(machineDetails, "{onPopOut && (", "Open in its own window");
+    expect(row).toContain("onClick={onPopOut}");
     expect(row).not.toContain("onClose");
-    expect(remote).toContain("Leave this machine");
+    expect(machineDetails).toContain("Leave this machine");
   });
 });
 
@@ -505,14 +509,14 @@ describe("both kinds of place are offered the same window", () => {
     // `Place` now, so `user@host` comes off its identity rather than off a
     // machine row the menu would have to be handed separately.
     expect(roster).toContain("const at = `${p.identity.user}@${p.identity.host}`");
-    expect(roster).toContain("openPlaceMenu(e, place, work, at,");
-    expect(roster).toContain("onContextMenu={openMenu}");
+    expect(roster).toContain("placeMenu({ place, title: work, subtitle: at,");
+    expect(roster).toContain("<ContextMenuTrigger asChild>");
     expect(roster).toContain('aria-label="Machine actions"');
     expect(roster).toContain('aria-label="Cloud work actions"');
   });
 
   test("the row pops out the place it stands for, not a path near it", () => {
-    const item = between(roster, 'menu.kind === "place" ? (', "Open in its own window");
+    const item = between(roster, "export function placeMenu(", "title: `Aura. ${menu.title}`");
     expect(item).toContain("place: menu.place");
     expect(item).toContain('kind: "workspace"');
     // Going there and opening a window are different rows, and the menu keeps

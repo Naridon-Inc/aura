@@ -5,17 +5,21 @@
 // closed. One key, one reader, one writer — a model starred in either chat is
 // starred in both, and survives a reload.
 
+import { isRetiredRowKey } from "./retiredBrains";
+
 export const MODEL_FAVORITES_KEY = "aura.manager.modelFavorites";
 
 /** The stored stars (`rowKey(brainId, model)` strings). Empty when storage is
- *  unavailable or holds something that isn't a string list. */
+ *  unavailable or holds something that isn't a string list. A star on a
+ *  brain the app no longer offers is left out, so it neither holds a loadout
+ *  slot nor takes a chord. */
 export function loadModelFavorites(): string[] {
   try {
     const raw = localStorage.getItem(MODEL_FAVORITES_KEY);
     if (!raw) return [];
     const arr = JSON.parse(raw) as unknown;
     return Array.isArray(arr)
-      ? arr.filter((x): x is string => typeof x === "string")
+      ? arr.filter((x): x is string => typeof x === "string" && !isRetiredRowKey(x))
       : [];
   } catch {
     return [];

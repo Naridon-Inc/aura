@@ -170,6 +170,29 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// The gate's answer for one tool call, for a caller that is not a hook.
+///
+/// `aura acp-proxy` sits between an ACP client and an agent; when the agent
+/// asks permission for a tool call, this is the verdict a Claude Code hook
+/// would have got for the same call — same classifier, same policy, same
+/// strict-mode lock, same grants.
+pub(crate) struct GateCall {
+    pub decision: &'static str,
+    pub title: String,
+    pub reason: String,
+}
+
+pub(crate) fn verdict_for(tool_name: &str, tool_input: Value, cwd: Option<&str>) -> GateCall {
+    let v = decide(ToolInvocation {
+        tool_name: tool_name.to_string(),
+        tool_input,
+        session_id: None,
+        cwd: cwd.map(str::to_string),
+        agent_id: None,
+    });
+    GateCall { decision: v.decision, title: v.title, reason: v.reason }
+}
+
 /// Best-effort: emit a throttled `editing` awareness event for an allowed
 /// Write/Edit so the Team Radar reflects in-flight work automatically. Silent on
 /// any failure — this must never disturb the agent's tool call.

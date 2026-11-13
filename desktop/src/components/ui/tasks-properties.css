@@ -1,0 +1,102 @@
+/* Task properties — label/value rows in the detail aside. */
+.ui-tasks-properties {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 2px;
+  margin: 0;
+  font-size: 12px;
+}
+.ui-tasks-properties > dt {
+  color: var(--ui-muted-fg);
+  line-height: 28px;
+}
+.ui-tasks-properties > dd {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 28px;
+  margin: 0;
+}
+.ui-tasks-property-trigger {
+  max-width: 100%;
+  margin-left: -8px;
+  justify-content: flex-start;
+  font-weight: 400;
+}
+.ui-tasks-property-trigger > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-tasks-property-trigger > svg:last-child {
+  color: var(--ui-muted-fg);
+}
+.ui-tasks-property-empty {
+  color: var(--ui-muted-fg);
+}
+.ui-tasks-property-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.ui-tasks-property-tags > .ui-badge {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.ui-tasks-property-more {
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  line-height: 20px;
+}
+.ui-tasks-property-tags-trigger {
+  display: flex;
+  width: calc(100% + 16px);
+  margin: 0 -8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  text-align: left;
+}
+.ui-tasks-property-tags-trigger:hover,
+.ui-tasks-property-tags-trigger[data-state="open"] {
+  background: var(--ui-hover);
+}
+.ui-tasks-property-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 240px;
+  padding: 8px;
+}
+.ui-tasks-property-popover .ui-form-field {
+  margin: 0;
+}
+.ui-tasks-property-options {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0 -4px;
+}
+.ui-tasks-property-options > .ui-check-label {
+  padding: 4px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.ui-tasks-property-options > .ui-check-label:hover {
+  background: var(--ui-hover);
+}
+.ui-tasks-property-popover > p {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-tasks-property-popover > .ui-button {
+  align-self: flex-start;
+}

@@ -30,6 +30,8 @@ import { shortRevision, type EvidenceItem } from "../../lib/sessionEvidence";
 import { useRunEvidence } from "../../lib/useRunEvidence";
 import { relativeAge } from "../../lib/relativeTime";
 import { Button } from "../ui/button";
+import { TraceMark } from "../ui/trace-list";
+import { TraceItem, TraceItems, TraceLine, TraceSection } from "../ui/trace-report";
 
 export function SessionEvidence({
   repoRoot,
@@ -74,11 +76,8 @@ export function SessionEvidence({
   });
 
   return (
-    <section>
-      <div className="mb-2.5">
-        <h2 className="section-label">What this does and doesn&apos;t tell you</h2>
-      </div>
-      <div className="overflow-hidden rounded-lg border border-line-soft bg-bg-1">
+    <TraceSection title="What this does and doesn&apos;t tell you">
+      <TraceItems>
         {items.map((item) => (
           <EvidenceRow
             key={item.kind}
@@ -94,17 +93,10 @@ export function SessionEvidence({
             target={item.kind === "executed_check" ? actionTarget("checks", scope, working) : ""}
           />
         ))}
-      </div>
-    </section>
+      </TraceItems>
+    </TraceSection>
   );
 }
-
-const TONE_COLOR: Record<EvidenceTone, string> = {
-  good: "var(--color-accent-green)",
-  bad: "var(--color-red)",
-  warn: "var(--color-amber)",
-  muted: "var(--color-text-4)",
-};
 
 function EvidenceRow({
   item,
@@ -132,81 +124,54 @@ function EvidenceRow({
   const claimed = item.status === "pass" || item.status === "fail";
 
   return (
-    <div className="border-b border-line-soft px-3.5 py-3 last:border-b-0">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="text-base font-medium text-text-1">{item.title}</span>
-        <StatusChip status={item.status} tone={tone} />
-        {item.revision ? (
-          <span
-            className="font-mono text-2xs text-text-4"
-            title="The version of the code this result was measured against"
-          >
-            {shortRevision(item.revision)}
-          </span>
-        ) : null}
-        {item.checkedAt != null ? (
-          <span className="text-xs text-text-5">{relativeAge(item.checkedAt)}</span>
-        ) : null}
-        {onRecheck ? (
+    <TraceItem
+      tone={tone}
+      title={item.title}
+      marks={
+        <>
+          <StatusMark status={item.status} tone={tone} />
+          {item.revision ? (
+            <TraceMark title="The version of the code this result was measured against">
+              {shortRevision(item.revision)}
+            </TraceMark>
+          ) : null}
+          {item.checkedAt != null ? <TraceMark>{relativeAge(item.checkedAt)}</TraceMark> : null}
+        </>
+      }
+      actions={
+        onRecheck ? (
           <Button
             type="button"
-            variant="subtle"
-            size="xs"
+            variant="secondary"
+            size="sm"
             onClick={onRecheck}
             disabled={rechecking}
-            className="ml-auto text-xs text-text-3"
           >
             {rechecking ? "Running…" : "Run them now"}
           </Button>
-        ) : null}
-      </div>
-
-      <p className="mt-1 text-base leading-snug text-text-2">{item.detail}</p>
-
-      {failure ? (
-        <p className="mt-1 text-sm leading-snug" style={{ color: "var(--color-red)" }}>
-          {failure}
-        </p>
-      ) : null}
-
-      {target && onRecheck ? (
-        <p className="mt-1 text-sm leading-snug text-text-4">{target}</p>
-      ) : null}
-
-      {item.staleReason ? (
-        <p
-          className="mt-1 text-sm leading-snug"
-          style={{ color: "var(--color-amber)" }}
-        >
-          {item.staleReason}
-        </p>
-      ) : null}
-
+        ) : null
+      }
+    >
+      <TraceLine>{item.detail}</TraceLine>
+      {failure ? <TraceLine tone="danger">{failure}</TraceLine> : null}
+      {target && onRecheck ? <TraceLine tone="note">{target}</TraceLine> : null}
+      {item.staleReason ? <TraceLine tone="warn">{item.staleReason}</TraceLine> : null}
       {/* Only a row with a result needs the caveat. An empty row's own line
           already says the whole thing, and repeating "missing is not passing"
           under every one of them is how a section stops being read. */}
       {claimed ? (
-        <p className="mt-1 text-sm leading-snug text-text-4">
-          Doesn&apos;t tell you: {meaning.doesNotEstablish}
-        </p>
+        <TraceLine tone="note">Doesn&apos;t tell you: {meaning.doesNotEstablish}</TraceLine>
       ) : null}
-    </div>
+    </TraceItem>
   );
 }
 
-function StatusChip({ status, tone }: { status: EvidenceStatus; tone: EvidenceTone }) {
-  const color = TONE_COLOR[tone];
+const MARK_TONE = { good: "good", bad: "danger", warn: "warn", muted: undefined } as const;
+
+function StatusMark({ status, tone }: { status: EvidenceStatus; tone: EvidenceTone }) {
   return (
-    <span
-      title={statusHint(status)}
-      className="shrink-0 rounded px-1.5 py-px text-2xs"
-      style={{
-        color,
-        background: `color-mix(in oklab, ${color} 12%, transparent)`,
-        border: `0.5px solid color-mix(in oklab, ${color} 32%, transparent)`,
-      }}
-    >
+    <TraceMark tone={MARK_TONE[tone]} title={statusHint(status)}>
       {statusWord(status)}
-    </span>
+    </TraceMark>
   );
 }

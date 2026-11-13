@@ -6,11 +6,15 @@
 // for collisions but DO appear here (it's a feed of the whole team, me
 // included), dimmed via the agent/human styling.
 
+import { ShieldCheck } from "lucide-react";
 import { CategorySection } from "../CategorySection";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip";
 import type { RadarEvent } from "../../../lib/api";
 import { agoFromTs, actorShort, kindLabel, activityStatus } from "./radarFormat";
 import { ActorMark } from "./ActorMark";
+import "../../ui/details-pulls.css";
+import "../../ui/details-radar.css";
+import "../../ui/radar-rows.css";
 
 type Props = {
   events: RadarEvent[];
@@ -30,17 +34,18 @@ export function ActivitySection({ events, isOpen, onToggle, onOpenFile }: Props)
       {/* An empty feed is a real answer, not a loading state. The engine only
           hands us events from the last day, so nothing here means nobody has
           been in this project recently — say that, rather than leaving a blank
-          panel that reads as broken. */}
+          panel that reads as broken. The band's own quiet line, word for word
+          and in its style. */}
       {events.length === 0 && (
-        <div className="px-2 py-1.5 text-xs text-text-4">
-          Quiet. Nobody has touched this project in the last day.
-        </div>
+        <p className="ui-details-radar-quiet">
+          Quiet. Nobody has touched this repository in the last day.
+        </p>
       )}
       {events.map((e) => {
-        // One plain-language line: "Ashiq — working on create session". The
-        // actor's name leads (bold), then a human status; no function names or
-        // git verbs leak into the row (they live in the tooltip for anyone who
-        // wants the mechanical detail).
+        // Two plain-language lines: the actor's name, then a human status
+        // ("working on create session"). No function names or git verbs leak
+        // into the row — they live in the tooltip for anyone who wants the
+        // mechanical detail.
         const status = activityStatus(e);
         return (
           <Tooltip key={e.id}>
@@ -48,47 +53,37 @@ export function ActivitySection({ events, isOpen, onToggle, onOpenFile }: Props)
               <button
                 type="button"
                 onClick={() => e.file && onOpenFile?.(e.file)}
-                className="group w-full flex items-center gap-2 px-2 py-1 rounded-sm hover:bg-state-hover transition-colors min-w-0 text-left"
+                className="ui-details-pull ui-radar-row"
               >
-                <ActorMark actor={e.actor} isAgent={e.is_agent} size={18} />
-                <span className="flex-1 min-w-0 flex items-baseline gap-1.5">
-                  <span className="text-sm text-text-2 font-medium shrink-0">
-                    {actorShort(e.actor)}
-                  </span>
-                  <span className="text-xs text-text-3 truncate min-w-0">
-                    {status}
-                  </span>
-                </span>
-                {e.verified && <VerifiedTick />}
-                <span className="shrink-0 text-2xs text-text-4 tabular-nums">
-                  {agoFromTs(e.ts)}
-                </span>
+                <div>
+                  <ActorMark actor={e.actor} isAgent={e.is_agent} size={16} />
+                  <span className="ui-details-pull-title">{actorShort(e.actor)}</span>
+                  {e.verified && <VerifiedTick />}
+                  <span className="ui-radar-age">{agoFromTs(e.ts)}</span>
+                </div>
+                <div className="ui-details-pull-meta ui-radar-meta">
+                  <span>{status}</span>
+                </div>
               </button>
             </TooltipTrigger>
-            <TooltipContent side="left" className="text-xs">
-              <div className="font-medium mb-0.5 truncate max-w-[260px]">
+            <TooltipContent side="left" className="ui-radar-tip">
+              <strong>
                 {e.actor}
                 {e.is_agent ? " · agent" : ""}
-              </div>
-              <div className="text-text-3 leading-snug">
+              </strong>
+              <p>
                 {kindLabel(e.kind)}
                 {e.symbol ? ` ${e.symbol}` : ""}
                 {e.file ? ` · ${e.file}` : ""}
-              </div>
-              {e.intent && (
-                <div className="text-text-4 leading-snug mt-0.5 italic max-w-[260px]">
-                  “{e.intent}”
-                </div>
-              )}
+              </p>
+              {e.intent && <p className="ui-radar-tip-intent">“{e.intent}”</p>}
               {e.verified ? (
-                <div className="text-accent-green leading-snug mt-0.5 flex items-center gap-1">
+                <p className="ui-radar-tip-verified">
                   <VerifiedTick />
                   verified · signature checks out
-                </div>
+                </p>
               ) : e.sig ? (
-                <div className="text-text-4 leading-snug mt-0.5">
-                  signed · not verified on this machine
-                </div>
+                <p className="ui-radar-tip-quiet">signed · not verified on this machine</p>
               ) : null}
             </TooltipContent>
           </Tooltip>
@@ -98,27 +93,18 @@ export function ActivitySection({ events, isOpen, onToggle, onOpenFile }: Props)
   );
 }
 
-// A tiny shield-check that marks an event whose embedded pubkey re-derives its
-// key_id AND validates the signature — cryptographic proof it's genuinely from
-// the actor it claims, verified locally on this machine (not just "has a sig").
-// Semantic accent-green (success/verified), never the interactive brand accent.
+// Marks an event whose embedded pubkey re-derives its key_id AND validates the
+// signature — cryptographic proof it's genuinely from the actor it claims,
+// verified locally on this machine (not just "has a sig"). Success green,
+// never the interactive accent.
 function VerifiedTick() {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      width={11}
-      height={11}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2.25}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="shrink-0 text-accent-green"
+    <ShieldCheck
+      className="ui-radar-verified"
       aria-label="verified"
+      role="img"
     >
       <title>verified · signature checks out</title>
-      <path d="M12 2 4 5v6c0 4.5 3.2 7.9 8 9 4.8-1.1 8-4.5 8-9V5l-8-3Z" />
-      <path d="m9 12 2 2 4-4" />
-    </svg>
+    </ShieldCheck>
   );
 }

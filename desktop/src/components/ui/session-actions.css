@@ -1,0 +1,123 @@
+/* A session's header actions: Resume (with its confirm) and the Rewind menu. */
+.ui-session-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-session-actions-note {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ui-faint);
+}
+.ui-session-actions-note[data-tone="error"] {
+  color: var(--ui-destructive);
+}
+
+/* Resume confirm: what starts, which conversation, where it runs. */
+.ui-popover.ui-resume-popover {
+  width: 340px;
+  padding: 0;
+}
+.ui-resume-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ui-muted-fg);
+}
+.ui-resume-confirm header strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ui-fg);
+}
+.ui-resume-confirm header p {
+  margin-top: 2px;
+}
+.ui-resume-confirm dl > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 24px;
+}
+.ui-resume-confirm dt {
+  width: 92px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--ui-faint);
+}
+.ui-resume-confirm dd {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  color: var(--ui-fg);
+  font-variant-numeric: tabular-nums;
+}
+.ui-resume-confirm code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 12px var(--font-mono);
+  color: var(--ui-muted-fg);
+}
+.ui-resume-confirm p[data-tone="warn"] {
+  color: var(--ui-yellow);
+}
+.ui-resume-confirm footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px -12px -12px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--ui-border);
+}
+.ui-resume-confirm footer label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+/* Rewind menu: the files this run touched, each with its functions. */
+.ui-menu-panel.ui-rewind-menu {
+  width: 340px;
+  max-height: min(380px, var(--radix-dropdown-menu-content-available-height, 380px));
+}
+.ui-rewind-menu .ui-menu-label small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ui-faint);
+}
+.ui-rewind-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 12px var(--font-mono);
+}
+.ui-menu-row.ui-rewind-symbol {
+  padding-left: 28px;
+}
+.ui-rewind-menu .ui-menu-shortcut[data-change="added"] {
+  color: var(--ui-green);
+}
+.ui-rewind-menu .ui-menu-shortcut[data-change="deleted"] {
+  color: var(--ui-destructive);
+}
+.ui-rewind-note {
+  padding: 4px 8px 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ui-faint);
+}

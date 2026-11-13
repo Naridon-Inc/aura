@@ -569,6 +569,7 @@ mod tests {
     fn a_boxs_org_is_the_one_it_was_connected_under() {
         let mut machine = crate::cmd_machines::Machine {
             id: "ubuntu@10.0.0.4:/srv/alpha".into(),
+            aliases: Vec::new(),
             name: "aura-runner".into(),
             host: "10.0.0.4".into(),
             user: "ubuntu".into(),

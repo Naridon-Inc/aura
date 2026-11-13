@@ -7,14 +7,13 @@
 // characters that were never going to work. `joinFailureCopy` owns that verdict
 // so the button can't disagree with the sentence above it.
 //
-// The glyph is amber, matching `ui/state`'s ErrorState: this is the one place a
-// colour is spent, because a failure is the only state that needs the reader to
-// do something. Red is kept for things that actually broke.
+// It is the library's ErrorState: the one place a colour is spent, because a
+// failure is the only state that needs the reader to do something. The way
+// out is its action — another code when one could work, back when none will.
 
 import type { JSX } from "react";
-import { CircleAlert } from "lucide-react";
 
-import { Button } from "../../ui/button";
+import { ErrorState } from "../../ui/state";
 import { joinFailureCopy, type JoinFailure } from "./shareTypes";
 
 export type JoinFailureNoticeProps = {
@@ -32,26 +31,14 @@ export function JoinFailureNotice({
 }: JoinFailureNoticeProps): JSX.Element {
   const copy = joinFailureCopy(failure);
   return (
-    <div
-      role="alert"
-      className="flex flex-col items-center gap-4 px-5 py-10 text-center"
-    >
-      <CircleAlert size={28} strokeWidth={1.25} className="text-amber" aria-hidden />
-      <div className="flex flex-col gap-1.5">
-        <p className="text-lg font-semibold text-text-1">{copy.title}</p>
-        <p className="max-w-[420px] text-base leading-snug text-text-3">
-          {copy.body}
-        </p>
-      </div>
-      {copy.retryable ? (
-        <Button variant="subtle" size="sm" onClick={onTryAnother}>
-          Try another code
-        </Button>
-      ) : (
-        <Button variant="ghost" size="sm" onClick={onBack}>
-          Back
-        </Button>
-      )}
-    </div>
+    <ErrorState
+      title={copy.title}
+      message={copy.body}
+      action={
+        copy.retryable
+          ? { label: "Try another code", onClick: onTryAnother }
+          : { label: "Back", onClick: onBack }
+      }
+    />
   );
 }

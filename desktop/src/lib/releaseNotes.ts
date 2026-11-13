@@ -41,6 +41,149 @@ export type ReleaseCta = "mobile-waitlist";
 // one shown after an update.
 export const RELEASE_NOTES: ReleaseNote[] = [
   {
+    version: "0.20.11",
+    date: "November 2026",
+    title: "Add a computer with one line",
+    highlights: [
+      "Connect a computer you already have by pasting one line on it. It installs Aura and Claude Code and keeps running.",
+      "A machine chat this laptop can't reach opens as your teammates see it, with Reconnect, instead of an error.",
+      "Chats on servers set up without sudo sign in, and a runner that will stop at logout now says so.",
+    ],
+  },
+  {
+    version: "0.20.10",
+    date: "November 2026",
+    title: "Switching organization works everywhere",
+    highlights: [
+      "Home, Billing and Connected GitHub no longer fail with \"HTTP 403\" after you switch organization.",
+      "A shared cloud chat shows only what each person typed, one message at a time.",
+      "Cloud workspaces start from the project's real main branch, whatever it is called.",
+    ],
+  },
+  {
+    version: "0.20.9",
+    date: "November 2026",
+    title: "The cloud takes fewer clicks",
+    highlights: [
+      "A paying organization's cloud computer starts by itself the first time anyone opens the cloud.",
+      "Connecting GitHub happens right in setup and in the new-workspace dialog, so you never lose your place.",
+      "When a computer's payment stops, its chats and Settings offer Pay again.",
+      "Timed notices, like the restart offer, now close when their ring fills.",
+    ],
+  },
+  {
+    version: "0.20.8",
+    date: "November 2026",
+    title: "Your plan includes a cloud computer",
+    highlights: [
+      "Pro and Teams now come with a cloud computer, with its hours and size in Settings → Cloud computer.",
+      "New cloud workspaces go to your organization's Aura computer, which answers everyone's prompts.",
+      "Settings → Import brings your projects, chats and settings over from other agent apps.",
+      "Billing shows each plan's price, and checkout takes a promotion code.",
+    ],
+  },
+  {
+    version: "0.20.7",
+    date: "November 2026",
+    title: "Billing is easier to find",
+    highlights: [
+      "In Settings, Organization (with Billing and Members) and Services now come before your list of projects.",
+      "The account menu at the bottom of the sidebar has Billing, Members and Create organization, and the plan badge opens Billing.",
+      "A computer from Aura is now $35 a month and never more: after 360 awake hours it rests until the 1st.",
+      "A resting computer shows the date it wakes again.",
+    ],
+  },
+  {
+    version: "0.20.6",
+    date: "November 2026",
+    title: "Your team's cloud, your own GitHub",
+    highlights: [
+      "Teammates' messages in a cloud workspace are answered on the Claude of whoever started it.",
+      "Start a workspace from a pull request, and move a workspace to the cloud and back.",
+      "Connect your own GitHub in Settings → Git → Your GitHub, so your pushes and pull requests go out as you.",
+      "An organization can connect several GitHub accounts and organizations.",
+      "Get a computer from Aura during cloud setup. It sleeps when idle and wakes on a message.",
+    ],
+  },
+  {
+    version: "0.20.5",
+    date: "November 2026",
+    title: "A fuller cloud workspace",
+    highlights: [
+      "A cloud workspace's ⋯ menu can reassign it, open its pull request, run the project's command and open it in your editor.",
+      "Comment on a message from its ⋯ menu. Reactions are gone.",
+      "The model menu lists the latest Claude models automatically.",
+      "Buy a cloud plan, and find Organization, Billing and API access in Settings.",
+      "Start a cloud computer chat with @name to message that teammate instead of the agent.",
+    ],
+  },
+  {
+    version: "0.20.4",
+    date: "November 2026",
+    title: "Your cloud computer answers",
+    highlights: [
+      "Hand a cloud workspace to your team's cloud computer with one click.",
+      "It answers everyone's messages, on their own sign-in, even with every laptop closed.",
+      "Anyone in the workspace can send a message and see when it's being worked on.",
+      "Update downloads now show their progress.",
+    ],
+  },
+  {
+    version: "0.20.3",
+    date: "November 2026",
+    title: "Comments, reactions and mentions",
+    highlights: [
+      "React to any message in a shared cloud workspace, or comment on it in a thread.",
+      "@mention a teammate: they get a notification that opens right at that message.",
+      "A Comments tab lists every open and resolved thread in the workspace.",
+      "Each turn now says clearly whether a person or the agent wrote it.",
+    ],
+  },
+  {
+    version: "0.20.2",
+    date: "November 2026",
+    title: "Share in one click, and a quicker app",
+    highlights: [
+      "Sharing a cloud workspace with a teammate who isn't on its project now offers to add them to the project and share in one click.",
+      "Continue a pull request from your laptop in a cloud workspace.",
+      "The `aura` command in your terminal now updates with the app.",
+      "Many open workspaces stay quick: switching no longer reflows your agents, and hidden terminals rest.",
+    ],
+  },
+  {
+    version: "0.20.1",
+    date: "November 2026",
+    title: "Work together in the cloud",
+    highlights: [
+      "Start a workspace's chat on one of your organization's machines. It keeps going when your laptop closes, and teammates can join, follow it live and @mention you.",
+      "Choose who can use the team's machines, and see every machine you can reach in one list.",
+      "Each changed file now reads as a short story: what it used to do, what it does now, and what was added, removed or changed.",
+      "The Changes tab is a plain list of what changed, with one Commit and push button.",
+    ],
+  },
+  {
+    version: "0.20.0",
+    date: "November 2026",
+    title: "A new look, and your own sign-in everywhere",
+    highlights: [
+      "Aura has a new look: every screen is built from one set of parts now, so the whole app looks and behaves the same way wherever you are in it.",
+      "Create PR and the other git buttons open a chat and send their request there, and you can leave comments on any line of a diff.",
+      "On a shared cloud computer, each teammate signs in their own Claude or Codex, and work runs on the sign-in of whoever sent it.",
+      "Aura's own hosted model is gone — chats run on the agents you've signed in to or the keys you've added. If you had it picked, your next chat uses the first agent you have set up.",
+    ],
+  },
+  {
+    version: "0.19.59",
+    date: "October 2026",
+    title: "Copy, paste, and a shell where you need it",
+    highlights: [
+      "Copy and paste work again in the terminal and in an agent's chat. ⌘C and ⌘V used to make the error sound and do nothing at all.",
+      "A terminal can open in any folder you like, with any shell you like — the + menu has New Terminal in Folder, and the folders you pick come back as rows so the next visit is one click. The tab is named after the folder, so you can see where a command will run.",
+      "A project is listed once, however many copies of it you have open. A second copy shows up inside its project, with the others, instead of as a project of its own.",
+      "Every tab in the right rail shows its name instead of only the selected one, and a window macOS took the graphics out of comes back by itself instead of staying blank.",
+    ],
+  },
+  {
     version: "0.19.58",
     date: "October 2026",
     title: "In front, and fewer places to look",

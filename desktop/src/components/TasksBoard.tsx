@@ -4,30 +4,17 @@
 // in TeamTasksPanel — this is for humans tracking real work
 // (features, bugs, chores).
 //
-// Layout: one bar of chrome (how much work is on screen, the Filters and
-// Display menus, "+ New") above ONE list, grouped by whatever you picked —
-// status, by default. A row clicks to the detail pane for a full edit, and its
-// status tag sets the status in place, which is what dragging a card between
-// kanban lanes used to be for.
+// This is the Dashboard: a strip naming the view (List, Board, Graph) and how
+// much work is on screen, a toolbar (search, project, Filter, Sort, Display,
+// New task), then the work — status columns of cards on Board, grouped rows
+// on List. A card or row opens the task; its status glyph sets the status in
+// place, and on Board a card can also be dragged between columns.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import {
-  Sparkles,
-  Bug,
-  FlaskConical,
-  Ruler,
-  Wrench,
-  AlertTriangle,
-  Bot,
-  Mountain,
-  Inbox,
-  Plus,
-  SquareArrowOutUpRight,
-} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, Plus, SquareArrowOutUpRight } from "lucide-react";
 import {
   api,
   type Task,
-  type TaskPriority,
   type TaskStatus,
   type TeamMember,
   type CreateTaskInput,
@@ -47,10 +34,9 @@ import { fetchCycles, fetchModules, fetchTaskLabels, fetchTaskStates } from "../
 import { trackFeature } from "../lib/track";
 import { peekCache, writeCache } from "../lib/resourceCache";
 import { Button } from "./ui/button";
-import { CreateTaskWizard } from "./tasks/CreateTaskWizard";
+import { TaskCreateDialog } from "./tasks/TaskCreateDialog";
+import { TaskEditorDialog } from "./tasks/TaskEditorDialog";
 import { TaskDetailPane, TASK_EDIT_EVENT } from "./tasks/TaskDetailPane";
-import { BoardEmpty, BoardFilteredEmpty } from "./board";
-import { ErrorState } from "./ui/state";
 import {
   goToWork,
   isCrewLens,
@@ -78,7 +64,11 @@ import {
 } from "../lib/tasksFilterStore";
 import { useEditorStore } from "../lib/editorStore";
 import { openPopout } from "../lib/popout";
-import { SurfaceHeader } from "./ui/SurfaceHeader";
+import {
+  TaskSearch,
+  TaskToolbar,
+  TaskViewStrip,
+} from "./ui/tasks-toolbar";
 import { askConfirm } from "./ui/ask";
 import { ShortcutsDialog } from "./dialogs/ShortcutsDialog";
 import {
@@ -91,29 +81,23 @@ import {
   useProjectScope,
 } from "../lib/projectRoots";
 import { fetchTeam } from "../lib/teamCache";
+import { applyFilters, applyOrder, dedupeBy } from "./tasks/taskFilters";
+import { TasksRepositoryMenu } from "./tasks/TasksRepositoryMenu";
+import {
+  TasksEmptyHero,
+  TasksFilteredEmpty,
+  TasksLoading,
+  TasksUnreadable,
+} from "./tasks/TasksEmpty";
 
 // The composite the board caches under `tasks:${roots}` so reopening
 // paints instantly (resourceCache) instead of refetching every open. Keyed on
-// the roots rather than one root because All projects is a different set, and
+// the roots rather than one root because All repositories is a different set, and
 // two sets sharing a cache key means the wrong one paints on open.
 /** A task, remembering the project it was read out of. The tag survives into
  *  the warm-open cache so a mutation made before the first refetch lands still
  *  goes back to the right file. */
 type ScopedTask = Task & { __root?: string };
-
-/** First occurrence wins — the scope is ordered most-recently-opened first, so
- *  the open project's spelling of a shared person or label is the one kept. */
-function dedupeBy<T>(rows: T[], key: (row: T) => string): T[] {
-  const seen = new Set<string>();
-  const out: T[] = [];
-  for (const r of rows) {
-    const k = key(r);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(r);
-  }
-  return out;
-}
 
 type TasksBundle = {
   tasks: ScopedTask[];
@@ -177,79 +161,6 @@ type ViewMode = "board" | "list";
 // which surface happened to be mounted. `WORK_LENSES` in lib/workRoute is the
 // single list; both surfaces render it.
 
-// Quick-start templates surfaced on the empty state. Each template
-// pre-fills the create dialog so a first task can ship in two clicks.
-// Templates are intentionally biased toward dev work: incident, feature
-// design, bug, doc/RFC, tech debt, agent dispatch.
-type TaskTemplate = {
-  id: string;
-  label: string;
-  icon: ReactNode;
-  hint: string;
-  preset: Partial<CreateTaskInput>;
-};
-
-const TPL_ICON = "w-4 h-4 text-text-3";
-
-const TEMPLATES: TaskTemplate[] = [
-  {
-    id: "feature",
-    label: "Feature",
-    icon: <Sparkles className={TPL_ICON} strokeWidth={1.5} />,
-    hint: "New user-facing capability",
-    preset: { priority: "medium", labels: ["feature"] },
-  },
-  {
-    id: "bug",
-    label: "Bug",
-    icon: <Bug className={TPL_ICON} strokeWidth={1.5} />,
-    hint: "Something is broken",
-    preset: { priority: "high", labels: ["bug"] },
-  },
-  {
-    id: "spike",
-    label: "Spike",
-    icon: <FlaskConical className={TPL_ICON} strokeWidth={1.5} />,
-    hint: "Time-boxed investigation",
-    preset: { priority: "medium", labels: ["spike"], estimate: 4 },
-  },
-  {
-    id: "rfc",
-    label: "RFC / Design",
-    icon: <Ruler className={TPL_ICON} strokeWidth={1.5} />,
-    hint: "Write up before coding",
-    preset: { priority: "medium", labels: ["rfc", "design"] },
-  },
-  {
-    id: "tech-debt",
-    label: "Tech debt",
-    icon: <Wrench className={TPL_ICON} strokeWidth={1.5} />,
-    hint: "Cleanup / refactor",
-    preset: { priority: "low", labels: ["tech-debt"] },
-  },
-  {
-    id: "incident",
-    label: "Incident",
-    icon: <AlertTriangle className={TPL_ICON} strokeWidth={1.5} />,
-    hint: "Post-incident follow-up",
-    preset: { priority: "high", labels: ["incident", "postmortem"] },
-  },
-  {
-    id: "agent-claude",
-    label: "Send to Claude",
-    icon: <Bot className={TPL_ICON} strokeWidth={1.5} />,
-    hint: "Hand off to Claude Code",
-    preset: { priority: "medium", agent_assignee: "claude", labels: ["agent"] },
-  },
-  {
-    id: "epic",
-    label: "New Epic",
-    icon: <Mountain className={TPL_ICON} strokeWidth={1.5} />,
-    hint: "Groups related tasks together",
-    preset: { priority: "medium", is_epic: true, labels: ["epic"] },
-  },
-];
-
 export function TasksBoard({
   repoRoot,
   open: openProp,
@@ -267,7 +178,7 @@ export function TasksBoard({
   //
   // The rail's project picker writes one shared scope and this reads it, so
   // the counts in the rail and the cards on the board are the same claim
-  // about the same set. Under "All projects" every known root is read and
+  // about the same set. Under "All repositories" every known root is read and
   // each task remembers where it came from, which is what lets a change made
   // here go back to the file it came out of rather than to whichever project
   // happens to be open.
@@ -280,7 +191,7 @@ export function TasksBoard({
   const rootsKey = rootsKeyOf(roots);
   const multiRoot = roots.length > 1;
   /** Where a new task lands, and whose per-project catalogs (sprints,
-   *  workstreams, saved views) the board shows. Under All projects that is
+   *  workstreams, saved views) the board shows. Under All repositories that is
    *  the project the app has open — a new task has to be filed somewhere. */
   const primaryRoot = roots.length === 1 ? roots[0]! : repoRoot;
   /** id → the project a task was read out of. A ref, not state: it changes
@@ -323,10 +234,11 @@ export function TasksBoard({
       const raw = localStorage.getItem("aura.tasksBoard.view") as ViewMode | null;
       // Also the migration off the retired Sprint drawing: a stored "sprint"
       // is no longer a view, so it falls back rather than rendering nothing.
+      // The first open is the board, the same as the Tasks destination.
       const valid: ViewMode[] = ["board", "list"];
-      return raw && valid.includes(raw) ? raw : "list";
+      return raw && valid.includes(raw) ? raw : "board";
     } catch {
-      return "list";
+      return "board";
     }
   });
   // The lens the header strip shows, and what picking one does.
@@ -367,9 +279,6 @@ export function TasksBoard({
    *  click — including the shift-click that opens a workpane tab instead
    *  of the detail overlay. */
   const [focusedId, setFocusedId] = useState<string | null>(null);
-  /** The card currently being dragged between kanban lanes. Only the Board
-   *  drawing sets it; the list moves a task by picking its status tag. */
-  const [dragId, setDragId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   /** When set, the task with this id is open in the full-screen edit
    *  wizard (the same FullscreenOverlay shell as create). Reached only
@@ -608,7 +517,7 @@ export function TasksBoard({
       if (cancelled || inFlight) return;
       inFlight = true;
       try {
-        // Every project in scope, not just the open one — under All projects
+        // Every project in scope, not just the open one — under All repositories
         // a teammate's push to any of them changes what's on screen.
         const res = await Promise.all(
           roots.map((r) =>
@@ -644,8 +553,8 @@ export function TasksBoard({
           setCreating(false);
           return;
         }
-        // The edit wizard (FullscreenOverlay) owns Esc while it's up —
-        // don't let the board-level handler close the board underneath it.
+        // The edit dialog owns Esc while it's up — don't let the
+        // board-level handler close the board underneath it.
         if (editingId) {
           return;
         }
@@ -798,18 +707,31 @@ export function TasksBoard({
   // target the right row.
   const editor = useEditorStore();
 
-  // Promote a task into the stepped editor when the read-mode detail
-  // pane asks (its Edit button → editor.requestTaskEdit). The detail can
-  // be board-local or its own workpane tab, so two paths converge here:
+  // The detail the edit dialog was opened from, reopened when it closes.
+  const editReturnRef = useRef<string | null>(null);
+  const closeEditor = useCallback(() => {
+    setEditingId(null);
+    const back = editReturnRef.current;
+    editReturnRef.current = null;
+    if (back) setDetailId(back);
+  }, []);
+
+  // Open the edit dialog when the read-mode detail asks (its "Edit task"
+  // button → editor.requestTaskEdit). The detail can be board-local or its
+  // own workpane tab, so two paths converge here:
   //   • event — an already-mounted board reacts instantly;
   //   • pending — a board that mounts fresh (the detail was a full tab)
   //     consumes the stashed id.
   // The event handler clears the pending id so a later remount can't
-  // replay a stale edit.
+  // replay a stale edit. A detail open on this board steps aside for the
+  // dialog and comes back when it closes.
   useEffect(() => {
     const promote = (id: string) => {
       setSelectedId(null);
-      setDetailId(null);
+      setDetailId((open) => {
+        editReturnRef.current = open === id ? id : null;
+        return null;
+      });
       setEditingId(id);
     };
     const onEdit = (e: Event) => {
@@ -882,24 +804,6 @@ export function TasksBoard({
     setMultiSelectedIds((prev) => prev.filter((id) => valid.has(id)));
   }, [tasks]);
 
-  // OO.5 — sub-issue create surface for the detail panel's "+ Add
-  // child" button. Mirrors quickCreate but pre-fills `parent_id`.
-  const createChildTask = useCallback(
-    async (parentId: string, title: string) => {
-      const t = title.trim();
-      if (!t) return;
-      // A child belongs to its parent's project, not to whichever one is open.
-      const root = rootOf(parentId);
-      const next = await api.tasksCreate(root, {
-        title: t,
-        parent_id: parentId,
-      });
-      taskRootRef.current.set(next.id, root);
-      setTasks((prev) => [...prev, { ...next, __root: root }]);
-    },
-    [rootOf],
-  );
-
   async function patchTask(input: UpdateTaskInput) {
     try {
       const root = rootOf(input.id);
@@ -934,7 +838,7 @@ export function TasksBoard({
 
   async function createTask(input: CreateTaskInput) {
     try {
-      // New work is filed in the open project — under All projects there is no
+      // New work is filed in the open project — under All repositories there is no
       // other answer, and it is the one whose sprints and workstreams the
       // create wizard was offering.
       const next = await api.tasksCreate(primaryRoot, input);
@@ -1010,132 +914,109 @@ export function TasksBoard({
   /** A card dropped into a lane. The same move as picking a row's status tag in
    *  the list, so it routes through the same writer rather than keeping a
    *  second copy of the optimistic-then-revert dance. */
-  async function handleDrop(targetStatus: TaskStatus) {
-    if (!dragId) return;
-    const id = dragId;
-    setDragId(null);
+  async function handleDrop(id: string, targetStatus: TaskStatus) {
     await setStatus(id, targetStatus);
   }
 
   if (!open) return null;
 
   const rootClass = embedded
-    ? "h-full w-full bg-bg-content flex flex-col"
-    : "absolute inset-0 z-40 bg-bg-content flex flex-col";
+    ? "ui-tasks-dashboard h-full w-full flex flex-col"
+    : "ui-tasks-dashboard absolute inset-0 z-40 flex flex-col";
+
+  /** How much of the work is on screen. Not asserted before there is a count
+   *  to assert — a cold open read "0 tasks" over a body still loading — and
+   *  counted off what is drawn when something narrows it, because picking a
+   *  sprint or a goal in the rail scopes the board with no chip to say so. */
+  const countText =
+    loading && tasks.length === 0
+      ? "Counting…"
+      : visibleTasks.length !== tasks.length
+        ? `${visibleTasks.length} of ${tasks.length} tasks`
+        : `${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
+
+  const clearEveryNarrowing = () => {
+    setFilters({});
+    setSelectedCycleId(null);
+    setSelectedModuleId(null);
+    // Every narrowing, including the ones the rail owns — clearing "the
+    // filters" while a goal stayed lit would leave the same empty board under
+    // a button that said it fixed it.
+    clearTasksSharedFilters();
+  };
 
   return (
     <div className={rootClass}>
-      {/* One bar, and no title: the rail row you clicked is lit and says Tasks,
-          the workpane tab says Tasks, and the popout window's own title bar
-          says Tasks. This used to print it a fourth time at 20px — the largest
-          type in the app outside a dialog, spent on the one thing you already
-          knew — over a second line that named the repo the rail was already
-          showing and announced a grouping you could read off the headings.
-
-          What the bar does carry is the strip: which drawing of the work you
-          are on. Three cells, not the five this once had — Plan was the list
-          grouped by goal, which Display now does, and Sprint was a dashboard
-          about a sprint rather than a way of looking at the work. What's left
-          are three genuinely different pictures, and beside them the one fact
-          none of the rest of the screen states: how much of the work is on
-          screen. */}
-      <SurfaceHeader
-        tabs={
+      {/* No page title: the sidebar row says Dashboard and is lit. The strip
+          leads with the view — the same three cells the Graph lens shows, so
+          the switch never moves — and ends with the one fact nothing else on
+          screen states: how much of the work is showing. */}
+      <TaskViewStrip
+        label="Dashboard"
+        tabs={<WorkLensTabs lens={activeLens} onLens={chooseLens} />}
+        trailing={
           <>
-            <WorkLensTabs lens={activeLens} onLens={chooseLens} />
-            {/* How much of the work is on screen — the one thing the old page
-                head said that nothing else on screen says.
-
-                Don't assert a count we haven't got yet: on a cold open this
-                read "0 items" over a body that was still loading, the only
-                number on the page and wrong for as long as the fetch took. And
-                when something narrows the board, count what's on it — this read
-                "141 tasks" over five cards. The chips above say which filters
-                are on, but picking a sprint or a workstream in the rail scopes
-                the board with no chip at all, so this is the only place that
-                narrowing can show. */}
-            {/* Yields the row before the lens strip does. Flex shares a
-                shortfall in proportion to size, so the strip — ten times this
-                span's width — was giving up ten times as much: drag the place
-                rail wide and the tabs collapsed to one cell while this held on
-                and printed "1…", a truncated 1149 that reads as the number 1.
-                Where you can go outranks how much is there, and a count that
-                can't be read in full is better not drawn. */}
-            <span className="min-w-0 shrink-[100] truncate text-xs text-text-5">
-              {loading && tasks.length === 0
-                ? "Counting…"
-                : visibleTasks.length !== tasks.length
-                  ? `${visibleTasks.length} of ${tasks.length} tasks`
-                  : `${tasks.length} task${tasks.length === 1 ? "" : "s"}`}
-            </span>
-          </>
-        }
-        actions={
-          <>
-            <TasksControls
-              filters={filters}
-              onFilters={handleFilters}
-              groupBy={groupBy}
-              onGroupBy={setGroupBy}
-              orderBy={orderBy}
-              onOrderBy={setOrderBy}
-              orderDir={orderDir}
-              onOrderDir={setOrderDir}
-              displayProps={displayProps}
-              onDisplayProps={setDisplayProps}
-              members={members}
-              allLabels={allLabels}
-            />
-            {/* Spin this board off into its own window. The workpane has always
-                passed this and the board accepted it and drew nothing, so a
-                tasks tab could never be detached — even though the window it
-                would open already knows how to render one, and the task detail
-                inside this very board offers exactly this button. */}
+            <span>{countText}</span>
             {onPopOut ? (
               <Button
-                variant="subtle"
-                size="icon-sm"
+                variant="ghost"
+                size="iconXs"
                 onClick={onPopOut}
                 title="Detach to its own window"
                 aria-label="Detach to its own window"
               >
-                <SquareArrowOutUpRight size={13} strokeWidth={1.75} aria-hidden />
+                <SquareArrowOutUpRight aria-hidden />
               </Button>
             ) : null}
-            <Button
-              variant="accentSoft"
-              size="sm"
-              onClick={() => setCreating(true)}
-              title="New task (n)"
-            >
-              <Plus className="w-3 h-3" strokeWidth={2} aria-hidden />
-              New task
-            </Button>
           </>
         }
       />
+      <TaskToolbar
+        search={
+          <TaskSearch
+            value={filters.q ?? ""}
+            onChange={(q) => handleFilters({ ...filters, q: q || undefined })}
+            label="Search tasks"
+          />
+        }
+      >
+        <TasksRepositoryMenu openRoot={repoRoot} />
+        <TasksControls
+          filters={filters}
+          onFilters={handleFilters}
+          groupBy={groupBy}
+          onGroupBy={setGroupBy}
+          orderBy={orderBy}
+          onOrderBy={setOrderBy}
+          orderDir={orderDir}
+          onOrderDir={setOrderDir}
+          displayProps={displayProps}
+          onDisplayProps={setDisplayProps}
+          members={members}
+          allLabels={allLabels}
+        />
+        <Button size="sm" onClick={() => setCreating(true)} title="New task (n)">
+          <Plus />
+          New task
+        </Button>
+      </TaskToolbar>
 
-      {/* Error / loading */}
       {error && (
-        <div className="px-4 py-2 text-sm text-red bg-red/10 border-b border-line-soft">
-          {error}
+        <div className="ui-tasks-notice" data-tone="error" role="alert">
+          <AlertTriangle size={14} aria-hidden />
+          <span title={error}>{error}</span>
+          <Button size="xs" variant="ghost" onClick={() => setError(null)}>
+            Dismiss
+          </Button>
         </div>
       )}
-
-      {/* No saved-views bar. A second row of pills under the lens strip — "All
-          tasks", whatever you'd named, "+ New view" — was a switcher over a
-          switcher: two rows deep before the work, each answering a different
-          question, neither of them the one you came to the page with. What a
-          saved view held is still all here and still one click away: the rail
-          narrows by goal, sprint, module and person, Filters narrows by
-          anything else, and both survive a reload. */}
 
       {/* A project that didn't answer. Said once, above the work, rather than
           replacing it — the rows from every other project are still true. */}
       {unreadMessage && tasks.length > 0 && (
-        <div className="flex items-center gap-2 px-4 py-1.5 text-xs text-text-4">
-          <AlertTriangle className="size-3.5 shrink-0 text-amber-500" aria-hidden />
-          <span className="min-w-0 flex-1 truncate">{unreadMessage}</span>
+        <div className="ui-tasks-notice" role="status">
+          <AlertTriangle size={14} aria-hidden />
+          <span>{unreadMessage}</span>
           <Button size="xs" variant="ghost" onClick={() => void refresh()}>
             Try again
           </Button>
@@ -1149,28 +1030,17 @@ export function TasksBoard({
         members={members}
       />
 
-      {/* Body */}
       <div className="flex-1 min-h-0 flex relative">
-        {/* OO.6 — the in-board 220px filter rail has been replaced by
-         *  the app-level <TasksSidebar> rail that mounts in the
-         *  Layout's sidebar slot (same takeover pattern PR Inbox
-         *  uses). Selections from that sidebar arrive here through
-         *  `tasksFilterStore` and are merged into `filters` /
-         *  `selectedCycleId` / `selectedModuleId` via the effect
-         *  near the top of this component. */}
-        <div className="flex-1 min-h-0 overflow-hidden">
+        {/* The rail beside the Dashboard (TasksSidebar) narrows by sprint,
+            workstream, goal and person; its picks arrive through
+            `tasksFilterStore` and are merged into `filters` /
+            `selectedCycleId` / `selectedModuleId` near the top. */}
+        <div className="flex-1 min-h-0 min-w-0 flex flex-col overflow-hidden">
           {!loading && tasks.length === 0 && unread.length > 0 ? (
-            /* Nothing to show and a project we couldn't read: say that, and
-               offer the read again. Drawing the "add your first task" hero
-               here tells someone their work is gone when it is only
-               unreachable. */
-            <div className="flex h-full w-full items-center justify-center">
-              <ErrorState
-                title="Couldn’t read the board"
-                message={unreadMessage ?? "The task board could not be read."}
-                onRetry={() => void refresh()}
-              />
-            </div>
+            <TasksUnreadable
+              message={unreadMessage ?? "The task board could not be read."}
+              onRetry={() => void refresh()}
+            />
           ) : !loading && tasks.length === 0 ? (
             <TasksEmptyHero
               onBlank={() => {
@@ -1183,45 +1053,31 @@ export function TasksBoard({
               }}
             />
           ) : !loading && visibleTasks.length === 0 ? (
-            /* There IS work here — the current filters are hiding all of it.
-               Deliberately NOT the "add your first item" state: showing that
-               to someone who has thirty items and one stray filter makes them
-               think they lost their work. */
-            <div className="flex h-full w-full items-center justify-center">
-              <BoardFilteredEmpty
-                noun="tasks"
-                onClear={() => {
-                  setFilters({});
-                  setSelectedCycleId(null);
-                  setSelectedModuleId(null);
-                  // Every narrowing, including the ones the rail owns —
-                  // clearing "the filters" while a goal stayed lit would leave
-                  // the same empty board under a button that said it fixed it.
-                  clearTasksSharedFilters();
-                }}
-              />
-            </div>
+            <TasksFilteredEmpty onClear={clearEveryNarrowing} />
           ) : drawing === "board" ? (
-            <TasksBoardView
-              tasks={visibleTasks}
-              members={members}
-              taskStates={taskStates}
-              taskLabels={taskLabels}
-              loading={loading}
-              groupBy={groupBy}
-              displayProps={displayProps}
-              focusedId={editingId ?? focusedId}
-              multiSelectedIds={multiSelectedIds}
-              onSelect={(id, e) =>
-                handleSelect(id, {
-                  newTab: e?.shiftKey,
-                  multi: e?.metaKey || e?.ctrlKey,
-                })
-              }
-              onDragStart={(id) => setDragId(id)}
-              onDropOn={handleDrop}
-              onQuickCreate={quickCreate}
-            />
+            loading && tasks.length === 0 ? (
+              <TasksLoading />
+            ) : (
+              <TasksBoardView
+                tasks={visibleTasks}
+                members={members}
+                taskStates={taskStates}
+                taskLabels={taskLabels}
+                groupBy={groupBy}
+                displayProps={displayProps}
+                focusedId={editingId ?? focusedId}
+                multiSelectedIds={multiSelectedIds}
+                onSelect={(id, e) =>
+                  handleSelect(id, {
+                    newTab: e?.shiftKey,
+                    multi: e?.metaKey || e?.ctrlKey,
+                  })
+                }
+                onDropOn={handleDrop}
+                onStatus={setStatus}
+                onQuickCreate={quickCreate}
+              />
+            )
           ) : (
             <TasksListView
               tasks={visibleTasks}
@@ -1232,11 +1088,16 @@ export function TasksBoard({
               groupBy={groupBy}
               displayProps={displayProps}
               // Which goal each row belongs to, resolved by the rail off the
-              // loop graph. This is the Plan view, folded into the list: the
-              // plan's whole content was "these tasks, under that goal".
+              // loop graph — the list grouped by goal is the plan.
               goalOfTask={sharedSidebar.goalOfTask}
               selectedId={editingId ?? focusedId}
-              onSelect={(id) => handleSelect(id)}
+              multiSelectedIds={multiSelectedIds}
+              onSelect={(id, e) =>
+                handleSelect(id, {
+                  newTab: e?.shiftKey,
+                  multi: e?.metaKey || e?.ctrlKey,
+                })
+              }
               onStatus={setStatus}
               onAddInStatus={(status) => {
                 setCreateInitial({ status });
@@ -1277,10 +1138,8 @@ export function TasksBoard({
       />
 
       {creating && (
-        <CreateTaskWizard
+        <TaskCreateDialog
           members={members}
-          tasks={tasks}
-          sprints={sprints}
           onCancel={() => {
             setCreating(false);
             setCreateInitial(null);
@@ -1294,27 +1153,21 @@ export function TasksBoard({
         />
       )}
 
-      {/* Edit task — the same full-screen wizard shell as create, in
-          edit mode. Default card click opens it; submit routes through
-          patchTask (api.tasksUpdate). The Activity step hosts the
-          relational/discussion cards that don't fit the create model. */}
+      {/* Edit task — every field the task has, which the short create
+          dialog leaves for later. It opens from the detail's "Edit task" and
+          from the a/p/s/l keys; closing it returns to the detail it came
+          from. */}
       {editingTask && (
-        <CreateTaskWizard
-          mode="edit"
+        <TaskEditorDialog
           editing={editingTask}
           members={members}
           tasks={tasks}
           sprints={sprints}
-          repoRoot={rootOf(editingTask.id)}
-          currentHandle={currentHandle}
-          onCancel={() => setEditingId(null)}
-          onSubmit={createTask}
-          onSubmitEdit={async (input) => {
+          onCancel={closeEditor}
+          onSubmit={async (input) => {
             await patchTask(input);
-            setEditingId(null);
+            closeEditor();
           }}
-          onPatch={patchTask}
-          onCreateChild={createChildTask}
         />
       )}
 
@@ -1333,190 +1186,4 @@ export function TasksBoard({
       )}
     </div>
   );
-}
-
-// ─── Empty-state hero ──────────────────────────────────────────────────
-//
-// Shown only when the board has zero tasks in any column. Beats the
-// blank-canvas problem: every first-time visitor sees a clear "Create
-// task" CTA plus a row of template cards that pre-fill priority/labels/
-// agent assignee so the second task takes ten seconds.
-
-/**
- * The board's own empty state.
- *
- * This used to be a full marketing page: a hero, eight bordered template
- * cards, and three "feature bullet" panels explaining epics, agents and
- * sprints. All of it landed on someone who had asked for their work and been
- * shown none — the moment they are least interested in a tour.
- *
- * It's now the shared empty state plus one quiet line of templates: still the
- * fastest way to a well-formed first item, with none of the furniture. The
- * templates are plain text buttons, not cards, so the eye goes to the one
- * primary action first and finds them only if it wants a shortcut.
- */
-function TasksEmptyHero({
-  onBlank,
-  onPickTemplate,
-}: {
-  onBlank: () => void;
-  onPickTemplate: (tpl: TaskTemplate) => void;
-}) {
-  return (
-    <div className="flex h-full w-full items-center justify-center overflow-y-auto">
-      <div className="w-full">
-        <BoardEmpty
-          icon={Inbox}
-          title="No tasks yet"
-          body="This is the shared board. Everything you and your agents are working on lives here, in one place."
-          action={{ label: "New task", onClick: onBlank, icon: Plus }}
-          footnote={
-            <span className="flex flex-wrap items-center justify-center gap-x-1 gap-y-1">
-              <span className="text-text-5">Or start from</span>
-              {TEMPLATES.map((t, i) => (
-                <span key={t.id} className="inline-flex items-center gap-1">
-                  {i > 0 && <span className="text-text-5/50">·</span>}
-                  <button
-                    type="button"
-                    onClick={() => onPickTemplate(t)}
-                    title={t.hint}
-                    className="rounded-[3px] px-0.5 text-text-3 underline-offset-2 transition-colors hover:text-accent hover:underline"
-                  >
-                    {t.label}
-                  </button>
-                </span>
-              ))}
-            </span>
-          }
-        />
-      </div>
-    </div>
-  );
-}
-
-
-// ─── Board ─────────────────────────────────────────────────────────────
-
-// ─── List ──────────────────────────────────────────────────────────────
-
-// Plane-style row. Single-line: priority dot · #id · state pill · title
-// · label chips · assignees · due · updated. Mirrors the InboxPane Row
-// shape so visual rhythm is consistent between Tasks list + PR Inbox.
-// ─── Phase 2 filter / order helpers ────────────────────────────────────
-//
-// All filter dimensions are AND'd across dimensions, OR'd within. A task
-// passes the filter when, for each non-empty dimension, at least one of
-// the dimension's values matches the task. `q` is a case-insensitive
-// substring match against title + description; empty/undefined dimensions
-// are skipped entirely.
-
-function applyFilters(
-  tasks: Task[],
-  f: TaskViewFilters,
-  currentHandle: string | null,
-): Task[] {
-  // Pre-resolve `@me` so we don't re-look it up per row.
-  const assigneeSet = f.assignee?.map((a) =>
-    a === "@me" && currentHandle ? currentHandle : a,
-  );
-  // `@unassigned` is a special bucket: keep only rows with no assignee
-  // on either the legacy `assignee` field or the OO.3 multi `assignee_ids`.
-  const matchUnassigned = assigneeSet?.includes("@unassigned");
-  const realAssignees = assigneeSet?.filter((a) => a !== "@unassigned");
-  const q = f.q?.trim().toLowerCase() ?? "";
-  // Same day boundary the sidebar counts against, so its "Overdue N" badge and
-  // the list you land on always agree.
-  const today = new Date().toISOString().slice(0, 10);
-  return tasks.filter((t) => {
-    if (f.overdue) {
-      if (t.status === "done") return false;
-      if (!t.due_date || t.due_date >= today) return false;
-    }
-    if (f.status?.length && !f.status.includes(t.status)) return false;
-    if (f.priority?.length && !f.priority.includes(t.priority)) return false;
-    if (matchUnassigned) {
-      if (t.assignee_ids.length > 0 || t.assignee) return false;
-    } else if (realAssignees?.length) {
-      const hit =
-        (t.assignee && realAssignees.includes(t.assignee)) ||
-        t.assignee_ids.some((a) => realAssignees.includes(a));
-      if (!hit) return false;
-    }
-    if (
-      f.agent?.length &&
-      !(t.agent_assignee && f.agent.includes(t.agent_assignee))
-    )
-      return false;
-    if (f.labels?.length) {
-      const hit = t.labels.some((l) => f.labels!.includes(l));
-      if (!hit) return false;
-    }
-    if (q) {
-      const hay = `${t.title}\n${t.description ?? ""}`.toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    return true;
-  });
-}
-
-// OO.3 — sort rank for the 5-stop ladder. Lower number sorts first
-// (urgent rises to the top in asc; bottom in desc).
-const PRIORITY_RANK: Record<TaskPriority, number> = {
-  urgent: 0,
-  high: 1,
-  medium: 2,
-  low: 3,
-  none: 4,
-};
-
-function applyOrder(
-  tasks: Task[],
-  by: TaskViewOrderBy,
-  dir: TaskViewOrderDir,
-): Task[] {
-  const mul = dir === "asc" ? 1 : -1;
-  // Stable sort fallback — secondary key on created_at so the order is
-  // deterministic when the primary key ties (e.g. two tasks both
-  // priority=medium with no due date).
-  const out = [...tasks];
-  out.sort((a, b) => {
-    const cmp = compareBy(a, b, by) * mul;
-    if (cmp !== 0) return cmp;
-    return a.created_at.localeCompare(b.created_at);
-  });
-  return out;
-}
-
-function compareBy(a: Task, b: Task, by: TaskViewOrderBy): number {
-  switch (by) {
-    case "title":
-      return a.title.localeCompare(b.title);
-    case "priority":
-      return PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority];
-    case "due":
-      return cmpNullable(a.due_date, b.due_date);
-    case "estimate":
-      return cmpNullable(a.estimate ?? null, b.estimate ?? null);
-    case "created":
-      return a.created_at.localeCompare(b.created_at);
-    case "updated":
-    default:
-      return a.updated_at.localeCompare(b.updated_at);
-  }
-}
-
-function cmpNullable<T extends string | number>(
-  a: T | null | undefined,
-  b: T | null | undefined,
-): number {
-  // Treat null/undefined as "very large" so they sort to the end in asc
-  // mode. The dir multiplier inverts for desc, which puts null first —
-  // that's consistent with how Plane handles missing fields.
-  const aMissing = a == null;
-  const bMissing = b == null;
-  if (aMissing && bMissing) return 0;
-  if (aMissing) return 1;
-  if (bMissing) return -1;
-  if (typeof a === "number" && typeof b === "number") return a - b;
-  return String(a).localeCompare(String(b));
 }

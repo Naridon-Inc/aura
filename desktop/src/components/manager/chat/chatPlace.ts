@@ -66,7 +66,7 @@ export function chatPlaceSentence(place: ChatPlace): string | null {
     case "same":
       return null;
     case "elsewhere":
-      return `This chat works in ${folderName(place.runsIn)}, not the project selected in the sidebar.`;
+      return `This chat works in ${folderName(place.runsIn)}, not the repository selected in the sidebar.`;
     case "missing":
       return `This chat works in ${folderName(place.runsIn)}, which isn’t on this computer any more. Start a new chat to work here.`;
   }

@@ -93,9 +93,9 @@ describe("a worktree pane doesn't offer another project", () => {
 });
 
 describe("start something new / earlier sessions", () => {
-  test("the switch is the app's one segmented control, with both halves", async () => {
+  test("the switch is the library's tabs, with both halves", async () => {
     const src = await readSrc("components/launcher/Launcher.tsx");
-    expect(src).toContain("Segment<Mode>");
+    expect(src).toContain('<TabsList aria-label="What this pane is showing">');
     expect(src).toContain('"Start something new"');
     expect(src).toContain("Earlier sessions");
   });
@@ -110,12 +110,16 @@ describe("start something new / earlier sessions", () => {
 
   test("one cursor over whatever is showing", async () => {
     // Enter must pick the row the reader can see, never one on the side they
-    // switched away from.
+    // switched away from. The shared command list owns the cursor, and only
+    // the half on screen is mounted into it.
     const src = await readSrc("components/launcher/Launcher.tsx");
     expect(src).toMatch(
       /showing === "earlier" \? shownEarlier : \[\.\.\.shownStarters, \.\.\.shownOpen\]/,
     );
-    expect(src).toMatch(/setCursor\(0\);\s*\n\s*\}, \[q, showing\]\)/);
+    expect(src).toContain("<Command shouldFilter={false} loop");
+    expect(src).toMatch(/\) : showing === "earlier" \? \(\s*<EarlierBody/);
+    const row = await readSrc("components/launcher/row.tsx");
+    expect(row).toContain("onSelect={row.onPick}");
   });
 
   test("resuming spawns at the SESSION's cwd, not the workspace root", async () => {
@@ -228,19 +232,18 @@ describe("one segmented control, and it is a track", () => {
     expect(css).not.toMatch(/\.ade-seg--pill button \{\s*border-radius: 999px;/);
   });
 
-  test("the right rail is the one opt-out, and it says why", async () => {
-    // The rail's cells re-flow — only the tab you are on spells its name — so
-    // a bordered track around them reads as the control resizing under the
-    // cursor, and its unread counts overhang the glyph the track would clip.
-    // Both are structural, which is why this one strip gets `--bare` and
-    // nothing else does.
+  test("the right rail's tabs are not a segmented control at all", async () => {
+    // The rail's tabs carry counts beside their names and scroll when they
+    // outgrow the rail, so they are drawn as the details tab list rather than
+    // as a segmented strip — which is why the `--bare` opt-out the strip once
+    // needed is gone, rather than kept around for nothing.
     const rail = await readSrc("components/rightrail/RightRail.tsx");
-    expect(rail).toContain("ade-seg--bare");
+    expect(rail).toContain("<DetailsTabs");
+    expect(rail).not.toContain("ade-seg");
     const css = await readSrc("styles.css");
-    expect(css).toMatch(/\.ade-seg--bare \{[^}]*border: 0/);
-    expect(css).toMatch(/\.ade-seg--bare \{[^}]*background: transparent/);
+    expect(css).not.toContain(".ade-seg--bare");
 
-    // …and every other hand-written strip stays on the track.
+    // …and every hand-written strip stays on the track.
     for (const rel of [
       "components/workspaces/WorkspacesSurface.tsx",
       "components/board/BoardLayoutSwitch.tsx",

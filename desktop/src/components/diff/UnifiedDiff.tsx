@@ -4,6 +4,8 @@
 // apps. This wrapper keeps the desktop's import path and binds the live
 // resolved theme, which the shared renderer reads off `SharedUiProvider`.
 
+import type { ComponentProps } from "react";
+
 import { SharedUiProvider } from "@shared/ui/appContext";
 import { UnifiedDiff as SharedUnifiedDiff } from "@shared/ui/diff/UnifiedDiff";
 import { useResolvedTheme } from "../../lib/themeStore";
@@ -11,7 +13,11 @@ import type { DiffFocus } from "../../lib/diffSides";
 
 export { diffMarkerColor } from "@shared/ui/diff/UnifiedDiff";
 
-export function UnifiedDiff(props: { diff: string; focus?: DiffFocus | null }) {
+type SharedProps = ComponentProps<typeof SharedUnifiedDiff>;
+
+export function UnifiedDiff(
+  props: { diff: string; focus?: DiffFocus | null } & Pick<SharedProps, "rowProps" | "gutter" | "after">,
+) {
   const theme = useResolvedTheme() === "light" ? "light" : "dark";
   return (
     <SharedUiProvider value={{ theme }}>

@@ -1,0 +1,317 @@
+/* The sidebar workspace list. Everything here sits on the library's
+   navigation sections and sidebar items; these rules only even out the rows
+   the list draws that the library does not (machine, cloud and disclosure
+   rows, which carry an icon rather than a status), and style the few marks
+   the list adds. Library tokens only. */
+
+/* Every row in a repository lines up on the same column and height as a
+   workspace row with a status icon. */
+.ui-roster-row > .ui-sidebar-item .ui-sidebar-item-target {
+  height: 36px;
+  padding: 6px 10px 6px 20px;
+}
+
+/* Open behind the place you are looking at: yours, fainter than "here". */
+.ui-roster-row[data-held] > .ui-sidebar-item {
+  background: color-mix(in srgb, var(--ui-hover) 55%, transparent);
+}
+.ui-roster-row[data-held] > .ui-sidebar-item .ui-sidebar-item-target {
+  color: var(--ui-sidebar-fg);
+}
+
+/* Picked for side by side: Aura's own green, so "chosen, not yet opened"
+   never reads as "this is where you are". */
+.ui-roster-row[data-picked] > .ui-sidebar-item {
+  background: color-mix(in srgb, var(--color-accent-green) 14%, transparent);
+}
+.ui-roster-row[data-picked] > .ui-sidebar-item:hover {
+  background: color-mix(in srgb, var(--color-accent-green) 20%, transparent);
+}
+.ui-roster-row[data-picked] .ui-sidebar-item-target > svg:first-child {
+  color: var(--color-accent-green);
+}
+
+.ui-roster-row[data-archived] > .ui-sidebar-item .ui-sidebar-item-target {
+  opacity: 0.72;
+}
+
+/* The disclosure row reads quieter than the workspaces it reveals. */
+.ui-roster-row[data-disclosure] > .ui-sidebar-item .ui-sidebar-item-target {
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+
+/* The ⌘-hold quick-switch number, in the status icon's slot. */
+.ui-roster-switch-no {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--ui-border);
+  border-radius: 3px;
+  font: 10px var(--font-mono);
+  color: var(--ui-sidebar-fg);
+}
+
+.ui-roster-trailing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+/* The branch's pull request number, quiet beside the change count. */
+.ui-roster-pr-number {
+  color: var(--ui-sidebar-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The repository's own chosen icon, in the folder's slot. */
+.ui-repository-mark {
+  font-style: normal;
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* A spinner in a repository header keeps its size; the title text takes the
+   rest of the row. */
+.ui-roster .ui-navigation-title > span.ui-activity-loader {
+  flex: none;
+}
+
+/* A "…" stays on screen while its menu is open. The open menu takes the
+   pointer and the focus, so the hover and focus-within rules that show the
+   button stop holding; a header button that vanished would drop its menu to
+   the window's corner. */
+.ui-roster .ui-navigation-section > header > .ui-button[data-state="open"]:last-child {
+  display: inline-flex;
+}
+.ui-roster .ui-sidebar-item-actions:has([data-state="open"]) {
+  opacity: 1;
+}
+
+/* The list's menus fit their longest item on one line ("Find missing
+   worktrees…", a shortcut beside "Repository settings") instead of wrapping
+   inside the fixed menu width. */
+.ui-menu-panel.ui-roster-menu {
+  width: max-content;
+  max-width: min(320px, calc(100vw - 16px));
+}
+
+/* Renaming in place, in a row or a header. */
+.ui-roster-rename {
+  margin: 2px 8px;
+  width: calc(100% - 16px);
+}
+.ui-navigation-section > header > .ui-roster-rename {
+  flex: 1;
+  min-width: 0;
+  margin: 3px 2px;
+}
+
+/* Why a menu item is unavailable, printed under it. */
+.ui-roster-menu-note {
+  margin: 0;
+  max-width: 260px;
+  padding: 0 8px 6px 30px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--ui-muted-fg);
+}
+
+/* A place with nothing in it yet: the line and the dashed button that makes
+   the first workspace. */
+.ui-roster-first {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 6px;
+  color: var(--ui-sidebar-muted);
+}
+.ui-roster-first > p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+}
+.ui-button.ui-roster-first-create {
+  justify-content: flex-start;
+  width: 100%;
+  height: auto;
+  padding: 8px 10px;
+  border: 1px dashed var(--ui-border);
+  color: var(--ui-sidebar-muted);
+  font-size: 14px;
+}
+.ui-button.ui-roster-first-create:hover {
+  color: var(--ui-sidebar-fg);
+}
+.ui-button.ui-roster-first-create > svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* "My workspaces": its actions sit behind "…", which shows on hover, on
+   keyboard focus, and while its menu is open, in the gap the heading leaves
+   before its chevron. */
+.ui-sidebar-group-header.ui-roster-group-header {
+  position: relative;
+}
+.ui-roster-group-header:has(> [data-state="open"]) {
+  background: var(--ui-hover);
+}
+.ui-roster-header-gap {
+  flex: 0 0 24px;
+  margin-left: auto;
+}
+.ui-roster-group-header .ui-section-chevron {
+  margin-left: 0;
+}
+.ui-sidebar-group-header .ui-button.ui-roster-header-actions {
+  position: absolute;
+  top: 50%;
+  right: 26px;
+  margin: 0;
+  transform: translateY(-50%);
+  color: var(--ui-sidebar-muted);
+  opacity: 0;
+}
+.ui-roster-group-header:hover > .ui-button.ui-roster-header-actions,
+.ui-roster-group-header:focus-within > .ui-button.ui-roster-header-actions,
+.ui-roster-group-header > .ui-button.ui-roster-header-actions[data-state="open"] {
+  opacity: 1;
+}
+.ui-roster-header-actions:hover {
+  color: var(--ui-sidebar-fg);
+}
+.ui-roster-header-actions svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* "Filter by project" past a handful of projects: a search field over a
+   scrolling list. */
+.ui-roster-filter-search {
+  width: 288px;
+  overflow: hidden;
+  padding: 0;
+}
+.ui-roster-filter-search .ui-command-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-roster-filter-search .ui-command-list {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.ui-roster-filter-search .ui-command-empty {
+  padding: 6px 8px;
+  text-align: left;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+}
+.ui-roster-filter-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A workspace listed outside its repository (pinned, in a section you made,
+   or archived) sits on the section's own column, the way a repository row
+   does. */
+.ui-roster-row:is([data-placement="pinned"], [data-placement="section"], [data-placement="archived"])
+  > .ui-sidebar-item
+  .ui-sidebar-item-target {
+  padding-left: 12px;
+}
+.ui-roster-row-repo {
+  display: inline-flex;
+  flex: none;
+}
+
+/* The current choice in a menu list, e.g. a workspace's status. */
+.ui-roster-menu .ui-roster-menu-check {
+  margin-left: auto;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-muted-fg);
+}
+
+/* A heading submenu of choices: wide enough for "In progress", the current
+   one checked on the right. */
+.ui-roster-choice {
+  min-width: 144px;
+}
+
+/* Grouped by status: each stage's heading reads like a row (its icon, its
+   name in bold), the chevron and a folded stage's count showing on hover. */
+.ui-roster-status-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.ui-roster-status {
+  min-width: 0;
+}
+.ui-roster-status-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  margin: 2px 0 4px;
+  padding: 6px;
+  border-radius: 6px;
+  color: var(--ui-sidebar-fg);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.ui-roster-status-header:hover {
+  background: var(--ui-hover);
+}
+.ui-roster-status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-bottom: 1px;
+}
+.ui-roster-status-label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.ui-roster-status-count {
+  flex: none;
+  font: 10px var(--font-mono);
+}
+.ui-roster-status-chevron {
+  display: inline-flex;
+  flex: none;
+  color: var(--ui-sidebar-muted);
+  opacity: 0;
+}
+.ui-roster-status-header:is(:hover, :focus-visible) > .ui-roster-status-chevron {
+  opacity: 1;
+}
+.ui-roster-status-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.ui-roster-status-rows[data-empty] {
+  gap: 12px;
+}

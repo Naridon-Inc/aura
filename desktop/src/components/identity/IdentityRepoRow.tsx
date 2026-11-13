@@ -13,9 +13,13 @@
 
 import * as React from "react";
 
+import { monogram } from "../../lib/monogram";
+import { Avatar, AvatarFallback } from "../ui/avatar";
 import { Button } from "../ui/button";
 import { Select, type SelectOption } from "../ui/select";
-import { Avatar } from "../team/presentation/Avatar";
+import { SettingsActions, SettingsError } from "../ui/settings-blocks";
+import { SettingsRow } from "../ui/settings-row";
+import "../ui/identity-row.css";
 import {
   identityOverrideClear,
   identityOverrideSet,
@@ -113,168 +117,145 @@ export function IdentityRepoRow({ status, onChanged }: IdentityRepoRowProps) {
   const options: SelectOption[] = status.candidates.map((c) => ({
     value: c.handle,
     label: <CandidateLabel member={c} />,
-    icon: <Avatar name={c.name || c.handle} size={18} />,
+    icon: (
+      <Avatar className="ui-identity-avatar">
+        <AvatarFallback>{monogram(c.name || c.handle)}</AvatarFallback>
+      </Avatar>
+    ),
   }));
 
   const settled = status.confusion === "clear";
 
-  return (
-    // A repo is a settings row, not a card: the pane it lives in is a
-    // ruled list and a bordered box per project made five projects read as
-    // five separate panels. Same 28px rhythm, same 14/13 scale.
-    <div className="flex flex-col gap-2 py-7">
-      {/* header: project + committing-as */}
-      <div className="flex items-baseline justify-between gap-3">
-        <span className="text-sm font-medium text-text-1 truncate">
-          {status.repo_name}
-        </span>
-        <span className="text-[13px] text-text-3 truncate">
-          {/* "Committing as an unset git email" filled the value slot with a
-              description of the hole. It reads like an address until you
-              finish the sentence, and it names nothing to do about it. */}
-          {noEmail ? "No git email set here" : `Committing as ${status.email}`}
-        </span>
-      </div>
+  // The sentence under the project when it is not settled yet.
+  const verdict = noEmail ? (
+    status.candidates.length > 0 ? (
+      <>
+        Git has no email for you in this repository, so Aura can&apos;t tell which
+        teammate you are here. Pick yourself and it will remember.
+      </>
+    ) : (
+      <>
+        Git has no email for you in this repository, and nobody has joined this
+        repository&apos;s team yet — so there&apos;s nobody to match you to.
+      </>
+    )
+  ) : status.confusion === "not_on_roster" ? (
+    <>We don&apos;t recognise this email on your team yet.</>
+  ) : status.best_guess ? (
+    <>
+      We think you&apos;re <strong>@{status.best_guess}</strong> in this repository.
+    </>
+  ) : (
+    <>Confirm who you are in this repository.</>
+  );
 
-      {/* verdict line */}
-      {settled ? (
-        <div className="flex items-center justify-between gap-3">
-          <span className="flex items-center gap-1.5 text-[13px] text-text-2">
-            <span
-              className="inline-block h-1.5 w-1.5 rounded-full bg-accent-green"
-              aria-hidden
-            />
+  const control = settled ? (
+    !picking && (
+      <Button variant="ghost" size="xs" onClick={() => setPicking(true)} disabled={busy}>
+        Not you? Change
+      </Button>
+    )
+  ) : (
+    <SettingsActions>
+      {/* Both of these claim a seat keyed on the git email, so with no
+          email they are buttons whose only outcome is an error. */}
+      {!noEmail && status.confusion !== "not_on_roster" && (
+        <Button size="xs" onClick={confirmMe} disabled={busy}>
+          This is me
+        </Button>
+      )}
+      {!noEmail && status.confusion === "not_on_roster" && (
+        <Button size="xs" onClick={addMe} disabled={busy}>
+          I&apos;m new. Add me
+        </Button>
+      )}
+      {!picking && status.candidates.length > 0 && (
+        <Button
+          size="xs"
+          // With no git email this is the only thing left that works, and
+          // the only action in a row shouldn't read as the secondary one.
+          variant={noEmail ? "default" : "subtle"}
+          onClick={() => setPicking(true)}
+          disabled={busy}
+        >
+          {noEmail ? "Pick who you are" : "Pick someone else"}
+        </Button>
+      )}
+    </SettingsActions>
+  );
+
+  return (
+    // A repo is a settings row, not a card: the pane it lives in is a ruled
+    // list, and a bordered box per project made five projects read as five
+    // separate panels.
+    <SettingsRow
+      className="ui-identity-row"
+      title={status.repo_name}
+      // "Committing as an unset git email" filled the value slot with a
+      // description of the hole. It reads like an address until you finish
+      // the sentence, and it names nothing to do about it.
+      description={noEmail ? "No git email set here" : `Committing as ${status.email}`}
+      help={
+        settled ? (
+          <span className="ui-identity-verdict" data-tone="ok">
+            <span className="ui-identity-dot" aria-hidden />
             You&apos;re @{status.effective_handle}
           </span>
-          {!picking && (
-            <button
-              type="button"
-              onClick={() => setPicking(true)}
-              disabled={busy}
-              className="text-[13px] text-text-3 hover:text-text-1 transition-colors disabled:opacity-50"
-            >
-              Not you? Change
-            </button>
-          )}
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          <p className="text-[13px] text-text-2 leading-relaxed">
-            {noEmail ? (
-              status.candidates.length > 0 ? (
-                <>
-                  Git has no email for you in this project, so Aura can&apos;t
-                  tell which teammate you are here. Pick yourself and it will
-                  remember.
-                </>
-              ) : (
-                <>
-                  Git has no email for you in this project, and nobody has
-                  joined this project&apos;s team yet — so there&apos;s nobody to
-                  match you to.
-                </>
-              )
-            ) : status.confusion === "not_on_roster" ? (
-              <>We don&apos;t recognise this email on your team yet.</>
-            ) : status.best_guess ? (
-              <>
-                We think you&apos;re{" "}
-                <span className="text-text-1 font-medium">
-                  @{status.best_guess}
-                </span>{" "}
-                in this project.
-              </>
-            ) : (
-              <>Confirm who you are in this project.</>
-            )}
-          </p>
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Both of these claim a seat keyed on the git email, so with no
-                email they are buttons whose only outcome is an error. */}
-            {!noEmail && status.confusion !== "not_on_roster" && (
-              <Button size="xs" onClick={confirmMe} disabled={busy}>
-                This is me
-              </Button>
-            )}
-            {!noEmail && status.confusion === "not_on_roster" && (
-              <Button size="xs" onClick={addMe} disabled={busy}>
-                I&apos;m new. Add me
-              </Button>
-            )}
-            {!picking && status.candidates.length > 0 && (
-              <Button
-                size="xs"
-                // With no git email this is the only thing left that works,
-                // and the only action in a row shouldn't read as the
-                // secondary one.
-                variant={noEmail ? "default" : "subtle"}
-                onClick={() => setPicking(true)}
-                disabled={busy}
-              >
-                {noEmail ? "Pick who you are" : "Pick someone else"}
-              </Button>
-            )}
-          </div>
-        </div>
-      )}
-
+        ) : (
+          <span className="ui-identity-verdict">{verdict}</span>
+        )
+      }
+      control={control}
+    >
       {/* picker — shared by the settled "Change" path and the unsettled
           "Pick someone else" path */}
-      {picking && (
-        <div className="flex flex-col gap-2 pt-1">
-          <Select
-            value={pick}
-            onChange={(v) => {
-              setPick(v);
-              choosePerson(v);
-            }}
-            options={options}
-            placeholder="Choose your teammate…"
-            disabled={busy}
-            aria-label="Choose who you are in this project"
-          />
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => {
-                setPicking(false);
-                setPick("");
-              }}
-              disabled={busy}
-              className="text-[13px] text-text-3 hover:text-text-1 transition-colors disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            {settled && (
-              <button
-                type="button"
-                onClick={resetPin}
+      {(picking || error) && (
+        <div className="ui-identity-picker">
+          {picking && (
+            <>
+              <Select
+                value={pick}
+                onChange={(v) => {
+                  setPick(v);
+                  choosePerson(v);
+                }}
+                options={options}
+                placeholder="Choose your teammate…"
                 disabled={busy}
-                className="text-[13px] text-text-3 hover:text-text-1 transition-colors disabled:opacity-50"
-              >
-                Use my git email instead
-              </button>
-            )}
-          </div>
+                aria-label="Choose who you are in this repository"
+              />
+              <SettingsActions>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => {
+                    setPicking(false);
+                    setPick("");
+                  }}
+                  disabled={busy}
+                >
+                  Cancel
+                </Button>
+                {settled && (
+                  <Button variant="ghost" size="xs" onClick={resetPin} disabled={busy}>
+                    Use my git email instead
+                  </Button>
+                )}
+              </SettingsActions>
+            </>
+          )}
+          {error && <SettingsError>{error}</SettingsError>}
         </div>
       )}
-
-      {error && (
-        <p className="text-[13px] text-text-3" role="alert">
-          {error}
-        </p>
-      )}
-    </div>
+    </SettingsRow>
   );
 }
 
 function CandidateLabel({ member }: { member: RosterLite }) {
   return (
-    <span className="flex min-w-0 items-center gap-1.5">
-      <span className="text-text-1">@{member.handle}</span>
-      {member.name && (
-        <span className="text-text-3 truncate">{member.name}</span>
-      )}
+    <span className="ui-identity-candidate">
+      <span>@{member.handle}</span>
+      {member.name && <small>{member.name}</small>}
     </span>
   );
 }

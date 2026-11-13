@@ -103,9 +103,12 @@ fn sanitize_profile_name(name: &str) -> String {
         .collect::<String>()
 }
 
-/// Resolve a profile name to its on-disk HOME path, creating the
-/// directory tree if missing. Returns None if HOME itself can't be
-/// resolved.
+/// Resolve a profile name to its on-disk HOME path. Only a profile that
+/// still exists resolves: a workspace bound to a profile that has since
+/// been deleted, or a tab reopened under one, gets None, so the agent
+/// runs on the normal sign-ins instead of in a fresh, empty home that
+/// asks for every sign-in again. Profiles are made by
+/// `agent_profile_create`, never here.
 pub fn agent_profile_home(name: &str) -> Option<PathBuf> {
     let root = agent_profiles_root()?;
     let safe = sanitize_profile_name(name);
@@ -113,8 +116,7 @@ pub fn agent_profile_home(name: &str) -> Option<PathBuf> {
         return None;
     }
     let dir = root.join(&safe);
-    fs::create_dir_all(&dir).ok()?;
-    Some(dir)
+    dir.is_dir().then_some(dir)
 }
 
 fn read_agent_profile_metadata(dir: &Path, name: &str) -> AgentProfile {
@@ -230,7 +232,8 @@ fn write_global_binding(repo_root: &str, b: &WorkspaceBinding) -> Result<(), Str
 /// "Isolated session…" from the launcher). Returns the env tuples to
 /// inject on the spawned child:
 ///
-/// - `HOME=<agent profile dir>` when an agent profile is selected.
+/// - `HOME=<agent profile dir>` when an agent profile is selected and
+///   still exists; a deleted one leaves HOME alone.
 /// - `GIT_AUTHOR_NAME/EMAIL`, `GIT_COMMITTER_NAME/EMAIL` when a git
 ///   profile is bound. Also `GIT_AUTHOR_DATE` is left to the agent.
 ///

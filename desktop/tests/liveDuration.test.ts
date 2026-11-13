@@ -48,7 +48,7 @@ describe("the in-flight timers tick fast enough to show it", () => {
   });
 
   it("the running-tool row ticks at 10Hz too", async () => {
-    const src = await readSrc("components/manager/ManagerChatView.tsx");
+    const src = await readSrc("components/manager/chat/RunningCommandStatus.tsx");
     expect(src).toContain("setElapsed(Math.max(0, (Date.now() - start) / 1000))");
     expect(src).toContain("window.setInterval(tick, 100)");
     expect(src).toContain("formatLiveDuration(elapsed)");

@@ -16,10 +16,10 @@
 // working and nothing is queued, the strip renders nothing — it never nags.
 
 import * as React from "react";
-import { createPortal } from "react-dom";
-import { ChevronDown, ChevronUp, Users } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, Users } from "lucide-react";
 
 import { AsciiSpinner } from "../../ui/ascii-spinner";
+import "../../ui/crew-strip.css";
 
 import { type ReadyViewDto } from "../../../lib/api";
 import { fetchReadyView } from "../../../lib/loopCache";
@@ -145,58 +145,51 @@ export function CrewComposerBlock({
   const lead = working[0]?.task.title ?? done[0]?.task.title ?? "";
 
   return (
-    <div className="aura-crew-block">
-      <button
-        type="button"
-        className="aura-crew-head"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        title={open ? "Hide the crew" : "Show the crew"}
-      >
-        <span className="aura-crew-glyph" aria-hidden>
+    <div className="ui-message-queue ui-crew-strip" aria-label="Crew">
+      <div className="ui-queue-caption">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          title={open ? "Hide the crew" : "Show the crew"}
+        >
+          {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           {/* Agents are working right now — the one thing the house spinner
-              is for. This drew a lucide `Loader2` instead, which put a second
-              "something is running" glyph in the same transcript as the one
-              the tool cards and status line already use. */}
-          {liveCount > 0 ? <AsciiSpinner size={13} /> : <Users size={13} />}
-        </span>
-        <span className="aura-crew-summary">
-          {summary}
-          {lead ? <span className="aura-crew-lead"> · {lead}</span> : null}
-        </span>
-        <span className="aura-crew-chev" aria-hidden>
-          {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-        </span>
-      </button>
+              is for. */}
+          {liveCount > 0 ? <AsciiSpinner size={12} /> : <Users size={12} />}
+          <span className="ui-crew-strip-summary">
+            {summary}
+            {lead ? <span className="ui-crew-strip-lead"> · {lead}</span> : null}
+          </span>
+        </button>
+      </div>
 
       {open && (
-        <div className="aura-crew-rows">
+        <>
           {/* Working — clickable, opens the agent's live transcript so you can
               watch it build, not just read a label. */}
           {working.map((i) => (
             <button
               key={i.task.id}
               type="button"
-              className="aura-crew-row aura-crew-row-live"
+              className="ui-queue-row ui-crew-strip-row"
               onClick={() => setWatchTitle(i.task.title)}
               title="Watch this agent work"
             >
               <AgentBit agentKind={i.task.agent_kind} size={18} />
-              <span className="aura-crew-row-title">{i.task.title}</span>
+              <span className="ui-queue-text">{i.task.title}</span>
               <WorkingLine agentKind={i.task.agent_kind} />
             </button>
           ))}
 
           {/* Just landed — with the proof that ties the commit to the goal it
-              delivered (the moat). */}
+              delivered. */}
           {done.map((i) => {
             const best = bestProof(proofForCommit(proof, i.task.commit_sha));
             return (
-              <div key={i.task.id} className="aura-crew-row">
+              <div key={i.task.id} className="ui-queue-row ui-crew-strip-row" data-done="">
                 <AgentBit agentKind={i.task.agent_kind} size={18} dim />
-                <span className="aura-crew-row-title aura-crew-row-done">
-                  {i.task.title}
-                </span>
+                <span className="ui-queue-text">{i.task.title}</span>
                 {i.task.commit_sha ? <CommitChip sha={i.task.commit_sha} /> : null}
                 {best ? <ProofPill proof={best} /> : null}
               </div>
@@ -205,33 +198,28 @@ export function CrewComposerBlock({
 
           {/* Hit a problem — surfaced so a stuck run is never silent. */}
           {failed.map((i) => (
-            <div key={i.task.id} className="aura-crew-row">
-              <span className="aura-crew-fail-dot" aria-hidden />
-              <span className="aura-crew-row-title">{i.task.title}</span>
-              <span className="aura-crew-fail-msg">
-                {(i.task.error_message ?? "Hit a problem").trim().split("\n")[0]}
+            <div key={i.task.id} className="ui-queue-row ui-crew-strip-row" data-failed="">
+              <CircleAlert size={14} aria-label="Hit a problem" />
+              <span className="ui-queue-text">
+                {i.task.title}
+                <small>{(i.task.error_message ?? "Hit a problem").trim().split("\n")[0]}</small>
               </span>
             </div>
           ))}
 
-          <div className="aura-crew-foot">
+          <p className="ui-crew-strip-foot">
             Crew is running these for you. Open Build → Crew to manage, or type{" "}
             <code>/loop</code> in chat.
-          </div>
-        </div>
+          </p>
+        </>
       )}
 
-      {watchTitle
-        ? createPortal(
-            <div className="fixed inset-0 z-[70]">
-              <CrewLiveTranscript
-                nodeTitle={watchTitle}
-                onClose={() => setWatchTitle(null)}
-              />
-            </div>,
-            document.body,
-          )
-        : null}
+      {/* The transcript is a sheet, which portals itself and brings its own
+          overlay. It used to be wrapped in a full-screen layer of our own on
+          top of that, which sat over the whole window while it was open. */}
+      {watchTitle ? (
+        <CrewLiveTranscript nodeTitle={watchTitle} onClose={() => setWatchTitle(null)} />
+      ) : null}
     </div>
   );
 }

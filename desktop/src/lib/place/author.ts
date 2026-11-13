@@ -153,7 +153,7 @@ export function whyNotMe(plan: AuthorPlan): string {
     case "machine":
       return a.why;
     case "someone":
-      return `${authorLine(a.author)} is set for this project, and that is somebody else.`;
+      return `${authorLine(a.author)} is set for this repository, and that is somebody else.`;
     case "missing":
       return a.why;
   }

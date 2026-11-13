@@ -14,6 +14,11 @@ export function keyEventToBytes(e: KeyboardEvent): string | null {
 
   // ⌘ chords (copy/paste, app shortcuts) are never terminal input.
   if (metaKey) return null;
+  // Neither is Ctrl+Shift+<letter>, which is how every terminal spells its own
+  // commands on Linux and Windows — Ctrl+Shift+C/V/F are copy, paste and find.
+  // Encoding them would send the same byte as plain Ctrl+<letter>, so the shell
+  // got a ^F for a find and readline moved the cursor while the widget opened.
+  if (ctrlKey && e.shiftKey && !altKey && key.length === 1) return null;
   // Bare modifier presses produce no bytes.
   if (key === "Shift" || key === "Control" || key === "Alt" || key === "Meta") {
     return null;

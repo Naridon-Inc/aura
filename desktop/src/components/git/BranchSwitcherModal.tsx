@@ -1,27 +1,41 @@
-// BranchSwitcherModal — a Cmd-K-style branch switcher that opens OVER the Git
-// view's full-screen overlay. Where the old popover gave you a name and a
-// subject, this gives you the context you actually decide on: who last moved
-// the branch and when, its one-line subject, how far it is ahead/behind its
-// upstream, whether it's local or remote, and — live from the Team Radar — who
-// else is on it right now. Fuzzy-filter at the top, arrow keys to move, Enter
-// to switch (with the shared dirty-guard + human error), and a one-keystroke
-// "create a branch from here".
+// The branch switcher: a search over this repository's branches in the shared
+// command dialog. Each row carries what you decide on — who last moved the
+// branch and when, its one-line subject, how far it is from its shared copy,
+// and who else is on it right now. Typing a name no branch has offers to
+// create it from the branch you're on.
 //
-// It renders through a portal at a higher stacking context (z-[60]) than the
-// FullscreenOverlay (z-50) beneath it, and its Esc handler stops propagation —
-// so pressing Esc closes THIS modal without also closing the Git view under it.
+// Picking a branch while an agent is working in this checkout asks first
+// ("Switch branch?"); the switcher steps aside for that question, and comes
+// back only if the switch then fails, to say why. Creating a branch isn't
+// asked about — it starts from where the agent already is.
+//
+// It can open over the full-screen Git view, whose Escape handler sits on the
+// window. The dialog stops Escape before it gets there, so Esc closes the
+// switcher and leaves the view under it open.
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { Check, Cloud, GitBranch, Plus, Search } from "lucide-react";
+import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { Check, Cloud, GitBranch, Plus } from "lucide-react";
 
 import { api, type GitBranchRich, type RadarEvent } from "../../lib/api";
+import * as work from "../../lib/place/workApi";
 import { monogram } from "../../lib/monogram";
-import { Button } from "../ui/button";
-import { AsciiSpinner } from "../ui/ascii-spinner";
-import { useBranches } from "./branches";
-import { branchSyncDetail } from "../rightrail/reviewState";
 import { relativeAgeFromSecs } from "../../lib/relativeTime";
+import { branchSyncDetail } from "../rightrail/reviewState";
+import { Alert, AlertDescription } from "../ui/alert";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Avatar, AvatarFallback } from "../ui/avatar";
+import { Badge } from "../ui/badge";
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "../ui/command";
+import { BranchSwitchConfirm, useBranchSwitchGuard } from "./BranchSwitchConfirm";
+import { useBranches } from "./branches";
+import "../ui/branch-switcher.css";
 
 type Props = {
   repoRoot: string;
@@ -32,342 +46,216 @@ type Props = {
 // The radar feed is ambient; an event older than this is stale presence.
 const PRESENCE_WINDOW_MS = 30 * 60 * 1000;
 
-export function BranchSwitcherModal({ repoRoot, onClose }: Props) {
-  const br = useBranches(repoRoot, { poll: false });
-  const [rich, setRich] = useState<GitBranchRich[]>([]);
+/** The rich branch list, read once on open. The shared `useBranches` engine
+ *  still owns checkout and create (dirty-guard + human error); this only
+ *  feeds the rows. */
+function useRichBranches(repoRoot: string) {
+  const [rows, setRows] = useState<GitBranchRich[]>([]);
   const [loading, setLoading] = useState(true);
-  const [presence, setPresence] = useState<RadarEvent[]>([]);
-  const [query, setQuery] = useState("");
-  const [idx, setIdx] = useState(0);
-  const [creating, setCreating] = useState(false);
-  const [newName, setNewName] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-
-  // Load the rich branch list once on open. The shared useBranches engine still
-  // owns checkout/create (dirty-guard + humanizeGitError); this just feeds the
-  // richer rows the modal paints.
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    api
+    work
       .gitBranchesRich(repoRoot)
-      .then((rows) => {
-        if (alive) setRich(rows);
-      })
-      .catch(() => {
-        if (alive) setRich([]);
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
+      .then((next) => alive && setRows(next))
+      .catch(() => alive && setRows([]))
+      .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
   }, [repoRoot]);
+  return { rows, loading };
+}
 
-  // Pull the Team Radar once so each row can show who else is on that branch.
-  // Best-effort — no radar (not signed in / no cloud) just means no pips.
+/** Branch name → the distinct people recently active on it, from the Team
+ *  Radar. Best-effort: no radar (not signed in, no cloud) means no faces. */
+function useBranchPresence(repoRoot: string) {
+  const [events, setEvents] = useState<RadarEvent[]>([]);
   useEffect(() => {
     let alive = true;
     api
       .auraRadar(repoRoot)
-      .then((view) => {
-        if (alive) setPresence(view.events ?? []);
-      })
-      .catch(() => {
-        if (alive) setPresence([]);
-      });
+      .then((view) => alive && setEvents(view.events ?? []))
+      .catch(() => alive && setEvents([]));
     return () => {
       alive = false;
     };
   }, [repoRoot]);
-
-  // Focus the filter as soon as the modal mounts.
-  useEffect(() => {
-    const id = requestAnimationFrame(() => inputRef.current?.focus());
-    return () => cancelAnimationFrame(id);
-  }, []);
-
-  // Map branch name → the distinct, recent actors editing on it (excluding me).
-  const presenceByBranch = useMemo(() => {
+  return useMemo(() => {
     const now = Date.now();
     const map = new Map<string, string[]>();
-    for (const ev of presence) {
-      if (!ev.branch) continue;
-      if (now - ev.ts * 1000 > PRESENCE_WINDOW_MS) continue;
+    for (const ev of events) {
+      if (!ev.branch || now - ev.ts * 1000 > PRESENCE_WINDOW_MS) continue;
       const list = map.get(ev.branch) ?? [];
       if (!list.includes(ev.actor)) list.push(ev.actor);
       map.set(ev.branch, list);
     }
     return map;
-  }, [presence]);
+  }, [events]);
+}
 
-  const q = query.trim().toLowerCase();
-  const filtered = useMemo(() => {
-    const rows = q ? rich.filter((b) => b.name.toLowerCase().includes(q)) : rich;
-    // Current branch first, then locals, then remotes — newest-commit order is
-    // preserved within each group (the backend already sorted by committerdate).
-    return [...rows].sort((a, b) => {
-      if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
-      if (a.isRemote !== b.isRemote) return a.isRemote ? 1 : -1;
-      return 0;
-    });
-  }, [rich, q]);
+const rowKey = (b: GitBranchRich) => (b.isRemote ? "r:" : "l:") + b.name;
 
-  // Keep the highlighted row in range as the filter narrows.
-  useEffect(() => {
-    setIdx((i) => Math.min(Math.max(0, i), Math.max(0, filtered.length - 1)));
-  }, [filtered.length]);
+export function BranchSwitcherModal({ repoRoot, onClose }: Props) {
+  const br = useBranches(repoRoot, { poll: false });
+  const rich = useRichBranches(repoRoot);
+  const presence = useBranchPresence(repoRoot);
+  const [query, setQuery] = useState("");
+  const guard = useBranchSwitchGuard(repoRoot);
+  // Out of the way while the question is up, and while the switch it allowed
+  // runs; a failed switch brings the list back with git's reason.
+  const [stepAside, setStepAside] = useState(false);
 
-  // Keep the highlighted row scrolled into view.
-  useEffect(() => {
-    const el = listRef.current?.querySelector<HTMLElement>(`[data-row="${idx}"]`);
-    el?.scrollIntoView({ block: "nearest" });
-  }, [idx]);
+  const name = query.trim();
+  // The current branch leads; newest-commit order (the backend's) holds
+  // within each group.
+  const { local, remote } = useMemo(() => {
+    const q = name.toLowerCase();
+    const hits = q ? rich.rows.filter((b) => b.name.toLowerCase().includes(q)) : rich.rows;
+    const local = hits
+      .filter((b) => !b.isRemote)
+      .sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent));
+    return { local, remote: hits.filter((b) => b.isRemote) };
+  }, [rich.rows, name]);
+  const canCreate = name.length > 0 && !rich.loading && !rich.rows.some((b) => b.name === name);
 
   // checkout/createBranch broadcast `aura:git-changed` themselves (in the
   // shared useBranches engine), so every git pane re-reads after the switch.
-  async function pick(name: string) {
+  async function checkout(name: string) {
     if (await br.checkout(name)) onClose();
+    else setStepAside(false);
   }
-
+  function pick(b: GitBranchRich) {
+    if (b.isCurrent) return onClose();
+    const outcome = guard.requestSwitch({
+      branchName: b.name,
+      switchBranch: () => void checkout(b.name),
+    });
+    if (outcome === "confirming") setStepAside(true);
+  }
   async function create() {
-    if (await br.createBranch(newName)) onClose();
+    if (await br.createBranch(name)) onClose();
   }
 
-  function onKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Escape") {
-      // Stop the FullscreenOverlay underneath from also catching this and
-      // closing the whole Git view — Esc closes ONLY the modal.
-      e.preventDefault();
-      e.stopPropagation();
-      if (creating) {
-        setCreating(false);
-        return;
-      }
-      onClose();
-      return;
-    }
-    if (creating) return; // arrow/enter belong to the create input while open
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setIdx((i) => Math.min(filtered.length - 1, i + 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setIdx((i) => Math.max(0, i - 1));
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      const row = filtered[idx];
-      if (row && !row.isCurrent) void pick(row.name);
-    }
+  function row(b: GitBranchRich) {
+    return (
+      <BranchRow
+        key={rowKey(b)}
+        b={b}
+        busy={br.busy === b.name}
+        presence={presence.get(b.name) ?? []}
+        onPick={() => pick(b)}
+      />
+    );
   }
-
-  return createPortal(
-    // Backdrop captures Esc at the highest layer and a mousedown-to-dismiss.
-    // The wrapping div listens in capture phase so Esc never reaches the
-    // overlay below.
-    <div
-      className="fixed inset-0 z-[60] flex items-start justify-center pt-[12vh]"
-      style={{ background: "rgba(5,5,5,0.5)", backdropFilter: "blur(3px)" }}
-      onMouseDown={onClose}
-      onKeyDown={onKeyDown}
-    >
-      <div
-        className="w-full max-w-[560px] overflow-hidden rounded-xl shadow-2xl"
-        style={{
-          background: "var(--color-bg-1)",
-          border: "1px solid var(--color-line)",
-        }}
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        {/* Filter */}
-        <div className="flex items-center gap-2.5 border-b border-line-soft px-3.5 py-2.5">
-          <Search size={14} className="shrink-0 text-text-4" />
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setIdx(0);
-            }}
-            placeholder="Switch branch…"
-            className="flex-1 bg-transparent text-base text-text-1 placeholder:text-text-4 focus:outline-none"
-          />
-          <span className="text-2xs tracking-wider text-text-5">esc</span>
-        </div>
-
-        {/* Create-from-here */}
-        {creating ? (
-          <div className="flex items-center gap-2 border-b border-line-soft px-3.5 py-2.5">
-            <Plus size={14} className="shrink-0 text-accent" />
-            <input
-              autoFocus
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void create();
-                }
-              }}
-              placeholder="new-branch-name"
-              className="flex-1 bg-transparent font-mono text-base text-text-1 placeholder:text-text-4 focus:outline-none"
-            />
-            <Button
-              type="button"
-              size="xs"
-              variant="subtle"
-              onClick={() => void create()}
-              disabled={!newName.trim() || !!br.busy}
-            >
-              Create from {br.current ?? "here"}
-            </Button>
-          </div>
-        ) : (
-          <button
-            type="button"
-            onClick={() => {
-              setCreating(true);
-              setNewName("");
-            }}
-            className="flex w-full items-center gap-2 border-b border-line-soft px-3.5 py-2.5 text-left text-base text-text-2 transition-colors hover:bg-state-hover"
-          >
-            <Plus size={14} className="shrink-0 text-accent" />
-            Create branch from here…
-          </button>
-        )}
-
-        {br.error && (
-          <div
-            className="border-b border-line-soft px-3.5 py-2 text-sm"
-            style={{ color: "var(--color-red)", background: "color-mix(in oklab, var(--color-red) 8%, transparent)" }}
-          >
-            {br.error}
-          </div>
-        )}
-
-        {/* Rich rows */}
-        <div ref={listRef} className="max-h-[52vh] overflow-y-auto py-1">
-          {loading ? (
-            <div className="flex items-center gap-1.5 px-3.5 py-3 text-sm text-text-4">
-              <AsciiSpinner className="text-2xs" />
-              <span>Reading this project's branches…</span>
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="px-3.5 py-3 text-sm text-text-4">No branches match.</div>
-          ) : (
-            filtered.map((b, i) => (
-              <BranchRowRich
-                key={(b.isRemote ? "r:" : "l:") + b.name}
-                index={i}
-                b={b}
-                active={i === idx}
-                busy={br.busy === b.name}
-                presence={presenceByBranch.get(b.name) ?? []}
-                onHover={() => setIdx(i)}
-                onPick={() => void pick(b.name)}
-              />
-            ))
-          )}
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
-function BranchRowRich({
-  index,
-  b,
-  active,
-  busy,
-  presence,
-  onHover,
-  onPick,
-}: {
-  index: number;
-  b: GitBranchRich;
-  active: boolean;
-  busy: boolean;
-  presence: string[];
-  onHover: () => void;
-  onPick: () => void;
-}) {
-  const secondary = [
-    b.author,
-    b.committedAt ? relativeTime(b.committedAt) : null,
-    b.subject,
-  ]
-    .filter(Boolean)
-    .join(" · ");
 
   return (
-    <button
-      type="button"
-      data-row={index}
-      disabled={busy || b.isCurrent}
-      onMouseEnter={onHover}
-      onMouseDown={(e) => {
-        e.preventDefault();
-        if (!b.isCurrent) onPick();
-      }}
-      title={b.upstream ? `Shared copy: ${b.upstream}` : undefined}
-      className={
-        "flex w-full items-start gap-2.5 px-3.5 py-2 text-left transition-colors disabled:cursor-default " +
-        (active && !b.isCurrent ? "bg-bg-card" : b.isCurrent ? "" : "hover:bg-state-hover")
-      }
-    >
-      <span className="mt-0.5 flex w-4 shrink-0 justify-center">
-        {b.isCurrent ? (
-          <Check size={14} className="text-accent" />
-        ) : b.isRemote ? (
-          <Cloud size={13} className="text-text-4" />
-        ) : (
-          <GitBranch size={13} className="text-text-4" />
+    <>
+      <BranchSwitchConfirm
+        {...guard.dialogProps}
+        onCancel={() => {
+          guard.dialogProps.onCancel();
+          onClose();
+        }}
+      />
+      <CommandDialog
+        open={!stepAside}
+        onOpenChange={(next) => !next && onClose()}
+        title="Switch branch"
+        description="Search this repository's branches and press Enter to switch, or type a new name to create one."
+        commandProps={{
+          shouldFilter: false,
+          loop: true,
+          onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
+            if (e.key === "Escape") e.stopPropagation();
+          },
+        }}
+      >
+        <CommandInput
+          value={query}
+          onValueChange={setQuery}
+          placeholder="Switch branch, or type a new name…"
+          aria-label="Switch branch"
+          trailing={rich.loading && <AsciiSpinner />}
+        />
+        {br.error && (
+          <Alert variant="destructive" className="ui-branch-switch-error">
+            <AlertDescription>{br.error}</AlertDescription>
+          </Alert>
         )}
-      </span>
-
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="flex items-center gap-2">
-          <span
-            className={
-              "truncate font-mono text-base " +
-              (b.isCurrent ? "font-medium text-text-1" : "text-text-1")
-            }
-          >
-            {b.name}
-          </span>
-          {b.isCurrent && (
-            <span className="shrink-0 text-2xs text-accent">
-              current
-            </span>
+        <CommandList>
+          <CommandEmpty>
+            {rich.loading ? "Reading this repository's branches…" : "No branches match."}
+          </CommandEmpty>
+          {canCreate && (
+            <CommandGroup heading="New branch">
+              <CommandItem
+                value={`create:${name}`}
+                disabled={!!br.busy}
+                onSelect={() => void create()}
+              >
+                <Plus />
+                <span className="ui-branch-switch-new">
+                  Create <code>{name}</code> from {br.current ?? "here"}
+                </span>
+              </CommandItem>
+            </CommandGroup>
           )}
-          <AheadBehindChip ahead={b.ahead} behind={b.behind} hasUpstream={!!b.upstream} />
-          <span className="meta-tag">
-            {b.isRemote ? "remote" : "local"}
-          </span>
-        </span>
-        {secondary && (
-          <span className="truncate text-xs text-text-4">{secondary}</span>
-        )}
-      </span>
-
-      {presence.length > 0 && <PresencePips actors={presence} />}
-      {busy && <span className="shrink-0 self-center text-2xs text-text-4">…</span>}
-    </button>
+          {local.length > 0 && <CommandGroup heading="Local">{local.map(row)}</CommandGroup>}
+          {remote.length > 0 && <CommandGroup heading="Remote">{remote.map(row)}</CommandGroup>}
+        </CommandList>
+      </CommandDialog>
+    </>
   );
 }
 
-// A branch row is a dense line of 2xs text, so the chip stays terse — two
-// arrows and two numbers. That makes the hover the only place the state is
-// actually explained, and this file used to write its own three explanations
-// ("3 ahead · 5 behind upstream", "In step with upstream.", "This branch has
-// no upstream — it only lives on your machine.") while the review rail wrote
-// the same three a second time. `branchSyncDetail` is the one copy, and it
-// leads with what the numbers MEAN before the git fact — an arrow and a
-// number explain themselves to nobody.
-function AheadBehindChip({
+function BranchRow({
+  b,
+  busy,
+  presence,
+  onPick,
+}: {
+  b: GitBranchRich;
+  busy: boolean;
+  presence: string[];
+  onPick: () => void;
+}) {
+  const detail = [b.author, b.committedAt ? relativeAgeFromSecs(b.committedAt) : null, b.subject]
+    .filter(Boolean)
+    .join(" · ");
+  const Icon = b.isCurrent ? Check : b.isRemote ? Cloud : GitBranch;
+  return (
+    <CommandItem
+      value={rowKey(b)}
+      disabled={busy}
+      onSelect={onPick}
+      className="ui-branch-switch-row"
+      title={b.upstream ? `Shared copy: ${b.upstream}` : undefined}
+    >
+      <Icon className="ui-branch-switch-icon" data-current={b.isCurrent ? "" : undefined} />
+      <span className="ui-branch-switch-main">
+        <span className="ui-branch-switch-line">
+          <span className="ui-branch-switch-name">{b.name}</span>
+          {b.isCurrent && <Badge variant="secondary">Current</Badge>}
+          {/* A remote ref is the shared copy itself; only a local branch
+              can be ahead of, behind, or missing one. */}
+          {!b.isRemote && (
+            <SyncMark ahead={b.ahead} behind={b.behind} hasUpstream={!!b.upstream} />
+          )}
+        </span>
+        {detail && <span className="ui-branch-switch-detail">{detail}</span>}
+      </span>
+      {presence.length > 0 && <Presence actors={presence} />}
+      {busy && <AsciiSpinner />}
+    </CommandItem>
+  );
+}
+
+// The mark stays terse — two arrows and two numbers — so the hover is where
+// the state is explained. `branchSyncDetail` is the one copy of that
+// explanation, shared with the review rail, and it leads with what the
+// numbers mean before the git fact.
+function SyncMark({
   ahead,
   behind,
   hasUpstream,
@@ -377,73 +265,33 @@ function AheadBehindChip({
   hasUpstream: boolean;
 }) {
   const detail = branchSyncDetail(ahead, behind, hasUpstream);
-  if (!hasUpstream) {
-    return (
-      <span className="shrink-0 text-2xs text-text-5" title={detail}>
-        only here
-      </span>
-    );
-  }
-  if (ahead === 0 && behind === 0) {
-    return (
-      <span className="shrink-0 text-2xs text-text-5" title={detail}>
-        in step
-      </span>
-    );
-  }
+  const text = !hasUpstream
+    ? "only here"
+    : ahead === 0 && behind === 0
+      ? "in step"
+      : [ahead > 0 && `↑${ahead}`, behind > 0 && `↓${behind}`].filter(Boolean).join(" ");
   return (
-    <span
-      className="inline-flex shrink-0 items-center gap-1 text-2xs tabular-nums text-text-3"
-      title={detail}
-    >
-      {ahead > 0 && <span>↑{ahead}</span>}
-      {behind > 0 && <span>↓{behind}</span>}
+    <span className="ui-branch-switch-sync" title={detail}>
+      {text}
     </span>
   );
 }
 
-// Small avatar pips for who's live on this branch (from the Team Radar). Caps
-// at three; a "+N" tail covers the rest. Initial-based so it works with no
-// avatar service — the point is presence, not a photo.
-function PresencePips({ actors }: { actors: string[] }) {
+// Who's live on this branch, from the Team Radar. Caps at three faces with a
+// "+N" tail. Monograms, so it works with no avatar service — the point is
+// presence, not a photo.
+function Presence({ actors }: { actors: string[] }) {
   const shown = actors.slice(0, 3);
   const extra = actors.length - shown.length;
   return (
-    <span
-      className="flex shrink-0 items-center self-center"
-      title={`On this branch: ${actors.join(", ")}`}
-    >
-      {shown.map((a, i) => (
-        <span
-          key={a}
-          className="flex items-center justify-center rounded-full border text-2xs font-medium uppercase"
-          style={{
-            width: 18,
-            height: 18,
-            marginLeft: i === 0 ? 0 : -5,
-            background: "var(--color-bg-3)",
-            borderColor: "var(--color-line)",
-            color: "var(--color-text-2)",
-            zIndex: shown.length - i,
-          }}
-        >
-          {initials(a)}
-        </span>
+    <span className="ui-branch-switch-who" title={`On this branch: ${actors.join(", ")}`}>
+      {shown.map((a) => (
+        <Avatar key={a}>
+          {/* The shared monogram strips the "@host" off a radar actor. */}
+          <AvatarFallback>{monogram(a, { empty: "·" })}</AvatarFallback>
+        </Avatar>
       ))}
-      {extra > 0 && (
-        <span className="ml-1 text-2xs text-text-4">+{extra}</span>
-      )}
+      {extra > 0 && <span className="ui-branch-switch-more">+{extra}</span>}
     </span>
   );
-}
-
-function initials(actor: string): string {
-  // One monogram for the whole app — see lib/monogram. Stripping the "@host" off a radar actor
-  // ("ashiq@cursor") is what the shared one does for every caller now.
-  return monogram(actor, { empty: "·" });
-}
-
-function relativeTime(unix: number): string {
-  // One ladder for the whole app — see lib/relativeTime.
-  return relativeAgeFromSecs(unix);
 }

@@ -1,0 +1,145 @@
+/* The app's left navigation: header, account switcher, primary rows,
+   workspace groups and footer. Row metrics come from `.ui-sidebar-item`;
+   this file only places the pieces around them. */
+.ui-app-navigation {
+  font: 14px var(--font-sans);
+}
+.ui-nav-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  text-align: left;
+}
+.ui-nav-account strong {
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-nav-avatar {
+  display: grid;
+  place-items: center;
+  background: var(--ui-card);
+  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.ui-nav-primary {
+  padding: 6px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-nav-primary .ui-sidebar-item {
+  margin: 0 0 2px;
+}
+.ui-nav-primary .ui-sidebar-item:last-child {
+  margin-bottom: 0;
+}
+.ui-nav-primary .ui-sidebar-item-target {
+  padding-inline: 6px;
+}
+.ui-nav-shortcut {
+  opacity: 0;
+  font-size: 12px;
+}
+.ui-sidebar-item:hover .ui-nav-shortcut {
+  opacity: 1;
+}
+.ui-nav-count {
+  font-size: 12px;
+  color: var(--ui-sidebar-muted);
+}
+.ui-nav-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  min-height: 40px;
+  color: var(--ui-sidebar-muted);
+}
+.ui-nav-plan-badge {
+  font: 12px var(--font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 1px dashed var(--ui-sidebar-muted);
+  border-radius: 2px;
+  padding: 1px 8px;
+}
+.ui-nav-plan {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: inherit;
+  font-size: 12px;
+}
+.ui-nav-plan > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-app-navigation > .ui-sidebar-content > .ui-sidebar-group {
+  margin-top: 0;
+}
+.ui-app-navigation > .ui-sidebar-content > .ui-sidebar-group > .ui-sidebar-group-header {
+  margin-bottom: 8px;
+}
+
+/* The workspace list draws its own group header (it owns the sort and fold
+   controls), so it takes the same spacing the composed group does. */
+.ui-app-navigation .ui-roster > .ui-sidebar-group {
+  margin-top: 0;
+}
+.ui-app-navigation .ui-roster > .ui-sidebar-group > .ui-sidebar-group-header {
+  margin-bottom: 8px;
+}
+
+/* The list scrolls inside the same gutter on both sides. The app's scrollbar
+   (styles.css, 10px) takes its room from the right edge, so once the list was
+   long enough to scroll every row sat 6px from the left edge and 16px from
+   the right. Here the scrollbar is the right gutter instead: as wide as the
+   left padding, always laid out (transparent until you point at the list),
+   and the content gives up its own right padding for it. Scrolling or not,
+   the two sides match. */
+.ui-app-navigation > .ui-sidebar-content {
+  overflow-y: scroll;
+  padding-right: 0;
+}
+.ui-app-navigation > .ui-sidebar-content::-webkit-scrollbar {
+  width: 6px;
+}
+.ui-app-navigation > .ui-sidebar-content::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+}
+
+/* The list's top-level headings ("My workspaces", and "People" above it)
+   stay at the top of the sidebar while their list scrolls under them. Opaque
+   in the sidebar's own colour, with a band of it beside and below, so a row
+   passing under never shows through the side gaps or the rounded corners.
+   It pins to the scroll area's very top edge (-6px undoes the list's top
+   padding), so no row slides through a strip above it. Above the rows; the
+   heading's menus are portalled out of the sidebar, so they still open over
+   it. */
+.ui-app-navigation .ui-roster > .ui-sidebar-group > .ui-sidebar-group-header {
+  position: sticky;
+  top: -6px;
+  z-index: 2;
+  background: var(--ui-sidebar);
+  box-shadow:
+    -6px 0 0 var(--ui-sidebar),
+    6px 0 0 var(--ui-sidebar),
+    0 6px 0 var(--ui-sidebar);
+}
+.ui-app-navigation
+  .ui-roster
+  > .ui-sidebar-group
+  > .ui-sidebar-group-header:is(:hover, :has(> [data-state="open"])) {
+  background: linear-gradient(var(--ui-hover), var(--ui-hover)) var(--ui-sidebar);
+}

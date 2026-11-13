@@ -67,7 +67,6 @@ export function PlacePicker({
       }}
       options={options}
       disabled={disabled || places.length <= 1}
-      widthClass="min-w-[200px]"
     />
   );
 }

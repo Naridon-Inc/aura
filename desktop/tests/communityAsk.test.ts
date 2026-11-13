@@ -23,7 +23,7 @@ import {
 const community = await readSrc("lib/community.ts");
 const screen = await readSrc("components/onboarding/SupportAuraScreen.tsx");
 const flow = await readSrc("components/onboarding/OnboardingFlow.tsx");
-const settings = await readSrc("components/dialogs/SettingsDialog.tsx");
+const settings = await readSrc("components/settings/pages/HelpPage.tsx");
 const stream = await readSrc("lib/agentStreamStore.ts");
 
 describe("no surface can ship a dead link", () => {

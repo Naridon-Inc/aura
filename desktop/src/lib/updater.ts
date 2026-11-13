@@ -1,8 +1,8 @@
-// Auto-update flow. Checks GitHub releases on boot (debounced once per
-// 6 hours), and surfaces a non-blocking "update available" toast that
-// the user can click to install. The actual download + install hands
-// off to the tauri-plugin-updater and restarts the app via
-// tauri-plugin-process when finished.
+// Auto-update flow. Checks for a release on boot (then at most once per
+// 6 hours) and downloads it; `UpdateToast` shows the download's progress, then
+// a "Ready — restart to update" toast with a Restart button. Only that click
+// installs the downloaded bundle (tauri-plugin-updater) and relaunches the
+// app (tauri-plugin-process).
 //
 // The endpoint + signing pubkey are configured in
 // `src-tauri/tauri.conf.json::plugins.updater`. Releases come out of
@@ -83,13 +83,19 @@ export async function checkForUpdate(
   return inflightCheck;
 }
 
-/** Download the update bundle and stage it for install. The OS verifies
- *  the signature against the pubkey baked into the app at build time
- *  during the download phase. After this resolves the new version is
- *  installed on disk but the running process is still on the old one —
- *  call `restartIntoUpdate()` to swap. We keep download and restart
- *  separate so the UI can stage a banner and let the user pick a moment
- *  rather than yanking the app from under them. */
+/** EXDEV: tauri-updater renames the new bundle over the install path; on
+ *  Intel Macs with /Applications on a separate volume the rename crosses
+ *  filesystems and dies with `Cross-device link (os error 18)`. */
+function isCrossDeviceError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /cross-device link|os error 18/i.test(msg);
+}
+
+/** Download the update bundle in the background. The plugin verifies the
+ *  signature against the pubkey baked into the app at build time. Nothing
+ *  is installed yet — the bytes wait in the updater until `installAndRestart`
+ *  runs, so the app is never swapped from under the person (and on Windows,
+ *  where installing closes the app, it only happens when they click). */
 export async function downloadUpdate(
   info: UpdateInfo,
   onProgress?: (downloaded: number, total: number | null) => void,
@@ -97,7 +103,7 @@ export async function downloadUpdate(
   let downloaded = 0;
   let total: number | null = null;
   try {
-    await info.update.downloadAndInstall((event) => {
+    await info.update.download((event) => {
       if (event.event === "Started") {
         total = event.data.contentLength ?? null;
         onProgress?.(0, total);
@@ -109,17 +115,24 @@ export async function downloadUpdate(
       }
     });
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    // EXDEV: tauri-updater renames the new bundle over the install path; on
-    // Intel Macs with /Applications on a separate volume the rename crosses
-    // filesystems and dies with `Cross-device link (os error 18)`. Fall back
-    // to opening the download page in the browser so the user can install
-    // manually rather than getting stuck.
-    if (/cross-device link|os error 18/i.test(msg)) {
-      throw new UpdateRequiresManualInstall(info.version);
-    }
+    if (isCrossDeviceError(e)) throw new UpdateRequiresManualInstall(info.version);
     throw e;
   }
+}
+
+/** Install a bundle `downloadUpdate` already fetched, then relaunch onto it.
+ *  Throws `UpdateRequiresManualInstall` when this machine can't replace the
+ *  app in place, so the caller can offer the manual download instead. */
+export async function installAndRestart(info: UpdateInfo): Promise<void> {
+  try {
+    await info.update.install();
+  } catch (e: unknown) {
+    // Falls back to opening the download page in the browser so the person
+    // can install manually rather than getting stuck.
+    if (isCrossDeviceError(e)) throw new UpdateRequiresManualInstall(info.version);
+    throw e;
+  }
+  await restartIntoUpdate();
 }
 
 /** Relaunch the app onto the freshly-downloaded update. Run the PTY
@@ -154,18 +167,8 @@ export async function restartIntoUpdate(): Promise<void> {
   await relaunch();
 }
 
-/** Back-compat alias — old call sites that expect download+restart in
- *  one call still work, but the UI should prefer the two-step flow. */
-export async function applyUpdate(
-  info: UpdateInfo,
-  onProgress?: (downloaded: number, total: number | null) => void,
-): Promise<void> {
-  await downloadUpdate(info, onProgress);
-  await restartIntoUpdate();
-}
-
-/** Thrown when auto-install isn't viable on this machine. UpdateBanner
- *  catches it and renders a "Download manually" affordance. */
+/** Thrown when auto-install isn't viable on this machine. UpdateToast
+ *  catches it and offers the manual download instead. */
 export class UpdateRequiresManualInstall extends Error {
   readonly version: string;
   constructor(version: string) {

@@ -1,0 +1,76 @@
+/* The Team Radar's clash and activity rows are the details panel's two-line
+   row, the same one its zones use: who and how hard on the first line, why
+   under it. Added here: the actor's mark, the age at the row's end, the meta
+   line lined up under the name, the verified tick, and the tooltip's lines. */
+
+.ui-radar-mark {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+}
+.ui-radar-avatar .ui-avatar-fallback {
+  color: var(--ui-muted-fg);
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.ui-details-pull.ui-radar-row {
+  cursor: pointer;
+}
+.ui-radar-row > div > .ui-status-chip {
+  flex: none;
+}
+.ui-radar-age {
+  flex: none;
+  margin-left: auto;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-radar-meta {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  padding-left: 22px;
+}
+.ui-radar-meta > .ui-details-pull-branch {
+  flex: none;
+  margin-left: auto;
+}
+
+.ui-radar-verified {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-green);
+}
+
+.ui-radar-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 280px;
+}
+.ui-radar-tip > strong {
+  font-weight: 500;
+}
+.ui-radar-tip > p {
+  margin: 0;
+}
+.ui-radar-tip-quiet {
+  color: var(--ui-muted-fg);
+}
+.ui-radar-tip-quiet > code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-radar-tip-intent {
+  color: var(--ui-muted-fg);
+  font-style: italic;
+}
+.ui-radar-tip-verified {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ui-green);
+}

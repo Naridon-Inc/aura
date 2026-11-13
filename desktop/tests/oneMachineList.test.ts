@@ -49,9 +49,9 @@ const TAURI = `${import.meta.dir}/../src-tauri/src`;
 const rust = async (rel: string) =>
   stripComments(await Bun.file(`${TAURI}/${rel}`).text());
 
-describe("the section asks for the merged list, not the book", () => {
+describe("the Machines page asks for the merged list, not the book", () => {
   const section = () =>
-    readSrc("components/workspaces/WorkspacesMachinesSection.tsx");
+    readSrc("components/workspaces/MachinesSurface.tsx");
 
   test("it reads places_list", async () => {
     const src = await section();
@@ -67,13 +67,13 @@ describe("the section asks for the merged list, not the book", () => {
     // the empty state, so the first frame of a slow read tells somebody with
     // four machines that they have none.
     const src = await section();
-    expect(src).toContain("LoadingState");
     expect(src).toContain("roster === null ?");
+    expect(src).toContain("<AsciiSpinner />");
   });
 
   test("empty and unreachable are different sentences", async () => {
     const src = await section();
-    expect(src).toContain("EmptyState");
+    expect(src).toContain("ui-home-empty");
     // Both come from the seam, so the wording is decided once and cannot drift
     // between this list and any other that grows later.
     expect(src).toContain("emptyLine(roster.org)");
@@ -85,8 +85,8 @@ describe("the section asks for the merged list, not the book", () => {
     // a file on this disk and are still reachable, so replacing the list with
     // an error would hide working machines because of a server they don't need.
     const src = await section();
-    const notice = src.indexOf("ErrorNote");
-    const rows = src.indexOf("places.map(");
+    const notice = src.indexOf('role="note"');
+    const rows = src.indexOf("rows.map(");
     expect(notice).toBeGreaterThan(-1);
     expect(rows).toBeGreaterThan(notice);
     // And the rows are not inside the notice's branch.

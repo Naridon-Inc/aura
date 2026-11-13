@@ -75,6 +75,8 @@ function merge(prev: NormalizedEvent, next: NormalizedEvent): NormalizedEvent {
           ? false
           : next.partial,
       toolName: next.toolName === "tool" ? prev.toolName : next.toolName,
+      // An update that omits its kind arrives as "other"; keep the real one.
+      toolKind: next.toolKind === "other" ? prev.toolKind : next.toolKind,
       // A pending/running update may omit settled output; never clobber a real
       // result back to undefined. Keep the richer side per field.
       title: next.title || prev.title,

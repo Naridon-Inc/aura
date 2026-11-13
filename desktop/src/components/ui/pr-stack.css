@@ -1,0 +1,64 @@
+/* A pull request's stack in the files tab's aside: the details panel's pull
+   request rows, base first, under a caption. Added: the rows as a list, a
+   rail down their left edge so the chain reads as one line, Graphite's mark
+   beside a row it tracks, and the states' padding inside the aside. */
+
+.ui-pr-stack {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ui-pr-stack-caption {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-pr-stack-list {
+  position: relative;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--ui-border);
+}
+/* The chain: a quiet rule joining each row's dot to the next one's. */
+.ui-pr-stack-list > li {
+  position: relative;
+}
+.ui-pr-stack-list > li + li::before {
+  content: "";
+  position: absolute;
+  top: -9px;
+  left: 15px;
+  width: 1px;
+  height: 18px;
+  background: var(--ui-border);
+  pointer-events: none;
+}
+.ui-pr-stack-gt {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+}
+.ui-pr-stack-mark {
+  flex-shrink: 0;
+}
+.ui-pr-stack-state {
+  padding: 12px;
+}
+.ui-pr-stack-error {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+.ui-state.ui-pr-stack-empty {
+  padding: 32px 16px;
+}
+/* "This workspace" on the current pull request's row, at the line's end. */
+.ui-pr-stack-here {
+  flex: none;
+  margin-left: auto;
+  color: var(--ui-fg);
+}

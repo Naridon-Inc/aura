@@ -1,0 +1,46 @@
+/* A workspace on another machine: a file open in its own tab, and the
+   body divided into panes. */
+
+.ui-remote-file {
+  height: 100%;
+  min-height: 0;
+}
+
+/* A divided body: a hairline of the border colour between panes and nothing
+   else, and a ring on the pane that holds the keyboard once there is more
+   than one to tell apart. */
+.ui-remote-panes {
+  width: 100%;
+  height: 100%;
+}
+.ui-remote-split {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  gap: 1px;
+  background: var(--ui-border);
+}
+.ui-remote-split[data-direction="column"] {
+  flex-direction: column;
+}
+.ui-remote-split-cell {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: var(--ui-bg);
+}
+.ui-remote-pane {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.ui-remote-pane[data-focused]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border: 1px solid var(--ui-ring);
+  pointer-events: none;
+}

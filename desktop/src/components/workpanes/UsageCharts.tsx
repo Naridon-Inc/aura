@@ -1,9 +1,10 @@
-// UsageCharts — the "shared usage" hero for the Trace Overview team section.
+// UsageCharts — the figures and charts at the head of Cost & usage.
 //
-// Three honest pieces, all hand-rolled SVG (no chart deps — recharts is NOT
-// installed) and matched to OverviewPane's bar/opacity/sparkline aesthetic:
-//   1. UsageHero        — big current-month tokens + cost, plus an
-//                          "accumulated" (all-time local) figure.
+// Three honest pieces, drawn as trace sections (a quiet caption, no box) and
+// hand-rolled SVG (no chart deps — recharts is NOT installed):
+//   1. UsageHero        — current-month tokens + cost, plus an
+//                          "accumulated" (all-time local) figure, as the
+//                          trace stats row.
 //   2. CumulativeTrend  — a calm filled area line over the last N usage
 //                          buckets (period-derived, real points only).
 //   3. ModelSplitBar    — a single stacked bar splitting spend by provider,
@@ -14,6 +15,8 @@
 
 import { useId, useMemo } from "react";
 import { AgentIcon } from "../agent/AgentIcon";
+import { TraceSection } from "../ui/trace-report";
+import { TraceStat, TraceStats } from "../ui/trace-stats";
 import {
   modelLabel,
   providerAccent,
@@ -22,6 +25,7 @@ import {
 import { compactNumber } from "../../lib/compactNumber";
 import { formatCost } from "../../lib/money";
 import { percent } from "../../lib/percent";
+import "../trace/usage.css";
 
 export type ModelSlice = {
   /** Raw model id (local) or provider+model (cloud) — used for keys. */
@@ -35,40 +39,8 @@ export type ModelSlice = {
   costUsd: number;
 };
 
-/** One stat in the hero — a big value over a dim caption, with an
- *  optional secondary line. Mirrors OverviewPane's StatCard rhythm but sized
- *  up for the hero. */
-function HeroStat({
-  caption,
-  value,
-  sub,
-  accent,
-}: {
-  caption: string;
-  value: string;
-  sub?: string;
-  accent?: string;
-}) {
-  return (
-    <div className="flex flex-col">
-      <div className="section-label">
-        {caption}
-      </div>
-      <div
-        className="mt-1.5 text-2xl font-semibold leading-none"
-        style={{ color: accent ?? "var(--color-text-1)" }}
-      >
-        {value}
-      </div>
-      {sub ? (
-        <div className="mt-1.5 text-sm text-text-3">{sub}</div>
-      ) : null}
-    </div>
-  );
-}
-
-/** The shared-usage hero card: current-month tokens + cost (big), an
- *  accumulated all-time figure, and the source/scope caption. */
+/** The month's figures: tokens and cost this month, and the all-time total,
+ *  under a caption that says whose numbers they are. */
 export function UsageHero({
   monthLabel,
   monthTokensIn,
@@ -90,42 +62,34 @@ export function UsageHero({
 }) {
   const monthTotal = monthTokensIn + monthTokensOut;
   return (
-    <div className="rounded-lg border border-line-soft bg-bg-1 p-3">
-      <div className="mb-3 flex items-baseline justify-between">
-        <span className="section-label">
-          Shared usage · {monthLabel}
-        </span>
-        {scopeNote ? (
-          <span className="text-xs text-text-4">{scopeNote}</span>
-        ) : null}
+    <TraceSection
+      title={`Shared usage · ${monthLabel}`}
+      trailing={scopeNote ? <span className="ui-usage-scope">{scopeNote}</span> : null}
+    >
+      <div className="ui-usage-stats">
+        <TraceStats label={`Usage in ${monthLabel}`}>
+          <TraceStat
+            label="Tokens this month"
+            sub={`${compactNumber(monthTokensIn)} in · ${compactNumber(monthTokensOut)} out`}
+          >
+            {compactNumber(monthTotal)}
+          </TraceStat>
+          <TraceStat label="Cost this month">{formatCost(monthCostUsd)}</TraceStat>
+          <TraceStat label={accumulatedLabel} sub={formatCost(accumulatedCostUsd)}>
+            {compactNumber(accumulatedTokens)}
+          </TraceStat>
+        </TraceStats>
       </div>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <HeroStat
-          caption="This month · tokens"
-          value={compactNumber(monthTotal)}
-          sub={`${compactNumber(monthTokensIn)} in · ${compactNumber(monthTokensOut)} out`}
-        />
-        <HeroStat
-          caption="This month · cost"
-          value={formatCost(monthCostUsd)}
-          accent="var(--color-accent)"
-        />
-        <HeroStat
-          caption={accumulatedLabel}
-          value={compactNumber(accumulatedTokens)}
-          sub={formatCost(accumulatedCostUsd)}
-        />
-      </div>
-    </div>
+    </TraceSection>
   );
 }
 
 export type TrendPoint = { label: string; value: number };
 
-/** A calm cumulative area-line over real points. Hand-rolled SVG; the fill
- *  uses the accent at low opacity like the activity strip, the stroke is the
- *  accent at full opacity. Renders nothing meaningful (a flat baseline) when
- *  there's only one point, and is omitted by the parent below 2 points. */
+/** A calm cumulative area-line over real points. Hand-rolled SVG in the page's
+ *  own ink: a quiet stroke over a fill that fades to nothing. Renders nothing
+ *  meaningful (a flat baseline) when there's only one point, and is omitted by
+ *  the parent below 2 points. */
 export function CumulativeTrend({
   points,
   caption,
@@ -175,16 +139,12 @@ export function CumulativeTrend({
   if (points.length === 0) return null;
 
   return (
-    <div className="rounded-lg border border-line-soft bg-bg-1 p-3">
-      <div className="mb-2 flex items-baseline justify-between">
-        <span className="section-label">
-          {caption}
-        </span>
-        <span className="font-mono text-xs text-text-4">
-          {compactNumber(peak)} cumulative
-        </span>
-      </div>
+    <TraceSection
+      title={caption}
+      trailing={<span className="ui-usage-scope">{compactNumber(peak)} cumulative</span>}
+    >
       <svg
+        className="ui-usage-trend"
         viewBox={`0 0 ${W} ${H}`}
         width="100%"
         height={H}
@@ -194,16 +154,8 @@ export function CumulativeTrend({
       >
         <defs>
           <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-            <stop
-              offset="0%"
-              stopColor="var(--color-accent)"
-              stopOpacity="0.28"
-            />
-            <stop
-              offset="100%"
-              stopColor="var(--color-accent)"
-              stopOpacity="0.02"
-            />
+            <stop offset="0%" stopColor="var(--ui-muted-fg)" stopOpacity="0.22" />
+            <stop offset="100%" stopColor="var(--ui-muted-fg)" stopOpacity="0" />
           </linearGradient>
         </defs>
         {areaPath ? <path d={areaPath} fill={`url(#${gradId})`} /> : null}
@@ -211,27 +163,25 @@ export function CumulativeTrend({
           <path
             d={linePath}
             fill="none"
-            stroke="var(--color-accent)"
+            stroke="var(--ui-muted-fg)"
             strokeWidth="1.5"
-            strokeOpacity="0.9"
             strokeLinejoin="round"
             strokeLinecap="round"
             vectorEffect="non-scaling-stroke"
           />
         ) : null}
       </svg>
-      <div className="mt-1.5 flex items-center justify-between text-xs text-text-4">
+      <div className="ui-usage-axis">
         <span>{points[0]?.label ?? ""}</span>
         <span>{points[points.length - 1]?.label ?? ""}</span>
       </div>
-    </div>
+    </TraceSection>
   );
 }
 
 /** A single stacked horizontal bar splitting total spend across providers,
- *  each segment tinted with the provider's brand accent, plus a legend with
- *  the real AgentIcon logo per provider. Calm: segments sit at 0.85 opacity
- *  like the by-agent bars. */
+ *  each segment tinted with the provider's brand accent, over one row per
+ *  model with its real AgentIcon logo, tokens, share and cost. */
 export function ModelSplitBar({
   slices,
   caption,
@@ -251,56 +201,40 @@ export function ModelSplitBar({
   if (ranked.withTotal.length === 0) return null;
 
   return (
-    <div className="rounded-lg border border-line-soft bg-bg-1 p-3">
-      <div className="section-label mb-2.5">
-        {caption}
-      </div>
-      <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-bg-2">
+    <TraceSection title={caption}>
+      <div className="ui-usage-split" role="img" aria-label={caption}>
         {ranked.withTotal.map((s) => {
           const pct = ranked.grand > 0 ? (s.total / ranked.grand) * 100 : 0;
           if (pct <= 0) return null;
           return (
             <span
               key={s.key}
-              className="block h-full"
               title={`${s.label} · ${compactNumber(s.total)} tokens · ${formatCost(
                 s.costUsd,
               )}`}
-              style={{
-                width: `${pct}%`,
-                background: providerAccent(s.providerId),
-                opacity: 0.85,
-              }}
+              style={{ width: `${pct}%`, background: providerAccent(s.providerId) }}
             />
           );
         })}
       </div>
-      <div className="mt-3 flex flex-col gap-1.5">
-        {ranked.withTotal.map((s) => {
-          const pct = percent(s.total, ranked.grand);
-          return (
-            <div
-              key={`legend-${s.key}`}
-              className="flex items-center gap-2 text-sm"
-            >
-              <AgentIcon agentId={s.providerId} size={14} />
-              <span className="min-w-0 flex-1 truncate text-text-2">
-                {modelLabel(s.label)}
-              </span>
-              <span className="shrink-0 font-mono text-xs text-text-4">
-                {compactNumber(s.total)}
-              </span>
-              <span className="w-9 shrink-0 text-right font-mono text-xs text-text-3">
-                {pct}%
-              </span>
-              <span className="w-14 shrink-0 text-right font-mono text-xs text-text-3">
-                {formatCost(s.costUsd)}
-              </span>
-            </div>
-          );
-        })}
+      <div className="ui-usage-rows">
+        {ranked.withTotal.map((s) => (
+          <div key={`legend-${s.key}`} className="ui-usage-row">
+            <AgentIcon agentId={s.providerId} size={14} />
+            <span className="ui-usage-row-label">{modelLabel(s.label)}</span>
+            <span className="ui-usage-num" data-tone="faint">
+              {compactNumber(s.total)}
+            </span>
+            <span className="ui-usage-num" data-width="pct">
+              {percent(s.total, ranked.grand)}%
+            </span>
+            <span className="ui-usage-num" data-width="cost">
+              {formatCost(s.costUsd)}
+            </span>
+          </div>
+        ))}
       </div>
-    </div>
+    </TraceSection>
   );
 }
 

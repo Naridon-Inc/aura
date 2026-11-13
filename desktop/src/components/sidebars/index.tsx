@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { FileTree } from "../FileTree";
+import { ProjectFiles } from "../rightrail/files/ProjectFiles";
 import { clockTimeFromSecs } from "../../lib/clockTime";
 import { savePointLabel } from "../../lib/snapshotDetail";
 import {
@@ -46,7 +46,7 @@ export function FilesSidebar({
   onSelectSplit?: (p: string, direction: "row" | "column") => void;
 }) {
   // The Files tab is the tree, and nothing else. The per-row git-status mark
-  // is the FileTree's own job (it reads git_status internally).
+  // and line counts are the tree's own job (it reads git itself).
   //
   // A band used to sit above it reading "● 59 changed files", on its own 5s
   // `gitDiffStats` poll. It was written when this tab had no neighbour that
@@ -57,7 +57,7 @@ export function FilesSidebar({
   // says the number and takes you to the list. Two pollers for one figure,
   // one of them a dead end.
   return (
-    <FileTree
+    <ProjectFiles
       root={repoRoot}
       selected={selected}
       onSelect={onSelect}
@@ -68,30 +68,26 @@ export function FilesSidebar({
 
 // ── Git (Source Control) ───────────────────────────────────────────────
 //
-// Mirrors what every editor's SCM panel does: branch chip on top, message
-// box, list of staged + unstaged + untracked changes. Click a row to open
-// the file (the existing diff toggle in the work-surface toolbar then
-// shows the diff vs HEAD). Stage / unstage with the per-row +/-, then
-// commit. Discard guarded by a confirm — we don't shell out to `git
-// clean`, so untracked files stay safe even if you click discard.
+// The rail's Changes tab: every changed file once, the way a diff lists it.
+// Click a row to open the file's diff. Stage, unstage and discard (behind a
+// confirm — we don't shell out to `git clean`, so untracked files stay safe)
+// are in each row's menu; committing is the git status row's "Commit and
+// push" above the rail, and the Git view keeps a commit box of its own.
 
 export function GitSidebar({
   repoRoot,
   onOpen,
-  onBeforeCommit,
+  onOpenCommitFile,
 }: Common & {
+  /** See ChangesPanel `onOpenCommitFile`; the path stays project-relative. */
+  onOpenCommitFile?: (sha: string, path: string) => void;
   /** Mode mirrors the row click intent — see ChangesPanel `OpenMode`. */
   onOpen: (path: string, mode: "diff" | "diff-new-tab" | "edit") => void;
-  /** Optional pre-flight gate. When supplied, called before
-   *  `git commit` runs — return true to proceed, false to abort
-   *  (the dialog opener owns surfacing why). Used by the strict-mode
-   *  commit guard (Wave B4). */
-  onBeforeCommit?: () => Promise<boolean>;
 }) {
   return (
     <ChangesPanel
       repoRoot={repoRoot}
-      onBeforeCommit={onBeforeCommit}
+      onOpenCommitFile={onOpenCommitFile}
       onOpenFile={(path, mode) => onOpen(repoFilePath(repoRoot, path), mode)}
     />
   );
@@ -578,7 +574,7 @@ function HistoryEmpty({ filter }: { filter: Filter }) {
   } else if (filter === "commit") {
     title = "No commits yet";
     body =
-      "No commits yet for this project. Once you commit, the rows show up here grouped by day.";
+      "No commits yet for this repository. Once you commit, the rows show up here grouped by day.";
   }
   return (
     <div className="px-4 py-4">

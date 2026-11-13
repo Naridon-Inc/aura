@@ -6,15 +6,19 @@
 // affordance. Pulls from the existing `aura_memory_view` Tauri command
 // (Stage 5D) — no new backend.
 //
-// Why a UX signal: aura_memory_* is more capable than competitor
-// "Memory Banks" but the user has no way to *see* that memory is
-// loaded. This indicator is the proof.
+// Why a UX signal: the memory store is only useful if the user can *see*
+// that memory is loaded. This indicator is the proof.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { Plus } from "lucide-react";
 import { api, type MemoryView } from "../../lib/api";
+import { Button } from "../ui/button";
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Select } from "../ui/select";
-import { useDismiss } from "../../lib/useDismiss";
+import { ErrorNote } from "../ui/state";
+import { Textarea } from "../ui/textarea";
+import "../ui/memory-badge.css";
 
 const SECTIONS = [
   "architecture",
@@ -50,14 +54,14 @@ export function memoryPill(
     return {
       glyph: "·",
       count: null,
-      title: "Checking what Aura remembers about this project…",
+      title: "Checking what Aura remembers about this repository…",
     };
   if (!view)
     return {
       glyph: "·",
       count: null,
       title:
-        "Aura couldn't read what it remembers about this project just now. Click to try again.",
+        "Aura couldn't read what it remembers about this repository just now. Click to try again.",
     };
   const count = view.sections.reduce((acc, s) => acc + s.entries.length, 0);
   return count > 0
@@ -84,7 +88,6 @@ export function MemoryBadge({ repoRoot, headless = false }: Props) {
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const ref = useRef<HTMLDivElement | null>(null);
 
   const reload = useCallback(async () => {
     if (!repoRoot) {
@@ -134,22 +137,16 @@ export function MemoryBadge({ repoRoot, headless = false }: Props) {
     return () => window.removeEventListener("aura:manager:open-memory", onOpen);
   }, [reload]);
 
-  useDismiss(
-    open,
-    () => {
-      setOpen(false);
-      setAddOpen(false);
-    },
-    ref,
-  );
+  // Outside click and Esc close it through the popover; closing also folds
+  // the add form away, as it always has.
+  const onOpenChange = (next: boolean) => {
+    setOpen(next);
+    if (!next) setAddOpen(false);
+  };
 
   if (!repoRoot) return null;
 
   const pill = memoryPill(view, checked);
-  const tone =
-    pill.count === null || pill.count === 0
-      ? { color: "var(--color-text-3)" }
-      : { color: "var(--color-text-1)" };
 
   async function save() {
     if (!repoRoot || !draft.trim() || !section) return;
@@ -168,127 +165,110 @@ export function MemoryBadge({ repoRoot, headless = false }: Props) {
   }
 
   return (
-    <div
-      ref={ref}
-      className={headless ? "fixed top-11 right-3 z-40" : "relative"}
-    >
-      {!headless && (
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          title={pill.title}
-          className="chip"
-          style={tone}
-        >
-          <span aria-hidden style={{ fontSize: 10 }}>
-            {pill.glyph}
-          </span>
-          <span>Memory</span>
-          <span className="text-text-3">·</span>
-          <span className="tabular-nums">{pill.count ?? "—"}</span>
-        </button>
+    <Popover open={open} onOpenChange={onOpenChange}>
+      {headless ? (
+        // No pill to anchor to: the panel opens from the chat tab's menu and
+        // sits at the surface's top-right.
+        <PopoverAnchor className="ui-memory-anchor" />
+      ) : (
+        <PopoverTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="ui-memory-pill"
+            title={pill.title}
+            data-empty={pill.count ? undefined : ""}
+          >
+            <span
+              className="ui-status-dot"
+              data-status={pill.count ? "review" : undefined}
+              aria-hidden
+            />
+            Memory
+            <span className="ui-memory-count">{pill.count ?? "—"}</span>
+          </Button>
+        </PopoverTrigger>
       )}
-      {open && (
-        <div
-          className="absolute right-0 top-7 z-30 min-w-[260px] rounded-md py-1 shadow-lg text-sm"
-          style={{
-            background: "var(--color-bg-3)",
-            border: "1px solid var(--color-line-soft)",
-          }}
-        >
-          <div className="section-label px-2.5 py-1.5 border-b border-line-soft">
-            Memory bank
-          </div>
-          {view && view.identity && (
-            <div className="px-2.5 py-1 text-text-2 text-xs">
-              {view.identity}
-            </div>
-          )}
-          {view && view.stack.length > 0 && (
-            <div className="px-2.5 pb-1 text-text-3 text-xs truncate">
-              {view.stack.join(" · ")}
-            </div>
-          )}
-          <div className="px-2.5 py-1">
-            {SECTIONS.map((name) => {
-              const sec = view?.sections.find((s) => s.name === name);
-              const count = sec?.entries.length ?? 0;
-              return (
-                <div
-                  key={name}
-                  className="flex items-center justify-between py-0.5"
-                >
-                  <span className="text-text-2 capitalize">
-                    {name.replace("_", " ")}
-                  </span>
-                  <span
-                    className={count > 0 ? "text-text-1" : "text-text-4"}
-                    style={{ fontVariantNumeric: "tabular-nums" }}
-                  >
-                    {count}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-          <div className="border-t border-line-soft mt-1 px-1.5 py-1 flex flex-col gap-1">
-            {addOpen ? (
-              <div className="flex flex-col gap-1.5 p-1">
-                <Select
-                  value={section}
-                  onChange={setSection}
-                  aria-label="Memory section"
-                  options={SECTIONS.map((s) => ({
-                    value: s,
-                    label: s.replace("_", " "),
-                  }))}
-                />
-                <textarea
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  placeholder="Add a fact, decision, or gotcha…"
-                  rows={3}
-                  className="bg-bg-1 border border-line-soft rounded px-1.5 py-1 text-sm resize-none"
-                />
-                {err && (
-                  <div className="text-xs text-red" role="alert">
-                    {err}
-                  </div>
-                )}
-                <div className="flex justify-end gap-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAddOpen(false);
-                      setDraft("");
-                      setErr(null);
-                    }}
-                    className="px-2 py-0.5 text-xs text-text-3 hover:text-text-1"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    disabled={saving || !draft.trim()}
-                    onClick={() => void save()}
-                    className="px-2 py-0.5 text-xs rounded bg-accent text-bg-0 disabled:opacity-40"
-                  >
-                    {saving ? "Saving…" : "Save"}
-                  </button>
-                </div>
+      <PopoverContent align="end" className="ui-memory">
+        <header>
+          <strong>Memory bank</strong>
+        </header>
+        {view && view.identity && <p className="ui-memory-identity">{view.identity}</p>}
+        {view && view.stack.length > 0 && (
+          <p className="ui-memory-stack" title={view.stack.join(" · ")}>
+            {view.stack.join(" · ")}
+          </p>
+        )}
+        <dl className="ui-memory-sections">
+          {SECTIONS.map((name) => {
+            const sec = view?.sections.find((s) => s.name === name);
+            const count = sec?.entries.length ?? 0;
+            return (
+              <div key={name} data-empty={count > 0 ? undefined : ""}>
+                <dt>{name.replace("_", " ")}</dt>
+                <dd>{count}</dd>
               </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setAddOpen(true)}
-                className="w-full text-left px-1.5 py-1 text-text-2 hover:bg-state-hover rounded text-sm"
-              >
-                + Add to memory…
-              </button>
-            )}
-          </div>
+            );
+          })}
+        </dl>
+        <div className="ui-memory-add">
+          {addOpen ? (
+            <>
+              <Select
+                value={section}
+                onChange={setSection}
+                aria-label="Memory section"
+                options={SECTIONS.map((s) => ({
+                  value: s,
+                  label: s.replace("_", " "),
+                }))}
+              />
+              <Textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder="Add a fact, decision, or gotcha…"
+                aria-label="Memory entry"
+                rows={3}
+              />
+              {err && <ErrorNote>{err}</ErrorNote>}
+              <div className="ui-pattern-actions">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => {
+                    setAddOpen(false);
+                    setDraft("");
+                    setErr(null);
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  size="xs"
+                  disabled={saving || !draft.trim()}
+                  onClick={() => void save()}
+                >
+                  {saving ? "Saving…" : "Save"}
+                </Button>
+              </div>
+            </>
+          ) : (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="ui-memory-add-open"
+              onClick={() => setAddOpen(true)}
+            >
+              <Plus />
+              Add to memory…
+            </Button>
+          )}
         </div>
-      )}
-    </div>
+      </PopoverContent>
+    </Popover>
   );
 }

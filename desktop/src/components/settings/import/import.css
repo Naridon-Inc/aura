@@ -1,0 +1,157 @@
+/* Settings → Import. One app's contents unfold under its row: a heading per
+   kind, then a flat list of what it holds. No boxes — the rows of the page
+   carry on into the list. */
+.ui-import-panel {
+  padding: 4px 0 24px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-import-group + .ui-import-group {
+  margin-top: 20px;
+}
+.ui-import-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ui-import-group-head > label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ui-fg);
+}
+.ui-import-group-count {
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-import-group-lands {
+  margin: 2px 0 8px 26px;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-import-items {
+  margin: 0 0 0 26px;
+  padding: 0;
+  list-style: none;
+}
+.ui-import-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 6px 0;
+  min-width: 0;
+}
+.ui-import-item + .ui-import-item {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-import-item > button[role="checkbox"] {
+  margin-top: 2px;
+  flex: none;
+}
+.ui-import-item-text {
+  flex: 1;
+  min-width: 0;
+}
+.ui-import-item-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--ui-fg);
+}
+.ui-import-item[data-state="unavailable"] .ui-import-item-title {
+  color: var(--ui-muted-fg);
+}
+.ui-import-item-detail {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-import-item-reason {
+  display: block;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+  /* A reason is a sentence; let it wrap rather than cut it. */
+  white-space: normal;
+}
+.ui-import-item-state {
+  flex: none;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-import-more {
+  margin: 4px 0 0 26px;
+}
+.ui-import-notes {
+  margin: 20px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-import-notes > li {
+  display: flex;
+  gap: 8px;
+  padding: 3px 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 18px;
+}
+.ui-import-notes svg {
+  flex: none;
+  margin-top: 2px;
+}
+.ui-import-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+}
+.ui-import-progress {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ui-muted-fg);
+}
+.ui-import-progress > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-import-result {
+  margin-top: 16px;
+}
+.ui-import-result-line {
+  font-size: 13px;
+  color: var(--ui-fg);
+}
+.ui-import-result .ui-import-items {
+  margin-left: 0;
+  margin-top: 6px;
+}
+.ui-import-outcome-mark {
+  flex: none;
+  margin-top: 2px;
+}
+.ui-import-outcome-mark[data-status="imported"] {
+  color: var(--ui-green);
+}
+.ui-import-outcome-mark[data-status="failed"] {
+  color: var(--ui-red);
+}
+.ui-import-outcome-mark[data-status="skipped"] {
+  color: var(--ui-muted-fg);
+}
+.ui-import-footnote {
+  max-width: 560px;
+  margin: 24px 0 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 18px;
+}

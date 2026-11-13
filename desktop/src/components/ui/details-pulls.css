@@ -1,0 +1,111 @@
+.ui-details-pull {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 12px;
+  line-height: normal;
+  text-align: left;
+}
+.ui-details-pull:hover,
+.ui-details-pull[data-selected="true"] {
+  background: var(--ui-hover);
+}
+.ui-details-pull > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-details-pull-number {
+  flex: none;
+  color: var(--ui-muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+.ui-details-pull-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-fg);
+}
+.ui-details-pull-meta {
+  padding-left: 14px;
+  color: var(--ui-muted-fg);
+}
+.ui-details-pull-meta > span:not(.ui-diff-count) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-details-pull-branch {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-details-pull-meta > .ui-diff-count {
+  flex: none;
+  margin-left: auto;
+}
+.ui-details-pull-decision {
+  flex: none;
+}
+.ui-details-pull-decision[data-tone="good"] {
+  color: var(--ui-green);
+}
+.ui-details-pull-decision[data-tone="bad"] {
+  color: var(--ui-red);
+}
+.ui-details-pull-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--ui-faint);
+}
+.ui-details-pull-dot--small {
+  width: 6px;
+  height: 6px;
+}
+.ui-details-pull-dot[data-tone="good"] {
+  background: var(--ui-green);
+}
+.ui-details-pull-dot[data-tone="bad"] {
+  background: var(--ui-red);
+}
+.ui-details-pull-dot[data-tone="waiting"] {
+  background: var(--ui-checks-pending);
+}
+/* The bucket filters wrap onto a second line in a narrow panel. */
+.ui-details-pull-filters {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  padding: 0 8px 8px;
+}
+.ui-details-pull-filters .ui-toggle > i {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+}
+.ui-details-pull-filters .ui-toggle > small {
+  color: var(--ui-muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+/* A row with its own action: the action sits at the row's end, centred on
+   its two lines, and the row's text stops short of it. */
+.ui-details-pull-item {
+  position: relative;
+}
+.ui-details-pull-item > .ui-details-pull {
+  padding-right: 156px;
+}
+.ui-details-pull-action {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+}

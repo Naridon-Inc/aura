@@ -16,13 +16,12 @@ import { useEffect, useState } from "react";
 import { api, type TelemetryConsent as Consent } from "../lib/api";
 import { trackActivation } from "../lib/track";
 import { Switch } from "./ui/switch";
-import { ToastActionButton, ToastCard, ToastStack } from "./ui/toast";
+import { LiveToast } from "./LiveToast";
 
 export function TelemetryConsent() {
   const [show, setShow] = useState(false);
   const [product, setProduct] = useState(true);
   const [crash, setCrash] = useState(true);
-  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -42,7 +41,6 @@ export function TelemetryConsent() {
   if (!show) return null;
 
   const save = async (p: boolean, c: boolean) => {
-    setSaving(true);
     try {
       await api.telemetrySetConsent(p, c);
       // First step of the activation funnel. Safe to send after the answer
@@ -55,51 +53,54 @@ export function TelemetryConsent() {
     }
   };
 
+  // No close button and no timer: nothing is sent until they pick one of
+  // the two buttons, so the question stays until it's answered.
   return (
-    <ToastStack bottom={44} zIndex={9999}>
-      <ToastCard
-        tone="accent"
-        title="Help make Aura better?"
-        message={
-          <>
-            Aura can send anonymous notes about which features get used and when
-            something crashes, so we can see what&rsquo;s working and fix what
-            isn&rsquo;t. It <span className="text-text-1">never</span> sends your code,
-            your files, what you type, or your name. You can change this anytime in
-            Settings.
-          </>
-        }
-        actions={
-          <>
-            <ToastActionButton disabled={saving} onClick={() => void save(false, false)}>
-              No thanks
-            </ToastActionButton>
-            <ToastActionButton
-              variant="primary"
-              disabled={saving}
-              onClick={() => void save(product, crash)}
-            >
-              Allow
-            </ToastActionButton>
-          </>
-        }
-      >
-        <div className="mt-3 grid gap-2.5">
-          <Row
-            on={crash}
-            onToggle={() => setCrash((v) => !v)}
-            title="Crash reports"
-            hint="The most useful. Tells us when Aura breaks so we can fix it for you."
-          />
-          <Row
-            on={product}
-            onToggle={() => setProduct((v) => !v)}
-            title="Usage analytics"
-            hint="Anonymous counts of which features people open. No content."
-          />
-        </div>
-      </ToastCard>
-    </ToastStack>
+    <LiveToast
+      id="telemetry-consent"
+      tone="accent"
+      title="Help make Aura better?"
+      durationMs={null}
+      dismissible={false}
+      message={
+        <>
+          Aura can send anonymous notes about which features get used and when
+          something crashes, so we can see what&rsquo;s working and fix what
+          isn&rsquo;t. It <span className="text-[var(--aura-toast-text)]">never</span>{" "}
+          sends your code, your files, what you type, or your name. You can change
+          this anytime in Settings.
+          <span className="mt-3 grid gap-2.5">
+            <Row
+              on={crash}
+              onToggle={() => setCrash((v) => !v)}
+              title="Crash reports"
+              hint="The most useful. Tells us when Aura breaks so we can fix it for you."
+            />
+            <Row
+              on={product}
+              onToggle={() => setProduct((v) => !v)}
+              title="Usage analytics"
+              hint="Anonymous counts of which features people open. No content."
+            />
+          </span>
+        </>
+      }
+      actions={[
+        {
+          label: "No thanks",
+          variant: "default",
+          keepOpen: true,
+          // The returned promise keeps both buttons disabled while it saves.
+          onClick: () => save(false, false),
+        },
+        {
+          label: "Allow",
+          variant: "primary",
+          keepOpen: true,
+          onClick: () => save(product, crash),
+        },
+      ]}
+    />
   );
 }
 
@@ -115,12 +116,12 @@ function Row({
   hint: string;
 }) {
   return (
-    <div className="flex items-start gap-2.5">
+    <span className="flex items-start gap-2.5">
       <Switch checked={on} onCheckedChange={onToggle} className="mt-px shrink-0" />
-      <div className="min-w-0">
-        <div className="text-sm font-medium text-text-1">{title}</div>
-        <div className="text-xs leading-[1.45] text-text-3">{hint}</div>
-      </div>
-    </div>
+      <span className="min-w-0">
+        <span className="block font-medium text-[var(--aura-toast-text)]">{title}</span>
+        <span className="block text-xs leading-[1.45]">{hint}</span>
+      </span>
+    </span>
   );
 }

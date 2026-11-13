@@ -1,0 +1,70 @@
+/* Task board additions on top of the dashboard columns and cards. */
+.ui-tasks-board {
+  min-width: 0;
+  height: 100%;
+}
+.ui-tasks-card {
+  outline: none;
+}
+.ui-tasks-card:focus-visible,
+.ui-tasks-card[data-focused] {
+  border-color: var(--ui-link);
+}
+.ui-tasks-card[data-selected] {
+  border-color: var(--ui-link);
+  background: color-mix(in srgb, var(--ui-link) 6%, var(--ui-card));
+}
+.ui-tasks-card .ui-workspace-card-meta > span:first-child {
+  font-variant-numeric: tabular-nums;
+}
+.ui-tasks-card .ui-workspace-card-content footer {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+.ui-tasks-fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  max-width: 140px;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-tasks-fact svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+.ui-tasks-fact[data-tone="alert"] {
+  color: var(--ui-red);
+}
+.ui-tasks-column-empty {
+  margin: 0;
+  padding: 12px 8px;
+  color: var(--ui-faint);
+  font-size: 12px;
+}
+.ui-tasks-quick-add {
+  align-self: flex-start;
+  color: var(--ui-muted-fg);
+}
+.ui-tasks-reveal {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+}
+.ui-tasks-column-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  /* xs buttons are taller than the column name; keep every header the
+     same height whether or not it has any. */
+  margin-block: -2px;
+  margin-left: auto;
+}
+.ui-dashboard-column > header > .ui-tasks-column-actions + span:last-child {
+  margin-left: 0;
+}

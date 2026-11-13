@@ -315,7 +315,7 @@ impl GhRepo {
 
     /// The `owner/repo` slug: known outright on a machine, asked of gh here
     /// (which reads the configured remote; ~30ms locally).
-    fn owner_path(&self) -> Result<String, String> {
+    pub(crate) fn owner_path(&self) -> Result<String, String> {
         if let Some(slug) = &self.remote {
             return Ok(slug.clone());
         }
@@ -374,7 +374,7 @@ fn gh_tokio(repo: &GhRepo, args: &[&str]) -> tokio::process::Command {
     cmd
 }
 
-fn run_gh(repo: &GhRepo, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_gh(repo: &GhRepo, args: &[&str]) -> Result<String, String> {
     if !repo.is_remote() && !PathBuf::from(repo.root()).is_dir() {
         return Err(format!("repo root does not exist: {}", repo.root()));
     }

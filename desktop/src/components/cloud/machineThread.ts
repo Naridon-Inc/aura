@@ -13,6 +13,8 @@
 // the *record* of the conversation is kept, which is what lets the chat outlive
 // the box being stopped, imaged or thrown away.
 
+import { carryForward } from "../../lib/machineRef";
+
 /** The slice of `localStorage` this needs — small enough to hand a fake. */
 export type ThreadStore = {
   getItem(key: string): string | null;
@@ -30,6 +32,10 @@ export type ThreadDeps = {
 
 export type Machine = {
   id: string;
+  /** Ids this machine went by before — the `user@host:/repo` key rows were
+   *  named by once, or the id of a lost machine it was reconnected as. A
+   *  conversation remembered under one of them is this machine's. */
+  formerIds?: readonly string[];
   name: string;
   /** The local checkout this conversation is filed under. */
   repoRoot: string;
@@ -75,7 +81,11 @@ export async function openThread(
   const key = rememberedKey(machine.id);
 
   if (!fresh) {
-    const saved = deps.store.getItem(key);
+    // Moved to this id as it is read, so the next visit finds it directly.
+    const saved = carryForward(deps.store, rememberedKey, [
+      machine.id,
+      ...(machine.formerIds ?? []),
+    ]);
     if (saved) {
       if (await deps.alive(saved)) return { sessionId: saved, resumed: true };
       deps.store.removeItem(key);

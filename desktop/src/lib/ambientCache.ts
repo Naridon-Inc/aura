@@ -8,8 +8,7 @@
 //   App.tsx            every 4s   impacts + conflicts + AST conflicts
 //   useLiveSync        every 4s   impacts + AST conflicts
 //   AuraImpactsBanner  every 30s  impacts
-//   ImpactsPane        on mount and on every refresh
-//   ConflictPane       on mount
+//   ImpactsPane        on mount and on every "check again"
 //   ConflictsDialog    on open and after each resolve
 //
 // Two four-second timers, running for the whole life of the window, asking the

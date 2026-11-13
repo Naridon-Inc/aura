@@ -6,19 +6,13 @@
 // as a team: your own work first, because it is the only work you can act on
 // without joining anything, then everyone else by whoever moved most recently.
 //
-// Geometry is the rail's, not this feature's, and the gutter belongs to the
-// HOST, exactly as it does for the project roster mounted below this. The root
-// used to carry a `px-1.5` of its own on the reasoning that every rail section
-// carries one — but the section it is mounted in (`.ade-build`) already adds
-// that 6px, so this rail alone ran on a 12px gutter and its heading and every
-// avatar under it sat 6px right of the roster's and the destinations'. Rows pad
-// 8px against whatever the host gives them, which puts every glyph on the rail's
-// 14px column. Mount it as the roster is mounted — inside `.ade-sec-fill`, which
-// cancels the body's own padding, under a host that supplies the gutter — and
-// give that host the scroll (`.ade-build` does `flex-1; min-height: 0;
-// overflow-y: auto`). This component does not scroll itself: a rail with two
-// independent scrollers is a rail where the thing you are looking for is
-// always in the other one.
+// It is drawn with the workspace list's own parts, because it sits directly
+// above that list in the same column: the sidebar group header for "People",
+// a repository-style section per person, and a workspace-height sidebar item
+// per session. Rows take their gutter from the host exactly as the list's rows
+// do, and the host owns the scroll. This component does not scroll itself: a
+// rail with two independent scrollers is a rail where the thing you are
+// looking for is always in the other one.
 //
 // Three real states, not one: we don't know yet, we couldn't find out, and
 // there is genuinely nothing. They read differently because they mean
@@ -26,8 +20,12 @@
 // looking has told the reader something false.
 
 import { useEffect, useMemo, useState } from "react";
+import { ChevronDown } from "lucide-react";
 
 import { AsciiSpinner } from "../../ui/ascii-spinner";
+import { AlertDescription, AlertTitle } from "../../ui/alert";
+import { Button } from "../../ui/button";
+import { ErrorNote, LoadingState } from "../../ui/state";
 import { PersonSessions } from "./PersonSessions";
 import {
   indexActors,
@@ -35,6 +33,7 @@ import {
   sortGroups,
   type RailPersonGroup,
 } from "./railModel";
+import "../../ui/people-rail.css";
 
 export type PeopleRailProps = {
   /** The rail's contents. `null` means "we don't know yet" — distinct from an
@@ -108,93 +107,87 @@ export function PeopleRail({
    *  anything, and the one where the rail should take up the least room. */
   const alone = others.length === 0;
 
+  const [folded, setFolded] = useState(false);
+
+  const content = error ? (
+    <ErrorNote>
+      <AlertTitle>Couldn’t see who’s working right now.</AlertTitle>
+      <AlertDescription>
+        {error}
+        {onRetry ? (
+          <div>
+            <Button variant="outline" size="xs" onClick={onRetry}>
+              Try again
+            </Button>
+          </div>
+        ) : null}
+      </AlertDescription>
+    </ErrorNote>
+  ) : groups === null ? (
+    <LoadingState label="Looking for who’s here…" />
+  ) : ordered.length === 0 ? (
+    <div className="ui-navigation-empty">
+      <p>Nobody is working here yet.</p>
+      <p>
+        When you or a teammate starts a session in this repository, it shows up
+        here with whoever is in it.
+      </p>
+    </div>
+  ) : (
+    <div className="ui-navigation-groups">
+      {ordered.map((g) => (
+        <PersonSessions
+          key={g.person.id}
+          group={g}
+          byId={byId}
+          nowSecs={now}
+          activeSessionId={activeSessionId}
+          onOpenSession={onOpenSession}
+          onJoinSession={onJoinSession}
+          // Alone on the rail, your own group starts folded: what's under
+          // it is your own agents, which whatever you are looking at
+          // already shows, and a rail that opens as a second copy of your
+          // session list is charging a column for a duplicate. The header
+          // stays, so the rail is still findable, and the moment anybody
+          // else appears every group opens normally.
+          defaultOpen={!(alone && g.isYou)}
+        />
+      ))}
+
+      {/* Working alone is a state, and it is worth naming — otherwise the
+          rail looks the same whether the team is offline or the feature is
+          broken. Only said once the rail has something in it; on an empty
+          project the block above already covers it. */}
+      {sessionCount > 0 && !anyoneElseHere ? (
+        <p className="ui-navigation-empty">
+          {others.length === 0
+            ? "Nobody else has joined this repository yet."
+            : "Nobody else is here right now."}
+        </p>
+      ) : null}
+    </div>
+  );
+
   return (
-    <nav className="flex flex-col min-h-0 text-[13px]" aria-label="People">
+    <nav className="ui-sidebar-group ui-people-rail" data-kind="section" aria-label="People">
       {heading ? (
-        <div className="ade-sec-h">
-          {heading}
-          <span className="right dim">
+        <div className="ui-sidebar-group-header">
+          <button
+            type="button"
+            aria-expanded={!folded}
+            onClick={() => setFolded((v) => !v)}
+            title={folded ? `Show ${heading.toLowerCase()}` : `Hide ${heading.toLowerCase()}`}
+          >
+            <span>{heading}</span>
             {/* A quiet re-read shows the loader here rather than replacing the
                 list — the list is still true while we check it. */}
             {loading && groups !== null ? <AsciiSpinner size={10} /> : null}
-            {peopleHere > 0 ? (
-              <span className="tabular-nums">{peopleHere} here</span>
-            ) : null}
-          </span>
+            {peopleHere > 0 ? <small>{peopleHere} here</small> : null}
+            <ChevronDown size={12} className="ui-section-chevron" data-collapsed={folded} />
+          </button>
         </div>
       ) : null}
-
-      {error ? (
-        <div className="px-2 py-2">
-          <div className="text-2xs text-red leading-[15px]">
-            Couldn’t see who’s working right now.
-          </div>
-          <div className="mt-0.5 text-2xs text-text-4 leading-[15px] break-words">
-            {error}
-          </div>
-          {onRetry ? (
-            <button
-              type="button"
-              className="mt-1.5 rounded px-1.5 h-[18px] text-2xs font-medium text-accent"
-              style={{
-                background:
-                  "color-mix(in srgb, var(--color-accent) 13%, transparent)",
-              }}
-              onClick={onRetry}
-            >
-              Try again
-            </button>
-          ) : null}
-        </div>
-      ) : groups === null ? (
-        <div className="flex items-center gap-2 px-2 py-2 text-2xs text-text-4">
-          <AsciiSpinner size={11} />
-          <span>Looking for who’s here…</span>
-        </div>
-      ) : ordered.length === 0 ? (
-        <div className="px-2 py-2">
-          <div className="text-2xs text-text-3 leading-[15px]">
-            Nobody is working here yet.
-          </div>
-          <div className="mt-0.5 text-2xs text-text-4 leading-[15px]">
-            When you or a teammate starts a session in this project, it shows up
-            here with whoever is in it.
-          </div>
-        </div>
-      ) : (
-        <div className="flex flex-col">
-          {ordered.map((g) => (
-            <PersonSessions
-              key={g.person.id}
-              group={g}
-              byId={byId}
-              nowSecs={now}
-              activeSessionId={activeSessionId}
-              onOpenSession={onOpenSession}
-              onJoinSession={onJoinSession}
-              // Alone on the rail, your own group starts folded: what's under
-              // it is your own agents, which whatever you are looking at
-              // already shows, and a rail that opens as a second copy of your
-              // session list is charging a column for a duplicate. The header
-              // stays, so the rail is still findable, and the moment anybody
-              // else appears every group opens normally.
-              defaultOpen={!(alone && g.isYou)}
-            />
-          ))}
-
-          {/* Working alone is a state, and it is worth naming — otherwise the
-              rail looks the same whether the team is offline or the feature is
-              broken. Only said once the rail has something in it; on an empty
-              project the block above already covers it. */}
-          {sessionCount > 0 && !anyoneElseHere ? (
-            <div className="px-2 pt-0.5 pb-1 text-2xs text-text-4">
-              {others.length === 0
-                ? "Nobody else has joined this project yet."
-                : "Nobody else is here right now."}
-            </div>
-          ) : null}
-        </div>
-      )}
+      {heading && folded ? null : content}
     </nav>
   );
 }

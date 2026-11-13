@@ -12,9 +12,10 @@ export type MentionToken =
   | { kind: "mention"; handle: string; raw: string };
 
 // Conservative — avoids matching email addresses (no `@` after a word
-// character), bare punctuation, or URLs. The lookbehind keeps trailing
-// punctuation outside the mention so "Ping @alice." still tags @alice.
-const MENTION_RE = /(^|[\s(\[{>])@([a-zA-Z0-9][a-zA-Z0-9._-]*)/g;
+// character), bare punctuation, or URLs. A handle may hold `.` and `-` but
+// never ends on one, so the full stop in "Ping @alice." stays text and the
+// handle is `alice` — not `alice.`, which matches nobody.
+const MENTION_RE = /(^|[\s(\[{>])@([a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9_])?)/g;
 
 export function parseMentions(text: string): MentionToken[] {
   if (!text) return [];

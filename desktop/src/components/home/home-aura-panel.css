@@ -1,0 +1,71 @@
+/* Aura's panel on Home: the row that holds Home's list and the panel, and the
+   panel's own slim header. The chat inside draws itself. */
+.home-aura-row {
+  display: flex;
+  flex: 1;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.home-aura-row__body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.home-aura-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  border-left: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.home-aura-panel__header {
+  height: 40px;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-sidebar);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.home-aura-panel__title {
+  font: 500 13px var(--font-sans);
+}
+.home-aura-panel__space {
+  flex: 1;
+}
+.home-aura-panel__body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.home-aura-panel__empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  color: var(--ui-muted-fg);
+  font: 13px var(--font-sans);
+}
+.home-aura-panel__empty p {
+  max-width: 280px;
+  margin: 0;
+}
+.home-aura-row__pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}

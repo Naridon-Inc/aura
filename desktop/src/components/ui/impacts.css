@@ -1,0 +1,75 @@
+/* Impacts on me: changes on other branches to code the reader's work leans
+   on. The toolbar, marks, facts and empty state are Trace's shared parts;
+   this is only how a row of them sits. */
+
+.ui-impacts-page {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-impacts-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.ui-impacts {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-impact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-impact-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-impact-name {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ui-fg);
+  font: 13px/20px var(--font-mono);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ui-impact-name:hover {
+  color: var(--ui-link);
+}
+.ui-impact-name:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--ui-ring);
+  outline-offset: 2px;
+}
+.ui-impact-branch {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-impact-message {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 20px;
+}
+.ui-impact-facts {
+  margin: 0 -12px;
+}
+.ui-impact-actions {
+  display: flex;
+  gap: 6px;
+}

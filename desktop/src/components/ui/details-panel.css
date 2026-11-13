@@ -1,0 +1,231 @@
+/* Workspace details panel — the right sidebar's body. */
+.ui-details-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.ui-details-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px;
+  overflow-x: auto;
+  min-height: 40px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--ui-border);
+  scrollbar-width: none;
+}
+.ui-details-tabs::-webkit-scrollbar {
+  display: none;
+}
+.ui-details-tabs button {
+  padding: 4px 8px;
+  color: var(--ui-muted-fg);
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ui-details-tabs button[aria-selected="true"] {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-details-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.ui-details-panel[hidden] {
+  display: none;
+}
+.ui-details-toolbar {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  gap: 4px;
+  border-bottom: 1px solid var(--ui-border);
+  padding: 0 6px;
+  flex-shrink: 0;
+}
+.ui-details-toolbar .ui-details-tabs {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  align-items: center;
+  gap: 2px;
+}
+.ui-details-toolbar .ui-details-tabs button {
+  padding: 4px 8px;
+  height: 28px;
+}
+.ui-details-toolbar > .ui-button {
+  color: var(--ui-link);
+}
+.ui-details-toolbar > button[aria-label^="Scroll details"] {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-details-search {
+  margin: 6px 8px;
+  width: calc(100% - 16px);
+}
+.ui-details-change-scope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px;
+  gap: 8px;
+}
+.ui-details-caption {
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--ui-muted-fg);
+  padding: 8px;
+}
+.ui-details-review-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+.ui-details-review-row > button {
+  flex: 1;
+  text-align: left;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-details-file-preview {
+  max-height: 40%;
+  overflow: auto;
+  border-top: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.ui-details-file-preview header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  background: var(--ui-muted);
+  font-size: 12px;
+}
+.ui-details-file-preview pre {
+  padding: 12px;
+  font: 12px/1.7 var(--font-mono);
+  white-space: pre-wrap;
+}
+/* A rail that fills its column, and bodies that own their own scrolling
+   (a terminal, a browser, a list with a pinned footer). */
+.ui-details-rail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--ui-bg);
+}
+.ui-details-panel--fill {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* A tab's pinned last row: the Changes tab's commit foot, for a tab whose
+   one action is a button (Tasks' "New task"). The list above it scrolls;
+   this stays, the button spanning the panel. */
+.ui-details-foot {
+  display: flex;
+  flex-shrink: 0;
+  min-width: 0;
+  padding: 8px;
+  border-top: 1px solid var(--ui-border);
+}
+.ui-details-foot > .ui-button {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+}
+/* The git status row, sized to the title bar it sits beside. */
+.ui-details-header {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+}
+.ui-details-header > .ui-git-toolbar {
+  flex: 1;
+  min-width: 0;
+  flex-shrink: 0;
+}
+/* Changed-file groups: a caption row (with its toggle and bulk action) over
+   each group's tree. */
+.ui-details-group-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 8px;
+}
+/* A caption's own actions — Re-run and Fix errors beside Checks. */
+.ui-details-caption-actions {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+}
+.ui-details-group-caption > .ui-details-group-toggle,
+.ui-details-group-caption > .ui-details-caption {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+.ui-details-change-scope-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.ui-details-comment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 12px;
+  font-size: 12px;
+  min-width: 0;
+}
+.ui-details-comment > button:not(.ui-button) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  color: var(--ui-muted-fg);
+}
+.ui-details-comment > button:not(.ui-button) strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+/* The actions take no room until the row is hovered, so the comment reads in
+   full width the rest of the time. */
+.ui-details-comment > .ui-button {
+  display: none;
+}
+.ui-details-comment:hover > .ui-button,
+.ui-details-comment:focus-within > .ui-button {
+  display: inline-flex;
+}
+.ui-details-comment-mark {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--ui-muted);
+  color: var(--ui-muted-fg);
+  font-size: 9px;
+  font-weight: 500;
+}

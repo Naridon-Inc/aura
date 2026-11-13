@@ -480,7 +480,10 @@ fn post(
 ) -> bool {
     let mut payload = serde_json::Map::new();
     payload.insert("role".into(), Value::String(turn.role.to_string()));
-    payload.insert("body".into(), Value::String(turn.body.clone()));
+    // Tool results carry whatever the agent printed: an env file, a header,
+    // a config read to debug a deploy. The org reads this, so credentials
+    // are taken out here, before the turn leaves the machine.
+    payload.insert("body".into(), Value::String(crate::secret_scrub::scrub(&turn.body)));
     payload.insert("source".into(), Value::String("aura-cli".into()));
     if let Some(at) = &turn.at {
         payload.insert("created_at".into(), Value::String(at.clone()));

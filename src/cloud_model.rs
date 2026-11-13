@@ -20,11 +20,11 @@ use crate::cloud_contract::ExitCode;
 use crate::workspace_api::client::Client;
 use crate::workspace_api::output;
 
-/// Models this cloud can route to. Auth: `AURA_API_KEY`, else the signed-in
-/// token.
+/// Models a cloud workspace's agent can run. Auth: `AURA_API_KEY`, else the
+/// signed-in token.
 #[derive(Subcommand, Debug, Clone)]
 pub enum ModelCmd {
-    /// List the model ids, their provider and whether a key is configured.
+    /// List the model ids, the agent that runs each and whether you're signed in to it.
     List {
         #[arg(long)]
         json: bool,
@@ -87,13 +87,13 @@ mod tests {
         // payload, so the two spellings cannot print different things.
         let v = serde_json::json!({
             "models": [
-                { "id": "claude-opus-5-5", "provider": "anthropic", "tier": "deep", "available": true }
+                { "id": "claude-opus-5-5", "label": "Opus 5.5", "provider": "anthropic", "agent": "claude", "available": true }
             ],
-            "default_provider": "anthropic"
+            "default_agent": "claude"
         });
         let out = output::render_models(&v);
         assert!(out.contains("claude-opus-5-5"));
-        assert!(out.contains("key configured"));
-        assert!(out.contains("default provider: anthropic"));
+        assert!(out.contains("signed in"));
+        assert!(out.contains("default agent: claude"));
     }
 }

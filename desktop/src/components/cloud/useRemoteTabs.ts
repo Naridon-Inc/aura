@@ -24,6 +24,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 
 import type { BoxSession } from "../../lib/api";
+import type { RemotePaneDirection, RemotePaneTree } from "../../lib/remotePaneTree";
 import {
   activeTab,
   closeRemoteTab,
@@ -32,15 +33,19 @@ import {
   hasSessionTabs,
   loadRemoteSnapshot,
   openSessionTab,
-  openWorkTab,
+  openFileTab,
+  openDiffTab,
+  paneCandidates,
+  panesInView,
   refreshSessions,
   remoteSlotFor,
   remoteSlotKey,
   saveRemoteSnapshot,
+  showPaneAlone,
+  showPaneBeside,
   switchRemoteSlot,
   type RemoteSlot,
   type RemoteTab,
-  type RemoteWorkKind,
   type RemoteWorkspaceSnapshot,
 } from "../../lib/remoteWorkspaceSnapshot";
 
@@ -53,11 +58,27 @@ export type RemoteTabs = {
   hasSessions: boolean;
   /** Join a session, or refresh and focus one already open. */
   openSession: (session: BoxSession, readOnly: boolean) => void;
-  /** Open a work surface — files, changes, git, PRs, run — or focus it. */
-  openWork: (kind: RemoteWorkKind) => void;
+  /** Open a file of the project to edit, or focus it. */
+  openFile: (path: string) => void;
+  /** Open a scope's diff — the working tree, or one commit — on a file. */
+  openDiff: (sha: string | null, path: string | null) => void;
   /** Close the view. The session keeps running on the box. */
   closeTab: (id: string) => void;
   focusTab: (id: string) => void;
+  /** How the body is divided right now, or null for the one-tab body. Only
+   *  non-null while the tab in front is one of its panes — see `panesInView`. */
+  panes: RemotePaneTree | null;
+  /** The other open tabs that could join the pane holding `beside`. Empty when
+   *  the body already holds as many as a screen usefully can. */
+  splitWith: (beside: string) => RemoteTab[];
+  /** Show an open tab beside a pane that is already on screen. */
+  showBeside: (
+    beside: string,
+    id: string,
+    direction: RemotePaneDirection,
+  ) => void;
+  /** Give the body back to the tab in front. Closes nothing. */
+  showAlone: () => void;
   /** Hand the box's latest read to the tabs drawn from it. */
   syncSessions: (sessions: readonly BoxSession[]) => void;
 };
@@ -147,8 +168,13 @@ export function useRemoteTabs(
       update((cur) => openSessionTab(cur, session, readOnly)),
     [update],
   );
-  const openWork = useCallback(
-    (kind: RemoteWorkKind) => update((cur) => openWorkTab(cur, kind)),
+  const openFile = useCallback(
+    (path: string) => update((cur) => openFileTab(cur, path)),
+    [update],
+  );
+  const openDiff = useCallback(
+    (sha: string | null, path: string | null) =>
+      update((cur) => openDiffTab(cur, sha, path)),
     [update],
   );
   const closeTab = useCallback(
@@ -164,6 +190,19 @@ export function useRemoteTabs(
       update((cur) => refreshSessions(cur, sessions)),
     [update],
   );
+  const showBeside = useCallback(
+    (beside: string, id: string, direction: RemotePaneDirection) =>
+      update((cur) => showPaneBeside(cur, beside, id, direction)),
+    [update],
+  );
+  const showAlone = useCallback(() => update(showPaneAlone), [update]);
+  // A function rather than a list: each pane's own toolbar asks about itself,
+  // and the candidates for the pane you opened the menu on are not the
+  // candidates for whichever pane happened to hold the keyboard.
+  const splitWith = useCallback(
+    (beside: string) => paneCandidates(snap, beside),
+    [snap],
+  );
 
   return {
     tabs: snap.tabs,
@@ -171,9 +210,14 @@ export function useRemoteTabs(
     active: activeTab(snap),
     hasSessions: hasSessionTabs(snap),
     openSession,
-    openWork,
+    openFile,
+    openDiff,
     closeTab,
     focusTab,
     syncSessions,
+    panes: panesInView(snap),
+    splitWith,
+    showBeside,
+    showAlone,
   };
 }

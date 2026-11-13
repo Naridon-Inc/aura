@@ -8,9 +8,8 @@
 //    ways of LOOKING at the work and the fifth was a dashboard about sprints —
 //    a burndown chart, a capacity rollup, a velocity sparkline, a staleness
 //    heuristic. It also owned the only two doors in the product for starting a
-//    sprint and completing one, so deleting it naively would have left the rail
-//    listing an object nothing could make or finish. The arithmetic behind
-//    those two doors moved to `lib/sprintScope` and is pinned below.
+//    sprint and completing one. Those doors lived in the Tasks rail after
+//    that, and went with it when Tasks became the dashboard.
 //
 // 2. THE LENS LIST AND THE FOLDS THAT READ IT COULD DISAGREE. `WorkLens` is
 //    answered by three separate functions — is this a crew lens, which crew
@@ -39,6 +38,7 @@ import {
   WORK_LENSES,
   WORK_LENS_VALUES,
   isCrewLens,
+  readWorkLens,
   taskViewFor,
   type WorkLens,
 } from "../src/lib/workRoute";
@@ -111,18 +111,62 @@ describe("every lens is answered by every fold", () => {
   });
 });
 
+describe("the lens you come back to", () => {
+  // A tiny in-memory store standing in for the browser's, so each case can
+  // say exactly what was left behind.
+  const withStored = (value: string | null, read: () => WorkLens): WorkLens => {
+    const prior = (globalThis as { localStorage?: Storage }).localStorage;
+    const store = new Map<string, string>();
+    if (value !== null) store.set("aura.work.lens", value);
+    (globalThis as { localStorage?: unknown }).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+    };
+    try {
+      return read();
+    } finally {
+      (globalThis as { localStorage?: unknown }).localStorage = prior;
+    }
+  };
+
+  test("the first open is the Dashboard's board", () => {
+    expect(withStored(null, readWorkLens)).toBe("board");
+  });
+
+  test("a lens you left is the lens you get back", () => {
+    expect(withStored("list", readWorkLens)).toBe("list");
+    expect(withStored("board", readWorkLens)).toBe("board");
+  });
+
+  test("a retired lens falls back to the board, not to a missing cell", () => {
+    for (const gone of ["sprint", "plan", "map"]) {
+      expect(withStored(gone, readWorkLens)).toBe("board");
+    }
+    if (!CREW_GRAPH_LENS_ENABLED) expect(withStored("graph", readWorkLens)).toBe("board");
+  });
+});
+
 describe("both surfaces render the same strip", () => {
   test("neither reaches for the icon-only switch", async () => {
+    // The crew page draws its strip through `CrewViewBars`, the Dashboard's
+    // strip and toolbar for that lens; the board draws it inline.
     for (const rel of [
       "components/TasksBoard.tsx",
-      "components/commons/crew/CrewSurface.tsx",
+      "components/tasks/CrewViewBars.tsx",
     ]) {
       const src = await readSrc(rel);
       expect(src).toContain("<WorkLensTabs");
+      expect(src).toContain("<TaskViewStrip");
+      expect(src).toContain("<TaskToolbar");
       // `BoardLayoutSwitch size="sm"` is the 28px icon-only variant. A surface
       // that still imports it is a surface that can still draw it.
       expect(src).not.toContain("BoardLayoutSwitch");
     }
+    const crew = await readSrc("components/commons/crew/CrewSurface.tsx");
+    expect(crew).toContain("<CrewViewBars");
+    expect(crew).not.toContain("BoardLayoutSwitch");
+    // No second strip in the frame's header above the shared one.
+    expect(crew).not.toMatch(/tabs=\{<WorkLensTabs/);
   });
 
   test("the strip itself renders the shared tab control, labels and all", async () => {
@@ -136,7 +180,7 @@ describe("both surfaces render the same strip", () => {
   });
 });
 
-describe("the Sprint page is gone, its lifecycle is not", () => {
+describe("the Sprint page is gone", () => {
   test("the board no longer draws a sprint view", async () => {
     const src = await readSrc("components/TasksBoard.tsx");
     for (const gone of [
@@ -150,14 +194,16 @@ describe("the Sprint page is gone, its lifecycle is not", () => {
     }
   });
 
-  test("starting and completing a sprint still have a door", async () => {
-    const src = await readSrc("components/tasks/SprintRailGroup.tsx");
-    expect(src).toContain("CreateSprintWizard");
-    expect(src).toContain("CloseSprintPanel");
-    expect(src).toContain("tasksCycleClose");
-    // And the rail actually mounts it — a door in a file nothing renders is
-    // the same as no door.
-    const rail = await readSrc("components/workpanes/TasksSidebar.tsx");
-    expect(rail).toContain("<SprintRailGroup");
+  test("the sprint rail went with the rail", async () => {
+    // Tasks is the dashboard now: no rail beside it, so no sprint group in one.
+    for (const gone of [
+      "components/tasks/SprintRailGroup.tsx",
+      "components/tasks/CreateSprintWizard.tsx",
+      "components/tasks/CloseSprintPanel.tsx",
+      "components/workpanes/TasksSidebar.tsx",
+    ]) {
+      expect(await Bun.file(`${import.meta.dir}/../src/${gone}`).exists()).toBe(false);
+    }
   });
+
 });

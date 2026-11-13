@@ -1,0 +1,89 @@
+/* The cloud machine page: the settings rows and cloud marks, plus the few
+   joins they need — the job composer under its agent row, the line that
+   turns red when a machine can't sign its agent in, and the in-surface sheet
+   the board opens it in. */
+
+.ui-cloud-runner-ok {
+  flex-shrink: 0;
+  color: var(--ui-green);
+}
+
+.ui-cloud-runner-line[data-blocked] {
+  color: var(--ui-red);
+}
+
+.ui-cloud-runner-compose {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-block: 24px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-cloud-runner-compose .ui-textarea {
+  min-height: 92px;
+}
+.ui-cloud-runner-compose > .ui-cloud-note {
+  margin: -4px 0 0;
+}
+.ui-cloud-runner-compose > .ui-settings-actions {
+  justify-content: flex-end;
+}
+
+.ui-cloud-runner-note {
+  display: flex;
+  margin: 16px 0 0;
+  font-size: 13px;
+}
+.ui-cloud-runner .ui-settings-row + .ui-settings-error {
+  margin-top: 16px;
+}
+
+.ui-cloud-runner-job {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-cloud-runner-reason {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--ui-red);
+  line-height: 16px;
+}
+.ui-cloud-runner-reason > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.ui-cloud-runner-notes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-cloud-runner-notes > li {
+  padding-block: 12px;
+  border-bottom: 1px solid var(--ui-border);
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* The board's own sheet: the library's right-hand sheet, held inside the
+   surface (not portalled over the window) so it never opens behind the
+   board's wizard. */
+.ui-cloud-runner-scrim {
+  position: absolute;
+  inset: 0;
+  background: #0008;
+}
+.ui-sheet.ui-cloud-runner-sheet {
+  position: absolute;
+  z-index: 1;
+  width: min(480px, 100%);
+}
+.ui-cloud-runner-sheet > .ui-dialog-header {
+  margin-bottom: 16px;
+  padding-right: 32px;
+}

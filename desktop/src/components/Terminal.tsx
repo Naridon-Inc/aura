@@ -35,13 +35,25 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { handleClipboardKey, mapKeyEvent } from "../lib/terminalKeymap";
+import { readClipboardText, writeClipboardText } from "../lib/clipboard";
 import { api } from "../lib/api";
+import { createWebglBudget, type WebglHolder } from "../lib/webglBudget";
 import { registerFilePathLinks } from "../lib/terminalLinks";
 import { openExternal } from "../lib/openExternal";
 import { defaultTerminalFontSize, getSettings } from "../lib/settingsStore";
 import { playTerminalBell } from "../lib/terminalBell";
 import { isNativeTerminalEnabled } from "../lib/nativeTerminalStore";
-import { NativeTerminal } from "./NativeTerminal";
+import {
+  NativeTerminal,
+  clearNativeTerminal,
+  clearNativeTerminalFind,
+  copyNativeTerminalSelection,
+  findInNativeTerminal,
+  onNativeTerminalFind,
+  pasteIntoNativeTerminal,
+  selectAllNativeTerminal,
+  stepNativeTerminalFind,
+} from "./NativeTerminal";
 import { decodePtyChunk, type PtyChunk } from "../lib/ptyPayload";
 export { releaseNativeTerminalSession } from "./NativeTerminal";
 
@@ -137,7 +149,73 @@ type PersistentSession = {
   saveTermId: string;
   /** Periodic scrollback-snapshot timer; cleared on release. */
   saveTimer: number | null;
+  /** Output arrived since the last cold-restore snapshot. A terminal sitting
+   *  in a background workspace writes nothing, so its 30s snapshot has
+   *  nothing new to say and is skipped rather than re-serialized. */
+  wroteSinceFlush: boolean;
+  /** This terminal's place in the shared WebGL budget (see `webglBudget`). */
+  gl: XtermGl;
 };
+
+/** A terminal's WebGL renderer, loaded and disposed on the budget's say-so. */
+type XtermGl = WebglHolder & { addon: WebglAddon | null; retries: number };
+
+const webgl = createWebglBudget<XtermGl>();
+
+function makeXtermGl(term: XTerm): XtermGl {
+  const gl: XtermGl = {
+    addon: null,
+    retries: 0,
+    attachGl() {
+      if (gl.addon) return true;
+      // Disposed (tab closed) before the budget got to it.
+      if (term.element == null) return false;
+      let addon: WebglAddon;
+      try {
+        addon = new WebglAddon();
+      } catch {
+        return false; /* no WebGL2 in this webview — DOM renderer stays */
+      }
+      addon.onContextLoss(() => {
+        try {
+          addon.dispose();
+        } catch {
+          /* already gone */
+        }
+        if (gl.addon === addon) gl.addon = null;
+        webgl.lost(gl);
+        // Transient loss (a GPU switch on a dual-GPU Mac, memory pressure) —
+        // win GPU rendering back rather than living on the DOM renderer for
+        // the rest of the session, but only for a terminal on screen, and only
+        // a few times, so a webview that genuinely can't hold a context
+        // settles on DOM instead of thrashing.
+        if (gl.retries < 3) {
+          gl.retries += 1;
+          window.setTimeout(() => {
+            if (term.element?.isConnected) webgl.acquire(gl);
+          }, 500);
+        }
+      });
+      try {
+        term.loadAddon(addon);
+      } catch {
+        return false; /* late context-creation failure — DOM renderer stays */
+      }
+      gl.addon = addon;
+      return true;
+    },
+    dropGl() {
+      const addon = gl.addon;
+      gl.addon = null;
+      try {
+        addon?.dispose();
+      } catch {
+        /* already gone */
+      }
+    },
+  };
+  return gl;
+}
 
 const sessions = new Map<string, PersistentSession>();
 // Pending boots — multiple effect runs can race for the same instanceId
@@ -195,6 +273,7 @@ export function releaseTerminalSession(instanceId: string): void {
     /* noop */
   }
   invoke("pty_close", { id: s.ptyId }).catch(() => {});
+  webgl.release(s.gl);
   try {
     s.shellIntegration.dispose();
   } catch {
@@ -213,7 +292,8 @@ export function releaseTerminalSession(instanceId: string): void {
  *  we cap line count here so an enormous scrollback doesn't stall the
  *  main thread. */
 function flushScrollback(s: PersistentSession): void {
-  if (!s.saveRepoRoot) return;
+  if (!s.saveRepoRoot || !s.wroteSinceFlush) return;
+  s.wroteSinceFlush = false;
   let text = "";
   try {
     text = s.serialize.serialize({ scrollback: 1000 });
@@ -279,9 +359,18 @@ export async function readTerminalContext(
 }
 
 /** Clear the visible buffer + scrollback for a live terminal (the `...`
- *  menu's "Clear Terminal"). No-op if the session isn't mounted. */
+ *  menu's "Clear Terminal").
+ *
+ *  Falls through to the GPU engine for ids with no xterm session. That engine
+ *  is the default on macOS and Linux, so without this the menu item did
+ *  nothing at all on a normal install. */
 export function clearTerminalSession(instanceId: string): void {
-  sessions.get(instanceId)?.term.clear();
+  const s = sessions.get(instanceId);
+  if (s) {
+    s.term.clear();
+    return;
+  }
+  void clearNativeTerminal(instanceId);
 }
 
 /** Current selection text for a live terminal, or "" when nothing is
@@ -290,35 +379,51 @@ export function terminalSelection(instanceId: string): string {
   return sessions.get(instanceId)?.term.getSelection() ?? "";
 }
 
-/** Copy the current selection to the system clipboard. Returns false
- *  when there's nothing selected. */
-export function copyTerminalSelection(instanceId: string): boolean {
+/** Copy the current selection to the system clipboard. Returns false when
+ *  there's nothing selected, or the copy didn't land.
+ *
+ *  Falls through to the GPU engine for ids it has no xterm session for: the
+ *  native terminal is the default, its selection lives in the Rust grid, and
+ *  this is the one place the `...` menu calls. */
+export async function copyTerminalSelection(instanceId: string): Promise<boolean> {
   const text = terminalSelection(instanceId);
-  if (!text) return false;
-  void navigator.clipboard?.writeText(text);
-  return true;
+  if (!text) return copyNativeTerminalSelection(instanceId);
+  // Through Rust, like every other copy here: the webview refuses a write
+  // whose user gesture has been spent, and a menu item's has been.
+  return writeClipboardText(text);
 }
 
-/** Select the whole buffer (the `...` menu's "Select All"). */
+/** Select the whole buffer (the `...` menu's "Select All"). Falls through to
+ *  the GPU engine, where the selection covers the scrollback as well as the
+ *  visible window. */
 export function selectAllTerminal(instanceId: string): void {
-  sessions.get(instanceId)?.term.selectAll();
+  const s = sessions.get(instanceId);
+  if (s) {
+    s.term.selectAll();
+    return;
+  }
+  void selectAllNativeTerminal(instanceId);
 }
 
-/** Paste clipboard text into a live terminal by writing it to the PTY,
- *  exactly as if the user had pressed ⌘V over the shell. */
+/** Paste clipboard text into a live terminal, exactly as if the user had
+ *  pressed ⌘V over the shell (the `...` menu's "Paste").
+ *
+ *  Read through Rust: `navigator.clipboard.readText()` is gated behind a paste
+ *  gesture WKWebView withholds, so this menu item came back with an empty
+ *  string every time and pasted nothing. Handed to xterm rather than written
+ *  as bytes, so it goes down the same path ⌘V does — newlines normalised and
+ *  the block fenced only if the child asked for bracketed paste.
+ *
+ *  An id with no xterm session is handed to the GPU engine, which is what
+ *  backs a pane by default. */
 export async function pasteIntoTerminal(instanceId: string): Promise<void> {
   const s = sessions.get(instanceId);
-  if (!s) return;
-  const text = await navigator.clipboard?.readText().catch(() => "");
-  // Bytes, not the string — `pty_write` is `data: Vec<u8>`, so a string is
-  // rejected at serde and the paste vanishes with no error anyone sees. Every
-  // other write on this path already encodes; this one was the odd one out.
-  if (text) {
-    const data = Array.from(new TextEncoder().encode(text));
-    invoke("pty_write", { id: s.ptyId, data }).catch((e) =>
-      console.warn("pasteIntoTerminal: pty_write failed", e),
-    );
+  if (!s) {
+    await pasteIntoNativeTerminal(instanceId);
+    return;
   }
+  const text = await readClipboardText();
+  if (text) s.term.paste(text);
 }
 
 /** Find-in-terminal options shared by the find widget. `caseSensitive`,
@@ -342,48 +447,92 @@ const FIND_DECORATIONS = {
   activeMatchColorOverviewRuler: "#d18616",
 };
 
-/** Search forward from the current selection. Returns false when the
- *  session isn't mounted or the term is empty. */
-export function terminalFindNext(
+/** Where a find stands: the zero-based current hit and how many there are.
+ *  `null` from a run means the engine reports its count by subscription
+ *  instead — which is what the xterm addon does. */
+export type TerminalFindStatus = { index: number; total: number };
+
+/** Run the query from scratch: the user typed, or flipped a toggle.
+ *
+ *  Separate from stepping because the two engines disagree about what a
+ *  search is. The xterm addon's `findNext` searches *and* advances, so
+ *  re-running it on every keystroke is how it stays live. The GPU engine
+ *  scans the buffer, highlights every hit, and lands on the first one at or
+ *  after the viewport — pressing Enter again has to step, or it would sit on
+ *  the hit it just landed on.
+ *
+ *  Rejects with the regular-expression error when `regex` is on and the
+ *  pattern will not compile, so the widget can say that rather than show "No
+ *  results", which means something else. */
+export async function terminalFindRun(
   instanceId: string,
   query: string,
   opts: TerminalFindOptions = {},
-): boolean {
+): Promise<TerminalFindStatus | null> {
   const s = sessions.get(instanceId);
-  if (!s || !query) {
-    s?.search.clearDecorations();
-    return false;
+  if (!s) {
+    if (!query) {
+      await clearNativeTerminalFind(instanceId);
+      return { index: 0, total: 0 };
+    }
+    return findInNativeTerminal(instanceId, query, opts);
   }
-  return s.search.findNext(query, { ...opts, decorations: FIND_DECORATIONS });
+  if (!query) {
+    s.search.clearDecorations();
+    return null;
+  }
+  s.search.findNext(query, { ...opts, decorations: FIND_DECORATIONS });
+  return null;
 }
 
-/** Search backward from the current selection. */
-export function terminalFindPrevious(
+/** Move to the next hit, or the previous one when `forward` is false, with the
+ *  same query. Wraps at either end. */
+export async function terminalFindStep(
   instanceId: string,
+  forward: boolean,
   query: string,
   opts: TerminalFindOptions = {},
-): boolean {
+): Promise<TerminalFindStatus | null> {
   const s = sessions.get(instanceId);
-  if (!s || !query) {
-    s?.search.clearDecorations();
-    return false;
+  if (!s) return stepNativeTerminalFind(instanceId, forward);
+  if (!query) {
+    s.search.clearDecorations();
+    return null;
   }
-  return s.search.findPrevious(query, { ...opts, decorations: FIND_DECORATIONS });
+  const search = { ...opts, decorations: FIND_DECORATIONS };
+  if (forward) s.search.findNext(query, search);
+  else s.search.findPrevious(query, search);
+  return null;
 }
 
 /** Drop all find highlights (Esc closes the widget). */
 export function clearTerminalFind(instanceId: string): void {
-  sessions.get(instanceId)?.search.clearDecorations();
+  const s = sessions.get(instanceId);
+  if (s) {
+    s.search.clearDecorations();
+    return;
+  }
+  void clearNativeTerminalFind(instanceId);
 }
 
-/** Subscribe to live match-count updates for the find widget's
- *  "N of M" readout. Returns an unsubscribe fn; no-op for unknown ids. */
+/** Subscribe to live match-count updates for the find widget's "N of M"
+ *  readout. Returns an unsubscribe fn.
+ *
+ *  Both engines push: the addon fires on its own searches, and the GPU engine
+ *  reports when output arrives that the live query matches, or when matched
+ *  lines scroll out of the scrollback. The GPU engine's index is 0-based with
+ *  no "nothing matched" sentinel, so an empty result comes through as -1 to
+ *  match what the addon sends. */
 export function onTerminalFindResults(
   instanceId: string,
   cb: (result: { resultIndex: number; resultCount: number }) => void,
 ): () => void {
   const s = sessions.get(instanceId);
-  if (!s) return () => {};
+  if (!s) {
+    return onNativeTerminalFind(instanceId, ({ index, total }) =>
+      cb({ resultIndex: total > 0 ? index : -1, resultCount: total }),
+    );
+  }
   const disposable = s.search.onDidChangeResults(cb);
   return () => {
     try {
@@ -463,6 +612,10 @@ function XtermTerminal({
       if (session.term.element && session.term.element.parentNode !== hostEl) {
         hostEl.appendChild(session.term.element);
       }
+      // On screen: this terminal is the most recently shown, so it gets (or
+      // keeps) a WebGL context; the budget hands the one shown longest ago
+      // back to the DOM renderer if it is full.
+      webgl.acquire(session.gl);
       try {
         session.fit.fit();
       } catch {
@@ -585,45 +738,12 @@ function XtermTerminal({
 
       term.open(hostEl);
       // GPU (WebGL) renderer — VSCode's default and far faster than xterm's
-      // DOM renderer. The DOM renderer is the fallback, and it's the prime
-      // suspect for sluggish redraws on Intel/older GPUs. Crucially, WebGL
-      // contexts on dual-GPU Intel Macs get *lost* on a GPU switch or under
-      // memory pressure; the old code disposed the addon on loss and then ran
-      // on the slow DOM renderer for the REST of the session. Now we reload a
-      // fresh WebGL addon after a loss (a few bounded retries) so GPU
-      // rendering is restored instead of degrading permanently — which is what
-      // made redraw-heavy CLIs (Claude Code, vim, htop) feel laggy.
-      let webglRetries = 0;
-      const loadWebgl = () => {
-        // Bail if the terminal was disposed (unmount) before a retry fired.
-        if (term.element == null) return;
-        let addon: WebglAddon;
-        try {
-          addon = new WebglAddon();
-        } catch {
-          return; /* no WebGL2 in this webview — DOM renderer stays */
-        }
-        addon.onContextLoss(() => {
-          try {
-            addon.dispose();
-          } catch {
-            /* already gone */
-          }
-          // Transient loss — try to restore GPU rendering rather than living
-          // on the DOM renderer forever. Bounded so a webview that genuinely
-          // can't hold a context settles on DOM instead of thrashing.
-          if (webglRetries < 3) {
-            webglRetries += 1;
-            window.setTimeout(loadWebgl, 500);
-          }
-        });
-        try {
-          term.loadAddon(addon);
-        } catch {
-          /* late context-creation failure — DOM renderer stays */
-        }
-      };
-      loadWebgl();
+      // DOM renderer — is loaded when the terminal is shown (`attach` →
+      // `webgl.acquire`), under a budget shared by every terminal, rather
+      // than here for the life of the tab. See `lib/webglBudget.ts`: holding
+      // one per terminal forever is what pushed a webview with several
+      // workspaces open past its context limit.
+      const gl = makeXtermGl(term);
       // VSCode-style shell-integration command decorations. Parses the OSC 133
       // marks the backend already injects and renders a pass/fail dot per
       // command in the gutter + overview ruler. Must run after open().
@@ -720,6 +840,10 @@ function XtermTerminal({
         if (
           handleClipboardKey(e, {
             getSelection: () => term.getSelection(),
+            // xterm's own paste: it normalises newlines and fences the block
+            // only when the child has asked for bracketed paste, then emits it
+            // through onData above — the same path typing takes.
+            paste: (text) => term.paste(text),
             writeBytes: (bytes) => {
               invoke("pty_write", { id: ptyId, data: bytes }).catch(() => {});
             },
@@ -747,7 +871,12 @@ function XtermTerminal({
         saveRepoRoot,
         saveTermId,
         saveTimer: null,
+        wroteSinceFlush: true,
+        gl,
       };
+      term.onWriteParsed(() => {
+        session.wroteSinceFlush = true;
+      });
 
       // Periodic cold-restore snapshot so an abrupt quit (crash, force
       // kill) still leaves recent history to replay. Persistent tabs
@@ -953,6 +1082,7 @@ function releaseEphemeral(session: PersistentSession): void {
     /* noop */
   }
   invoke("pty_close", { id: session.ptyId }).catch(() => {});
+  webgl.release(session.gl);
   try {
     session.shellIntegration.dispose();
   } catch {

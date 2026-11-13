@@ -7,9 +7,12 @@
 // named whenever the message was addressed to someone, and an agent's message
 // reading as from *that agent* rather than as anonymous output.
 //
-// It deliberately reuses the chat surface's own row grid (`slack-message-row`
-// and friends) instead of inventing a second bubble language — a teammate's
-// message has to sit inline in the agent's output and look like it belongs.
+// It is the shared-message row the cloud chat uses: the face beside the
+// words, yours on the right, and an agent's words on the page the way the
+// chat's assistant reads, with the face saying whose agent it is. What a room
+// adds sits on one quiet line above the words, and only when it says
+// something: whose agent this is, who it was for, and what kind of message.
+// A tool the host's agent ran is the chat's own tool row.
 
 import { useMemo } from "react";
 import type { JSX } from "react";
@@ -24,13 +27,14 @@ import type {
 import { hhmm } from "../team/domain/labels";
 import { ChatMarkdown } from "../chat/ChatMarkdown";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { ToolCall } from "../ui/message";
+import { StatusChip } from "../ui/statusChip";
 import { ParticipantFace } from "./ParticipantsStrip";
-import {
-  agentBrandName,
-  isYou,
-  mentionHandle,
-  participantLabel,
-} from "./collabPresence";
+import { isYou, mentionHandle, participantLabel } from "./collabPresence";
+import "../ui/cloud-patterns.css";
+import "../ui/session-room.css";
 
 /** How each intent reads in the room. `chat` is deliberately unlabelled —
  *  most traffic is chat, and a chip on every line is noise. */
@@ -61,7 +65,7 @@ export type SessionMessageRowProps = {
   role?: EntryRole;
   participants: readonly Participant[];
   youId: string | null;
-  /** Same sender as the row above — drops the header, keeps the hover time. */
+  /** Same sender as the row above — drops the face, keeps the hover time. */
   grouped?: boolean;
   /** The agent is still producing this one. */
   streaming?: boolean;
@@ -88,6 +92,12 @@ export function SessionMessageRow({
     : fromName?.trim() || "Someone who left";
   const loud = !!intent && LOUD.has(intent);
   const chip = intent ? INTENT_LABEL[intent] : null;
+  const own = !!from && isYou(from, youId);
+  const agent = from?.kind === "agent" || role === "tool";
+  const time = at ? hhmm(at) : "";
+  // Two agents of the same kind wear the same face, so an agent's line always
+  // says whose it is. A person's face is enough.
+  const named = !grouped && from?.kind === "agent";
 
   // Mention highlighting needs the set of handles that exist in this room,
   // which is exactly the set the mention picker offers.
@@ -100,56 +110,74 @@ export function SessionMessageRow({
     return me ? mentionHandle(me, participants) : "";
   }, [participants, youId]);
 
+  const words = (body: string) =>
+    body.trim() ? (
+      <ChatMarkdown body={body} members={mentionMembers} selfHandle={selfHandle} />
+    ) : null;
+
+  let content: JSX.Element | null;
+  if (role === "tool") {
+    const [first = "", ...more] = text.trim().split("\n");
+    content = (
+      <ToolCall title={first.trim() || "Ran a tool"} status={streaming ? "running" : "done"}>
+        {words(more.join("\n"))}
+      </ToolCall>
+    );
+  } else {
+    content = (
+      <>
+        {words(text) ??
+          (streaming ? null : <span className="ui-session-message-empty">(no text)</span>)}
+        {streaming && (
+          <span className="ui-session-message-streaming" role="status">
+            <AsciiSpinner size={12} />
+            still writing
+          </span>
+        )}
+      </>
+    );
+  }
+
   return (
     <div
-      className={`slack-message-row group ${grouped ? "is-grouped" : ""}`}
-      style={loud ? { boxShadow: "inset 2px 0 var(--color-accent)" } : undefined}
+      className="ui-shared-message ui-session-message"
+      data-own={own}
+      data-kind={agent ? "agent" : "human"}
+      data-grouped={grouped ? "" : undefined}
+      data-loud={loud ? "" : undefined}
+      aria-label={`Message from ${label}`}
     >
-      <div className="slack-message-avatar-col">
-        {grouped ? (
-          <span className="slack-grouped-time">{at ? hhmm(at) : ""}</span>
-        ) : from ? (
-          <ParticipantFace p={from} size={26} />
-        ) : (
-          <span className="w-[26px] h-[26px] rounded-md border border-line-soft bg-bg-2" aria-hidden />
-        )}
-      </div>
+      <header>
+        <span
+          className="ui-cloud-avatar ui-cloud-avatar-static ui-session-message-face"
+          role="img"
+          aria-label={label}
+          title={label}
+        >
+          {from ? (
+            <ParticipantFace p={from} size={24} />
+          ) : (
+            <span className="ui-session-message-gone" aria-hidden />
+          )}
+        </span>
+        <span>{label}</span>
+        <time>{time}</time>
+      </header>
 
-      <div className="slack-message-content">
-        {!grouped && (
-          <div className="slack-message-meta">
-            <strong>{label}</strong>
-            {from?.kind === "agent" && (
-              <span className="slack-agent-badge">{agentBrandName(from).toUpperCase()}</span>
-            )}
-            {from && isYou(from, youId) && <span className="slack-you-badge">you</span>}
+      <div title={grouped && time ? time : undefined}>
+        {(named || to || chip) && (
+          <div className="ui-session-message-meta">
+            {named && <strong>{label}</strong>}
             {to && <AddressedTo to={to} participants={participants} youId={youId} />}
-            {chip && <IntentChip label={chip} loud={loud} />}
-            <time>{at ? hhmm(at) : ""}</time>
+            {chip && (
+              <StatusChip tone={loud ? "green" : "neutral"} dense>
+                {chip}
+              </StatusChip>
+            )}
           </div>
         )}
-
-        <div className="slack-message-body">
-          {text.trim() ? (
-            <ChatMarkdown body={text} members={mentionMembers} selfHandle={selfHandle} />
-          ) : streaming ? null : (
-            <span className="text-text-4 italic">(no text)</span>
-          )}
-          {streaming && (
-            <span className="inline-flex items-center gap-1.5 ml-1 align-middle text-text-4">
-              <AsciiSpinner size={12} />
-              <span className="text-2xs">still writing</span>
-            </span>
-          )}
-        </div>
-
-        {refs && refs.length > 0 && (
-          <RefChips refs={refs} onOpenRef={onOpenRef} />
-        )}
-
-        {role === "tool" && (
-          <div className="mt-0.5 text-2xs text-text-4">Ran a tool</div>
-        )}
+        {content}
+        {refs && refs.length > 0 && <RefChips refs={refs} onOpenRef={onOpenRef} />}
       </div>
     </div>
   );
@@ -169,26 +197,9 @@ function AddressedTo({
 }): JSX.Element {
   const label = participantLabel(to, participants, youId);
   return (
-    <span
-      className="inline-flex items-center gap-0.5 text-2xs text-text-3 max-w-[180px]"
-      title={`Addressed to ${label}`}
-    >
-      <ArrowRight size={10} className="flex-shrink-0" />
-      <span className="truncate">{label === "You" ? "you" : label}</span>
-    </span>
-  );
-}
-
-function IntentChip({ label, loud }: { label: string; loud: boolean }): JSX.Element {
-  return (
-    <span
-      className={`px-1.5 py-px rounded text-2xs font-medium leading-[13px] ${
-        loud
-          ? "text-accent bg-accent/12 border border-accent/25"
-          : "text-text-3 bg-bg-3 border border-line-soft"
-      }`}
-    >
-      {label}
+    <span className="ui-session-message-to" title={`Addressed to ${label}`}>
+      <ArrowRight aria-hidden />
+      <span>{label === "You" ? "you" : label}</span>
     </span>
   );
 }
@@ -204,33 +215,33 @@ function RefChips({
   onOpenRef?: (ref: SessionLiveRef) => void;
 }): JSX.Element {
   return (
-    <div className="flex flex-wrap gap-1 mt-1">
+    <div className="ui-session-refs">
       {refs.map((r, i) => {
         const file = r.file ?? "";
         const base = file.split("/").pop() ?? file;
+        const key = `${r.symbol}:${file}:${i}`;
         const body = (
           <>
-            <FileCode2 size={11} className="flex-shrink-0 text-text-4" />
-            <span className="font-mono text-text-2 truncate">{r.symbol}</span>
-            {base && <span className="text-text-5 truncate">{base}</span>}
+            <FileCode2 aria-hidden />
+            <code>{r.symbol}</code>
+            {base && <small>{base}</small>}
           </>
         );
-        const cls =
-          "inline-flex items-center gap-1 max-w-[240px] px-1.5 py-0.5 rounded border border-line-soft bg-bg-2 text-2xs leading-none";
         return onOpenRef ? (
-          <button
-            key={`${r.symbol}:${file}:${i}`}
-            type="button"
+          <Button
+            key={key}
+            variant="outline"
+            size="xs"
+            className="ui-session-ref"
             onClick={() => onOpenRef(r)}
-            className={`${cls} hover:border-line`}
             title={file || r.symbol}
           >
             {body}
-          </button>
+          </Button>
         ) : (
-          <span key={`${r.symbol}:${file}:${i}`} className={cls} title={file || r.symbol}>
+          <Badge key={key} variant="outline" className="ui-session-ref" title={file || r.symbol}>
             {body}
-          </span>
+          </Badge>
         );
       })}
     </div>

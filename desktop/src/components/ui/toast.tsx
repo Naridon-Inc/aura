@@ -1,264 +1,114 @@
-// Toast — the one card shape every bottom-right notification in the app wears.
-//
-// Before this module there were six hosts (the general Toaster, the CLI update
-// pill, plugin toasts, the crash report, the huddle failure, the recording
-// notice) and each hand-rolled its own surface: three radii, three shadows,
-// four widths and a pile of raw hex that ignored the theme entirely. Seeing two
-// of them stacked in the same corner made the app look assembled rather than
-// designed.
-//
-// One shape now: a `--color-bg-2` card, hairline `--color-line` border, a 2px
-// tone stripe down the left, a tone dot, a 13px/600 title, a 12.5px body, an
-// optional right-aligned action row, and an optional close button that can draw
-// a draining countdown ring. Tone is the ONLY colour a toast carries, and it is
-// always a token — green means done, amber means needs-you, red means failed,
-// accent means informational.
-//
-// `ToastStack` is the fixed-position column. Hosts keep their own bottom offset
-// and z-index (they deliberately stack in the same corner at different heights)
-// but share the width, gap and pointer-events behaviour.
+// The parts a toast is drawn from: the glyph for its kind, the round close
+// button that sits on its top-left corner (and fills a ring as the toast's
+// time runs out), and the small buttons under its text. `Toaster.tsx` lays
+// them out and stacks the toasts; the look lives in `toast.css`.
 
-import * as React from "react";
+import { X } from "lucide-react";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ToastTone } from "../../lib/toast";
+import { AsciiSpinner } from "./ascii-spinner";
+import "./toast.css";
 
-import { cn } from "../../lib/utils";
+/** What a toast is, for its glyph. A tone with no glyph of its own (`accent`)
+ *  is a plain message. */
+export type ToastKind = "normal" | "success" | "info" | "warning" | "error" | "loading";
 
-export type ToastTone = "info" | "accent" | "success" | "warning" | "danger";
+export function toastKind(tone: ToastTone): ToastKind {
+  switch (tone) {
+    case "success":
+    case "info":
+    case "warning":
+    case "loading":
+      return tone;
+    case "danger":
+      return "error";
+    case "accent":
+      return "normal";
+  }
+}
 
-/** Tone → token. Never a literal: the theme owns these values. */
-export const toastToneColor: Record<ToastTone, string> = {
-  info: "var(--color-accent)",
-  accent: "var(--color-accent)",
-  success: "var(--color-accent-green)",
-  warning: "var(--color-amber)",
-  danger: "var(--color-red)",
+const GLYPHS: Record<"success" | "info" | "warning" | "error", { d: string; viewBox: string }> = {
+  success: {
+    viewBox: "0 0 20 20",
+    d: "M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm3.857-9.809a.75.75 0 0 0-1.214-.882L9.16 12.1l-1.88-1.88a.75.75 0 1 0-1.06 1.061l2.5 2.5a.75.75 0 0 0 1.137-.089l4-5.5Z",
+  },
+  info: {
+    viewBox: "0 0 20 20",
+    d: "M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0ZM11 6a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM9 9a.75.75 0 0 0 0 1.5h.253a.25.25 0 0 1 .244.304l-.459 2.066A1.75 1.75 0 0 0 10.747 15H11a.75.75 0 0 0 0-1.5h-.253a.25.25 0 0 1-.244-.304l.459-2.066A1.75 1.75 0 0 0 9.253 9H9Z",
+  },
+  warning: {
+    viewBox: "0 0 24 24",
+    d: "M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003zM12 8.25a.75.75 0 01.75.75v3.75a.75.75 0 01-1.5 0V9a.75.75 0 01.75-.75zm0 8.25a.75.75 0 100-1.5.75.75 0 000 1.5z",
+  },
+  error: {
+    viewBox: "0 0 20 20",
+    d: "M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-8-5a.75.75 0 0 0-.75.75v4.5a.75.75 0 0 0 1.5 0v-4.5A.75.75 0 0 0 10 5Zm0 10a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",
+  },
 };
 
-const RING_R = 9;
-const RING_C = 2 * Math.PI * RING_R;
-
-export interface ToastStackProps {
-  /** Distance from the bottom of the viewport, px. Hosts differ so their
-   *  cards sit above/below each other rather than overlapping. */
-  bottom?: number;
-  /** Stacking order against the other hosts in this corner. */
-  zIndex?: number;
-  /** Newest card nearest the corner (the general Toaster appends). */
-  reverse?: boolean;
-  children: React.ReactNode;
-}
-
-export function ToastStack({
-  bottom = 16,
-  zIndex = 9999,
-  reverse = false,
-  children,
-}: ToastStackProps) {
+/** The kind's glyph, drawn in the toast's text colour; nothing for a plain
+ *  message. A toast that is still working shows the app's loader. */
+export function ToastKindIcon({ kind }: { kind: ToastKind }) {
+  if (kind === "loading") return <AsciiSpinner size={14} />;
+  if (kind === "normal") return null;
+  const g = GLYPHS[kind];
   return (
-    <div
-      aria-live="polite"
-      className={cn(
-        "fixed right-4 flex w-[360px] max-w-[calc(100vw-32px)] gap-2.5",
-        // Clicks fall through the gaps between cards; each card re-enables.
-        "pointer-events-none",
-        reverse ? "flex-col-reverse" : "flex-col",
-      )}
-      style={{ bottom, zIndex }}
-    >
-      {children}
-    </div>
-  );
-}
-
-export interface ToastCloseButtonProps {
-  onDismiss: () => void;
-  /** Draws a ring that drains over this many ms; the ring IS the timer, so
-   *  when it finishes it calls `onDurationEnd`. `null` → plain close button. */
-  durationMs?: number | null;
-  paused?: boolean;
-  onDurationEnd?: () => void;
-  label?: string;
-  title?: string;
-}
-
-export function ToastCloseButton({
-  onDismiss,
-  durationMs = null,
-  paused = false,
-  onDurationEnd,
-  label = "Dismiss",
-  title,
-}: ToastCloseButtonProps) {
-  const hasRing = durationMs != null && durationMs > 0;
-  return (
-    <button
-      type="button"
-      onClick={onDismiss}
-      aria-label={label}
-      title={title ?? label}
-      className="relative grid size-[22px] shrink-0 place-items-center rounded-full border-none bg-transparent p-0 leading-none text-text-4 transition-colors hover:bg-state-hover hover:text-text-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-    >
-      {hasRing && (
-        <svg
-          width={22}
-          height={22}
-          viewBox="0 0 22 22"
-          aria-hidden
-          // Start draining from 12 o'clock.
-          className="absolute inset-0 -rotate-90"
-        >
-          <circle cx={11} cy={11} r={RING_R} fill="none" stroke="var(--color-line)" strokeWidth={1.5} />
-          <circle
-            cx={11}
-            cy={11}
-            r={RING_R}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={1.5}
-            strokeLinecap="round"
-            strokeDasharray={RING_C}
-            style={{
-              animation: `aura-toast-ring ${durationMs}ms linear forwards`,
-              animationPlayState: paused ? "paused" : "running",
-            }}
-            onAnimationEnd={onDurationEnd ?? onDismiss}
-          />
-        </svg>
-      )}
-      <CloseGlyph />
-    </button>
-  );
-}
-
-function CloseGlyph() {
-  return (
-    <svg width="9" height="9" viewBox="0 0 16 16" fill="none" aria-hidden className="relative">
-      <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    <svg width="20" height="20" viewBox={g.viewBox} fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" clipRule="evenodd" d={g.d} />
     </svg>
   );
 }
 
-export interface ToastActionButtonProps
-  extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
-  /** Exactly one action per toast may be `primary`. */
-  variant?: "primary" | "default";
-  children: React.ReactNode;
+/** The glyph a toast of this kind shows, or null for a plain message: the
+ *  toast then keeps no empty slot for one, so its title sits at the edge. */
+export function toastGlyph(kind: ToastKind): ReactNode {
+  return kind === "normal" ? null : <ToastKindIcon kind={kind} />;
 }
 
-export function ToastActionButton({
-  variant = "default",
-  className,
+/** The round close button on the toast's top-left corner. On a toast that
+ *  closes itself, a ring around the ✕ fills as its time runs out. */
+export function ToastCloseButton({
+  label = "Close toast",
+  onClick,
+}: {
+  label?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button type="button" aria-label={label} data-close-button="" onClick={onClick}>
+      <span className="aura-toast-close-icon" aria-hidden="true">
+        <svg className="aura-toast-close-progress" viewBox="0 0 20 20">
+          <circle className="aura-toast-close-progress-circle" cx="10" cy="10" r="8" />
+        </svg>
+        <X className="aura-toast-close-glyph" />
+      </span>
+    </button>
+  );
+}
+
+/** A button under the toast's text. `primary` is the filled one; the other is
+ *  the quiet one beside it. Shows the loader while its work runs. */
+export function ToastButton({
+  primary,
+  busy,
   children,
-  ...props
-}: ToastActionButtonProps) {
+  ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  primary: boolean;
+  busy?: boolean;
+  children: ReactNode;
+}) {
   return (
     <button
       type="button"
-      className={cn(
-        "inline-flex h-[26px] items-center whitespace-nowrap rounded-[var(--radius-sm)] px-2.5 text-sm font-medium transition-colors",
-        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-60",
-        variant === "primary"
-          ? "border border-transparent bg-accent text-bg-0 hover:opacity-90"
-          : "border border-line bg-transparent text-text-2 hover:bg-state-hover hover:text-text-1",
-        className,
-      )}
-      {...props}
-    />
-  );
-}
-
-export interface ToastCardProps {
-  tone?: ToastTone;
-  title?: React.ReactNode;
-  /** Body copy. Muted, sits under the title. */
-  message?: React.ReactNode;
-  /** Right-aligned action row under the body. */
-  actions?: React.ReactNode;
-  /** Replaces the tone dot (e.g. a spinner while work is in flight). */
-  icon?: React.ReactNode;
-  /** Extra content below the body — the crash report drawer uses this. */
-  children?: React.ReactNode;
-  onDismiss?: () => void;
-  durationMs?: number | null;
-  paused?: boolean;
-  onDurationEnd?: () => void;
-  dismissLabel?: string;
-  dismissTitle?: string;
-  /** `alert` for failures the reader must not miss. */
-  role?: "status" | "alert";
-  className?: string;
-  onMouseEnter?: () => void;
-  onMouseLeave?: () => void;
-}
-
-export function ToastCard({
-  tone = "info",
-  title,
-  message,
-  actions,
-  icon,
-  children,
-  onDismiss,
-  durationMs = null,
-  paused = false,
-  onDurationEnd,
-  dismissLabel,
-  dismissTitle,
-  role = "status",
-  className,
-  onMouseEnter,
-  onMouseLeave,
-}: ToastCardProps) {
-  const color = toastToneColor[tone];
-  return (
-    <div
-      role={role}
-      aria-live={role === "alert" ? "assertive" : "polite"}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
-      className={cn(
-        "pointer-events-auto flex w-full items-start gap-2.5 rounded-[var(--radius-md)] border border-line bg-bg-2 py-2.5 pl-3 pr-3 text-text-2 shadow-[var(--shadow-flyout)]",
-        className,
-      )}
-      style={{ borderLeft: `2px solid ${color}` }}
+      data-button=""
+      data-action={primary ? "" : undefined}
+      data-cancel={primary ? undefined : ""}
+      aria-busy={busy || undefined}
+      {...rest}
     >
-      {icon ?? (
-        <span
-          aria-hidden
-          className="mt-1 size-[7px] shrink-0 rounded-full"
-          style={{ background: color }}
-        />
-      )}
-
-      <div className="min-w-0 flex-1">
-        {title != null && (
-          <div className="text-base font-semibold leading-[1.35] text-text-1">{title}</div>
-        )}
-        {message != null && (
-          <div className={cn("text-base leading-[1.45] text-text-3", title != null && "mt-0.5")}>
-            {message}
-          </div>
-        )}
-        {children}
-        {actions != null && (
-          <div className="mt-2.5 flex flex-wrap items-center justify-end gap-1.5">{actions}</div>
-        )}
-      </div>
-
-      {onDismiss != null && (
-        <ToastCloseButton
-          onDismiss={onDismiss}
-          durationMs={durationMs}
-          paused={paused}
-          onDurationEnd={onDurationEnd}
-          label={dismissLabel}
-          title={dismissTitle}
-        />
-      )}
-    </div>
+      {busy && <AsciiSpinner size={10} />}
+      {children}
+    </button>
   );
-}
-
-/** The countdown-ring keyframes. Rendered once by whichever host draws rings. */
-export function ToastRingKeyframes() {
-  return <style>{`@keyframes aura-toast-ring { from { stroke-dashoffset: 0 } to { stroke-dashoffset: ${RING_C}px } }`}</style>;
 }

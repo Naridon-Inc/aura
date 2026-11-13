@@ -168,7 +168,7 @@ export function ClubRail({
             title={
               pick.picking
                 ? "Stop picking"
-                : "Put two side by side. Pick any two rows below — copies of a project, or a machine"
+                : "Put two side by side. Pick any two rows below — copies of a repository, or a machine"
             }
             aria-label={
               pick.picking ? "Stop picking" : "Put two side by side"
@@ -189,7 +189,7 @@ export function ClubRail({
             {enough
               ? "Open these together, or keep picking."
               : pick.places.length === 0
-                ? "Click two rows below — a copy of a project, or a machine."
+                ? "Click two rows below — a copy of a repository, or a machine."
                 : `Pick ${short} more row${short === 1 ? "" : "s"} below.`}
           </div>
           {pick.places.length > 0 && (

@@ -2,7 +2,7 @@
 // tabs column. One row per group: a solo terminal is a single row; a
 // split group folds its panes under tree-connector glyphs (┌ ├ └). The
 // active terminal carries the arctic-blue accent (green is reserved for
-// the live status dot). Rows are draggable — dropping a terminal onto
+// the live status dot). Rows can be carried — dropping a terminal onto
 // another group tiles it into that group's split (VS Code parity, "use
 // an existing terminal as part of the split"). Rows carry hover actions
 // (split / kill) and double-click-to-rename via the shared
@@ -27,8 +27,8 @@ import { TerminalNewMenu } from "./TerminalNewMenu";
 import { RunRow } from "./RunRow";
 import { EmptyState } from "../ui/state";
 import type { TerminalProfile } from "../../lib/api";
-
-const DRAG_MIME = "application/x-aura-term";
+import { usePointerDrag, type PointerDrag } from "../ui/use-pointer-drag";
+import { TAB_DRAG_SCOPE, tabDropAction, tabDropKey, type TabDrag } from "../../lib/workTabDrag";
 
 type Props = {
   repoRoot: string;
@@ -47,6 +47,10 @@ type Props = {
   onKill: (termId: string) => void;
   onNewTerminal: (profileId?: string) => void;
   onNewWindow?: () => void;
+  /** Open a terminal in a folder the user picks. */
+  onNewTerminalInFolder?: (profileId?: string, folder?: string) => void;
+  /** Folders already opened that way, newest first. */
+  recentFolders?: string[];
   onSelectDefaultProfile: (profileId: string) => void;
   onConfigureSettings: () => void;
   /** Run — the reserved row above the terminals you opened yourself. It is a
@@ -81,6 +85,8 @@ export function TerminalTabsList({
   onKill,
   onNewTerminal,
   onNewWindow,
+  onNewTerminalInFolder,
+  recentFolders,
   onSelectDefaultProfile,
   onConfigureSettings,
   runTermId,
@@ -96,8 +102,21 @@ export function TerminalTabsList({
   const views = panelGroupViews(groups, terminals).filter(
     (v) => !(v.panes.length === 1 && v.panes[0].termId === runTermId),
   );
-  const [dropGroupId, setDropGroupId] = useState<string | null>(null);
-  const [dropToNew, setDropToNew] = useState(false);
+  // Terminals are carried with a pointer drag shared with the editor area's
+  // tabs (lib/workTabDrag.ts), so an editor terminal tab lands here too. A
+  // group lights up while a terminal is over it; the list's empty space
+  // lights up when the terminal would become a group of its own.
+  const carry = usePointerDrag<TabDrag>(
+    (item, key) => {
+      const action = tabDropAction(item, key);
+      if (action?.kind === "merge") onMerge(action.termId, action.groupId, "row");
+      else if (action?.kind === "demote") onDemote(action.termId);
+    },
+    { scope: TAB_DRAG_SCOPE },
+  );
+  const landing = tabDropAction(carry.dragged, carry.over);
+  const dropGroupId = landing?.kind === "merge" ? landing.groupId : null;
+  const dropToNew = landing?.kind === "demote";
 
   function nameFor(tab: TerminalTab, fallbackIndex: number): string {
     const custom = customMap[tabIdFor("term", tab.termId)]?.name;
@@ -127,6 +146,8 @@ export function TerminalTabsList({
             if (activeTermId) onSplit(activeTermId, "row");
           }}
           onNewWindow={onNewWindow}
+          onNewTerminalInFolder={onNewTerminalInFolder}
+          recentFolders={recentFolders}
           onSelectDefaultProfile={onSelectDefaultProfile}
           onConfigureSettings={onConfigureSettings}
           align="end"
@@ -148,28 +169,9 @@ export function TerminalTabsList({
           dropToNew ? "ring-1 ring-inset ring-accent/50 bg-accent/10" : "",
         ].join(" ")}
         // Empty-space drop target: a terminal dropped here (not on a group
-        // row — those stopPropagation) becomes its own new group. This is
-        // how an editor terminal tab is dragged back into the panel.
-        onDragOver={(e) => {
-          if (e.dataTransfer.types.includes(DRAG_MIME)) {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = "move";
-            if (!dropToNew) setDropToNew(true);
-          }
-        }}
-        onDragLeave={(e) => {
-          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-            setDropToNew(false);
-          }
-        }}
-        onDrop={(e) => {
-          setDropToNew(false);
-          const termId = e.dataTransfer.getData(DRAG_MIME);
-          if (termId) {
-            e.preventDefault();
-            onDemote(termId);
-          }
-        }}
+        // row — the nearest marked place wins) becomes its own new group.
+        // This is how an editor terminal tab is dragged back into the panel.
+        {...carry.target(tabDropKey.panel)}
       >
         {views.map((view) => (
           <div
@@ -180,28 +182,7 @@ export function TerminalTabsList({
                 ? "ring-1 ring-inset ring-accent/50 bg-accent/10"
                 : "",
             ].join(" ")}
-            onDragOver={(e) => {
-              if (e.dataTransfer.types.includes(DRAG_MIME)) {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "move";
-                if (dropGroupId !== view.groupId) setDropGroupId(view.groupId);
-              }
-            }}
-            onDragLeave={(e) => {
-              // Only clear when leaving the wrapper, not crossing children.
-              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-                setDropGroupId((id) => (id === view.groupId ? null : id));
-              }
-            }}
-            onDrop={(e) => {
-              const termId = e.dataTransfer.getData(DRAG_MIME);
-              setDropGroupId(null);
-              if (termId) {
-                e.preventDefault();
-                e.stopPropagation(); // don't also hit the new-group drop below
-                onMerge(termId, view.groupId, "row");
-              }
-            }}
+            {...carry.target(tabDropKey.group(view.groupId))}
           >
             {view.panes.map((tab, pi) => {
               const idx = terminals.findIndex((t) => t.termId === tab.termId);
@@ -213,6 +194,7 @@ export function TerminalTabsList({
                   name={nameFor(tab, idx)}
                   active={tab.termId === activeTermId}
                   connector={connectorFor(pi, view.panes.length)}
+                  carry={carry}
                   onSelect={() => onSelect(tab.termId)}
                   onSplit={() => onSplit(tab.termId, "row")}
                   onKill={() => onKill(tab.termId)}
@@ -245,6 +227,7 @@ function TermRow({
   name,
   active,
   connector,
+  carry,
   onSelect,
   onSplit,
   onKill,
@@ -254,6 +237,8 @@ function TermRow({
   name: string;
   active: boolean;
   connector: string | null;
+  /** The list's drag, so this row can be picked up. */
+  carry: PointerDrag<TabDrag>;
   onSelect: () => void;
   onSplit: () => void;
   onKill: () => void;
@@ -273,15 +258,12 @@ function TermRow({
     <div
       role="button"
       tabIndex={0}
-      draggable={!editing}
-      onDragStart={(e) => {
-        e.dataTransfer.setData(DRAG_MIME, tab.termId);
-        e.dataTransfer.effectAllowed = "move";
-      }}
-      // macOS WKWebView drops the synthetic `click` on `draggable=true`
-      // elements, so selecting a terminal row was unreliable while it was
-      // draggable (i.e. not being renamed). Select on mousedown (left button);
-      // the onDoubleClick rename still fires as its own event.
+      {...(editing ? {} : carry.source({ termId: tab.termId }))}
+      // Select on press (left button), as the editor area's tabs do: the same
+      // press may go on to carry the row, and the row carried is then the one
+      // showing. (It once had to be: while rows were HTML5-draggable the web
+      // view dropped their `click`.) The onDoubleClick rename still fires as
+      // its own event.
       onMouseDown={(e) => {
         if (e.button === 0) onSelect();
       }}

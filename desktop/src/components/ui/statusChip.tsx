@@ -1,30 +1,13 @@
 // StatusChip — the app's status pill: "Open", "Failing", "In review", "Done".
 // Seventeen files import it, which makes it the single most-repeated object on
-// screen and the one most worth getting exactly right.
+// screen.
 //
-// It used to wrap `@medusajs/ui`'s StatusBadge, and three things were wrong
-// with that in ways no screenshot would show:
-//
-//   • `dense` applied `txt-compact-2xsmall-plus`, a class that does not exist
-//     in Medusa's type ramp. It compiled to nothing, so the twenty-odd call
-//     sites asking for a dense chip all got the normal one.
-//   • `dot` was destructured and thrown away, while Medusa's badge drew its
-//     marker unconditionally. So the prop was inert in both directions: you
-//     could not ask for a dot and you could not turn one off, and the two
-//     spellings rendered identically.
-//   • The marker was an 8px rounded *square* parked in a fixed 20px-wide box —
-//     more dead gutter than glyph — and it was the only part of the chip that
-//     carried the tone. A failing check read as a grey pill with a small red
-//     mark rather than as something failing.
-//
-// So the tone now lands on the label, where the reader is already looking, and
-// the dot is a real 6px dot that appears only when asked for. Colours come from
-// our own theme tokens, which means the chip tracks light mode and all five
-// accent packs instead of Medusa's fixed cool ramp.
-//
-// The surface stays neutral on purpose. Seventeen surfaces × several chips each
-// is a lot of pills, and tinting every one of their backgrounds would turn a
-// task list into a paint chart. Colour is spent on the word, not the box.
+// It is the library's outline Badge. The tone lands on the label, where the
+// reader is already looking, and the dot is a real 6px dot that appears only
+// when asked for. The surface stays neutral on purpose: seventeen surfaces ×
+// several chips each is a lot of pills, and tinting every background would
+// turn a task list into a paint chart. Colour is spent on the word, not the
+// box.
 //
 // Audience: non-engineers. The labels below are the vocabulary — "Passing",
 // "Changes requested", "No priority" — never the underlying state name.
@@ -33,6 +16,8 @@ import * as React from "react";
 
 import { cn } from "../../lib/utils";
 import { TASK_STATUS } from "../../lib/taskStatus";
+import { Badge } from "./badge";
+import "./status-chip.css";
 
 export type ChipTone = "neutral" | "green" | "red" | "amber" | "violet" | "blue";
 
@@ -46,49 +31,20 @@ export interface StatusChipProps extends React.HTMLAttributes<HTMLSpanElement> {
   icon?: React.ReactNode;
 }
 
-/** Label colour per tone. Neutral deliberately drops to the secondary text
- *  step rather than a colour, so "Backlog" recedes and "Failing" does not. */
-const TONE_TEXT: Record<ChipTone, string> = {
-  neutral: "text-text-2",
-  green: "text-green",
-  red: "text-red",
-  amber: "text-amber",
-  violet: "text-violet",
-  blue: "text-blue",
-};
-
-const TONE_DOT: Record<ChipTone, string> = {
-  neutral: "bg-text-3",
-  green: "bg-green",
-  red: "bg-red",
-  amber: "bg-amber",
-  violet: "bg-violet",
-  blue: "bg-blue",
-};
-
 export const StatusChip = React.forwardRef<HTMLSpanElement, StatusChipProps>(
   ({ tone = "neutral", dot = false, dense = false, icon, className, children, ...props }, ref) => (
-    <span
+    <Badge
       ref={ref}
-      className={cn(
-        "inline-flex w-fit select-none items-center whitespace-nowrap rounded-md border border-line-soft bg-bg-2",
-        dense
-          ? "h-[18px] gap-1 px-1.5 text-2xs [&_svg]:size-2.5"
-          : "h-[22px] gap-1.5 px-2 text-xs [&_svg]:size-3",
-        TONE_TEXT[tone],
-        className,
-      )}
+      variant="outline"
+      className={cn("ui-status-chip", className)}
+      data-tone={tone}
+      data-dense={dense ? "" : undefined}
       {...props}
     >
-      {dot && (
-        <span
-          className={cn("size-1.5 shrink-0 rounded-full", TONE_DOT[tone])}
-          aria-hidden
-        />
-      )}
+      {dot && <span className="ui-status-chip-dot" aria-hidden />}
       {icon}
       {children}
-    </span>
+    </Badge>
   ),
 );
 StatusChip.displayName = "StatusChip";

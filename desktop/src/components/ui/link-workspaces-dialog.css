@@ -1,0 +1,75 @@
+/* The link-workspaces dialog's rows. The box, search field, groups and empty
+   state are the link-issue dialog's (issue-link-dialog.css). A row is an icon
+   (a check once linked), a name, a quieter folder name or path, and a
+   "Link"/"Unlink" hint on the row the keyboard is on. */
+.ui-link-workspaces-dialog .ui-command-item.ui-link-ws-row {
+  gap: 0;
+  padding: 12px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ui-link-workspaces-dialog .ui-command-item.ui-link-ws-row[data-selected="true"] {
+  background: var(--ui-sidebar-accent);
+}
+.ui-link-ws-row svg.ui-link-ws-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  color: var(--ui-fg);
+}
+.ui-link-ws-row svg.ui-link-ws-icon[data-muted="true"] {
+  color: var(--ui-muted-fg);
+}
+.ui-link-ws-name {
+  flex-shrink: 0;
+  margin-right: 8px;
+  font-size: 14px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+.ui-link-ws-dir,
+.ui-link-ws-path,
+.ui-link-ws-missing {
+  margin-right: 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.ui-link-ws-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-link-ws-missing {
+  flex-shrink: 0;
+  font-style: italic;
+}
+.ui-link-ws-hint {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  opacity: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 16px;
+}
+.ui-link-ws-row[data-selected="true"] .ui-link-ws-hint {
+  opacity: 1;
+}
+.ui-link-ws-row .ui-link-ws-hint svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-link-ws-note {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--ui-sidebar-border);
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 16px;
+}

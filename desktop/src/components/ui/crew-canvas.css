@@ -1,0 +1,473 @@
+/* The crew's work as a node graph on a dotted board. The cards are the
+   board's own task cards, the marks are its lifecycle glyphs, the bars are
+   the library progress bar and the zoom bar is the code map's; added here
+   are the pieces only a canvas has — the board and its sheet, a card's fixed
+   box and the hover read under it, the wave labels, the "no set order" band,
+   the goal and result bookends, the objective strip and the work-group
+   bands. Unlayered, like the code map's sheet, so it sits over the shared
+   controls it positions. */
+
+.ui-crew-canvas {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--ui-bg);
+  background-image: radial-gradient(circle, var(--ui-border) 1px, transparent 1px);
+}
+.ui-crew-canvas-sheet {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+}
+.ui-crew-canvas-edges {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+/* A selected task's chain streams from its roots toward its ends. */
+@keyframes ui-crew-edge-flow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+.ui-crew-edge-flow {
+  animation: ui-crew-edge-flow 0.7s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-crew-edge-flow {
+    animation: none;
+  }
+}
+
+/* ── a task card ───────────────────────────────────────────────────── */
+
+.ui-crew-node.ui-dashboard-card {
+  position: absolute;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 10px 12px;
+  text-align: left;
+  transition:
+    border-color 120ms,
+    opacity 120ms,
+    transform 120ms;
+}
+/* The hover read overflows the card; lifting the hovered card keeps its
+   later-painted neighbours from covering it. */
+.ui-crew-node.ui-dashboard-card:hover {
+  z-index: 50;
+  transform: translateY(-1px);
+}
+.ui-crew-node[data-chain] {
+  border-color: var(--ui-link);
+}
+.ui-crew-node[data-selected] {
+  box-shadow: 0 0 0 1px var(--ui-link);
+}
+.ui-crew-node[data-done] {
+  opacity: 0.85;
+}
+.ui-crew-node[data-dimmed] {
+  opacity: 0.32;
+}
+.ui-crew-node-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-crew-node-agent {
+  display: inline-grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+}
+.ui-crew-node-agent[data-empty] {
+  border-radius: 999px;
+  background: var(--ui-muted);
+  color: var(--ui-faint);
+  font-size: 10px;
+  font-weight: 500;
+}
+.ui-crew-node[data-done] .ui-crew-node-agent {
+  opacity: 0.55;
+}
+.ui-crew-node-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-fg);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-crew-node[data-done] .ui-crew-node-title {
+  color: var(--ui-muted-fg);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--ui-faint) 50%, transparent);
+}
+.ui-crew-node-story {
+  margin: 0;
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The watch affordance on a working card: spinner at rest, the live glyph
+   when the card is hovered. */
+.ui-crew-node-watch {
+  display: inline-grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  color: var(--ui-muted-fg);
+  cursor: pointer;
+}
+.ui-crew-node-watch:hover {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-crew-node-watch:focus-visible {
+  outline: 1px solid var(--ui-link);
+}
+.ui-crew-node-watch > svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-crew-node-watch-hover,
+.ui-crew-node:hover .ui-crew-node-watch-rest {
+  display: none;
+}
+.ui-crew-node:hover .ui-crew-node-watch-hover {
+  display: block;
+}
+
+/* The richer read under a hovered card: the popover's surface, never
+   catching the pointer. */
+.ui-crew-node-card {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 30;
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  width: 260px;
+  margin-top: 6px;
+  padding: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-popover);
+  box-shadow: 0 4px 12px #0003;
+  color: var(--ui-fg);
+  text-align: left;
+  pointer-events: none;
+}
+.ui-crew-node:hover .ui-crew-node-card {
+  display: flex;
+}
+.ui-crew-node-card > strong {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.ui-crew-node-card .ui-tasks-status {
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-crew-node-card .ui-tasks-status-label {
+  max-width: none;
+}
+.ui-crew-node-card-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+.ui-crew-node-priority {
+  text-transform: capitalize;
+}
+.ui-crew-node-card > p {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.ui-crew-node-card > p.ui-crew-node-card-story {
+  padding-top: 6px;
+  border-top: 1px solid var(--ui-border);
+}
+
+/* ── labels on the board ───────────────────────────────────────────── */
+
+.ui-crew-wave {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ui-crew-wave > small {
+  font-size: 12px;
+  font-weight: 400;
+}
+.ui-crew-order {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ui-crew-order-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--ui-border);
+}
+
+/* ── the bookends: a flow's goal and its result ────────────────────── */
+
+.ui-crew-bookend {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-card);
+}
+.ui-crew-bookend-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ui-crew-bookend-head > svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+.ui-crew-bookend-agents {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.ui-crew-bookend-title {
+  display: -webkit-box;
+  margin-top: 4px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--ui-fg);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.ui-crew-bookend-foot {
+  margin-top: auto;
+  padding-top: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.ui-crew-goal {
+  border-color: color-mix(in srgb, var(--ui-link) 35%, transparent);
+  background: color-mix(in srgb, var(--ui-link) 7%, var(--ui-card));
+}
+.ui-crew-goal > .ui-crew-bookend-head {
+  color: var(--ui-link);
+}
+.ui-crew-result[data-proven] {
+  border-color: color-mix(in srgb, var(--ui-green) 45%, transparent);
+  background: color-mix(in srgb, var(--ui-green) 8%, var(--ui-card));
+}
+.ui-crew-result[data-proven] > .ui-crew-bookend-head,
+.ui-crew-result-proven {
+  color: var(--ui-green);
+}
+.ui-crew-result-proven {
+  font-weight: 500;
+}
+.ui-crew-result-pct {
+  margin-left: auto;
+  color: var(--ui-fg);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.ui-crew-result-bar.ui-progress {
+  height: 6px;
+  margin-top: 6px;
+}
+.ui-crew-result-bar.ui-progress .ui-progress-indicator {
+  background: var(--ui-link);
+}
+.ui-crew-result-bar.ui-progress[data-tone="done"] .ui-progress-indicator,
+.ui-crew-rollup-bar.ui-progress .ui-progress-indicator {
+  background: var(--ui-green);
+}
+
+/* ── group headers: objectives and work groups ─────────────────────── */
+
+.ui-crew-tile {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--ui-muted);
+  color: var(--ui-muted-fg);
+}
+.ui-crew-tile > svg {
+  width: 13px;
+  height: 13px;
+}
+.ui-crew-tile[data-tone="goal"] {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ui-link) 12%, transparent);
+  color: var(--ui-link);
+}
+.ui-crew-tile[data-tone="goal"] > svg {
+  width: 15px;
+  height: 15px;
+}
+.ui-crew-rollup {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+}
+.ui-crew-rollup .ui-tasks-fact > svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-crew-rollup-bar.ui-progress {
+  width: 64px;
+  height: 6px;
+}
+.ui-crew-objective {
+  position: absolute;
+}
+.ui-crew-objective-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ui-crew-objective-name {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.ui-crew-objective-name > small {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ui-crew-objective-name > strong {
+  overflow: hidden;
+  color: var(--ui-fg);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-crew-objective-meta {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-crew-objective-rule {
+  width: 100%;
+  height: 1px;
+  background: var(--ui-border);
+}
+.ui-crew-cluster {
+  position: absolute;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ui-card) 25%, transparent);
+}
+.ui-crew-cluster-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 0 12px;
+  border-radius: 12px;
+  text-align: left;
+}
+.ui-crew-cluster-head:hover {
+  background: var(--ui-hover);
+}
+.ui-crew-cluster-head:focus-visible {
+  outline: 1px solid var(--ui-link);
+  outline-offset: -1px;
+}
+.ui-crew-cluster-chevron {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-crew-cluster-name {
+  flex: 1;
+  min-width: 0;
+}
+.ui-crew-cluster-name > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-crew-cluster-name strong {
+  overflow: hidden;
+  color: var(--ui-fg);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-crew-cluster-name > small {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── the zoom bar: the code map's, at the node-editor corner ───────── */
+
+.ui-graph-zoom.ui-crew-zoom {
+  left: auto;
+  right: 12px;
+}
+.ui-crew-zoom > .ui-graph-zoom-scale {
+  color: var(--ui-muted-fg);
+}

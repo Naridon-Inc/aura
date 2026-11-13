@@ -1,7 +1,6 @@
 // Permissions badge — surfaces the "advanced" tools a mode opts into
-// (shell.exec, fs.delete, net.fetch, git.commit). Renders as a row of
-// small pills next to the mode card title; clicking shows a tooltip
-// with the full ACL.
+// (shell.exec, fs.delete, net.fetch, git.commit). Renders as a
+// small badge next to the mode's name; hovering it lists the full ACL.
 //
 // Why a dedicated component? The install sheet and the installed pane
 // both need the same affordance, and the "this mode wants shell
@@ -11,6 +10,7 @@
 import { ShieldAlert } from "lucide-react";
 
 import type { ToolAcl } from "../../lib/api";
+import { Badge } from "../ui/badge";
 
 // Subset of CANONICAL_TOOLS the Rust validator marks as RESERVED. The
 // validator is the source of truth; this list mirrors it so the UI
@@ -40,23 +40,20 @@ export function ModePermissionsBadge({ toolAcl, showSafe = false }: Props) {
   if (wanted.length === 0) {
     if (!showSafe) return null;
     return (
-      <span
-        className="inline-flex items-center gap-1 rounded-full bg-bg-2 px-2 py-0.5 text-2xs text-text-3"
+      <Badge
+        variant="secondary"
         title="No advanced tools. This mode cannot exec shell commands or modify state"
       >
-        Safe
-      </span>
+        safe
+      </Badge>
     );
   }
 
   return (
-    <span
-      className="inline-flex items-center gap-1 rounded-full bg-amber/10 px-2 py-0.5 text-2xs text-amber"
-      title={`Advanced tools requested: ${wanted.join(", ")}`}
-    >
-      <ShieldAlert className="h-3 w-3" />
-      Advanced ({wanted.length})
-    </span>
+    <Badge variant="destructive" title={`Advanced tools requested: ${wanted.join(", ")}`}>
+      <ShieldAlert size={12} aria-hidden />
+      advanced ({wanted.length})
+    </Badge>
   );
 }
 

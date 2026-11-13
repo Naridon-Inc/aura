@@ -1,0 +1,53 @@
+/* `/resume` is the composer's docked strip: the queued-messages frame, its
+   caption and its rows. Added here: the rows are buttons (the whole row picks
+   the conversation), the origin badge and timestamp sit at the row's end, and
+   the strip keeps its own corners when it is not docked on the composer. */
+
+.ui-resume-picker:not([data-docked]) {
+  margin: 6px 0;
+  border-bottom: 1px solid var(--ui-border);
+  border-radius: 12px;
+}
+.ui-resume-picker > .ui-queue-caption {
+  min-height: 24px;
+  padding-bottom: 4px;
+}
+.ui-resume-picker-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-queue-row.ui-resume-row {
+  align-items: center;
+  /* The tray's rows are inset 12px a side. */
+  width: calc(100% - 24px);
+  padding-inline: 6px;
+  color: var(--ui-fg);
+  text-align: left;
+  cursor: pointer;
+}
+.ui-resume-row:hover {
+  background: var(--ui-accent);
+}
+.ui-resume-row > .ui-queue-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-resume-row > small {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-resume-row > .ui-badge {
+  flex-shrink: 0;
+}
+.ui-resume-glyph,
+.ui-resume-chevron {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-resume-row:hover > .ui-resume-chevron {
+  color: var(--ui-fg);
+}

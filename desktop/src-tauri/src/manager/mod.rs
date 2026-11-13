@@ -25,6 +25,7 @@ pub mod skill;
 pub mod team;
 pub mod tick;
 pub mod tokens;
+pub mod view_note;
 pub mod worktree;
 
 use serde::{Deserialize, Serialize};
@@ -316,7 +317,7 @@ pub struct ChatTurn {
     /// Per-turn token usage as reported by the brain: `input_tokens` = the
     /// prompt/context the turn processed, `output_tokens` = what the brain
     /// generated (the FINAL round's figures, matching the live header meter).
-    /// Populated on native-brain turns — Anthropic/OpenAI/Gemini/aura_pro emit
+    /// Populated on native-brain turns — Anthropic/OpenAI/Gemini emit
     /// a `Usage` chunk before End; `None` on CLI-wrapper turns (their CLI
     /// doesn't report counts) and on sessions that predate these fields. Drives
     /// the optional per-message token readout (Settings → "Show token usage per
@@ -350,6 +351,17 @@ pub struct ChatTurn {
     /// published one, so every surface showing it can mark it `~`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_estimated: Option<bool>,
+    /// The key this turn's copy on a cloud workspace's log carries, for a
+    /// chat that runs on one of the org's machines (`<turn>-u` / `<turn>-a`).
+    /// Reactions and comments on that copy come back under it, so the chat
+    /// can show them under this turn. None for every other chat, and for a
+    /// turn this laptop did not send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_key: Option<String>,
+    /// The cloud's own id for this turn's copy, when the turn was filed here
+    /// from the workspace's log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_id: Option<String>,
 }
 
 /// One persisted `tool_use`/`tool_result` pair on a `ChatTurn`. Mirrors
@@ -910,6 +922,8 @@ impl ManagerSession {
             model: None,
             cost_usd: None,
             cost_estimated: None,
+            cloud_key: None,
+            cloud_id: None,
         });
         self.touch();
     }
@@ -936,6 +950,8 @@ impl ManagerSession {
             model: None,
             cost_usd: None,
             cost_estimated: None,
+            cloud_key: None,
+            cloud_id: None,
         });
         self.touch();
     }
@@ -967,6 +983,8 @@ impl ManagerSession {
             model: None,
             cost_usd: None,
             cost_estimated: None,
+            cloud_key: None,
+            cloud_id: None,
         });
         self.touch();
     }
@@ -998,6 +1016,8 @@ impl ManagerSession {
             model: None,
             cost_usd: None,
             cost_estimated: None,
+            cloud_key: None,
+            cloud_id: None,
         });
         self.touch();
     }
@@ -1026,6 +1046,8 @@ impl ManagerSession {
             model: None,
             cost_usd: None,
             cost_estimated: None,
+            cloud_key: None,
+            cloud_id: None,
         });
         self.touch();
     }
@@ -1102,14 +1124,21 @@ pub fn now_secs() -> u64 {
 /// wiring must reach the model but is never human-facing, so it must not become
 /// the session title. Only blocks opening with a known marker are stripped, so a
 /// user message that legitimately starts with `[` survives untouched. Repeats so
-/// a stacked pipe + mode prefix both come off.
-fn strip_steering_prefix(text: &str) -> &str {
-    const MARKERS: [&str; 5] = ["AUTO MODE", "PLAN MODE", "ASK MODE", "BUILD MODE", "↪ PIPED"];
+/// a stacked pipe + mode + goal prefix all come off. A marker is a whole word,
+/// as `stripSteeringDirective` reads it, so `[AUTO MODEL …]` and `[GOALS …]`
+/// are the person's own words.
+pub(crate) fn strip_steering_prefix(text: &str) -> &str {
+    const MARKERS: [&str; 6] = ["AUTO MODE", "PLAN MODE", "ASK MODE", "BUILD MODE", "↪ PIPED", "GOAL"];
     let mut s = text.trim_start();
     loop {
         let Some(after) = s.strip_prefix('[') else { break };
         let inner = after.trim_start();
-        if !MARKERS.iter().any(|m| inner.starts_with(m)) {
+        let opens = |m: &&str| {
+            inner
+                .strip_prefix(*m)
+                .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
+        };
+        if !MARKERS.iter().any(opens) {
             break;
         }
         // No directive nests a `]`, so the first one closes the block.
@@ -1117,6 +1146,18 @@ fn strip_steering_prefix(text: &str) -> &str {
         s = after[close + 1..].trim_start();
     }
     s
+}
+
+/// The name a person typed for a conversation, made fit to be its title: one
+/// line, inner runs of whitespace collapsed, at most 100 characters (the same
+/// cap the automatic title has). `None` when nothing is left, so a blank
+/// rename keeps the name the chat already had.
+pub(crate) fn clean_chat_title(raw: &str) -> Option<String> {
+    let one_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.is_empty() {
+        return None;
+    }
+    Some(one_line.chars().take(100).collect())
 }
 
 pub(crate) fn summarize_objective(text: &str) -> String {
@@ -1136,6 +1177,15 @@ pub(crate) fn summarize_objective(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_typed_chat_name_becomes_one_clean_line() {
+        assert_eq!(clean_chat_title("  Fix the  retry\nbackoff "), Some("Fix the retry backoff".into()));
+        assert_eq!(clean_chat_title("   \n\t "), None);
+        assert_eq!(clean_chat_title(""), None);
+        let long = "a".repeat(140);
+        assert_eq!(clean_chat_title(&long).unwrap().chars().count(), 100);
+    }
 
     fn task(id: usize, deps: Vec<usize>) -> ManagerTask {
         ManagerTask {
@@ -1224,6 +1274,12 @@ mod tests {
         assert_eq!(summarize_objective(plain), "[urgent] please refactor the parser");
         // No prefix at all — unchanged.
         assert_eq!(summarize_objective("hello world"), "hello world");
+        // The goal block comes off with the rest; a word that only starts
+        // like a marker is the person's.
+        let goal = "[AUTO MODE. Full autopilot.]\n\n[GOAL. Treat the message below as a standing goal.]\n\nShip it";
+        assert_eq!(summarize_objective(goal), "Ship it");
+        assert_eq!(summarize_objective("[GOALS for Q3] hire"), "[GOALS for Q3] hire");
+        assert_eq!(summarize_objective("[AUTO MODEL pick] which?"), "[AUTO MODEL pick] which?");
     }
 
     /// The directive as `buildSteeringText` actually writes it: marker, full
@@ -1376,6 +1432,8 @@ mod tests {
             model: Some("gemini-2.5-pro".into()),
             cost_usd: Some(0.024_997_5),
             cost_estimated: Some(false),
+            cloud_key: None,
+            cloud_id: None,
         };
         let back: ChatTurn =
             serde_json::from_str(&serde_json::to_string(&turn).unwrap()).unwrap();

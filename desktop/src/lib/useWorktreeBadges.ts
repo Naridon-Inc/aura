@@ -12,7 +12,7 @@
 //     worktreeDiffCache.ts).
 //   • `fetchPrList(root)`        — open PRs for the repo (SWR-cached, so it
 //     survives a `gh` rate-limit by serving the last good list); match a
-//     row by `head_ref === worktree.branch`.
+//     row by `head_ref === worktree.branch`, the open PR first.
 //   • `cloudJobsForRepo(root)`   — unfinished cloud work for the repo, keyed by
 //     the branch it was sent on. Once a box can drain your work, "who is
 //     running this" is no longer answerable from this machine alone: a copy
@@ -24,8 +24,8 @@
 // no badge rather than blocking the others.
 
 import { useEffect, useRef, useState } from "react";
-import { api, type CloudPlacement } from "./api";
-import { fetchPrList } from "./prsCache";
+import { api, type CloudPlacement, type PrSummary } from "./api";
+import { fetchPrList, pickBranchPr } from "./prsCache";
 import { fetchWorktreeDiffs } from "./worktreeDiffCache";
 import { useDocumentVisibility } from "./useDocumentVisibility";
 
@@ -33,12 +33,39 @@ export type WorktreeBadge = {
   added: number;
   removed: number;
   changedFiles: number;
-  pr?: { number: number; state: string };
+  pr?: WorktreeBadgePr;
   /** Set when this copy's branch is being worked on by a machine that isn't
    *  this one. Absent the moment the job reaches a terminal state — a cloud
    *  mark that outlives the run stops meaning "right now". */
   cloud?: CloudPlacement;
 };
+
+/** A branch's pull request as its sidebar row draws it: the number, and the
+ *  state, draft flag and CI verdict its status mark reads. */
+export type WorktreeBadgePr = {
+  number: number;
+  state: string;
+  draft?: boolean;
+  /** GitHub's roll-up: "success", "failure", "pending", or null with no CI. */
+  checks?: string | null;
+};
+
+export function badgePr(p: Pick<PrSummary, "number" | "state" | "is_draft" | "checks_state">): WorktreeBadgePr {
+  return { number: p.number, state: p.state, draft: p.is_draft, checks: p.checks_state };
+}
+
+/** Each branch's pull request, picked the way the Checks tab picks it (see
+ *  `pickBranchPr`): the open one wins over a superseded closed one, so the
+ *  row and the tab never name different PRs. */
+export function branchPrs(prs: PrSummary[]): Record<string, WorktreeBadgePr> {
+  const m: Record<string, WorktreeBadgePr> = {};
+  for (const ref of new Set(prs.map((p) => p.head_ref))) {
+    if (!ref) continue;
+    const p = pickBranchPr(prs, ref);
+    if (p) m[ref] = badgePr(p);
+  }
+  return m;
+}
 
 type WorktreeGroup = {
   root: string;
@@ -68,6 +95,8 @@ function sameBadges(
       x.changedFiles !== y.changedFiles ||
       x.pr?.number !== y.pr?.number ||
       x.pr?.state !== y.pr?.state ||
+      x.pr?.draft !== y.pr?.draft ||
+      x.pr?.checks !== y.pr?.checks ||
       x.cloud?.branch !== y.cloud?.branch ||
       x.cloud?.status !== y.cloud?.status
     ) {
@@ -139,18 +168,11 @@ export function useWorktreeBadges(
       })();
 
       const prPromise = (async () => {
-        const prByRoot: Record<string, Record<string, { number: number; state: string }>> = {};
+        const prByRoot: Record<string, Record<string, WorktreeBadgePr>> = {};
         await Promise.all(
           groups.map(async (g) => {
             try {
-              const prs = await fetchPrList(g.root);
-              const m: Record<string, { number: number; state: string }> = {};
-              for (const p of prs) {
-                if (p.head_ref && m[p.head_ref] === undefined) {
-                  m[p.head_ref] = { number: p.number, state: p.state };
-                }
-              }
-              prByRoot[g.root] = m;
+              prByRoot[g.root] = branchPrs(await fetchPrList(g.root));
             } catch {
               prByRoot[g.root] = {};
             }

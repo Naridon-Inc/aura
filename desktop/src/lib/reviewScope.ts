@@ -45,13 +45,13 @@ export type WorkingTarget = {
 export function projectName(repoRoot: string): string {
   const trimmed = repoRoot.replace(/\/+$/, "");
   const name = trimmed.slice(trimmed.lastIndexOf("/") + 1);
-  return name || trimmed || "this project";
+  return name || trimmed || "this repository";
 }
 
 /** The version, in words a reader can act on. */
 export function versionWords(revision: string | null): string {
   const rev = (revision ?? "").trim();
-  if (!rev) return "Not saved to the project's history";
+  if (!rev) return "Not saved to the repository's history";
   return rev.length > 7 ? rev.slice(0, 7) : rev;
 }
 
@@ -104,7 +104,7 @@ export function actionTarget(
   }
   return scope.revision
     ? `Compares what was asked with what changed at ${versionWords(scope.revision)}.`
-    : "Needs this run's changes saved to the project's history first.";
+    : "Needs this run's changes saved to the repository's history first.";
 }
 
 /** True when a recorded fact is missing and must be shown as missing rather

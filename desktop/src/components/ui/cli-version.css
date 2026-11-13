@@ -1,0 +1,97 @@
+/* The Aura CLI check in the footer: a ghost button with a toned dot, and
+   behind it the cloud details popover. Added here: the dot and its tones,
+   the status word's tones, long version strings and paths wrapping inside the
+   right-hand column, and the fix block — the update button, the manual line
+   and the install command with its copy button. */
+
+.ui-cli-chip {
+  gap: 6px;
+  color: var(--ui-muted-fg);
+}
+.ui-cli-chip:hover,
+.ui-cli-chip[data-state="open"] {
+  color: var(--ui-fg);
+}
+.ui-cli-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ui-muted-fg);
+}
+.ui-cli-dot[data-tone="green"] {
+  background: var(--ui-green);
+}
+.ui-cli-dot[data-tone="amber"] {
+  background: var(--ui-yellow);
+}
+.ui-cli-dot[data-tone="red"] {
+  background: var(--ui-red);
+}
+
+/* ── the details ───────────────────────────────────────────────────── */
+
+.ui-cli-details .ui-cloud-resource-table dd {
+  min-width: 0;
+}
+.ui-cli-status[data-tone="green"] {
+  color: var(--ui-green);
+}
+.ui-cli-status[data-tone="amber"] {
+  color: var(--ui-yellow);
+}
+.ui-cli-status[data-tone="red"] {
+  color: var(--ui-red);
+}
+.ui-cli-mono {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-cli-path {
+  overflow-wrap: normal;
+}
+.ui-cli-raw {
+  color: var(--ui-muted-fg);
+}
+
+.ui-cli-fix {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ui-cli-fix > p {
+  margin: 0;
+}
+/* The note carries an inline command name, so it flows as a sentence. */
+.ui-cli-fix > .ui-cloud-note {
+  display: block;
+}
+.ui-cli-fix code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-cli-update {
+  width: 100%;
+}
+.ui-cli-manual {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-cli-command {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm, 6px);
+  background: var(--ui-muted);
+}
+.ui-cli-command > code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

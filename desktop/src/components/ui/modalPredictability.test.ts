@@ -15,7 +15,8 @@
 // card with no height cap grows with its content, and since the panel is
 // overflow-hidden its own buttons end up below the bottom of the window with
 // nothing to scroll. The shared ask sheet — 38 call sites — was one of them,
-// and its body is whatever the caller had to say.
+// and its body is whatever the caller had to say. It is the shared dialog
+// now, like every centred card, and that dialog carries the cap itself.
 //
 // A source scan rather than a render: both failures are a class name or the
 // element a handler sits on, and they only show at a real keyboard in a real
@@ -53,7 +54,11 @@ const modals = walk(SRC)
 
 describe("every modal dismisses the same way", () => {
   test("there are modals to check (the scan itself still works)", () => {
-    expect(modals.length).toBeGreaterThan(8);
+    // Fewer every time a hand-drawn overlay moves onto the shared Dialog,
+    // which closes on Escape by construction: the ⌘/ sheet, the phone
+    // waitlist, the pairing QR and the old first-run dialog went that way.
+    // The floor only proves the scan still finds the ones that remain.
+    expect(modals.length).toBeGreaterThan(1);
   });
 
   test("each one reaches Escape from the document, or says why it doesn't", () => {
@@ -96,15 +101,19 @@ describe("no modal hides its own buttons", () => {
    *  caller renders inside it, not to the shell. A centred card is the other
    *  kind: its height follows its content, so the cap and the scroller have
    *  to be its own. Two shapes, two rules. */
-  const isShell = (text: string) => /className="fixed inset-0|absolute inset-2/.test(text);
+  const isShell = (text: string) =>
+    /className="fixed inset-0|absolute inset-2|className="ui-focus"/.test(text);
   const shells = withFooter.filter((f) => isShell(f.text));
   const cards = withFooter.filter((f) => !isShell(f.text));
 
-  test("there are footered modals of both shapes to check", () => {
-    // A floor, not a census: the point is that the rules below are checked
-    // against a real population rather than an empty list. It was four cards
-    // until the Team dialogs left with the messaging surface.
-    expect(cards.length).toBeGreaterThanOrEqual(3);
+  test("no centred card is drawn by hand any more", () => {
+    // It was four cards until the Team dialogs left with the messaging
+    // surface; the MCP server add and sign-in dialogs, the ⌘/ shortcuts sheet
+    // and the shared ask sheet then moved onto the shared Dialog, whose own
+    // cap and scroller are checked below. A new centred card belongs there
+    // too, so the two rules after this one are a backstop for one that
+    // slips through, and the shells still have their own rule.
+    expect(cards.map((f) => f.path.slice(SRC.length + 1))).toEqual([]);
     expect(shells.length).toBeGreaterThan(0);
   });
 
@@ -129,14 +138,38 @@ describe("no modal hides its own buttons", () => {
     expect(offenders).toEqual([]);
   });
 
+  test("the shared Dialog caps itself and scrolls inside the cap", () => {
+    // A modal drawn with `ui/dialog` has no class of its own for the scan
+    // above to read; the cap and the scroller live on the shared content
+    // rule, so every caller gets both or none of them do.
+    const css = readFileSync(join(import.meta.dir, "interface.css"), "utf8");
+    const at = css.indexOf(".ui-dialog-content {");
+    expect(at).toBeGreaterThan(-1);
+    const rule = css.slice(at, css.indexOf("}", at));
+    expect(rule).toMatch(/max-height:\s*calc\(100dvh/);
+    expect(rule).toMatch(/overflow(-y)?:\s*auto/);
+  });
+
   test("a footered shell lets its body give way, not its footer", () => {
     // `flex-1 min-h-0` on the body is the whole guarantee: without min-h-0 a
     // flex child refuses to shrink below its content and pushes the footer
     // out of the panel, which is the same bug wearing a different layout.
     const offenders = shells
-      .filter((f) => !/flex-1 min-h-0|min-h-0 flex-1/.test(f.text))
+      .filter((f) => !/flex-1 min-h-0|min-h-0 flex-1|"ui-focus-body"/.test(f.text))
       .map((f) => f.path.slice(SRC.length + 1));
 
     expect(offenders).toEqual([]);
+  });
+
+  test("the focus shell's body class carries the same give", () => {
+    // The overlay draws its body with `.ui-focus-body`, so the guarantee is
+    // in the stylesheet rather than the class list: flex 1 and a zero
+    // minimum, or the footer leaves the panel.
+    const css = readFileSync(join(import.meta.dir, "focus-overlay.css"), "utf8");
+    const at = css.indexOf(".ui-focus-body {");
+    expect(at).toBeGreaterThan(-1);
+    const rule = css.slice(at, css.indexOf("}", at));
+    expect(rule).toMatch(/flex:\s*1/);
+    expect(rule).toMatch(/min-height:\s*0/);
   });
 });

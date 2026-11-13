@@ -8,12 +8,13 @@
 // is not a zero, no answer at all until git has actually answered. See
 // `summaryLine`.
 
-import { useEffect, useState } from "react";
-import { GitCommitHorizontal, RotateCcw, ShieldCheck } from "lucide-react";
+import { Fragment, useEffect, useState } from "react";
+import { GitCommitHorizontal } from "lucide-react";
 
 import { type AheadBehind, type DiffStats } from "../../lib/api";
 import { fetchAheadBehind, fetchDiffStats } from "../../lib/gitStateCache";
-import { AsciiSpinner } from "../ui/ascii-spinner";
+import { DiffCount } from "../ui/sidebar";
+import { EmptyState, LoadingState } from "../ui/state";
 
 /** What this pane is allowed to say, given what it actually knows.
  *
@@ -28,9 +29,11 @@ export function summaryLine(
   stats: DiffStats | null,
   failed: boolean,
 ): { text: string; tone: "known" | "waiting" } {
-  if (failed)
+  // An answer without a count can't be printed as one ("changed undefined
+  // files"), so it reads the way a failed read does.
+  if (failed || (stats && typeof stats.changed_files !== "number"))
     return {
-      text: "Aura couldn't read this project's changes just now. Nothing is wrong with your work. Reopen this tab to try again.",
+      text: "Aura couldn't read this repository's changes just now. Nothing is wrong with your work. Reopen this tab to try again.",
       tone: "waiting",
     };
   if (!stats)
@@ -88,116 +91,47 @@ export function ChangesSummaryPane({ repoRoot }: { repoRoot: string }) {
   const line = summaryLine(stats, statsFailed);
   const changed = stats?.changed_files ?? 0;
 
+  if (!stats && !statsFailed) {
+    return <LoadingState label={line.text} size="md" />;
+  }
+
+  // The quiet lines under the sentence: the numbers, only once there are real
+  // ones to print; where you stand against the shared copy; and that saving
+  // keeps the why and can be undone.
+  const notes: React.ReactNode[] = [];
+  if (stats && changed > 0) {
+    notes.push(
+      <>
+        <DiffCount added={stats.added} removed={stats.removed} /> across {changed} file
+        {changed === 1 ? "" : "s"}
+      </>,
+    );
+  }
+  if (ab) notes.push(standing(ab));
+  notes.push(
+    "Saving keeps the reason with the change, and any saved change can be rewound one function at a time.",
+  );
+
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-[560px] px-8 py-12">
-        <div className="text-lg font-semibold text-text-1">
-          Your uncommitted work
-        </div>
-        <p className="mt-1.5 flex items-start gap-2 text-base leading-relaxed text-text-3">
-          {line.tone === "waiting" && !statsFailed && (
-            <AsciiSpinner className="mt-1 shrink-0" />
-          )}
-          <span>{line.text}</span>
-        </p>
-
-        {/* The numbers, plain — only once there are real ones to print. */}
-        {stats && changed > 0 && (
-          <div className="mt-5 flex items-center gap-5 rounded-lg border border-line-soft bg-bg-1/40 px-4 py-3">
-            <Stat label="files" value={String(changed)} />
-            <Stat
-              label="lines added"
-              value={`+${stats?.added ?? 0}`}
-              tone="var(--color-green)"
-            />
-            <Stat
-              label="lines removed"
-              value={`−${stats?.removed ?? 0}`}
-              tone="var(--color-red)"
-            />
-          </div>
-        )}
-
-        {/* Where you stand vs. the shared copy. */}
-        {ab && (
-          <div className="mt-3 rounded-lg border border-line-soft bg-bg-1/40 px-4 py-3 text-sm text-text-3">
-            {!ab.has_upstream
-              ? "This branch only lives on your machine. Publish it from the top bar to share it."
-              : ab.ahead === 0 && ab.behind === 0
-                ? "You're in step with the shared copy. Nothing waiting either way."
-                : `${ab.ahead} change${ab.ahead === 1 ? "" : "s"} to send · ${ab.behind} to receive. Use Sync in the top bar.`}
-          </div>
-        )}
-
-        {/* The Aura reassurance — this is Git + Aura, not bare git. */}
-        <div className="mt-7 space-y-3">
-          <Reassure
-            icon={<GitCommitHorizontal size={15} />}
-            title="Saving records the why"
-            body="When you save (commit), Aura keeps the reason alongside the change, so months later you, or a teammate, can read back what this was for."
-          />
-          <Reassure
-            icon={<RotateCcw size={15} />}
-            title="Nothing here is one-way"
-            body="Every saved change can be rewound (surgically, one function at a time) without untangling the rest. You can always get back to a known-good state."
-          />
-          <Reassure
-            icon={<ShieldCheck size={15} />}
-            title="It stays yours"
-            body="This all happens on your machine. Sharing is a deliberate step you take, never something that just happens."
-          />
-        </div>
-      </div>
-    </div>
+    <EmptyState
+      icon={GitCommitHorizontal}
+      title="Your uncommitted work"
+      body={line.text}
+      footnote={notes.map((n, i) => (
+        <Fragment key={i}>
+          {i > 0 && <br />}
+          {n}
+        </Fragment>
+      ))}
+    />
   );
 }
 
-function Stat({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone?: string;
-}) {
-  return (
-    <div className="flex flex-col">
-      <span
-        className="text-xl font-semibold tabular-nums"
-        style={tone ? { color: tone } : { color: "var(--color-text-1)" }}
-      >
-        {value}
-      </span>
-      <span className="text-xs text-text-4">{label}</span>
-    </div>
-  );
-}
-
-function Reassure({
-  icon,
-  title,
-  body,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  body: string;
-}) {
-  return (
-    <div className="flex gap-3">
-      <span
-        className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg"
-        style={{
-          background: "color-mix(in srgb, var(--color-accent) 14%, transparent)",
-          color: "var(--color-accent)",
-        }}
-      >
-        {icon}
-      </span>
-      <div className="min-w-0">
-        <div className="text-base font-medium text-text-1">{title}</div>
-        <p className="mt-0.5 text-sm leading-relaxed text-text-4">{body}</p>
-      </div>
-    </div>
-  );
+/** Where this branch stands against the shared copy, in one sentence. */
+function standing(ab: AheadBehind): string {
+  if (!ab.has_upstream)
+    return "This branch only lives on your machine. Publish it from the top bar to share it.";
+  if (ab.ahead === 0 && ab.behind === 0)
+    return "You're in step with the shared copy. Nothing waiting either way.";
+  return `${ab.ahead} change${ab.ahead === 1 ? "" : "s"} to send · ${ab.behind} to receive. Use Sync in the top bar.`;
 }

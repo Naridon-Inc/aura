@@ -2,25 +2,36 @@
 //
 // A different population from the git-derived list above it: these are the
 // people in your Aura Cloud org — the ones invites, billing seats and cloud
-// entitlements are about. Until now the desktop could only ever ADD to this
-// list (CloudInviteRow); seeing it, changing a role, or removing someone
-// meant the web console. This block closes that.
+// entitlements are about. Seeing it, inviting to it, changing a role and
+// removing someone all happen here, without the web console.
 //
 // The authority model is the server's (aura-cloud orgs.rs); rosterPowers is
 // its client mirror, so no control is offered that the API would refuse. The
 // one refusal that still reaches here — the last owner demoting or removing
 // themselves — arrives as a sentence and is shown verbatim.
+//
+// The member list is a network read, and it used to run on every open behind
+// a spinner. It now comes from the shared cache: a reopen paints the last
+// list and refreshes behind it. The key carries the org, and like every
+// `cloud:` key it is dropped on an org switch or sign-in change, so one org's
+// people are never shown under another's name.
 
-import { useCallback, useEffect, useState } from "react";
-import { Cloud, UserMinus } from "lucide-react";
+import { useCallback, useState } from "react";
+import { UserMinus } from "lucide-react";
 
 import { api, type CloudOrgMember } from "../../lib/api";
+import { useCloudAuthStatus } from "../../lib/cloudAuthCache";
 import { myRosterRole, rosterPowers } from "../../lib/orgRosterPowers";
-import { AsciiSpinner } from "../ui/ascii-spinner";
-import { Select } from "../ui/select";
-import { askConfirm } from "../ui/ask";
 import { toast } from "../../lib/toast";
+import { useCachedResource } from "../../lib/useCachedResource";
 import { Avatar } from "../team/presentation/Avatar";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+import { askConfirm } from "../ui/ask";
+import { Button } from "../ui/button";
+import { Select } from "../ui/select";
+import { SettingsError } from "../ui/settings-blocks";
+import { SettingsMemberList, SettingsMemberRow } from "../ui/settings-team-members";
+import { CloudInviteRow } from "./CloudInviteRow";
 
 const ROLE_LABEL: Record<string, string> = {
   owner: "Owner",
@@ -28,36 +39,22 @@ const ROLE_LABEL: Record<string, string> = {
   member: "Member",
 };
 
+const readMembers = () => api.cloudOrgMembers();
+
 export function CloudOrgRoster() {
-  const [orgName, setOrgName] = useState<string | null>(null);
-  const [myLogin, setMyLogin] = useState<string | null>(null);
-  const [members, setMembers] = useState<CloudOrgMember[] | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const auth = useCloudAuthStatus();
+  const status = auth.data;
+  const orgSlug = status?.connected ? (status.org_slug ?? null) : null;
+  const orgName = orgSlug ? (status?.org_name ?? orgSlug) : null;
+  const myLogin = status?.user ?? null;
+  const roster = useCachedResource<CloudOrgMember[]>(
+    orgSlug ? `cloud:org-members:${orgSlug}` : null,
+    readMembers,
+  );
+  const members = roster.data ?? null;
+  const err = roster.staleError;
+  const load = roster.reload;
   const [busyId, setBusyId] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      const s = await api.cloudAuthStatus();
-      if (!s.connected || !s.org_slug) {
-        setOrgName(null);
-        setMembers(null);
-        return;
-      }
-      setOrgName(s.org_name ?? s.org_slug);
-      setMyLogin(s.user ?? null);
-      setMembers(await api.cloudOrgMembers());
-      setErr(null);
-    } catch (e) {
-      setErr(String(e));
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-    const onChange = () => void load();
-    window.addEventListener("aura:cloud-auth-changed", onChange);
-    return () => window.removeEventListener("aura:cloud-auth-changed", onChange);
-  }, [load]);
 
   const setRole = useCallback(
     async (m: CloudOrgMember, role: string) => {
@@ -106,45 +103,29 @@ export function CloudOrgRoster() {
     [load],
   );
 
-  // Signed out, or no org: nothing to manage — stay out of the way, the same
-  // contract CloudInviteRow keeps.
+  // Signed out, or no org: nothing to manage — stay out of the way.
   if (!orgName) return null;
 
   const myRole = members ? myRosterRole(members, myLogin) : null;
 
   return (
-    <div className="space-y-1 pt-1">
-      <div className="flex items-center gap-1.5 text-xs font-medium text-text-4">
-        <Cloud size={12} aria-hidden />
-        <span>
-          {orgName} on Aura Cloud
-          {members ? ` · ${members.length} member${members.length !== 1 ? "s" : ""}` : ""}
-        </span>
-      </div>
-
-      {err && (
-        <div
-          role="alert"
-          className="text-xs rounded px-2 py-1 leading-snug"
-          style={{
-            color: "var(--color-red)",
-            background: "color-mix(in srgb, var(--color-red) 12%, transparent)",
-            border: "1px solid color-mix(in srgb, var(--color-red) 30%, transparent)",
-          }}
-        >
-          {err}
-        </div>
-      )}
-
+    <SettingsMemberList
+      label={`People in ${orgName}`}
+      action={<CloudInviteRow orgName={orgName} />}
+      note={
+        members
+          ? `${members.length} member${members.length !== 1 ? "s" : ""} of this organization on Aura Cloud. Invites, seats and cloud access are about these people.`
+          : undefined
+      }
+    >
+      {err && <SettingsError>{err}</SettingsError>}
       {!members && !err && (
-        <div className="flex items-center gap-2 text-xs text-text-4 py-1">
-          <AsciiSpinner /> Loading the org roster…
-        </div>
+        <p className="ui-settings-status" role="status">
+          <AsciiSpinner /> Loading the organization’s members…
+        </p>
       )}
-
       {members?.map((m) => {
-        const isSelf =
-          !!myLogin && m.github_login.toLowerCase() === myLogin.toLowerCase();
+        const isSelf = !!myLogin && m.github_login.toLowerCase() === myLogin.toLowerCase();
         const powers = rosterPowers(myRole, m.role.toLowerCase(), isSelf);
         const busy = busyId === m.user_id;
         const label = m.display_name || m.github_login;
@@ -154,48 +135,54 @@ export function CloudOrgRoster() {
           // The server would refuse an admin minting an owner; don't offer it.
           disabled: r === "owner" && !powers.offerOwner,
         }));
+        const detail = [
+          isSelf ? "You" : null,
+          m.display_name && m.display_name !== m.github_login ? `@${m.github_login}` : null,
+          m.email || null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
         return (
-          <div key={m.user_id} className="flex items-center gap-2 py-1">
-            <Avatar name={label} size={24} />
-            <span className="min-w-0 flex-1 truncate text-xs text-text-2">
-              {label}
-              {isSelf && <span className="text-text-5"> · you</span>}
-              {m.display_name && m.display_name !== m.github_login && (
-                <span className="text-text-5"> · {m.github_login}</span>
-              )}
-            </span>
-            {powers.changeRole ? (
-              <div className="w-28 shrink-0">
+          <SettingsMemberRow
+            key={m.user_id}
+            avatar={
+              <Avatar
+                name={label}
+                identity={m.email || m.github_login}
+                src={m.github_avatar}
+                size={26}
+                title={label}
+              />
+            }
+            name={label}
+            detail={detail || ROLE_LABEL[m.role.toLowerCase()] || m.role}
+            control={
+              <>
+                {busy && <AsciiSpinner />}
                 <Select
                   value={m.role.toLowerCase()}
                   onChange={(r) => void setRole(m, r)}
                   options={roleOptions}
-                  disabled={busy}
+                  disabled={!powers.changeRole || busy}
                   aria-label={`Role for ${m.github_login}`}
                 />
-              </div>
-            ) : (
-              <span className="shrink-0 text-[11px] text-text-4">
-                {ROLE_LABEL[m.role.toLowerCase()] ?? m.role}
-              </span>
-            )}
-            {powers.remove && (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void remove(m, isSelf)}
-                aria-label={
-                  isSelf ? "Leave this organization" : `Remove ${m.github_login}`
-                }
-                title={isSelf ? "Leave this organization" : "Remove from org"}
-                className="shrink-0 rounded p-1 text-text-4 transition-colors hover:text-[var(--color-red)] disabled:opacity-50"
-              >
-                {busy ? <AsciiSpinner size={12} /> : <UserMinus size={12} />}
-              </button>
-            )}
-          </div>
+                {powers.remove && (
+                  <Button
+                    variant="ghost"
+                    size="iconSm"
+                    disabled={busy}
+                    onClick={() => void remove(m, isSelf)}
+                    aria-label={isSelf ? "Leave this organization" : `Remove ${m.github_login}`}
+                    title={isSelf ? "Leave this organization" : "Remove from the organization"}
+                  >
+                    <UserMinus />
+                  </Button>
+                )}
+              </>
+            }
+          />
         );
       })}
-    </div>
+    </SettingsMemberList>
   );
 }

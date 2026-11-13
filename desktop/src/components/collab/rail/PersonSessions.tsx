@@ -13,11 +13,17 @@
 
 import { useState } from "react";
 
-import { ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 
 import { RailAvatar } from "./RailAvatar";
 import { SessionRow } from "./SessionRow";
-import { sortSessions, type RailActor, type RailPersonGroup } from "./railModel";
+import {
+  presenceTitle,
+  sortSessions,
+  type RailActor,
+  type RailPersonGroup,
+} from "./railModel";
+import "../../ui/people-rail.css";
 
 export type PersonSessionsProps = {
   group: RailPersonGroup;
@@ -52,82 +58,61 @@ export function PersonSessions({
   const sessions = sortSessions(group.sessions);
   const count = sessions.length;
 
+  const sessionsWord =
+    count === 0 ? "nothing open" : `${count} session${count === 1 ? "" : "s"}`;
+
   return (
-    <div className="mb-[5px]">
-      <button
-        type="button"
-        className="flex w-full items-center gap-2 rounded-md px-2 min-h-[26px] text-left hover:bg-bg-2 transition-colors"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        title={
-          count === 0
-            ? `${group.person.name} has nothing open`
-            : `${group.person.name} · ${count} session${count === 1 ? "" : "s"}`
-        }
-      >
-        {/* The face rides the rail's 20px mark column — the same slot a
-            project's mark gets in the roster below — so one ink column runs
-            the whole sidebar and this row's name lands on 36px with every
-            other name. It was a bare 22px disc in no slot at all, which made
-            the one person on screen the largest mark in the rail and pushed
-            their name two pixels right of everything under it. */}
-        <span
-          className="flex-none grid place-items-center"
-          style={{ width: 20, height: 20 }}
+    <section className="ui-navigation-section" data-kind="repository">
+      <header>
+        <button
+          type="button"
+          className="ui-navigation-title"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+          // The face gives way to the fold chevron under the pointer, as a
+          // repository's folder does, so what its presence dot said is
+          // said here too.
+          title={`${presenceTitle(group.person.name, group.person.state)} · ${sessionsWord}`}
         >
-          <RailAvatar actor={group.person} size={16} showPresence />
-        </span>
-        <span className="flex-1 min-w-0 truncate text-text-1">
-          {group.person.name}
-        </span>
-        {/* "you" rather than a coloured name or a badge — it is a fact about
-            one row on a rail that is otherwise all other people, and the
-            quietest way to state it is the word. Dropped when the name IS
-            "You", which is what the rail falls back to before it knows your
-            account: "You  you" reads as a rendering bug. */}
-        {group.isYou && group.person.name !== "You" ? (
-          <span className="flex-none text-2xs text-text-4">you</span>
-        ) : null}
-        {count > 0 ? (
-          <span className="flex-none text-2xs tabular-nums text-text-4">
-            {count}
+          {/* The face rides the folder's slot, so this name lands on the same
+              column as every repository name in the list below. */}
+          <span className="ui-repository-icon">
+            <i className="ui-rail-person-face">
+              <RailAvatar actor={group.person} size={16} showPresence />
+            </i>
+            <span>{open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
           </span>
-        ) : null}
-        <ChevronRight
-          size={12}
-          aria-hidden
-          className="flex-none text-text-5 transition-transform"
-          style={{ transform: open ? "rotate(90deg)" : "none" }}
-        />
-      </button>
+          <span>{group.person.name}</span>
+          {/* "you" rather than a coloured name or a badge — it is a fact about
+              one row on a rail that is otherwise all other people, and the
+              quietest way to state it is the word. Dropped when the name IS
+              "You", which is what the rail falls back to before it knows your
+              account: "You  you" reads as a rendering bug. */}
+          {group.isYou && group.person.name !== "You" ? <small>you</small> : null}
+          {!open && count > 0 ? <small>{count}</small> : null}
+        </button>
+      </header>
 
       {open ? (
-        <div className="flex flex-col gap-[2px] pt-[2px]">
-          {count === 0 ? (
-            // A teammate with nothing open is a real answer — they're on the
-            // team, they're just not in anything. Saying so beats an empty
-            // gap the reader has to interpret.
-            <div className="px-2 py-[3px] text-2xs text-text-4">
-              {group.isYou
-                ? "You have nothing open here yet."
-                : "Nothing open right now."}
-            </div>
-          ) : (
-            sessions.map((s) => (
-              <SessionRow
-                key={s.id}
-                session={s}
-                byId={byId}
-                nowSecs={nowSecs}
-                ownerName={group.person.name}
-                active={s.id === activeSessionId}
-                onOpen={onOpenSession}
-                onJoin={group.isYou ? undefined : onJoinSession}
-              />
-            ))
-          )}
-        </div>
+        count === 0 ? (
+          <p className="ui-navigation-empty">
+            {group.isYou ? "You have nothing open here yet." : "Nothing open right now."}
+          </p>
+        ) : (
+          sessions.map((s) => (
+            <SessionRow
+              key={s.id}
+              session={s}
+              byId={byId}
+              nowSecs={nowSecs}
+              ownerName={group.person.name}
+              active={s.id === activeSessionId}
+              onOpen={onOpenSession}
+              onJoin={group.isYou ? undefined : onJoinSession}
+            />
+          ))
+        )
       ) : null}
-    </div>
+    </section>
   );
 }

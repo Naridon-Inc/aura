@@ -1,0 +1,44 @@
+/* A settings page split by tabs starts each pane 24px under the strip, the
+   same space a provider pane leaves above its first block. */
+.ui-settings-tab-panel {
+  padding-top: 24px;
+}
+
+/* A member list is a block on the page like a section, so it keeps the same
+   32px under it before the next one starts. */
+.ui-settings-member-list {
+  margin-bottom: 32px;
+}
+
+/* The face keeps its own size; only the name column takes the spare width. */
+.ui-settings-member-face {
+  display: inline-flex;
+  flex: none;
+}
+
+/* After a row, a list needs the row's own 24px before its label, or the label
+   sits on the row's rule. */
+.ui-settings-row + .ui-settings-member-list {
+  margin-top: 24px;
+}
+
+/* A pane that opens on a row already has the row's own 24px above its title;
+   the panel's 24px on top of it would double the gap under the tab strip. */
+.ui-settings-tab-panel > .ui-settings-row:first-child {
+  padding-top: 0;
+}
+
+/* The message an admin sends someone they just added: a quiet quote they can
+   read before copying, wrapped so a long download link never widens the
+   dialog. */
+.settings-invite-message {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-muted);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: text;
+}

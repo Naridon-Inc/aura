@@ -1,0 +1,257 @@
+/* A machine's panel: what is running on it and what to start there. The
+   surface, header, status table, rows and sections are the shared cloud
+   details parts; this is only how the machine's own pieces sit inside them. */
+
+.ui-cloud-details.ui-box-panel.aura-menu-surface {
+  position: absolute;
+  top: 100%;
+  left: 8px;
+  z-index: 50;
+  width: 380px;
+  max-height: min(30rem, calc(100vh - 80px));
+  margin-top: 4px;
+  padding: 16px;
+}
+
+/* ── tones ─────────────────────────────────────────────────────────── */
+
+.ui-box-panel [data-tone="ok"] {
+  --ui-box-tone: var(--ui-green);
+}
+.ui-box-panel [data-tone="warn"] {
+  --ui-box-tone: var(--ui-yellow);
+}
+.ui-box-panel [data-tone="bad"] {
+  --ui-box-tone: var(--ui-red);
+}
+.ui-box-panel [data-tone="info"],
+.ui-box-panel [data-tone="quiet"] {
+  --ui-box-tone: var(--ui-muted-fg);
+}
+.ui-box-panel p[data-tone],
+.ui-box-meta [data-tone],
+.ui-box-repo [data-tone] {
+  color: var(--ui-box-tone);
+}
+
+/* ── asleep / waking ───────────────────────────────────────────────── */
+
+.ui-box-asleep > dl {
+  margin-bottom: 4px;
+}
+.ui-box-wake-progress {
+  margin: 4px 0 2px;
+}
+.ui-box-wake-progress[data-late] .ui-progress-indicator {
+  background: var(--ui-faint);
+}
+
+/* ── sessions ──────────────────────────────────────────────────────── */
+
+.ui-box-group + .ui-box-group {
+  margin-top: 10px;
+}
+.ui-box-group > small {
+  display: block;
+  padding-bottom: 4px;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+}
+.ui-box-session {
+  padding: 6px 0;
+}
+.ui-box-session-open {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--ui-fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ui-box-session-open > div {
+  flex: 1;
+  min-width: 0;
+}
+.ui-box-session-open > div > span {
+  display: block;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-box-session-mark {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--ui-muted-fg);
+}
+.ui-box-meta {
+  display: flex !important;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ui-box-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+/* The row's own verbs wait for the row, as the shared rows' do. */
+.ui-box-session .ui-box-session-action {
+  opacity: 0;
+}
+.ui-box-session:hover .ui-box-session-action,
+.ui-box-session:focus-within .ui-box-session-action,
+.ui-box-session .ui-box-session-action[data-armed] {
+  opacity: 1;
+}
+
+/* ── forms ─────────────────────────────────────────────────────────── */
+
+.ui-box-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.ui-box-form > .ui-cloud-segments {
+  margin-bottom: 0;
+}
+.ui-box-form > .ui-cloud-segments button {
+  padding: 6px 10px;
+}
+.ui-box-form > p {
+  margin: 0;
+}
+.ui-box-form > .ui-cloud-inline {
+  justify-content: flex-start;
+}
+.ui-box-mono,
+.ui-box-mono input {
+  font-family: var(--font-mono);
+}
+.ui-box-repo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-box-repo > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-box-repo > small {
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.ui-box-credential {
+  font-size: 11px !important;
+}
+.ui-box-credential > span {
+  display: block;
+  margin-top: 2px;
+  color: var(--ui-muted-fg);
+}
+.ui-box-add {
+  margin-left: -8px;
+}
+.ui-box-withheld {
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+}
+.ui-box-withheld > summary {
+  cursor: pointer;
+  list-style: none;
+}
+.ui-box-withheld > summary::-webkit-details-marker {
+  display: none;
+}
+.ui-box-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 4px 0 0;
+  padding-left: 16px;
+  list-style: disc;
+}
+.ui-box-list + .ui-box-list {
+  margin-top: 8px;
+}
+.ui-box-list[data-tone="quiet"] {
+  color: var(--ui-faint);
+}
+
+/* ── what the machine has / can reach ──────────────────────────────── */
+
+.ui-box-asking {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-box-facts-block > p {
+  margin: 6px 0;
+}
+.ui-box-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 6px 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.ui-box-facts > li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-box-fact-dot {
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
+  align-self: center;
+  border-radius: 999px;
+  background: var(--ui-box-tone, var(--ui-faint));
+}
+.ui-box-fact-title {
+  flex-shrink: 0;
+  color: var(--ui-fg);
+}
+code.ui-box-fact-title {
+  font: 11px var(--font-mono);
+}
+.ui-box-fact-word {
+  flex-shrink: 0;
+  color: var(--ui-box-tone, var(--ui-muted-fg));
+}
+.ui-box-fact-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-box-fact-detail > code {
+  font: 11px var(--font-mono);
+}
+.ui-box-facts-toggle {
+  margin-left: -8px;
+  color: var(--ui-muted-fg);
+}

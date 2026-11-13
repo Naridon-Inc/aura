@@ -1,0 +1,20 @@
+<!doctype html>
+<!--
+  Visual harness for the sidebar's workspace list and the sections you make:
+  the real list on a stand-in for the desktop's commands.
+
+  Dev-server only: Vite's build input is index.html, so this page never
+  reaches a bundle. `bun run dev` serves it at /sections-harness.html; add
+  `&theme=light` for the light palette.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sections harness</title>
+  </head>
+  <body>
+    <div id="sections-harness"></div>
+    <script type="module" src="/src/components/nav/roster/sections/__harness__/main.tsx"></script>
+  </body>
+</html>

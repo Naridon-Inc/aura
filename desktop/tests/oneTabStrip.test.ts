@@ -38,31 +38,47 @@ import { readSrc } from "./support/code";
 const CSS = await Bun.file(`${import.meta.dir}/../src/styles.css`).text();
 
 describe("every surface header is the same header", () => {
-  test("Trace's strip renders the shared bar, not one of its own", async () => {
+  test("Trace's header and strip are the page furniture, not a bar of its own", async () => {
     const src = await readSrc("components/trace/TraceTabs.tsx");
-    expect(src).toContain("<SurfaceHeader");
+    // The 40px page header every top-level page wears, then the underline
+    // view strip under it — both from the component library.
+    expect(src).toContain("<TraceHeader");
+    expect(src).toContain("<TraceStrip");
     // The bar it used to draw: a flex row with its own height and its own
-    // bottom rule. Any of those three back in this file is the drift again.
+    // bottom rule. Any of those back in this file is the drift again.
     expect(src).not.toContain("min-h-9");
     expect(src).not.toContain("border-b border-line-soft px-3");
+
+    // And the strip is the Dashboard's tab list, measured once, not a lookalike.
+    const page = await readSrc("components/ui/trace-page.tsx");
+    expect(page).toContain('className="ui-dashboard-projects ui-trace-strip"');
+    expect(page).toContain('role="tablist"');
+    const css = await readSrc("components/ui/trace-page.css");
+    expect(css).toContain("height: 40px");
   });
 
-  test("Tasks' strip renders the same control Trace does", async () => {
+  test("Tasks' strip renders the shared view tabs", async () => {
     const src = await readSrc("components/tasks/WorkLensTabs.tsx");
     expect(src).toContain("ViewTabs");
-    const trace = await readSrc("components/trace/TraceTabs.tsx");
-    expect(trace).toContain("ViewTabs");
   });
 
-  test("Workspaces' lens switch is a tab strip, not a segmented track", async () => {
+  test("Workspaces' header is the shared toolbar, not a segmented track", async () => {
     const src = await readSrc("components/workspaces/WorkspacesSurface.tsx");
-    expect(src).toContain("<FleetLensTabs");
-    // It hand-rolled the right rail's track markup. A track is for a toggle
-    // INSIDE a page; a lens switch in a surface header answers "which page",
-    // and the header's own hairline is the line it belongs on — a track here
-    // draws a box inside a bar.
-    expect(src).not.toContain('className="ade-seg ade-seg--row"');
-    // And the strip itself is the shared one, not a fourth drawing of it.
+    // The page is one list of every workspace, so it has no lens to switch:
+    // its header is the shared home toolbar (search, then menu buttons), the
+    // same bar the list draws everywhere else.
+    expect(src).toContain("<WorkspaceHome");
+    expect(src).not.toContain("<FleetLensTabs");
+    // It once hand-rolled the right rail's track markup. A track is for a
+    // toggle INSIDE a page; the header's own hairline is the line a page
+    // control belongs on — a track here draws a box inside a bar.
+    expect(src).not.toContain("ade-seg");
+    const home = await readSrc("components/ui/workspace-home.tsx");
+    expect(home).toContain('className="ui-home-toolbar"');
+    expect(home).toContain("<DropdownMenuTrigger");
+    expect(home).not.toContain("ade-seg");
+    // The lens strip still exists for the chrome preview, and it is the shared
+    // strip, not a fourth drawing of it.
     const strip = await readSrc("components/workspaces/FleetLensTabs.tsx");
     expect(strip).toContain("<ViewTabs");
   });
@@ -224,8 +240,9 @@ describe("a tab keeps its width and the strip scrolls", () => {
     // Out of the tab ORDER though: Left/Right are how a keyboard walks a strip.
     expect(strip).toContain("tabIndex={-1}");
     // The fade dissolves into whatever ground the bar actually has. A fixed
-    // colour paints a slab over any header that isn't a surface's.
+    // colour paints a slab over any header that isn't a surface's; a bar on
+    // another ground sets `--strip-fade` itself (the only one that did, Team's
+    // conversation header, left with the messaging surface).
     expect(CSS).toContain("var(--strip-fade, var(--color-bg-content))");
-    expect(CSS).toContain("--strip-fade: var(--color-bg-0)");
   });
 });

@@ -6,8 +6,8 @@
 // so they only make sense when run on Claude's CLI. This module discovers them
 // (reusing the same `agent_skills_list` scan the Skills pane uses) and exposes:
 //
-//   • a menu list   → the TiptapComposer slash popup shows them alongside
-//                     Aura's native verbs, tagged so the user knows they run on
+//   • a menu list   → the composer's `/` list shows them alongside Aura's
+//                     native verbs, tagged so the user knows they run on
 //                     Claude;
 //   • a sync lookup → chatSlashHandler routes a matching `/verb` to Claude's
 //                     CLI no matter which brain is currently selected.

@@ -23,16 +23,27 @@
 // Distinct from the other two trust surfaces by design: the Safety check
 // answers "healthy to keep?", Alignment answers "did it match the ask?", and
 // the Gate answers "is this dangerous right now?". Backend: aura-cli/src/pr.rs.
+//
+// Drawn like repository health: the verdict line, then what it found as the
+// shared check list, the context folded into the shared accordion, and the
+// shared empty and error states before and around it.
 
 import { useEffect, useMemo, useState } from "react";
+import { ShieldCheck } from "lucide-react";
 import { Dialog } from "../Dialog";
 import { relativeAge } from "../../lib/relativeTime";
+import { Alert, AlertDescription } from "../ui/alert";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { EmptyState, ErrorState } from "../ui/state";
 import { api } from "../../lib/api";
-import { humanizeFindingText } from "../../lib/humanizeFinding";
 import { askConfirm } from "../ui/ask";
 import { verdictCopy, type RiskLabel } from "../../lib/reviewVerdict";
+import { classifyViolation, GoodToKnow, WorthFixing, type Finding } from "./ReviewFindings";
+import "../ui/check-report.css";
+import "../ui/compare-copies.css";
 
 
 type ReviewReport = {
@@ -48,20 +59,6 @@ type ReviewReport = {
   /** Advisory coding-pattern nits from the Taste Engine. Real signal but
    *  not defects — they ride in Details, not the blocking problem list. */
   taste_findings?: string[];
-};
-
-type Severity = "high" | "med";
-
-// Category derived from finding source. Mirrors Graphite Diamond's
-// taxonomy but mapped onto Aura's invariant model: forbidden_call →
-// security, layer rule → architecture, cross-branch → conflict.
-type Category = "security" | "architecture" | "conflict";
-
-type Finding = {
-  severity: Severity;
-  source: string;
-  text: string;
-  category: Category;
 };
 
 type ReviewDialogProps = {
@@ -226,182 +223,118 @@ export function ReviewDialog({ open, repoRoot, baseBranch = "main", onClose, inl
     }
   };
 
+  const autoFixFailed = autoFixToast != null && !autoFixToast.startsWith("Fixed");
+
   return (
     <Dialog
       open={open}
       inline={inline}
       onClose={onClose}
-      title={`Safety check · ${base}`}
+      title="Safety check"
       width={720}
       footer={
         <>
-          <Input
-            value={base}
-            onChange={(e) => setBase(e.target.value)}
-            placeholder="compare against"
-            title="Which version to compare your changes against"
-            className="w-32"
-          />
+          {!inline && (
+            <Button variant="outline" onClick={onClose}>
+              Close
+            </Button>
+          )}
           {report && report.invariant_violations.length > 0 && (
             <Button
-              variant="ghost"
-              size="xs"
+              variant="outline"
               onClick={runAutoFix}
               disabled={autoFixBusy || loading}
               title="Let Aura try to fix these automatically"
-              className="text-accent-green hover:text-accent-green"
             >
               {autoFixBusy ? "Fixing…" : "Fix for me"}
             </Button>
           )}
           {/* Only offer re-run once there's something cached to re-run.
-              The first run is the big CTA in the calm landing body. */}
+              The first run is the action in the calm landing body. */}
           {report && (
-            <Button variant="ghost" size="xs" onClick={run} disabled={loading}>
+            <Button onClick={run} disabled={loading}>
               {loading ? "Checking…" : "Check again"}
             </Button>
           )}
-          <Button variant="default" size="xs" onClick={onClose}>
-            Close
-          </Button>
         </>
       }
     >
-      {error ? (
-        <div className="flex flex-col gap-3">
-          <div role="alert" className="text-red text-sm py-2">{error}</div>
-          <Button variant="default" size="xs" onClick={run} disabled={loading} className="self-start">
-            {loading ? "Checking…" : "Try again"}
-          </Button>
-        </div>
-      ) : !report ? (
-        // Calm landing — nothing runs until asked. Lead with what this IS,
-        // in plain language, then a single press-to-run CTA.
-        <SafetyCheckLanding base={base} loading={loading} onRun={run} />
-      ) : (
-        <div className={`flex flex-col gap-3 ${inline ? "" : "max-h-[68vh]"}`}>
-          {ranAt != null && <CheckedStrip ranAt={ranAt} loading={loading} onRecheck={run} />}
-
-          <Verdict
-            report={report}
-            problemCount={problems.length}
-            unverified={unverifiedTotal}
+      <div className="ui-check-report" data-scroll={inline ? undefined : ""}>
+        <label className="ui-compare-base">
+          <span>Compare against</span>
+          <Input
+            value={base}
+            onChange={(e) => setBase(e.target.value)}
+            placeholder="main"
+            title="Which version to compare your changes against"
+            className="ui-compare-branch"
+            style={{ width: 160 }}
           />
-
-          {autoFixToast && (
-            <div className="text-sm text-accent-green border border-accent-green/40 rounded px-2 py-1">
-              {autoFixToast}
-            </div>
-          )}
-
-          {problems.length > 0 && (
-            <div className="flex flex-col gap-2 min-h-0">
-              <div className="section-label">
-                Worth fixing
-                <span className="ml-1.5 font-normal text-text-4">{problems.length}</span>
-              </div>
-              <ul className={`flex flex-col gap-1.5 pr-1 ${inline ? "" : "overflow-auto"}`}>
-                {problems.map((f, i) => (
-                  <FindingRow key={i} finding={f} />
-                ))}
-              </ul>
-            </div>
-          )}
-
-          <Details
-            report={report}
-            impact={impact}
-            unverifiedTotal={unverifiedTotal}
-            taste={taste}
-            inline={inline}
+        </label>
+        {error ? (
+          <ErrorState
+            title="Couldn’t run the safety check"
+            message={error}
+            onRetry={() => void run()}
+            size="sm"
           />
-        </div>
-      )}
+        ) : !report ? (
+          // Calm landing — nothing runs until asked. Lead with what this IS,
+          // in plain language, then a single press-to-run action.
+          <EmptyState
+            icon={ShieldCheck}
+            title="Run a safety check"
+            body={
+              <>
+                A second set of eyes on everything you&apos;ve changed since{" "}
+                <code className="ui-compare-branch">{base}</code>. It looks for bugs, security holes,
+                and things that don&apos;t match what you asked for.
+              </>
+            }
+            action={{
+              label: loading ? "Checking your changes…" : "Run safety check",
+              onClick: () => void run(),
+              disabled: loading,
+            }}
+            footnote="Nothing runs until you press the button, and the result is kept so you can come back to it without checking again."
+          />
+        ) : (
+          <>
+            {ranAt != null && (
+              <p className="ui-check-report-when">
+                {loading ? (
+                  <>
+                    <AsciiSpinner /> Checking your changes…
+                  </>
+                ) : (
+                  `Last checked ${agoLabel(ranAt)}`
+                )}
+              </p>
+            )}
+            <Verdict report={report} problemCount={problems.length} unverified={unverifiedTotal} />
+            {autoFixToast && (
+              <Alert variant={autoFixFailed ? "destructive" : "default"}>
+                <AlertDescription>{autoFixToast}</AlertDescription>
+              </Alert>
+            )}
+            <WorthFixing problems={problems} />
+            <GoodToKnow
+              impact={impact}
+              unverified={report.unverified_nodes}
+              unverifiedTotal={unverifiedTotal}
+              taste={taste}
+            />
+          </>
+        )}
+      </div>
     </Dialog>
   );
 }
 
-// Calm landing — the surface NEVER auto-runs, so the first thing the
-// builder sees is what a safety check is for (plain language, their
-// fears answered) and one button to run it. No uninvited spinner.
-function SafetyCheckLanding({
-  base,
-  loading,
-  onRun,
-}: {
-  base: string;
-  loading: boolean;
-  onRun: () => void;
-}) {
-  return (
-    <div className="flex flex-col items-center text-center px-6 py-10">
-      <div
-        className="w-14 h-14 rounded-2xl flex items-center justify-center mb-4"
-        style={{ background: "color-mix(in oklab, var(--color-accent) 14%, transparent)" }}
-      >
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 3 5 5.5v5.2c0 4.4 3 7.3 7 8.8 4-1.5 7-4.4 7-8.8V5.5Z" />
-          <path d="m9 11.5 2 2 4-4.2" />
-        </svg>
-      </div>
-      <div className="text-text-1 text-lg font-semibold mb-2">Run a safety check</div>
-      <p className="text-text-2 text-base leading-relaxed max-w-[420px]">
-        A second set of eyes on everything you&apos;ve changed since{" "}
-        <span className="font-mono text-text-1">{base}</span>. It looks for bugs,
-        security holes, and things that don&apos;t match what you asked for.
-      </p>
-      <p className="text-text-4 text-xs leading-relaxed max-w-[420px] mt-2.5">
-        Nothing runs until you press the button, and the result is kept so you
-        can come back to it without re-checking.
-      </p>
-      <Button
-        variant="default"
-        size="sm"
-        onClick={onRun}
-        disabled={loading}
-        className="mt-5"
-      >
-        {loading ? "Checking your changes…" : "Run safety check"}
-      </Button>
-    </div>
-  );
-}
-
-// "Checked X ago · check again" strip above a cached result, so the
-// builder knows whether they're looking at something fresh or stale.
-function CheckedStrip({
-  ranAt,
-  loading,
-  onRecheck,
-}: {
-  ranAt: number;
-  loading: boolean;
-  onRecheck: () => void;
-}) {
-  return (
-    <div className="flex items-center gap-2 text-xs text-text-4">
-      <span
-        className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-        style={{ background: loading ? "var(--color-amber)" : "var(--color-text-5)" }}
-      />
-      <span>{loading ? "Checking your changes…" : `Last checked ${agoLabel(ranAt)}`}</span>
-      {!loading && (
-        <button
-          type="button"
-          onClick={onRecheck}
-          className="ml-1 text-text-3 hover:text-text-1 underline-offset-2 hover:underline transition-colors"
-        >
-          check again
-        </button>
-      )}
-    </div>
-  );
-}
-
-// The lead. Counts real problems, never impact. Risk label from the
-// engine rides along as a quiet tag so power users still see it — in its
-// OWN colour, so a CRITICAL never renders green just because nothing
-// tripped the two counters `problemCount` is built from.
+// The lead. Counts real problems, never impact. The engine's risk label rides
+// along as a quiet tag so power users still see it — in its OWN colour, so a
+// CRITICAL never renders green just because nothing tripped the two counters
+// `problemCount` is built from.
 function Verdict({
   report,
   problemCount,
@@ -417,221 +350,26 @@ function Verdict({
     risk: report.risk_label,
     unverified,
   });
-  // Color rides on the glyph/risk-tag only — never as a full card fill.
-  const fg =
-    v.tone === "good"
-      ? "var(--color-accent-green)"
-      : v.tone === "bad"
-        ? "var(--color-red)"
-        : "var(--color-amber)";
   return (
-    <div className="rounded-lg px-3 py-3 border border-line-soft bg-bg-1">
-      <div className="flex items-center gap-2.5">
-        <span aria-hidden className="text-base leading-none flex-shrink-0" style={{ color: fg }}>
-          {v.glyph}
-        </span>
-        <span className="text-md font-semibold text-text-1">{v.headline}</span>
-        <span
-          className="ml-auto text-2xs px-1.5 py-0.5 rounded border border-line-soft"
+    <header className="ui-verdict" data-tone={v.tone}>
+      <div className="ui-verdict-line">
+        <strong>{v.headline}</strong>
+        <Badge
+          variant="outline"
           style={{ color: riskTone(report.risk_label) }}
           title={`Aura's overall read on these changes: ${String(report.risk_label).toLowerCase()}`}
         >
           {report.risk_label}
-        </span>
+        </Badge>
       </div>
-      <div className="text-sm text-text-2 mt-1.5 leading-snug">{v.sub}</div>
-    </div>
+      <span>{v.sub}</span>
+    </header>
   );
 }
 
-function FindingRow({ finding }: { finding: Finding }) {
-  const tone = sevTone(finding.severity);
-  return (
-    <li className="flex items-start gap-2 px-2.5 py-2 rounded border bg-bg-1" style={{ borderColor: tone.border }}>
-      <span className="shrink-0 mt-0.5" style={{ color: tone.fg }}>
-        {tone.glyph}
-      </span>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5 mb-0.5">
-          {/* The kind of problem is a label, not an alarm — the severity glyph and
-              the row border already carry the "look at me". A third hue per
-              category just made the list noisy. */}
-          <span className="meta-tag">
-            {categoryLabel(finding.category)}
-          </span>
-          <span className="section-label">{sourceLabel(finding.source)}</span>
-        </div>
-        <div className="text-sm text-text-1 leading-snug break-words whitespace-pre-wrap">
-          {humanizeFindingText(finding.text)}
-        </div>
-      </div>
-    </li>
-  );
-}
-
-// Context, not defects — downstream impact and undocumented changes. One
-// click away, collapsed by default.
-function Details({
-  report,
-  impact,
-  unverifiedTotal,
-  taste,
-  inline,
-}: {
-  report: ReviewReport;
-  impact: string[];
-  unverifiedTotal: number;
-  taste: string[];
-  inline?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const count = impact.length + unverifiedTotal + taste.length;
-  if (count === 0) return null;
-  return (
-    <div className="border-t border-line-soft pt-3">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-2 text-xs text-text-3 hover:text-text-1 transition-colors"
-      >
-        <svg
-          width="9"
-          height="9"
-          viewBox="0 0 12 12"
-          fill="none"
-          className={`transition-transform ${open ? "rotate-90" : ""}`}
-        >
-          <path d="M4 2.5 8 6l-4 3.5" stroke="currentColor" strokeWidth="1.5" />
-        </svg>
-        <span>Good to know. What else this touches, missing notes & style ({count})</span>
-      </button>
-      {open && (
-        <div className={`mt-3 flex flex-col gap-3 ${inline ? "" : "overflow-auto pr-1 max-h-[40vh]"}`}>
-          {impact.length > 0 && (
-            <Section title={`What else this touches · ${impact.length}`}>
-              <div className="text-xs text-text-4 mb-1">
-                Other parts of the code that lean on what changed. Worth a look, but not problems.
-              </div>
-              <ul className="flex flex-col gap-0.5">
-                {impact.slice(0, 80).map((n, i) => (
-                  <li key={i} className="text-sm font-mono text-text-2 px-2 py-1 rounded hover:bg-state-hover">
-                    <span className="text-amber mr-2">↳</span>
-                    {n}
-                  </li>
-                ))}
-                {impact.length > 80 && (
-                  <li className="text-xs text-text-4 px-2">… and {impact.length - 80} more</li>
-                )}
-              </ul>
-            </Section>
-          )}
-          {unverifiedTotal > 0 && (
-            <Section title={`Changes with no note · ${unverifiedTotal}`}>
-              <div className="text-xs text-text-4 mb-1">
-                Some logic changed without a note saying why. Adding a quick note keeps the
-                history clear for later.
-              </div>
-              <ul className="flex flex-col gap-1">
-                {Object.entries(report.unverified_nodes)
-                  .sort((a, b) => b[1] - a[1])
-                  .map(([kind, n]) => (
-                    <li
-                      key={kind}
-                      className="flex items-center gap-2 px-2.5 py-1.5 rounded border border-line-soft bg-bg-1"
-                    >
-                      <span className="text-sm text-text-1 capitalize">{kind}</span>
-                      <span className="ml-auto text-xs text-text-3 tabular-nums">{n}</span>
-                    </li>
-                  ))}
-              </ul>
-            </Section>
-          )}
-          {taste.length > 0 && (
-            <Section title={`Style · ${taste.length}`}>
-              <div className="text-xs text-text-4 mb-1">
-                Small style suggestions Aura picked up from this project, not problems,
-                just gentle nudges.
-              </div>
-              <ul className="flex flex-col gap-0.5">
-                {taste.slice(0, 40).map((t, i) => (
-                  <li
-                    key={i}
-                    className="text-sm font-mono text-text-2 px-2 py-1 rounded hover:bg-state-hover break-words whitespace-pre-wrap"
-                  >
-                    <span className="text-amber mr-2">🧪</span>
-                    {t}
-                  </li>
-                ))}
-                {taste.length > 40 && (
-                  <li className="text-xs text-text-4 px-2">
-                    … and {taste.length - 40} more
-                  </li>
-                )}
-              </ul>
-            </Section>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <div className="section-label mb-1">{title}</div>
-      {children}
-    </div>
-  );
-}
-
-// The one ink the verdict line is allowed to spend. Reads through the live
-// tokens so a retuned palette can't leave a stale hex behind.
+// The one ink the verdict line is allowed to spend on the risk tag.
 function riskTone(label: RiskLabel): string {
-  if (label === "CRITICAL") return "var(--color-red)";
-  if (label === "MODERATE") return "var(--color-amber)";
-  return "var(--color-accent-green)";
-}
-
-// Plain-word labels for the finding chips — non-engineers don't read
-// "architecture" / "invariant" / "cross-branch". Same words as the filter
-// chips so the row and the filter read alike.
-function categoryLabel(c: Category): string {
-  switch (c) {
-    case "security":
-      return "safety";
-    case "architecture":
-      return "structure";
-    case "conflict":
-    default:
-      return "clash";
-  }
-}
-
-function sourceLabel(source: string): string {
-  if (source === "invariant") return "broke a rule";
-  if (source === "cross-branch") return "clashes with another version";
-  return source;
-}
-
-function sevTone(s: Severity): { fg: string; border: string; glyph: string } {
-  if (s === "high") return { fg: "var(--color-red)", border: "var(--color-red)", glyph: "✗" };
-  return { fg: "var(--color-amber)", border: "var(--color-amber)", glyph: "⚠" };
-}
-
-// Plain-language rewrite of the engine's own invariant wording. The four real
-// shapes (pr.rs) lead with AST jargon ("Protected Node…") that means nothing to
-// Derive a finding's severity + category from the engine's own wording
-// rather than hardcoding "high" on every row. The four real invariant
-// shapes (pr.rs): "Forbidden Call…", "Layer Violation…", "Protected Node
-// Modified…", "Protected Node Deleted…". Deleting a protected node or making
-// a forbidden/layer-crossing call blocks a merge (high); *modifying* a
-// protected-but-allowed block is a warning to look twice (med).
-function classifyViolation(text: string): { severity: Severity; category: Category } {
-  if (text.startsWith("Forbidden")) return { severity: "high", category: "security" };
-  if (text.startsWith("Layer Violation")) return { severity: "high", category: "architecture" };
-  if (text.startsWith("Protected Node Deleted")) return { severity: "high", category: "security" };
-  if (text.startsWith("Protected Node Modified")) return { severity: "med", category: "security" };
-  // Unknown invariant text → treat as a blocking architectural finding.
-  return { severity: "high", category: "architecture" };
+  if (label === "CRITICAL") return "var(--ui-red)";
+  if (label === "MODERATE") return "var(--ui-yellow)";
+  return "var(--ui-green)";
 }

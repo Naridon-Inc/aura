@@ -1,24 +1,36 @@
-import * as React from "react";
-import { Popover as MedusaPopover } from "@medusajs/ui";
-
+import { forwardRef, type ComponentPropsWithoutRef, type ElementRef } from "react";
+import { Root, Trigger, Anchor, Content, Portal, Close } from "@radix-ui/react-popover";
 import { cn } from "../../lib/utils";
-
-const Popover = MedusaPopover;
-const PopoverTrigger = MedusaPopover.Trigger;
-const PopoverAnchor = MedusaPopover.Anchor;
-
-const PopoverContent = React.forwardRef<
-  React.ComponentRef<typeof MedusaPopover.Content>,
-  React.ComponentPropsWithoutRef<typeof MedusaPopover.Content>
->(({ className, align = "center", sideOffset = 4, ...props }, ref) => (
-  <MedusaPopover.Content
-    ref={ref}
-    align={align}
-    sideOffset={sideOffset}
-    className={cn("w-72 p-4", className)}
-    {...props}
-  />
-));
+import { MENU_ANIM, MENU_SURFACE_CLASS } from "./menuSurface";
+import { UI_GEOMETRY } from "./geometry";
+export const Popover = Root;
+export const PopoverTrigger = Trigger;
+export const PopoverAnchor = Anchor;
+export const PopoverClose = Close;
+export const PopoverContent = forwardRef<
+  ElementRef<typeof Content>,
+  ComponentPropsWithoutRef<typeof Content>
+>(
+  (
+    {
+      className,
+      align = "center",
+      sideOffset = UI_GEOMETRY.menu.sideOffset,
+      collisionPadding = UI_GEOMETRY.menu.collisionPadding,
+      ...props
+    },
+    ref,
+  ) => (
+    <Portal>
+      <Content
+        ref={ref}
+        align={align}
+        sideOffset={sideOffset}
+        collisionPadding={collisionPadding}
+        className={cn(MENU_SURFACE_CLASS, MENU_ANIM, "ui-popover", className)}
+        {...props}
+      />
+    </Portal>
+  ),
+);
 PopoverContent.displayName = "PopoverContent";
-
-export { Popover, PopoverTrigger, PopoverContent, PopoverAnchor };

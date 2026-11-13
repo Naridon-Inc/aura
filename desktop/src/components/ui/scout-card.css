@@ -1,0 +1,89 @@
+/* The plan review in the thread: the shared tool-group disclosure, one
+   subagent-run row per reviewer, and each reviewer's findings as check-run
+   rows. Added here: the rows' spacing inside the disclosure, the live tail a
+   running reviewer prints, the full summary once a row is opened, the
+   severity colours on a finding's icon, and the open questions. */
+
+.ui-scout-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ui-scout-run > button > small {
+  flex-shrink: 0;
+}
+.ui-scout-tail {
+  margin: 0 10px 8px 32px;
+  padding: 4px 6px;
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  background: var(--ui-muted);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ui-subagent-run > .ui-scout-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+.ui-scout-summary {
+  margin: 0;
+  color: var(--ui-secondary-fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ui-scout-detail .ui-check-runs {
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+}
+.ui-scout-detail .ui-check-runs > div {
+  align-items: flex-start;
+}
+.ui-scout-detail .ui-check-runs > div:last-child {
+  border-bottom: 0;
+}
+.ui-scout-detail .ui-check-runs > div > svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--ui-muted-fg);
+}
+.ui-scout-detail .ui-check-runs > [data-severity="warn"] > svg {
+  color: var(--ui-yellow);
+}
+.ui-scout-detail .ui-check-runs > [data-severity="block"] > svg {
+  color: var(--ui-red);
+}
+.ui-scout-detail .ui-check-runs small {
+  line-height: 1.5;
+}
+.ui-scout-detail .ui-check-runs .ui-status-chip {
+  flex: none;
+}
+.ui-scout-detail .ui-check-runs [data-loc] {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.ui-scout-questions ul {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--ui-secondary-fg);
+  font-size: 12px;
+  list-style: disc;
+}
+.ui-scout-notes {
+  margin: 2px 0 0;
+  color: var(--ui-secondary-fg);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}

@@ -217,7 +217,7 @@ export function InboxPane({ repoRoot, onClose }: Props) {
           <EmptyState
             icon={GitPullRequest}
             title="Nothing waiting on you"
-            body="A pull request is a change someone wants to put into the project, held back until it's been looked at. There are none open right now."
+            body="A pull request is a change someone wants to put into the repository, held back until it's been looked at. There are none open right now."
             action={{
               label: "Check again",
               onClick: () => void refresh(true),
@@ -494,7 +494,7 @@ function ErrorHint({
         title="This folder isn’t being tracked yet"
         body={
           <>
-            Pull requests are proposed changes to a project’s history, and
+            Pull requests are proposed changes to a repository’s history, and
             this folder doesn’t have one. Start tracking it and point it at a
             remote, and the pull requests appear on their own.
             <Cmd>{`git init\ngit remote add origin <your-remote-url>\ngit fetch`}</Cmd>
@@ -559,7 +559,7 @@ function ErrorHint({
     return (
       <EmptyState
         icon={EyeOff}
-        title="This account can’t see the project"
+        title="This account can’t see the repository"
         body={
           <>
             The GitHub account you’re signed in as doesn’t have access to this
@@ -622,7 +622,7 @@ function Section({
           width="11"
           height="11"
           viewBox="0 0 10 10"
-          className={`text-text-4 transition-transform ${
+          className={`text-text-4 ${
             expanded ? "" : "-rotate-90"
           }`}
         >

@@ -1,17 +1,10 @@
-import {
-  ComposerFrame,
-  ComposerToolbar,
-  ChatModePicker,
-} from "../chat/ChatComposer";
-import { ChevronLeft, ChevronRight, Shield, ArrowUp } from "lucide-react";
-// Cursor-style chat composer for the Manager tab. Renders the prototype's
-// `.composer` block (Stage 11.6 — Forge Chat-States port): a transparent
-// textarea sits on top, then a `.composer-bottom` row carries the Plan
-// mode chip, the model selector chip, attach/mic icon-buttons, and the
-// accent send-btn. The outer `.p-dock` wrapper is the parent's
-// responsibility — this component owns only the `.composer` itself, so
-// inline cards (Question/Plan) can be docked above it without breaking
-// the dock's gap rhythm.
+import { CornerUpLeft } from "lucide-react";
+// The chat composer for the Manager tab: the shared composer itself, fed the
+// conversation's draft, attachments, `/` and `@` lists, and the model control
+// on the left of its footer, with voice, add, stop and send on the right. The outer `.p-dock` wrapper is
+// the parent's responsibility — this component owns only the box itself, so
+// inline cards (Question/Plan) can be docked above it without breaking the
+// dock's gap rhythm.
 //
 // Mode is a visual chip only — the brain decides plan vs build via
 // `aura propose-plan` heuristics. We don't mangle the user's text with
@@ -35,49 +28,40 @@ import {
   useRef,
   useState,
   type DragEvent,
+  type KeyboardEvent,
 } from "react";
-import { BrainPicker } from "./BrainPicker";
-import { UsagePopover } from "./chat/UsagePopover";
-import { useClaudeUsage } from "./chat/ClaudeUsageRing";
-import { type TokenUsage, type TurnSpend } from "./chat/types";
-import {
-  api,
-  type AgentMode,
-  type BrainChoice,
-  type ReasoningEffort,
-  type ApprovalPolicy,
-} from "../../lib/api";
+import { ManagerModelPicker } from "../chat/model/ManagerModelPicker";
+import { api, type ReasoningEffort, type ApprovalPolicy } from "../../lib/api";
 import { OS_FILE_DROP_COMPOSER, OS_FILE_DRAG } from "../../lib/osFileDrop";
-import { type SelectedModel } from "../../lib/modelCatalog";
-import { ModelDefaultsPanel } from "./ModelDefaultsPanel";
+import { registerComposerInserter, withLeading, withTrailing, type InsertAt } from "../../lib/composerBridge";
 import {
-  TurnModelControls,
-  turnModelDetail,
-} from "../chat/TurnModelControls";
-import { registerComposerInserter } from "../../lib/composerBridge";
+  notifyComposerAttachments,
+  registerComposerAttacher,
+} from "../../lib/composerAttachments";
 import { useFollowUpBehavior } from "../../lib/followUpBehavior";
-import {
-  TiptapComposer,
-  type SlashItem,
-  type TiptapComposerHandle,
-} from "./TiptapComposer";
-import { ChipButton } from "../ui/chip";
-
-import {
-  CheckMini,
-  ShieldCheck,
-  PencilSquare,
-  Eye,
-  Bolt,
-} from "@medusajs/icons";
+import { Composer, type ComposerSuggestion } from "../ui/composer";
+import { ComposerAddMenu, ContextUsageIndicator } from "../ui/composer-tools";
+import { IssueLinkDialog } from "../ui/issue-link-dialog";
+import { LinkWorkspacesDialog } from "../ui/link-workspaces-dialog";
+import { SnippetFormDialog } from "../ui/snippet-form-dialog";
+import { SnippetPickerDialog } from "../ui/snippet-picker-dialog";
+import { useIssueLink } from "./useIssueLink";
+import { useLinkWorkspaces } from "./useLinkWorkspaces";
+import { isInsertSnippetKey, useSnippetInsert } from "./useSnippetInsert";
+import { useClaudeUsage } from "./chat/ClaudeUsageRing";
+import "../chat/ChatComposer.css";
+import "../ui/chat-composer.css";
+import { formatCost } from "../../lib/money";
+import { useComposerSuggestions } from "../chat/composer/useComposerSuggestions";
+import { ComposerTurnMenu } from "../chat/composer/ComposerTurnMenu";
 
 import { Button } from "../ui/button";
 import { readTerminalContext } from "../Terminal";
 import { useEditorStore } from "../../lib/editorStore";
-import { useDismiss } from "../../lib/useDismiss";
 import {
   composerKey,
   MANAGER_DRAFT_PREFIX,
+  MANAGER_HISTORY_PREFIX,
   pushHistory,
   readDraft,
   readHistory,
@@ -90,203 +74,29 @@ import {
   effortLabel,
   nextEffort,
 } from "../../lib/effortCycle";
-import { TOGGLE_FAST_EVENT } from "../../lib/composerChords";
+import { TOGGLE_FAST_EVENT, modKeyLabel } from "../../lib/composerChords";
 import {
-  readOutputStyle,
   toggleOutputStyle,
+  useOutputStyle,
   writeOutputStyle,
-  type OutputStyle,
 } from "../../lib/outputStyle";
 import { toast } from "../../lib/toast";
+import { useChatTeammates } from "../../lib/chatTeammates";
+import type {
+  ComposerImage,
+  ComposerAttachment,
+  ComposerMode,
+  SpeechRecognitionLike,
+  SpeechRecognitionCtor,
+  SpeechRecognitionEventLike,
+  ManagerComposerProps,
+} from "./chat/composerTypes";
+import { agentModeFor } from "./chat/agentModeFor";
 
-type ComposerImage = {
-  id: string;
-  /** image | text | path — drives how the preview tile renders + how
-   *  the bytes are read at submit. (M.5) */
-  kind: "image" | "text" | "path";
-  name: string;
-  /** Object URL for images, or a short text preview for text/path. */
-  preview_url: string;
-  /** Held until submit so we can read base64/utf8 lazily. Kept off the
-   *  network/IPC path until the user actually presses Send. Null for
-   *  kind=path entries — those carry only `pathValue`. */
-  file: File | null;
-  /** Filesystem path string for kind=path drops (folders or files that
-   *  the OS handed us as text instead of as a File handle). */
-  pathValue?: string;
-};
-
-export type ComposerAttachment = {
-  media_type: string;
-  data_base64: string;
-  name?: string | null;
-};
-
-export type ComposerMode = "auto" | "plan" | "build" | "ask";
-
-// Minimal shape of the Web Speech API. The DOM lib doesn't ship these
-// types and we'd rather avoid a separate dependency for one button.
-type SpeechRecognitionLike = {
-  lang: string;
-  continuous: boolean;
-  interimResults: boolean;
-  start(): void;
-  /** Graceful: finishes the utterance, then fires `onend`. */
-  stop(): void;
-  /** Immediate: drops the utterance and releases the input device now.
-   *  Optional because the DOM lib doesn't type the Web Speech API at all and
-   *  we can't assume every WebView ships it. */
-  abort?(): void;
-  onresult: ((e: SpeechRecognitionEventLike) => void) | null;
-  onerror: ((e: unknown) => void) | null;
-  onend: ((e: unknown) => void) | null;
-};
-type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
-type SpeechRecognitionEventLike = {
-  results: ArrayLike<ArrayLike<{ transcript: string }>>;
-};
-
-type Props = {
-  /** Working directory shown in the workspace pill + used for git probes. */
-  repoRoot: string | null;
-  /** Friendly workspace label (folder name). Falls back to last path segment. */
-  workspaceLabel?: string;
-  /** True while the brain is mid-turn — disables the send button + textarea. */
-  busy: boolean;
-  /** Last-turn context fill from the native brain. Drives a slim context-window
-   *  meter in the composer's bottom row. Null (CLI brains / no report) hides it. */
-  usage?: TokenUsage | null;
-  spend?: TurnSpend | null;
-  /** Optional placeholder override (e.g. "Add more optional details"). */
-  placeholder?: string;
-  /** Fires on Enter (no shift) or Send click. Receives the trimmed text
-   *  and any pasted/dropped image attachments (already base64-encoded).
-   *  Caller is responsible for clearing `text` (we don't manage it
-   *  externally). */
-  /** The composer's current Plan/Build/Ask chip is part of every send so
-   *  the chat view can prepend a steering directive to the user message
-   *  (the brain has no separate mode parameter). */
-  onSend: (
-    message: string,
-    attachments: ComposerAttachment[],
-    mode: ComposerMode,
-    /** When non-null, the same trimmed text is also written into the
-     *  named agent PTY session — so the Manager can drive an already-
-     *  open Claude / Gemini / Codex tab while still recording the
-     *  message as a normal Manager turn (the brain stays in the loop).
-     *  Null = pure Manager send, no PTY pipe. */
-    pipeTargetSessionId: string | null,
-    /** Reasoning effort for this turn — null = provider default. Threaded
-     *  into `brain_chat_turn`'s context; each brain maps it to its own real
-     *  mechanism (Anthropic/Gemini budgets, OpenAI effort, CLI keyword). */
-    effort: ReasoningEffort | null,
-    /** Latency-first (⚡) — collapse effort to the provider minimum. */
-    fast: boolean,
-    /** Permission/autonomy policy for this turn — null = the agent's own
-     *  default ask-flow. Threaded into `brain_chat_turn`'s context; each
-     *  CLI maps it to its real permission flag (Claude `--permission-mode`,
-     *  Gemini `--approval-mode`, Codex `--sandbox`), thin CLIs get a
-     *  read-only Plan steer. Cross-agent — applies to whichever brain runs. */
-    approval: ApprovalPolicy | null,
-    /** The Goal toggle was armed for this send — tag the turn as a goal so it
-     *  lands in the chat with a "Sent as goal" badge and the brain is steered
-     *  to plan it through the crew loop and prove it. */
-    goal: boolean,
-  ) => void;
-  /** Cancel an in-flight brain turn. When `busy` is true the send button
-   *  flips into a Stop button that fires this handler. */
-  onStop?: () => void;
-  /** Presence enables the composer's Goal toggle. The toggle no longer fires
-   *  anything on click — it just arms the next send (see the `goal` flag on
-   *  `onSend`/`onQueue`); this callback is kept only as the enable-gate so a
-   *  composer with no goal wiring hides the chip. */
-  onPlanGoal?: (goal: string) => void;
-  /** Manager session id — required to wire the BrainPicker (WW-B3) so a
-   *  brain swap persists on the right session. Null hides the picker. */
-  sessionId?: string | null;
-  /** Lifts a BrainPicker brain selection (or null for Auto) to the parent —
-   *  the brain the lifted model routes through. Owned by ManagerChatView. */
-  onBrainOverrideChange?: (choice: BrainChoice | null) => void;
-  /** The exact model the next turn runs (composer model picker, #251).
-   *  Owned by ManagerChatView so the send path threads `model` +
-   *  `long_context` into `brain_chat_turn`. Null = the brain's default. */
-  modelOverride?: SelectedModel | null;
-  /** Lifts the per-turn model selection (or null for Auto) to the parent. */
-  onModelOverrideChange?: (model: SelectedModel | null) => void;
-  /** Type-ahead queue (W2). When `busy`, a submit parks the message here
-   *  instead of dropping it — same payload shape as `onSend`. The parent
-   *  drains the queue on turn-end. Absent → busy submits are no-ops (the
-   *  pre-queue behavior). Agent-agnostic: sits above dispatch, so it works
-   *  the same for a native brain and a piped CLI PTY. */
-  onQueue?: (
-    message: string,
-    attachments: ComposerAttachment[],
-    mode: ComposerMode,
-    pipeTargetSessionId: string | null,
-    effort: ReasoningEffort | null,
-    fast: boolean,
-    approval: ApprovalPolicy | null,
-    goal: boolean,
-  ) => void;
-  /** Steer (redirect) an in-flight turn. Same payload shape as `onQueue`, but
-   *  instead of parking for the current turn's end this interrupts it and
-   *  immediately re-runs with the new message so the agent changes course
-   *  mid-flight (the partial turn is persisted, so context is kept). Fires when
-   *  the follow-up-behavior pref is "steer", or on ⌘↵ regardless of the pref.
-   *  Absent → steer submits fall back to `onQueue`. */
-  onSteer?: (
-    message: string,
-    attachments: ComposerAttachment[],
-    mode: ComposerMode,
-    pipeTargetSessionId: string | null,
-    effort: ReasoningEffort | null,
-    fast: boolean,
-    approval: ApprovalPolicy | null,
-    goal: boolean,
-  ) => void;
-  /** Fuse the composer onto a pending-question card docked directly above it:
-   *  drop the top border + square the top corners so the question card and the
-   *  input read as one stacked panel (the card rounds only its top). False =
-   *  the standalone rounded composer. */
-  docked?: boolean;
-  /** Slash commands the running agent published for itself — merged into
-   *  the `/` menu below Aura's verbs and the repo's Claude commands. */
-  agentCommands?: SlashItem[];
-  /** Modes the running agent can actually be put into, if it has any.
-   *  Present → the Mode chip stops being a prompt steer and becomes a real
-   *  control on a real process (OpenCode's plan mode refuses every edit
-   *  tool), so the chip says which of the two it is. */
-  agentModes?: AgentMode[];
-  /** The mode the agent reports it is in right now. Diverges from the
-   *  chip's own label when the agent switched itself mid-turn, which is
-   *  worth showing rather than papering over. */
-  agentMode?: string | null;
-  /** Push a mode to the agent. Rejects if the agent won't take it — the
-   *  caller surfaces that rather than leaving the chip claiming a
-   *  read-only mode the agent never entered. */
-  onAgentModeChange?: (modeId: string) => Promise<void>;
-  /** Last mode switch the agent refused, in its own words. */
-  agentModeError?: string | null;
-};
-
-/** Which of the agent's own modes an Aura mode means.
- *
- * Aura's chip is four positions and an agent's is usually two, so this is
- * a narrowing, not a mapping: everything that promises not to edit
- * (`plan`, `ask`) asks for the agent's plan mode, and everything that
- * expects work done takes whatever else it offers. Matching on the id
- * rather than a per-agent table means an agent with modes we have never
- * heard of still gets the read-only half right. */
-export function agentModeFor(
-  mode: ComposerMode,
-  modes: AgentMode[],
-): string | null {
-  if (modes.length === 0) return null;
-  const readOnly = mode === "plan" || mode === "ask";
-  const planLike = modes.find((m) => /plan/i.test(m.id) || /plan/i.test(m.name));
-  if (readOnly) return planLike?.id ?? null;
-  return (modes.find((m) => m !== planLike) ?? modes[0]).id;
-}
+// The composer's public types and its mode narrowing live under chat/ now;
+// they are re-exported here so callers keep one import path.
+export type { ComposerAttachment, ComposerMode } from "./chat/composerTypes";
+export { agentModeFor } from "./chat/agentModeFor";
 
 // `hint` is the full description (the trigger tooltip); `blurb` is the 1-3 word
 // inline note shown on the menu row, kept tight so rows stay single-line.
@@ -318,65 +128,9 @@ function draftKey(sessionId?: string | null): string {
 
 // We store the RAW text the user typed (`/foo`, not the slash-expanded forward
 // text) so recall round-trips byte-identically. Newest message is LAST.
-const HISTORY_PREFIX = "aura.manager.history:";
 function historyKey(sessionId?: string | null): string {
-  return composerKey(HISTORY_PREFIX, sessionId);
+  return composerKey(MANAGER_HISTORY_PREFIX, sessionId);
 }
-
-// EFFORT_OPTIONS and EffortGauge now live in `chat/TurnModelControls`, with
-// the control that reads them — they moved when Effort and Fast folded into
-// the model picker.
-
-// The Approvals chip is a cross-agent autonomy control (Claude's
-// acceptEdits/plan/bypassPermissions, generalized). `null` = the agent's
-// own default ask-flow — the backend sends no permission flag, so the
-// invocation stays byte-identical. Each level maps to the real per-agent
-// flag in `aura-agents` (Claude `--permission-mode`, Gemini
-// `--approval-mode`, Codex `--sandbox`); thin CLIs honor Plan via a
-// read-only prompt steer.
-const APPROVAL_OPTIONS: {
-  value: ApprovalPolicy | null;
-  label: string;
-  hint: string;
-  blurb: string;
-}[] = [
-  {
-    value: null,
-    label: "Default",
-    hint: "Agent's standard flow. Asks before risky edits",
-    blurb: "asks first",
-  },
-  {
-    value: "accept_edits",
-    label: "Accept Edits",
-    hint: "Auto-accept file edits; still guard shell/destructive actions",
-    blurb: "auto-edits",
-  },
-  {
-    value: "plan",
-    label: "Plan",
-    hint: "Read-only. Propose a plan, change nothing on disk",
-    blurb: "read-only",
-  },
-  {
-    value: "bypass",
-    label: "Bypass",
-    hint: "Full autonomy. Skip all permission prompts",
-    blurb: "no prompts",
-  },
-];
-
-// Per-row glyphs so the Approvals / Mode menus read like the effort menu:
-// an icon-led row + a trailing accent check on the active choice. All icons
-// share the Medusa forward-ref component type, so `typeof ShieldCheck` types
-// the whole map. Keyed by the option value (Approvals folds `null` → "default").
-const APPROVAL_ICONS: Record<string, typeof ShieldCheck> = {
-  default: ShieldCheck,
-  accept_edits: PencilSquare,
-  plan: Eye,
-  bypass: Bolt,
-};
-
 
 export function ManagerComposer({
   repoRoot,
@@ -385,6 +139,7 @@ export function ManagerComposer({
   usage,
   spend,
   placeholder,
+  planAwaitingReply = false,
   onSend,
   onStop,
   onPlanGoal,
@@ -392,6 +147,7 @@ export function ManagerComposer({
   onBrainOverrideChange,
   modelOverride = null,
   onModelOverrideChange,
+  machineBrain = null,
   onQueue,
   onSteer,
   docked = false,
@@ -400,7 +156,10 @@ export function ManagerComposer({
   agentMode = null,
   onAgentModeChange,
   agentModeError = null,
-}: Props) {
+  history,
+  linkAgentId = null,
+  linkAgentLabel = null,
+}: ManagerComposerProps) {
   // Follow-up behavior while a turn is running: "queue" parks the message for
   // turn-end, "steer" redirects the running turn now. ⌘↵ always steers
   // regardless of this pref (handled in `submit`).
@@ -417,11 +176,9 @@ export function ManagerComposer({
   // Restore this session's draft on first paint so a reload (or a tab
   // round-trip) never loses a half-typed message.
   const [text, setText] = useState(() => readDraft(draftKey(sessionId)));
-  // Claude subscription reading (5h/7d window) — feeds the usage popover's
-  // limit section. Null off-subscription, so that section just hides.
-  const claudeUsage = useClaudeUsage();
   const [images, setImages] = useState<ComposerImage[]>([]);
-  const [dragOver, setDragOver] = useState(false);
+  // A file from the desktop is being dragged over this chat.
+  const [osDragOver, setOsDragOver] = useState(false);
   const [listening, setListening] = useState(false);
   // Captured at start so onresult appends to the snapshot, not whatever
   // the editor has after the user types mid-listen.
@@ -438,13 +195,40 @@ export function ManagerComposer({
       return "plan";
     }
   });
-  // Imperative handle into the Tiptap editor — clear after send, focus on
-  // ⌘L, append dictation / external-context. The editor is uncontrolled; we
-  // mirror its markdown into `text` via onChange for draft persistence + the
-  // send payload.
-  const composerRef = useRef<TiptapComposerHandle>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const addRef = useRef<HTMLDivElement>(null);
+  // The message field. The draft itself is `text`; this is only for moving
+  // focus and the caret (⌘L, history recall, dictation).
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // "Link issue": a picked GitHub issue arrives as a markdown attachment.
+  const issueLink = useIssueLink({
+    repoRoot,
+    field: textareaRef,
+    onAttach: (file) => ingestFileRef.current(file),
+    onClosed: () => textareaRef.current?.focus(),
+  });
+  const snippet = useSnippetInsert({ field: textareaRef, setText });
+  // "Link workspaces": other workspaces and folders this one's agents may read.
+  const workspaceLinks = useLinkWorkspaces({
+    repoRoot,
+    agentId: linkAgentId,
+    agentLabel: linkAgentLabel,
+    onClosed: () => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    },
+  });
+  /** Put `next` in the field and park the caret at one end of it. */
+  const placeText = useCallback((next: string, caret: "start" | "end" = "end") => {
+    setText(next);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const at = caret === "start" ? 0 : next.length;
+      el.setSelectionRange(at, at);
+    });
+  }, []);
   // Which session the current `text` belongs to — held in a ref so the
   // persist effect writes under the right key even on the render where
   // sessionId is changing out from under us.
@@ -459,22 +243,17 @@ export function ManagerComposer({
   // ── Message-history recall (shell-style Up/Down) ──────────────────────
   // The per-session ring of the user's own sent messages + a cursor while
   // browsing it. All held in refs (not state) because the recall is driven
-  // imperatively via composerRef.setMarkdown — there's no rendered surface
+  // imperatively from the field's arrow keys — there's no rendered surface
   // that depends on these, so they don't need to trigger re-renders.
   //   `historyRef`   — the ring, newest last (loaded from localStorage).
   //   `historyPosRef`— how many steps back from "newest" we're browsing.
   //                    null = at the live position (not browsing).
   //   `liveDraftRef` — the in-progress text saved on the first Up step, so
   //                    stepping back Down past the newest restores it.
-  //   `canRecall`    — gates the editor's Up/Down claim (state so the editor
-  //                    re-reads it through its handlersRef on every render).
   const historyRef = useRef<string[]>(readHistory(historyKey(sessionId)));
   const historyKeyRef = useRef(historyKey(sessionId));
   const historyPosRef = useRef<number | null>(null);
   const liveDraftRef = useRef<string>("");
-  const [canRecall, setCanRecall] = useState(
-    () => historyRef.current.length > 0,
-  );
   const [effort, setEffort] = useState<ReasoningEffort | null>(() => {
     try {
       const v = localStorage.getItem(EFFORT_KEY);
@@ -485,7 +264,6 @@ export function ManagerComposer({
       return null;
     }
   });
-  const [addOpen, setAddOpen] = useState(false);
   const [fast, setFast] = useState<boolean>(() => {
     try {
       return localStorage.getItem(FAST_KEY) === "1";
@@ -493,12 +271,6 @@ export function ManagerComposer({
       return false;
     }
   });
-  // Whether the Effort list is open inside the model picker. It lives here,
-  // and not in `TurnModelControls` alone, because the model list on the other
-  // side of the panel has to stand down while it is — two regions, one piece
-  // of state, so it belongs to the thing that renders both of them. Not
-  // persisted: it is a menu that is open, not a setting.
-  const [effortListOpen, setEffortListOpen] = useState(false);
   const [approval, setApproval] = useState<ApprovalPolicy | null>(() => {
     try {
       const v = localStorage.getItem(APPROVAL_KEY);
@@ -513,18 +285,43 @@ export function ManagerComposer({
   // prove it. One-shot — reset after each send. Not persisted; arming is a
   // deliberate per-message act, not a sticky mode.
   const [goalMode, setGoalMode] = useState(false);
+  // Goal mode is for the next message in this chat; another chat starts out
+  // of it.
+  useEffect(() => setGoalMode(false), [sessionId]);
 
   // Insert externally-sourced context (today: in-app browser Agentation —
   // clicked page elements) into this composer's draft, then focus it. The next
   // message carries it along with whatever the user types. Registered with the
   // composer bridge on mount and on focus, so the chat the user last touched is
   // the one that receives the attachment (a split view never double-inserts).
-  const insertExternal = useCallback((incoming: string) => {
-    const add = incoming.trim();
-    if (!add) return;
-    composerRef.current?.appendText(add);
+  // An @mention goes in front, since it addresses the whole message; anything
+  // else follows what is typed.
+  const insertExternal = useCallback((incoming: string, at: InsertAt = "end") => {
+    if (!incoming.trim()) return;
+    setText((prev) => (at === "start" ? withLeading(prev, incoming) : withTrailing(prev, incoming)));
+    requestAnimationFrame(() => textareaRef.current?.focus());
   }, []);
   useEffect(() => registerComposerInserter(insertExternal), [insertExternal]);
+
+  // Files handed in from outside the composer — an earlier chat or a saved
+  // plan picked on a new chat's opening screen — join the attachments, and
+  // the opening screen is told which ones are already here.
+  const ingestFileRef = useRef(ingestFile);
+  ingestFileRef.current = ingestFile;
+  const imagesRef = useRef(images);
+  imagesRef.current = images;
+  useEffect(() => {
+    if (!sessionId) return;
+    return registerComposerAttacher(sessionId, {
+      attach: (file) => {
+        ingestFileRef.current(file);
+        requestAnimationFrame(() => textareaRef.current?.focus());
+      },
+      names: () => imagesRef.current.map((i) => i.name),
+      remove: (name) => setImages((prev) => prev.filter((i) => i.name !== name)),
+    });
+  }, [sessionId]);
+  useEffect(() => notifyComposerAttachments(), [images]);
 
   // Persist the mode chip across reloads.
   useEffect(() => {
@@ -598,20 +395,13 @@ export function ManagerComposer({
 
   // AURA-1296 — "Concise" answers. Read at send time by ManagerChatView and
   // handed to Claude Code as `--output-style`; other brains ignore it.
-  const [outputStyle, setOutputStyle] = useState<OutputStyle>(() =>
-    readOutputStyle(),
-  );
-  const toggleConcise = () => {
-    const next = toggleOutputStyle(outputStyle);
-    writeOutputStyle(next);
-    setOutputStyle(next);
-  };
+  // Live: Settings › Default models sets the same value.
+  const outputStyle = useOutputStyle();
+  const toggleConcise = () => writeOutputStyle(toggleOutputStyle(outputStyle));
 
   // Draft persistence (per session). Two effects, ordered:
   //   1. On a session swap, point the ref at the new key and load that
-  //      session's saved draft into the `text` mirror. The editor itself is
-  //      keyed by sessionId (see render) so it REMOUNTS with the new draft as
-  //      its `initialMarkdown` — no controlled round-trip needed. The OLD
+  //      session's saved draft into `text`, which the field shows. The OLD
   //      session's text was already persisted under its own key by effect 2.
   //   2. On every text change, persist under the CURRENT key (empty wipes
   //      the slot — also how a successful send clears the draft).
@@ -631,7 +421,6 @@ export function ManagerComposer({
     historyRef.current = readHistory(nextHistoryKey);
     historyPosRef.current = null;
     liveDraftRef.current = "";
-    setCanRecall(historyRef.current.length > 0);
   }, [sessionId]);
 
   // Debounced draft persistence — coalesce the per-keystroke localStorage
@@ -677,12 +466,12 @@ export function ManagerComposer({
     const ae = document.activeElement as HTMLElement | null;
     const inOtherField =
       !!ae &&
-      !ae.closest(".tiptap-composer-input") &&
+      !ae.closest(".ui-composer") &&
       (ae.tagName === "INPUT" ||
         ae.tagName === "TEXTAREA" ||
         ae.isContentEditable);
     if (inOtherField) return;
-    composerRef.current?.focus();
+    textareaRef.current?.focus();
   }, [sessionId]);
 
   // Persist effort + fast. Clear the key at the default (Auto / off) so a
@@ -718,20 +507,17 @@ export function ManagerComposer({
     }
   }, [approval]);
 
-  // Click-outside / Esc closes the unified add (+) menu.
-  useDismiss(addOpen, () => setAddOpen(false), addRef);
-
-  // Cmd/Ctrl+L focuses the composer (Conductor parity — the "⌘L to focus"
+  // Cmd/Ctrl+L focuses the composer (the "⌘L to focus"
   // hint). We don't steal focus from another live text field (a code editor,
   // a rename input) so existing in-field shortcuts keep working; from the
-  // chat scrollback or loose focus it jumps straight to the editor. Our own
-  // ProseMirror surface is contentEditable too, so we exclude it by class
-  // rather than treating every contentEditable as "another field".
+  // chat scrollback or loose focus it jumps straight to the field. Our own
+  // field is a textarea too, so it is excluded by its box rather than
+  // treated as "another field".
   useEffect(() => {
     function onKey(e: globalThis.KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && (e.key === "l" || e.key === "L")) {
         const ae = document.activeElement as HTMLElement | null;
-        const inOurEditor = !!ae && !!ae.closest(".tiptap-composer-input");
+        const inOurEditor = !!ae && !!ae.closest(".ui-composer");
         const inOtherField =
           !!ae &&
           !inOurEditor &&
@@ -740,7 +526,7 @@ export function ManagerComposer({
             ae.isContentEditable);
         if (inOtherField) return;
         e.preventDefault();
-        composerRef.current?.focus();
+        textareaRef.current?.focus();
       }
     }
     window.addEventListener("keydown", onKey);
@@ -753,16 +539,15 @@ export function ManagerComposer({
   // that wants to invite input can dispatch it.
   useEffect(() => {
     function onFocus() {
-      composerRef.current?.focus();
+      textareaRef.current?.focus();
     }
     window.addEventListener("aura:focus-composer", onFocus);
     return () => window.removeEventListener("aura:focus-composer", onFocus);
   }, []);
 
-  // Message-history recall bridge. The editor (TiptapComposer) claims a plain
-  // Up at doc-start / Down at doc-end and fires this event; we walk the
-  // per-session ring here and apply the recalled text via the imperative
-  // setMarkdown handle (which also keeps the `text` mirror / draft in sync).
+  // Message-history recall. A plain Up with the caret at the very start of the
+  // field, or Down at the very end, walks the per-session ring (see
+  // `onFieldKey`), so ordinary multi-line caret movement keeps working.
   //
   //   pos === null  → live position (whatever the user is typing).
   //   pos === 0     → newest sent message.
@@ -771,48 +556,47 @@ export function ManagerComposer({
   // "up" steps toward older (pos grows); "down" steps toward newer (pos
   // shrinks) and, past the newest, restores the live draft saved on the first
   // Up step. Stepping up from the live position the FIRST time snapshots the
-  // current text so it isn't lost.
-  useEffect(() => {
-    function onHistoryMove(e: Event) {
-      const dir = (e as CustomEvent<{ dir: "up" | "down" }>).detail?.dir;
-      const ring = historyRef.current;
-      if (ring.length === 0) return;
-      const pos = historyPosRef.current;
-      if (dir === "up") {
-        if (pos === null) {
-          // Entering history: save the live draft, jump to the newest message.
-          liveDraftRef.current = text;
-          historyPosRef.current = 0;
-        } else if (pos < ring.length - 1) {
-          historyPosRef.current = pos + 1;
-        } else {
-          return; // already at the oldest — nothing further back.
-        }
-        const idx = ring.length - 1 - historyPosRef.current;
-        // Caret to the START so a held/repeated ArrowUp keeps walking back
-        // through EVERY earlier message — not just the newest one. (Parking it
-        // at the end left the next Up away from doc-start, so the editor stopped
-        // claiming the key and recall got stuck one message in.)
-        composerRef.current?.setMarkdown(ring[idx], "start");
-      } else {
-        if (pos === null) return; // not browsing — Down does nothing here.
-        if (pos > 0) {
-          historyPosRef.current = pos - 1;
-          const idx = ring.length - 1 - historyPosRef.current;
-          // Caret to the END so a repeated ArrowDown walks forward toward the
-          // newest the same way Up walks back.
-          composerRef.current?.setMarkdown(ring[idx], "end");
-        } else {
-          // Stepping down past the newest → back to the live in-progress draft.
-          historyPosRef.current = null;
-          composerRef.current?.setMarkdown(liveDraftRef.current, "end");
-        }
-      }
+  // current text so it isn't lost. Returns whether the key was used.
+  function moveHistory(dir: "up" | "down"): boolean {
+    // Read the ring afresh on the way in. A message can reach this
+    // conversation without passing through this box — the workspace home's
+    // first prompt, a starter picked from the empty chat — and the copy this
+    // composer loaded when it mounted has never heard of those, so the
+    // up-arrow in a chat begun that way recalled nothing.
+    if (dir === "up" && historyPosRef.current === null) {
+      historyRef.current = readHistory(historyKeyRef.current);
     }
-    window.addEventListener("aura:composer:history-move", onHistoryMove);
-    return () =>
-      window.removeEventListener("aura:composer:history-move", onHistoryMove);
-  }, [text]);
+    const ring = historyRef.current;
+    if (ring.length === 0) return false;
+    const pos = historyPosRef.current;
+    if (dir === "up") {
+      if (pos === null) {
+        // Entering history: save the live draft, jump to the newest message.
+        liveDraftRef.current = text;
+        historyPosRef.current = 0;
+      } else if (pos < ring.length - 1) {
+        historyPosRef.current = pos + 1;
+      } else {
+        return true; // already at the oldest — nothing further back.
+      }
+      // Caret to the START so a held/repeated ArrowUp keeps walking back
+      // through EVERY earlier message, not just the newest one.
+      placeText(ring[ring.length - 1 - historyPosRef.current], "start");
+      return true;
+    }
+    if (pos === null) return false; // not browsing — Down moves the caret.
+    if (pos > 0) {
+      historyPosRef.current = pos - 1;
+      // Caret to the END so a repeated ArrowDown walks forward toward the
+      // newest the same way Up walks back.
+      placeText(ring[ring.length - 1 - historyPosRef.current], "end");
+    } else {
+      // Stepping down past the newest → back to the live in-progress draft.
+      historyPosRef.current = null;
+      placeText(liveDraftRef.current, "end");
+    }
+    return true;
+  }
 
   // Revoke object URLs on unmount so blob refs don't leak.
   useEffect(() => {
@@ -895,9 +679,9 @@ export function ManagerComposer({
       }
       const base = dictationBaseRef.current;
       const sep = base.length > 0 && !/\s$/.test(base) ? " " : "";
-      // Rewrite the editor's tail from the captured base — interim results
-      // replace, not append. setMarkdown also pushes the mirror via onChange.
-      composerRef.current?.setMarkdown(base + sep + collected);
+      // Rewrite the field's tail from the captured base — interim results
+      // replace, not append.
+      placeText(base + sep + collected);
     };
     rec.onerror = () => stopDictation();
     rec.onend = () => stopDictation();
@@ -905,7 +689,7 @@ export function ManagerComposer({
     try {
       rec.start();
       setListening(true);
-      composerRef.current?.focus();
+      textareaRef.current?.focus();
     } catch (err) {
       console.warn("[composer] recognition.start() failed", err);
       // start() can throw *after* the engine already took the input (a
@@ -1006,16 +790,14 @@ export function ManagerComposer({
   // focus is in the chat scrollback.
   useEffect(() => {
     function onWindowPaste(e: globalThis.ClipboardEvent) {
-      // Already consumed by an element handler — in particular Tiptap's
-      // `handlePaste` preventDefaults after ingesting a pasted image. Running
-      // again here attached the same screenshot TWICE (once per handler).
+      // Already consumed by an element handler — in particular the field's
+      // own paste, which attaches pasted files. Running again here attached
+      // the same screenshot TWICE (once per handler).
       if (e.defaultPrevented) return;
       const target = e.target as HTMLElement | null;
-      // Our own ProseMirror surface is contentEditable; if a paste inside it
-      // somehow got here unconsumed we still route it to the attachment tray.
-      // Only bail for OTHER editables.
-      const inOurEditor =
-        !!target && !!target.closest?.(".tiptap-composer-input");
+      // A paste inside our own field that got here unconsumed still routes to
+      // the attachment tray. Only bail for OTHER editables.
+      const inOurEditor = !!target && !!target.closest?.(".ui-composer");
       const inOtherEditable =
         target &&
         !inOurEditor &&
@@ -1038,7 +820,7 @@ export function ManagerComposer({
       }
       if (consumed) {
         e.preventDefault();
-        composerRef.current?.focus();
+        textareaRef.current?.focus();
       }
     }
     window.addEventListener("paste", onWindowPaste);
@@ -1076,19 +858,20 @@ export function ManagerComposer({
             ingestPath(path);
           }
         }
-        composerRef.current?.focus();
+        textareaRef.current?.focus();
       })();
     }
     function onDragHint(e: Event) {
       const detail = (
         e as CustomEvent<{ kind?: string | null; targetId?: string | null }>
       ).detail;
-      if (detail?.targetId) {
-        setDragOver(false);
-        return;
-      }
-      const kind = detail?.kind;
-      setDragOver(kind === "composer");
+      // The box shows its drop mark while a file is over the area that drops
+      // into it (the whole conversation, not only the box).
+      setOsDragOver(detail?.kind === "composer" && !detail?.targetId);
+      if (detail?.targetId) return;
+      // Over this composer: give it focus, which is how the box shows it is
+      // the one that will take the drop.
+      if (detail?.kind === "composer") textareaRef.current?.focus();
     }
     window.addEventListener(OS_FILE_DROP_COMPOSER, onComposerDrop);
     window.addEventListener(OS_FILE_DRAG, onDragHint);
@@ -1099,8 +882,10 @@ export function ManagerComposer({
   }, []);
 
   function onDrop(e: DragEvent<HTMLDivElement>) {
+    // The composer box takes dropped files itself; what reaches here is the
+    // rest — and files dropped while the box is read-only.
+    if (e.defaultPrevented) return;
     e.preventDefault();
-    setDragOver(false);
     // (M.5) Three drop shapes are real on macOS/Tauri:
     //   1) Files[] — handled below via ingestFile.
     //   2) text/uri-list — file:// URLs (folders or files dragged from
@@ -1144,7 +929,7 @@ export function ManagerComposer({
     // `/brain [query]` is a client-side affordance, not a message: it opens
     // the model picker so the user can swap the brain for the next turn. We
     // consume it here (clear the draft, don't dispatch to the brain) and let
-    // the BrainPicker's listener take over. Zero backend round-trip.
+    // the model picker's listener take over. Zero backend round-trip.
     if (/^\/brain(\s|$)/i.test(trimmed)) {
       window.dispatchEvent(
         new CustomEvent("aura:composer:open-brain-picker", {
@@ -1152,7 +937,6 @@ export function ManagerComposer({
         }),
       );
       setText("");
-      composerRef.current?.clear();
       return;
     }
     // While busy we don't drop the turn — we park it in the per-session
@@ -1168,7 +952,6 @@ export function ManagerComposer({
       const nextRing = pushHistory(historyRef.current, trimmed);
       historyRef.current = nextRing;
       writeHistory(historyKeyRef.current, nextRing);
-      setCanRecall(nextRing.length > 0);
     }
     historyPosRef.current = null;
     liveDraftRef.current = "";
@@ -1236,9 +1019,6 @@ export function ManagerComposer({
       return;
     }
     setText("");
-    // Reset the editor itself — it's uncontrolled, so clearing the `text`
-    // mirror alone wouldn't empty the document.
-    composerRef.current?.clear();
     for (const img of snapshot) {
       if (img.kind === "image" && img.preview_url)
         URL.revokeObjectURL(img.preview_url);
@@ -1273,10 +1053,57 @@ export function ManagerComposer({
     if (goalMode) setGoalMode(false);
   }
 
-  // Slash + `@file` menus are owned by `TiptapComposer` now — it tracks the
-  // live token under the caret and drives both popups, completing each into a
-  // real inline atom chip. The composer here only owns Enter=submit and the
-  // Esc=stop affordance, both forwarded into the editor's key handling below.
+  // The `/` and `@` lists: the composer box draws and filters them; this says
+  // which rows exist for the token under the caret.
+  const caret = textareaRef.current?.selectionStart ?? text.length;
+  const { suggestions, resolvePick } = useComposerSuggestions({
+    repoRoot,
+    before: text.slice(0, caret),
+    agentRows: agentCommands,
+    terminalAttaches: true,
+  });
+  // A chat a cloud workspace runs on one of the org's machines also offers
+  // its teammates after an `@`, first: a message opening with one is theirs.
+  const teammates = useChatTeammates(sessionId);
+  function onSuggestionSelect(pick: ComposerSuggestion) {
+    // The box has already put the pick in; a task or a folder means more.
+    setText((prev) => resolvePick(pick, prev) ?? prev);
+  }
+
+  /** Keys the box leaves to its host: Esc stops a streaming turn, ⌘↵ steers
+   *  it, and Up/Down at the field's ends walk this conversation's history. */
+  function onFieldKey(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (isInsertSnippetKey(e)) {
+      e.preventDefault();
+      snippet.trigger();
+      return;
+    }
+    if (e.key === "Escape" && busy && onStop) {
+      e.preventDefault();
+      onStop();
+      return;
+    }
+    if (e.key === "Enter" && !e.shiftKey && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      void submit({ steer: true });
+      return;
+    }
+    if (
+      (e.key === "ArrowUp" || e.key === "ArrowDown") &&
+      !e.shiftKey &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey
+    ) {
+      const el = e.currentTarget;
+      const collapsed = el.selectionStart === el.selectionEnd;
+      const atEdge =
+        e.key === "ArrowUp" ? el.selectionStart === 0 : el.selectionEnd === el.value.length;
+      if (collapsed && atEdge && moveHistory(e.key === "ArrowUp" ? "up" : "down")) {
+        e.preventDefault();
+      }
+    }
+  }
 
   // The agent's own mode this chip position asks for, when the running
   // agent has modes at all. Null = the chip is the prompt steer it has
@@ -1306,14 +1133,6 @@ export function ManagerComposer({
     });
   }
 
-  const canSend = !busy && (text.trim().length > 0 || images.length > 0);
-  // While a turn is in flight, the same content can be parked in the queue
-  // (W2) instead of sent — Enter or the queue button enqueues it.
-  // The primary busy-state follow-up button. It runs whatever the follow-up
-  // pref says — queue (drain on turn-end) or steer (redirect now) — so the
-  // label/icon below track `followUpBehavior`, not a fixed "Queue".
-  const canFollowUp =
-    busy && !!onQueue && (text.trim().length > 0 || images.length > 0);
   // A SECOND, explicit steer control, shown only when steering isn't already
   // the default (when it is, the primary button steers, so this would be
   // redundant). Lets you fold a message into the running turn without changing
@@ -1323,529 +1142,184 @@ export function ManagerComposer({
     !!onSteer &&
     followUpBehavior !== "steer" &&
     (text.trim().length > 0 || images.length > 0);
-  // Redirect-into-the-stream glyph (a corner-down-right arrow) shared by the
-  // primary button when steering is the default and by the explicit steer
-  // control. Inlined — the sprite has no steer symbol.
-  const steerGlyph = (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M4 3.5v4a2 2 0 0 0 2 2h5.5" />
-      <path d="m9 7 3 2.5-3 2.5" />
-    </svg>
-  );
-  // Keep the editor itself LIVE while a turn streams, as long as the parent
-  // wired a queue handler — the user must be able to type and press Enter to
-  // queue a follow-up (W2). TiptapComposer turns its `busy` prop into
-  // `setEditable(!busy)`, so we only let it go read-only in the legacy,
-  // no-queue case (preserves the old block-on-busy behavior). Esc=Stop while
-  // busy is restored below via an onKeyDownCapture on the composer root, since
-  // a non-busy editor would otherwise stop forwarding Esc to onStop.
+  // Keep the field LIVE while a turn streams, as long as the parent wired a
+  // queue or steer handler — the user must be able to type and press Enter
+  // to follow up (W2). Only the legacy no-handler case goes read-only.
   const editorBusy = busy && !onQueue && !onSteer;
 
-  // "This turn" strip folded into the model switcher (#17): Fast + Effort ride
-  // inside the BrainPicker popover (`TurnModelControls`, passed as
-  // `turnControls`) instead of sitting as extra chips on the composer bar or,
-  // as they did until now, as two rows of a separate options popover one chip
-  // over. They are per-turn knobs for whichever agent runs the next turn, the
-  // same scope as the model, so they belong on the model's surface — and the
-  // chip carries what they currently say (`chipDetail`) so nothing is hidden
-  // by the move.
+  // The last mode that wasn't Plan, so leaving plan mode from the box's own
+  // Plan control (⇧Tab, its × pill, the add menu) returns to it.
+  const lastActModeRef = useRef<ComposerMode>(mode === "plan" ? "build" : mode);
+  // The subscription's own reading — its rolling windows — rides in the
+  // context meter beside the tokens. Null off-subscription, so the rows hide.
+  const claudeUsage = useClaudeUsage();
+  const usageDetails: { label: string; value: string }[] = [];
+  if (spend) {
+    const cost = (usd: number) => `${spend.estimated ? "~" : ""}${formatCost(usd)}`;
+    usageDetails.push({ label: "This response", value: cost(spend.costUsd) });
+    usageDetails.push({ label: "All repositories", value: cost(spend.spendUsd) });
+  }
+  if (claudeUsage?.fresh && typeof claudeUsage.five_h_pct === "number")
+    usageDetails.push({ label: "5h window", value: `${Math.round(100 - claudeUsage.five_h_pct)}% left` });
+  if (claudeUsage?.fresh && typeof claudeUsage.seven_d_pct === "number")
+    usageDetails.push({ label: "7d limit", value: `${Math.round(100 - claudeUsage.seven_d_pct)}% left` });
+  if (mode !== "plan") lastActModeRef.current = mode;
+
+  // Fast and effort ride inside the model control's panel (`turnControls`):
+  // they are per-turn knobs for whichever agent runs the next turn, the same
+  // scope as the model, and its chip says what they currently are.
+  const followUpPlaceholder =
+    busy && (onQueue || onSteer)
+      ? followUpBehavior === "steer" && onSteer
+        ? "Steer the running turn. ↵ redirects it now"
+        : onSteer
+          ? "Queue a follow-up. ⌘↵ to steer now"
+          : "Queue a follow-up. Sends when the agent finishes"
+      : goalMode
+        ? "Set a goal"
+        : planAwaitingReply
+          ? "Enter your plan adjustments here..."
+          : (placeholder ?? "Ask to make changes, @mention files, run /commands");
 
   return (
-    <ComposerFrame
+    // The OS drop router finds this composer by `data-os-drop`; the wrapper
+    // draws nothing, so the box is laid out exactly as the shared part is.
+    <div
+      style={{ display: "contents" }}
       data-os-drop="composer"
-      className={`composer relative ${dragOver ? "focus" : ""}${docked ? " composer-docked" : ""}`}
-      onKeyDownCapture={(e) => {
-        // Esc=Stop while a turn streams. Normally TiptapComposer forwards this
-        // (its own busy-gated handler), but we keep the editor editable while
-        // busy so follow-ups can be queued — so its `busy` is false and it no
-        // longer fires onEscapeWhileBusy. Re-home Stop here, in the capture
-        // phase, so Esc still halts the in-flight turn even while typing a
-        // queued message. Only when the parent wired Stop AND a queue handler
-        // (the live-editor case); otherwise TiptapComposer's own path runs.
-        if (e.key === "Escape" && busy && onStop && (onQueue || onSteer)) {
-          e.preventDefault();
-          e.stopPropagation();
-          onStop();
-        }
-      }}
       onDragOver={(e) => {
-        // Accept OS file drags (Files) AND in-app path drags — the file tree
-        // and agent-terminal links carry only text/plain (or text/uri-list),
-        // no Files. Without preventDefault the browser refuses the drop, so a
-        // file-tree drag never lands here. dropEffect=copy pairs with the
-        // tree's effectAllowed=copyMove so the drop is permitted.
+        // The box accepts dragged files itself. In-app path drags — the file
+        // tree and agent-terminal links — carry only text/plain or
+        // text/uri-list, and without preventDefault the browser refuses them.
         const t = e.dataTransfer.types;
-        if (
-          t.includes("Files") ||
-          t.includes("text/uri-list") ||
-          t.includes("text/plain")
-        ) {
+        if (t.includes("Files") || t.includes("text/uri-list") || t.includes("text/plain")) {
           e.preventDefault();
           e.dataTransfer.dropEffect = "copy";
-          setDragOver(true);
+          if (document.activeElement !== textareaRef.current) textareaRef.current?.focus();
         }
       }}
-      onDragLeave={() => setDragOver(false)}
       onDrop={onDrop}
     >
-
-
-      {images.length > 0 && (
-        <div className="flex flex-wrap gap-2 pb-1.5">
-          {images.map((img) => (
-            <ImageThumb
-              key={img.id}
-              img={img}
-              onRemove={() => removeImage(img.id)}
-            />
-          ))}
-        </div>
-      )}
-
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/png,image/jpeg,image/gif,image/webp"
-        multiple
-        hidden
-        onChange={(e) => {
-          const files = e.target.files;
-          if (files) {
-            for (let i = 0; i < files.length; i++) ingestFile(files[i]);
-          }
-          e.target.value = "";
-        }}
-      />
-
-      {/* Rich composer — a Tiptap editor that turns `/commands` and
-          `@file` mentions into inline atom chips while serializing back to
-          plain `/cmd` / `@path` for the brain. Keyed by session so a swap
-          remounts with that session's restored draft (uncontrolled past
-          mount). Enter submits, Shift+Enter newlines, Esc stops while busy. */}
-      <TiptapComposer
-        key={sessionId ?? "__global"}
-        ref={composerRef}
-        repoRoot={repoRoot}
-        initialMarkdown={readDraft(draftKey(sessionId))}
-        busy={editorBusy}
-        placeholder={
-          busy && (onQueue || onSteer)
-            ? followUpBehavior === "steer" && onSteer
-              ? "Steer the running turn. ↵ redirects it now"
-              : onSteer
-                ? "Queue a follow-up. ⌘↵ to steer now"
-                : "Queue a follow-up. Sends when the agent finishes"
-            : (placeholder ??
-              "Ask to make changes, @mention files, run /commands")
-        }
+      <Composer
+        className={docked ? "composer-docked" : ""}
+        focusShortcut={`${modKeyLabel()}L`}
+        value={text}
         onChange={setText}
-        onSubmit={(opts) => void submit(opts)}
-        onEscapeWhileBusy={onStop}
-        onImageFiles={(files) => files.forEach(ingestFile)}
-        canRecallHistory={canRecall}
-        agentRows={agentCommands}
-      />
-
-      {agentModeError && (
-        <div role="alert" className="chat-notice">
-          Could not switch mode: {agentModeError}
-        </div>
-      )}
-      {driftedMode && (
-        <div className="chat-notice">Agent mode: {driftedMode}</div>
-      )}
-      <ComposerToolbar
-        mode={
-          <ChatModePicker
-            value={mode}
-            onChange={chooseMode}
-            disabled={editorBusy}
-          />
+        onSend={() => void submit()}
+        onStop={onStop}
+        running={busy}
+        // Queue mode while a turn streams and the follow-up waits for it;
+        // when follow-ups steer, Enter and the send button redirect the turn.
+        mode={busy && onQueue && !(followUpBehavior === "steer" && onSteer) ? "queue" : "send"}
+        disabled={editorBusy}
+        placeholder={followUpPlaceholder}
+        attachments={images.map((img) => ({
+          id: img.id,
+          name: img.name,
+          kind: img.kind === "image" ? "image" : "file",
+          previewUrl: img.preview_url || undefined,
+        }))}
+        onRemoveAttachment={removeImage}
+        onAttach={(files) => files.forEach(ingestFile)}
+        attachLongPaste
+        dragOver={osDragOver}
+        suggestions={[...teammates, ...suggestions, ...snippet.rows]}
+        onSuggestionSelect={onSuggestionSelect}
+        recording={listening}
+        onVoiceToggle={toggleListening}
+        planMode={mode === "plan"}
+        onPlanModeChange={(on) => chooseMode(on ? "plan" : lastActModeRef.current)}
+        textareaRef={textareaRef}
+        onKeyDown={onFieldKey}
+        context={
+          agentModeError ? (
+            <span role="alert">Could not switch mode: {agentModeError}</span>
+          ) : driftedMode ? (
+            <span>Agent mode: {driftedMode}</span>
+          ) : undefined
         }
-        model={
+        renderAddMenu={(openFiles) => (
+          <ComposerAddMenu
+            onAttach={openFiles}
+            onIssue={issueLink.toggle}
+            onWorkspace={repoRoot ? workspaceLinks.toggle : undefined}
+            onSnippet={snippet.trigger}
+            onPlan={() => chooseMode(mode === "plan" ? lastActModeRef.current : "plan")}
+            planMode={mode === "plan"}
+          >
+            <ComposerTurnMenu
+              mode={mode}
+              onModeChange={chooseMode}
+              modeDisabled={editorBusy}
+              approval={{ value: approval, onChange: setApproval }}
+              goal={
+                onPlanGoal
+                  ? { value: goalMode, onChange: setGoalMode, disabled: !repoRoot }
+                  : undefined
+              }
+              concise={{
+                value: outputStyle === "concise",
+                onChange: (on) => {
+                  if (on !== (outputStyle === "concise")) toggleConcise();
+                },
+              }}
+            />
+          </ComposerAddMenu>
+        )}
+        actions={
           <>
-            {sessionId && onBrainOverrideChange && onModelOverrideChange && (
-              <BrainPicker
-                sessionId={sessionId}
-                value={modelOverride}
-                onBrainChange={onBrainOverrideChange}
-                onModelChange={onModelOverrideChange}
-                // Stay switchable while a turn streams: brain/model/effort are all
-                // per-NEXT-turn knobs (ManagerChatView reads the override live at
-                // send), so changing them mid-stream simply targets the follow-up
-                // you're queueing. Only the legacy no-queue path locks it.
-                disabled={editorBusy}
-                variant="popover"
-                modalFooter={<ModelDefaultsPanel />}
-                turnControls={
-                  <TurnModelControls
-                    fast={fast}
-                    effort={effort}
-                    onFastChange={setFast}
-                    onEffortChange={setEffort}
-                    onPickingChange={setEffortListOpen}
-                  />
-                }
-                turnControlsExpanded={effortListOpen}
-                chipDetail={turnModelDetail(effort, fast)}
+            {history}
+            {/* How full the model's window is — present once the brain has
+                reported usage for this conversation. */}
+            {usage && (
+              <ContextUsageIndicator
+                usage={{
+                  used: usage.inputTokens + usage.outputTokens,
+                  total: modelOverride?.longContext ? 1_000_000 : 200_000,
+                  input: usage.inputTokens,
+                  output: usage.outputTokens,
+                }}
+                details={usageDetails}
               />
             )}
-          </>
-        }
-        options={
-          <>
-            <ChatOptionsFields
-              approval={approval}
-              onApprovalChange={setApproval}
-            />
-            {onPlanGoal && (
-              <ChipButton
-                title={
-                  goalMode
-                    ? "Sending as a goal. The brain will plan it through the crew loop. Click to unset."
-                    : "Send as a goal. The brain plans it through the crew loop and proves it"
-                }
-                chevron={false}
-                className={goalMode ? "chip-on" : undefined}
-                aria-pressed={goalMode}
-                disabled={!repoRoot}
-                onClick={() => setGoalMode((v) => !v)}
-              >
-                <svg className="ico-12">
-                  <use href="#i-target" />
-                </svg>
-                <span className="chip-label">Goal</span>
-              </ChipButton>
-            )}
-            <ChipButton
-              title={
-                outputStyle === "concise"
-                  ? "Concise answers on. Claude Code keeps replies short. Click to turn off."
-                  : "Concise answers. Claude Code keeps replies short; other engines ignore this"
-              }
-              chevron={false}
-              className={outputStyle === "concise" ? "chip-on" : undefined}
-              aria-pressed={outputStyle === "concise"}
-              onClick={toggleConcise}
-            >
-              <span className="chip-label">Concise</span>
-            </ChipButton>
-          </>
-        }
-        actions={
-          <div className="right justify-end" style={{ minWidth: 96 }}>
-            {/* Live context-fill gauge — hidden until the native brain reports
-              usage, then shows how full the model's window is (the Conductor
-              parity gap: a peripheral token meter on the composer, not buried
-              in a header). */}
-            {usage && (
-              <div className="mr-0.5">
-                <UsagePopover
-                  usage={usage}
-                  spend={spend}
-                  contextWindow={
-                    modelOverride?.longContext ? 1_000_000 : undefined
-                  }
-                  usageTitle={claudeUsage ? "Claude usage" : undefined}
-                  limit={
-                    claudeUsage?.fresh && claudeUsage.seven_d_pct != null
-                      ? {
-                          label: "7d limit",
-                          pctLeft: 100 - claudeUsage.seven_d_pct,
-                        }
-                      : null
-                  }
-                  account={
-                    modelOverride?.family
-                      ? { provider: modelOverride.family }
-                      : null
-                  }
-                />
-              </div>
-            )}
-            {/* Unified add (+) — attachments and dictation folded into one menu,
-              the way Conductor consolidated its composer inserts. */}
-            <div className="relative" ref={addRef}>
-              <button
-                type="button"
-                className="icon-btn-sm"
-                title="Add. Attach an image or dictate"
-                aria-expanded={addOpen}
-                onClick={() => setAddOpen((v) => !v)}
-                style={
-                  listening
-                    ? {
-                        color: "var(--color-red)",
-                        background: "var(--color-bg-2)",
-                      }
-                    : undefined
-                }
-              >
-                <svg className="ico">
-                  <use href="#i-plus" />
-                </svg>
-              </button>
-              {addOpen && (
-                <div
-                  className="absolute right-0 bottom-7 z-30 min-w-[184px] rounded-md py-1 shadow-lg"
-                  style={{
-                    background: "var(--color-bg-3)",
-                    border: "1px solid var(--color-line-soft)",
-                  }}
-                >
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAddOpen(false);
-                      fileInputRef.current?.click();
-                    }}
-                    className="w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left text-sm text-text-2 hover:bg-state-hover hover:text-text-1 transition-colors"
-                  >
-                    <svg className="ico-12">
-                      <use href="#i-image" />
-                    </svg>
-                    <span>Attach image…</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAddOpen(false);
-                      toggleListening();
-                    }}
-                    className="w-full flex items-center gap-2.5 px-2.5 py-1.5 text-left text-sm text-text-2 hover:bg-state-hover hover:text-text-1 transition-colors"
-                  >
-                    <svg className="ico-12">
-                      <use href="#i-mic" />
-                    </svg>
-                    <span>{listening ? "Stop dictation" : "Dictate"}</span>
-                  </button>
-                </div>
-              )}
-            </div>
-            {busy && onStop ? (
-              <>
-                {canFollowUp && (
-                  <Button
-                    type="button"
-                    variant="subtle"
-                    size="sm"
-                    className="font-mono text-accent"
-                    onClick={() => void submit()}
-                    title={
-                      followUpBehavior === "steer"
-                        ? "Steer. Redirects the running turn now (↵)"
-                        : "Queue. Sends when the current turn finishes (↵)"
-                    }
-                  >
-                    {followUpBehavior === "steer" ? (
-                      steerGlyph
-                    ) : (
-                      <svg className="ico-12">
-                        <use href="#i-arrow-up" />
-                      </svg>
-                    )}
-                    <span className="send-kbd">⏎</span>
-                  </Button>
-                )}
-                {canSteerNow && (
-                  <Button
-                    type="button"
-                    variant="subtle"
-                    size="sm"
-                    className="font-mono text-accent"
-                    onClick={() => void submit({ steer: true })}
-                    title="Steer. Fold this into the running turn now (⌘↵)"
-                  >
-                    {steerGlyph}
-                    <span className="send-kbd">⌘⏎</span>
-                  </Button>
-                )}
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="sm"
-                  className="font-mono"
-                  onClick={() => onStop()}
-                  aria-label="Stop response"
-                  title="Stop (Esc)"
-                >
-                  <svg
-                    width="10"
-                    height="10"
-                    viewBox="0 0 10 10"
-                    fill="currentColor"
-                    aria-hidden
-                  >
-                    <rect x="2" y="2" width="6" height="6" rx="1" />
-                  </svg>
-                  <span className="send-kbd">Esc</span>
-                </Button>
-              </>
-            ) : (
+            {canSteerNow && onStop && (
               <Button
-                type="button"
-                variant="default"
-                size="sm"
-                className="font-mono"
-                disabled={!canSend}
-                onClick={() => void submit()}
-                aria-label="Send message"
-                title="Send (↵)"
+                size="icon-sm"
+                variant="ghost"
+                aria-label="Steer now"
+                title="Steer. Fold this into the running turn now (⌘↵)"
+                onClick={() => void submit({ steer: true })}
               >
-                <ArrowUp size={15} />
-                <span className="send-kbd">⌘↵</span>
+                <CornerUpLeft />
               </Button>
             )}
-          </div>
+          </>
+        }
+        footer={
+          sessionId && onBrainOverrideChange && onModelOverrideChange ? (
+            <ManagerModelPicker
+              sessionId={sessionId}
+              value={modelOverride}
+              onBrainChange={onBrainOverrideChange}
+              onModelChange={onModelOverrideChange}
+              machine={machineBrain}
+              effort={effort}
+              fast={fast}
+              onEffortChange={setEffort}
+              onFastChange={setFast}
+              // Stay switchable while a turn streams: brain/model/effort are
+              // all per-NEXT-turn knobs (ManagerChatView reads the override
+              // live at send), so changing them mid-stream targets the
+              // follow-up being queued.
+              disabled={editorBusy}
+            />
+          ) : undefined
         }
       />
-    </ComposerFrame>
-  );
-}
-
-// (EffortGauge moved to `chat/TurnModelControls`, where the Effort row it
-// draws for now lives.)
-
-function ImageThumb({
-  img,
-  onRemove,
-}: {
-  img: ComposerImage;
-  onRemove: () => void;
-}) {
-  // (M.5) Three tile shapes:
-  //   image — thumbnail from the object URL.
-  //   text  — filename + a small "TXT" badge.
-  //   path  — last segment + a folder icon glyph.
-  const tipExtra = img.kind === "path" ? `\n${img.pathValue}` : "";
-  return (
-    <div
-      className="relative group w-14 h-14 rounded border border-line-soft overflow-hidden bg-bg-0 flex items-center justify-center"
-      title={`${img.name}${tipExtra}`}
-    >
-      {img.kind === "image" ? (
-        <img
-          src={img.preview_url}
-          alt={img.name}
-          className="w-full h-full object-cover"
-        />
-      ) : (
-        <div className="flex flex-col items-center justify-center text-text-3 text-2xs gap-0.5 px-1">
-          <svg className="w-[18px] h-[18px]">
-            <use href={img.kind === "path" ? "#i-folder" : "#i-file"} />
-          </svg>
-          <span className="truncate max-w-full">{img.name}</span>
-        </div>
-      )}
-      <button
-        type="button"
-        onClick={onRemove}
-        title="Remove"
-        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-bg-deep/80 text-text-1 text-2xs leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
-      >
-        ×
-      </button>
-    </div>
-  );
-}
-
-/** The options popover — Approvals, and only Approvals.
- *
- *  Fast and Effort used to be its first two rows. They moved into the model
- *  picker (`chat/TurnModelControls`), because they describe the next turn the
- *  way the model does and reading them meant opening a second menu that the
- *  first one never mentioned.
- *
- *  Approvals stayed deliberately. It is an autonomy policy, not a property of
- *  the turn: it decides what the agent may do to the repo without asking, and
- *  it holds until someone changes it back. "Bypass" in particular should take
- *  a trip to a settings menu, not ride along behind the chip you click to
- *  switch models. */
-function ChatOptionsFields({
-  approval,
-  onApprovalChange,
-}: {
-  approval: ApprovalPolicy | null;
-  onApprovalChange: (value: ApprovalPolicy | null) => void;
-}) {
-  const [listing, setListing] = useState(false);
-  const wasListing = useRef(listing);
-  const panelRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (wasListing.current !== listing) {
-      panelRef.current
-        ?.querySelector<HTMLButtonElement>(
-          listing ? ".chat-options-back" : '[data-setting="approval"]',
-        )
-        ?.focus();
-    }
-    wasListing.current = listing;
-  }, [listing]);
-  const approvalOption =
-    APPROVAL_OPTIONS.find((option) => option.value === approval) ??
-    APPROVAL_OPTIONS[0];
-  if (listing)
-    return (
-      <div className="chat-options-fields" ref={panelRef}>
-        <button
-          type="button"
-          className="chat-options-back"
-          onClick={() => setListing(false)}
-        >
-          <ChevronLeft size={14} />
-          <span>Approvals</span>
-        </button>
-        <div className="chat-settings-list" role="group" aria-label="Approvals">
-          {APPROVAL_OPTIONS.map((option) => {
-            const Icon = APPROVAL_ICONS[option.value ?? "default"];
-            return (
-              <button
-                type="button"
-                key={option.label}
-                className={`chat-setting-choice${option.value === "bypass" ? " is-danger" : ""}`}
-                aria-pressed={approval === option.value}
-                onClick={() => {
-                  onApprovalChange(option.value);
-                  setListing(false);
-                }}
-              >
-                <Icon width={14} height={14} />
-                <span className="chat-menu-copy">
-                  <strong>{option.label}</strong>
-                  <small>{option.hint}</small>
-                </span>
-                {approval === option.value && (
-                  <CheckMini width={14} height={14} />
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    );
-  return (
-    <div className="chat-options-fields" ref={panelRef}>
-      <button
-        type="button"
-        className={`chat-option-row${approval === "bypass" ? " is-danger" : ""}`}
-        data-setting="approval"
-        onClick={() => setListing(true)}
-      >
-        <Shield size={14} />
-        <span className="chat-option-label">Approvals</span>
-        <span className="chat-option-value">{approvalOption.label}</span>
-        <ChevronRight size={12} />
-      </button>
+      <IssueLinkDialog {...issueLink.dialog} />
+      <LinkWorkspacesDialog {...workspaceLinks.dialog} />
+      <SnippetPickerDialog {...snippet.picker} />
+      <SnippetFormDialog {...snippet.form} />
     </div>
   );
 }

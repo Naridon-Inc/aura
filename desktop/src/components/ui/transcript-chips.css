@@ -1,0 +1,51 @@
+/* Quiet lines in a transcript are the turn footer's facts: the session-start
+   line (model and tool count), the usage under a reply, and the conversation's
+   usage line in the dock. Images attached to a sent turn are the composer's
+   attachment chips, docked under the bubble; a chip opens the picture under
+   the row. Added here: the facts line without the footer's top gap or a
+   leading indent, the dock line aligned right and hidden over a terminal, and
+   a chip that is a button whose name truncates.
+*/
+
+.ui-transcript-facts {
+  margin-top: 0;
+}
+.ui-transcript-facts > .ui-turn-fact:first-child {
+  margin-left: 0;
+}
+.ui-session-usage {
+  justify-content: flex-end;
+  padding: 0 2px 4px;
+}
+/* A footnote on a conversation you are reading; over a terminal it is one
+   more row of small grey text on top of small grey text. */
+.chat-workspace[data-chat-overlay] .ui-session-usage {
+  display: none;
+}
+
+.ui-sent-attachments {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+}
+.ui-sent-attachments > .ui-attachments {
+  justify-content: flex-end;
+  padding: 0;
+}
+button.ui-attachment {
+  max-width: 220px;
+  color: var(--ui-fg);
+  cursor: pointer;
+}
+button.ui-attachment:hover,
+button.ui-attachment[aria-pressed="true"] {
+  background: var(--ui-accent);
+}
+.ui-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

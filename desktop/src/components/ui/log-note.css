@@ -1,0 +1,86 @@
+/* The Add a note dialog: one text area, then the changed files the note
+   covers as a ticked list in a bordered box (the same box the Dashboard's
+   repository list uses), with help text under it. */
+.ui-log-note-files {
+  margin-top: 16px;
+  font-size: 14px;
+}
+.ui-log-note-files-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.ui-log-note-files-head > span:first-child {
+  font-weight: 500;
+}
+.ui-log-note-count {
+  margin-left: 4px;
+  margin-right: auto;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-log-note-list {
+  max-height: 180px;
+  margin: 8px 0 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+.ui-log-note-list .ui-check-label {
+  min-height: 32px;
+  min-width: 0;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.ui-log-note-list .ui-check-label:hover {
+  background: var(--ui-accent);
+}
+.ui-log-note-list .ui-check-label[data-unpicked] .ui-log-note-name {
+  color: var(--ui-muted-fg);
+}
+.ui-log-note-tag {
+  width: 12px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-log-note-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-log-note-dir {
+  min-width: 0;
+  margin-left: auto;
+  padding-left: 16px;
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-log-note-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 8px;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-log-note-help {
+  margin: 8px 0 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-log-note-files + .ui-alert {
+  margin-top: 16px;
+}

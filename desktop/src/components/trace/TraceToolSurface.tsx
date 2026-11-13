@@ -14,7 +14,7 @@ import { ReviewDialog } from "../dialogs/ReviewDialog";
 import { AttestationsDialog } from "../dialogs/AttestationsDialog";
 import { DoctorDialog } from "../dialogs/DoctorDialog";
 import { TimeMachinePane } from "../workpanes/TimeMachinePane";
-import { ImpactsPane } from "../workpanes";
+import { ImpactsPane } from "./impacts/ImpactsPane";
 import type { TraceToolKind } from "../../lib/editorStore";
 
 export function TraceToolSurface({

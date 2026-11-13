@@ -1,199 +1,28 @@
-//! Pre-first-message hint for the native Aura chat.
+//! What an empty conversation shows before its first message.
 //!
-//! Conductor-style: NOT a big centered hero. A calm, compact cluster that sits
-//! quietly near the top of the pane (a quiet hint above the composer), not a
-//! medallion stranded in the dead-center. One short tagline + a tight pill-row
-//! of suggestion chips that prefill the composer. On a personal copy, a single
-//! quiet one-line working-copy note (REAL git data) precedes it — never a
-//! bordered hero card. Lots of breathing room, nothing oversized.
+//! The first chat in a project says where you are: the copy of the repository
+//! this chat works in, the branch it was made from, and how its setup script
+//! is doing. Once the project has
+//! history, a new chat says which folder it is in and offers the earlier
+//! conversations and saved plans as attachments for the first message. The
+//! starters for a first chat sit above the composer (ChatStarters).
 
 import * as React from "react";
 import { GitBranch } from "lucide-react";
 import { api } from "../../../lib/api";
 import { worktreeParentName } from "../../../lib/workspaceLabel";
 import { CloudGlyph } from "../../ui/cloud-glyph";
+import { Timeline } from "../../ui/timeline";
 import { chatPlace, chatPlaceSentence } from "./chatPlace";
 import { getActiveWorkspaceRoot } from "../../../lib/editorStore";
-
-/** A single suggestion starter: leading glyph, short label, prefill prompt. */
-interface Suggestion {
-  label: string;
-  prompt: string;
-  glyph: React.ReactNode;
-}
-
-/** Shared props for the monoline inline glyphs: ~14px, currentColor, calm. */
-const glyphProps = {
-  width: 14,
-  height: 14,
-  viewBox: "0 0 24 24",
-  fill: "none",
-  stroke: "currentColor",
-  strokeWidth: 1.25,
-  strokeLinecap: "round" as const,
-  strokeLinejoin: "round" as const,
-  "aria-hidden": true,
-};
-
-/** Checklist + target — "find ready work". */
-function ReadyWorkGlyph() {
-  return (
-    <svg {...glyphProps}>
-      <path d="M4 6h8" />
-      <path d="M4 12h8" />
-      <path d="M4 18h6" />
-      <circle cx="17.5" cy="16.5" r="4" />
-      <path d="M17.5 14.5v2l1.3 1.3" />
-    </svg>
-  );
-}
-
-/** Map / route — "plan a feature". */
-function PlanGlyph() {
-  return (
-    <svg {...glyphProps}>
-      <path d="M9 4 4 6v14l5-2 6 2 5-2V4l-5 2-6-2Z" />
-      <path d="M9 4v14" />
-      <path d="M15 6v14" />
-    </svg>
-  );
-}
-
-/** Bug — "hunt a bug". */
-function BugGlyph() {
-  return (
-    <svg {...glyphProps}>
-      <rect x="8" y="8" width="8" height="11" rx="4" />
-      <path d="M8 13H4" />
-      <path d="M20 13h-4" />
-      <path d="M8.5 9 6.5 6.5" />
-      <path d="M15.5 9 17.5 6.5" />
-      <path d="M8 17l-3 1.5" />
-      <path d="M16 17l3 1.5" />
-      <path d="M12 8V5" />
-    </svg>
-  );
-}
-
-/** Book / compass — "explain this codebase". */
-function ExplainGlyph() {
-  return (
-    <svg {...glyphProps}>
-      <path d="M4 5.5A2 2 0 0 1 6 4h12v15H6a2 2 0 0 0-2 2V5.5Z" />
-      <circle cx="11" cy="11.5" r="3.2" />
-      <path d="m12.6 9.9-1 2.2-2.2 1 1-2.2 2.2-1Z" />
-    </svg>
-  );
-}
-
-const SUGGESTIONS: ReadonlyArray<Suggestion> = [
-  {
-    label: "Find ready work",
-    prompt:
-      "What's ready to work on right now? Look at what's on the board, skip anything that's blocked, and pick the most important one.",
-    glyph: <ReadyWorkGlyph />,
-  },
-  {
-    label: "Plan a feature",
-    prompt:
-      "Help me plan a new feature. Ask me what we're building, then break it into clear, ordered steps.",
-    glyph: <PlanGlyph />,
-  },
-  {
-    label: "Hunt a bug",
-    prompt: "There's a bug. Help me reproduce it, find the root cause, and fix it.",
-    glyph: <BugGlyph />,
-  },
-  {
-    label: "Explain this codebase",
-    prompt:
-      "Give me a tour of this codebase. The architecture and the main modules.",
-    glyph: <ExplainGlyph />,
-  },
-];
-
-/** One suggestion chip. Interactive only when an `onPick` handler is given;
- *  otherwise it renders as a calm, non-interactive affordance. */
-function SuggestionChip({
-  suggestion,
-  onPick,
-}: {
-  suggestion: Suggestion;
-  onPick?: (prompt: string) => void;
-}) {
-  const [hover, setHover] = React.useState(false);
-  const interactive = typeof onPick === "function";
-
-  return (
-    <button
-      type="button"
-      disabled={!interactive}
-      onClick={interactive ? () => onPick?.(suggestion.prompt) : undefined}
-      onMouseEnter={interactive ? () => setHover(true) : undefined}
-      onMouseLeave={interactive ? () => setHover(false) : undefined}
-      className="inline-flex items-center gap-1.5 text-sm transition-colors"
-      style={{
-        background: hover ? "var(--color-bg-2)" : "transparent",
-        border: "1px solid",
-        borderColor: hover ? "var(--color-line)" : "var(--color-line-soft)",
-        borderRadius: "999px",
-        padding: "4px 10px",
-        color: hover ? "var(--color-text-1)" : "var(--color-text-2)",
-        cursor: interactive ? "pointer" : "default",
-      }}
-    >
-      <span
-        className="inline-flex items-center"
-        style={{ color: "var(--color-text-4)" }}
-      >
-        {suggestion.glyph}
-      </span>
-      <span>{suggestion.label}</span>
-    </button>
-  );
-}
-
-/** The single, quiet identity mark — a small code-bracket frame around a dot,
- *  drawn from the faintest line/text tokens. Deliberately tiny so it reads as a
- *  calm inline hint, not a hero medallion. Echoes `WorkSurfaceEmpty`'s
- *  restraint — recognizably Aura, but it recedes rather than announcing itself. */
-function BracketGlyph() {
-  return (
-    <svg
-      width={30}
-      height={22}
-      viewBox="0 0 56 40"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="text-text-5"
-      aria-hidden
-    >
-      <path d="M18 6 8 20l10 14" />
-      <path d="M38 6l10 14-10 14" />
-      <circle cx="28" cy="20" r="1.75" fill="currentColor" stroke="none" />
-    </svg>
-  );
-}
+import { usePlanPages, usePriorChats } from "./chatStartSources";
+import { PlanChips, TranscriptChips } from "./ChatStartAttachments";
+import { useSetupEntry } from "./ChatSetupEntry";
+import "../../ui/chat-start.css";
 
 /** A branch name is "default" — the shared trunk, not a personal copy. We never
  *  show the working-copy context card on these. */
 const DEFAULT_BRANCHES = new Set(["main", "master"]);
-
-/** Turn a branch name into plain words: drop the leading `work/`, `lane/`, or
- *  `feat/` namespace, then dashes/underscores → spaces. `work/fix-login` reads
- *  as "fix login". A lane keeps the agent in its own segment
- *  (`lane/claude/fix-login`), which is machinery too — the words are the part
- *  after it. Falls back to the raw name if there's nothing to humanize. */
-function humanizeBranch(branch: string): string {
-  const tail = branch
-    .replace(/^lane\/[^/]+\//, "")
-    .replace(/^(work|lane|feat|feature|fix|chore)\//, "");
-  const words = tail.replace(/[-_]+/g, " ").trim();
-  return words || branch;
-}
 
 /** Drop the `origin/` (or any remote) prefix from an upstream ref so the base
  *  reads as a plain branch name: `origin/main` → "main". */
@@ -277,129 +106,137 @@ function useChatContext(repoRoot?: string): {
   return { ctx, reachable };
 }
 
-/** The working-copy note, compact: a single quiet line (muted branch icon +
- *  plain-language sentence) instead of a bordered hero card. Shown only on
- *  non-default branches. Names the copy in plain words and, when we could read
- *  it, the base it was branched from — all from REAL git data, never faked. */
-function ChatContextNote({
+function folderName(path: string): string {
+  return path.split("/").filter(Boolean).pop() ?? path;
+}
+
+/** The first chat in a copy of the repository: the copy named, then the
+ *  branch it was made from, read from git. */
+function NewCopyCard({
   ctx,
   projectLabel,
   repoRoot,
+  sessionId,
 }: {
   ctx: ChatContext;
   projectLabel?: string;
-  repoRoot?: string;
+  repoRoot: string;
+  sessionId?: string;
 }) {
-  // When this chat is a machine worktree, name the project it's a copy OF
-  // (the parent folder, e.g. "New Git") rather than the worktree's own hash
-  // dir — "a copy of agent-a6f18ff…" reads as gibberish to the audience.
-  const parent = repoRoot ? worktreeParentName(repoRoot) : null;
-  const copyName = parent
-    ? `a copy of ${parent}`
-    : projectLabel
-    ? `a copy of ${projectLabel}`
-    : `a copy called ${humanizeBranch(ctx.branch)}`;
-
+  const repo = worktreeParentName(repoRoot) ?? projectLabel ?? folderName(repoRoot);
+  const setup = useSetupEntry(repoRoot, sessionId);
+  const entries = [
+    ...(ctx.base
+      ? [
+          {
+            id: "branched",
+            title: "",
+            marker: <GitBranch aria-hidden />,
+            detail: (
+              <>
+                Branched <span className="ui-chat-start-mono">{ctx.branch}</span> from{" "}
+                <span className="ui-chat-start-mono">{ctx.base}</span>
+              </>
+            ),
+          },
+        ]
+      : []),
+    ...(setup ? [setup] : []),
+  ];
   return (
-    <div
-      className="inline-flex items-center gap-1.5 text-sm leading-snug"
-      style={{ color: "var(--color-text-3)" }}
-    >
-      <GitBranch size={12} style={{ color: "var(--color-text-4)" }} aria-hidden />
-      <span>
-        You&rsquo;re working in {copyName}
-        {ctx.base ? `, branched from ${ctx.base}` : ""}.
-      </span>
+    <div className="ui-chat-start-copy">
+      <div className="ui-chat-start-copy-head">
+        <h3>
+          You&rsquo;re in a new copy of <span className="ui-chat-start-mono">{repo}</span> called{" "}
+          <span className="ui-chat-start-mono">{folderName(repoRoot)}</span>
+        </h3>
+      </div>
+      {entries.length > 0 && <Timeline entries={entries} />}
     </div>
   );
 }
 
-/** Pre-first-message hint: a calm, compact cluster — NOT a centered hero. It
- *  sits near the top of the pane (a quiet hint above the composer): a small
- *  inline bracket glyph beside a short tagline, a tight pill-row of suggestion
- *  chips that prefill the composer via `onPick`, and, on a personal copy, a
- *  single quiet working-copy line built from real git data. */
+/** One quiet line naming where the work happens. */
+function PlaceLine({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <p className="ui-chat-empty-place">
+      {icon}
+      <span>{children}</span>
+    </p>
+  );
+}
+
 export function ChatEmptyState({
-  onPick,
   projectLabel,
   repoRoot,
   machineName,
+  sessionId,
 }: {
-  onPick?: (prompt: string) => void;
   projectLabel?: string;
   repoRoot?: string;
-  /** Set when this conversation's hands are on a connected machine. Same
-   *  opening, same chips — the one line underneath changes, because the
-   *  working copy being described is over there. */
+  /** Set when this conversation's hands are on a connected machine: the
+   *  working copy is over there, so the local git reads are skipped. */
   machineName?: string;
+  /** The conversation whose composer takes the attachments. Without one there
+   *  is nothing to attach to, so only the place is said. */
+  sessionId?: string;
 }) {
-  // The local working-copy line is read from this laptop's git. On a
-  // conversation whose hands are on a box that would be a confident sentence
-  // about the wrong checkout, so we don't ask for it at all.
   const { ctx, reachable } = useChatContext(machineName ? undefined : repoRoot);
+  const prior = usePriorChats(repoRoot, sessionId);
+  const plans = usePlanPages(machineName ? undefined : repoRoot);
 
   // Where this chat's hands are, against where the window is standing. A chat
   // runs in the project it was started against, which is right and was also
   // silent: on 2026-08-23 the sidebar said `zagreb` and this surface described
-  // `managua`, a worktree that had already been deleted. Home launches agent
-  // work, so the reader has to be told before they send a prompt.
+  // `managua`, a worktree that had already been deleted.
   const place = machineName
     ? ({ kind: "same" } as const)
     : chatPlace(repoRoot, getActiveWorkspaceRoot(), reachable);
   const placeLine = chatPlaceSentence(place);
+  const firstChat = prior !== null && prior.length === 0;
+  const dir = repoRoot && !machineName ? folderName(repoRoot) : undefined;
 
   return (
-    <div className="flex flex-col items-start gap-3 px-6 pt-10 pb-2 select-none">
-      <div className="flex items-center gap-2">
-        <BracketGlyph />
-        <span className="text-base" style={{ color: "var(--color-text-3)" }}>
-          Ask Aura to plan a feature, hunt a bug, or explain the codebase.
-        </span>
-      </div>
-      <div className="flex flex-wrap items-center gap-1.5 max-w-[480px]">
-        {SUGGESTIONS.map((suggestion) => (
-          <SuggestionChip key={suggestion.label} suggestion={suggestion} onPick={onPick} />
-        ))}
-      </div>
-      {machineName ? (
-        <div className="mt-0.5">
+    <div className="ui-chat-start">
+      {prior === null ? null : firstChat ? (
+        machineName ? (
           <MachineNote machineName={machineName} />
-        </div>
-      ) : ctx && place.kind === "same" ? (
-        <div className="mt-0.5">
-          <ChatContextNote ctx={ctx} projectLabel={projectLabel} repoRoot={repoRoot} />
-        </div>
-      ) : null}
-      {/* Said instead of the working-copy line, never beside it: two sentences
-          naming two different places is the confusion this is here to end. */}
-      {placeLine && (
-        <div
-          className="mt-0.5 inline-flex items-center gap-1.5 text-sm leading-snug"
-          style={{ color: "var(--color-text-3)" }}
-        >
-          <GitBranch size={12} style={{ color: "var(--color-text-4)" }} aria-hidden />
-          <span>{placeLine}</span>
+        ) : ctx && repoRoot && place.kind === "same" ? (
+          <NewCopyCard ctx={ctx} projectLabel={projectLabel} repoRoot={repoRoot} sessionId={sessionId} />
+        ) : dir ? (
+          <NewChatIn dir={dir} />
+        ) : null
+      ) : (
+        <div className="ui-chat-start-history">
+          {machineName ? <MachineNote machineName={machineName} /> : dir && <NewChatIn dir={dir} />}
+          {sessionId && prior.length > 0 && <TranscriptChips sessionId={sessionId} chats={prior} />}
+          {sessionId && plans.length > 0 && repoRoot && (
+            <PlanChips sessionId={sessionId} repoRoot={repoRoot} plans={plans} />
+          )}
         </div>
       )}
+      {/* Said instead of the working-copy card, never beside it: two
+          sentences naming two different places is the confusion this ends. */}
+      {placeLine && <PlaceLine icon={<GitBranch size={12} aria-hidden />}>{placeLine}</PlaceLine>}
     </div>
   );
 }
 
-/** The same quiet one-liner the local chat gets, saying the one thing that is
- *  actually different: which disk the answers come from. Worth stating plainly
- *  — everything else on screen is identical, which is the point, and that is
- *  exactly what makes an unlabelled remote chat easy to mistake for a local
- *  one. */
+function NewChatIn({ dir }: { dir: string }) {
+  return (
+    <p className="ui-chat-start-label">
+      New chat in <span className="ui-chat-start-mono">/{dir}</span>.
+    </p>
+  );
+}
+
+/** Which disk the answers come from, on a conversation whose hands are on a
+ *  connected machine: everything else on screen is the same as a local chat,
+ *  which is what makes an unlabelled remote one easy to mistake for it. */
 function MachineNote({ machineName }: { machineName: string }) {
   return (
-    <div
-      className="inline-flex items-center gap-1.5 text-sm leading-snug"
-      style={{ color: "var(--color-text-3)" }}
-    >
-      <CloudGlyph size={12} />
-      <span>
-        Reading and running on {machineName}. The conversation is kept here.
-      </span>
-    </div>
+    <PlaceLine icon={<CloudGlyph size={12} />}>
+      Reading and running on {machineName}. The conversation is kept here.
+    </PlaceLine>
   );
 }

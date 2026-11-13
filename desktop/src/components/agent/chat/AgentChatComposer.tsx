@@ -1,22 +1,18 @@
-import { ComposerFrame, ComposerToolbar, ChatModePicker, promptForChatMode, type ChatMode } from "../../chat/ChatComposer";
-import { BrainSwitcherModal } from "../../manager/BrainSwitcherModal";
-import { ModelCatalogPopover, agentCatalogBrain, useLiveModelCatalog, useModelFavorites } from "../../chat/ModelCatalogPopover";
-import { SquareTerminal } from "lucide-react";
 //! The CLI agent's composer, built to the same spec as the Aura brain's.
 //!
-//! What was here before was a bare `<textarea>` and a send button. The brain's
-//! composer, sitting one tab away, has a rich editor with `@file` mentions and
-//! slash chips, a model picker, per-session drafts, up-arrow recall of what you
-//! sent, and a send cluster that knows the difference between "send", "queue"
-//! and "stop". Two composers in one app, one of them a decade behind the other,
-//! and the poor one is the one you use when you are driving Gemini or Codex.
-//! This closes that.
+//! What was here before was a bare text field and a send button. The brain's
+//! composer, sitting one tab away, has `@file` mentions and `/` commands, a
+//! model picker, per-session drafts, up-arrow recall of what you sent, and a
+//! send cluster that knows the difference between "send", "queue" and "stop".
+//! Two composers in one app, one of them a decade behind the other, and the
+//! poor one is the one you use when you are driving Gemini or Codex. This
+//! closes that.
 //!
-//! It gets there by mounting the SAME input surface the brain mounts —
-//! `TiptapComposer` — which is where mentions, slash chips, paste handling and
-//! the keyboard contract actually live, and which never knew anything about the
-//! brain in the first place. Draft and recall come from the shared
-//! `composerDrafts` rules. So this file is only the parts that genuinely differ
+//! It gets there by mounting the SAME composer box the brain mounts — the
+//! shared `Composer` — with the same `/` and `@` lists
+//! (`useComposerSuggestions`), and which never knew anything about the brain in
+//! the first place. Draft and recall come from the shared `composerDrafts`
+//! rules. So this file is only the parts that genuinely differ
 //! for a CLI agent, and there is one real difference: nothing here is a request
 //! field. Everything is text typed into a live REPL.
 //!
@@ -36,27 +32,34 @@ import { SquareTerminal } from "lucide-react";
 //! The clearest case is image attachment: the brain base64s an image into the
 //! request, and a PTY has no such channel — a CLI agent reads pictures off
 //! disk by path. A pasted screenshot has no path, so instead of dropping it
-//! silently the paste says so and points at the thing that does work.
+//! silently the paste says so and points at the thing that does work. A file
+//! picked from the add menu does have one, so that path is what gets written.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { SquareSlash } from "lucide-react";
 
 import { api } from "../../../lib/api";
+import { readClipboardText } from "../../../lib/clipboard";
+import { isEditableTarget } from "../../../lib/keymap";
 import { settleAgentTurn } from "../../../lib/agentEventStore";
 import { toast } from "../../../lib/toast";
-import { familyOf, type CatalogModel } from "../../../lib/modelCatalog";
+import { pickPath } from "../../../lib/nativeDialog";
+import { useComposerSuggestions, type SlashItem } from "../../chat/composer/useComposerSuggestions";
+import { promptForChatMode, type ChatMode } from "../../chat/composer/chatMode";
+import { useComposerCollapse } from "../../chat/composerCollapse";
+import { AgentCliModelPicker } from "../../chat/model/AgentModelPickers";
+import { ComposerTurnMenu } from "../../chat/composer/ComposerTurnMenu";
+import { Composer, type ComposerSuggestion } from "../../ui/composer";
+import "../../chat/ChatComposer.css";
+import "../../ui/chat-composer.css";
+import { ComposerAddMenu } from "../../ui/composer-tools";
+import { TimelineMenuItems, TimelineViewSwitch } from "../normalized/timelineTools";
 import {
-  TiptapComposer,
-  type SlashItem,
-  type TiptapComposerHandle,
-} from "../../manager/TiptapComposer";
-import { ChipButton } from "../../ui/chip";
-import { Button } from "../../ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuTrigger,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
 } from "../../ui/dropdown-menu";
 
 import {
@@ -70,7 +73,6 @@ import {
 import {
   agentSlashRows,
   commandsForAgent,
-  type AgentCliCommands,
 } from "./agentCliCommands";
 
 const DRAFT_PREFIX = "aura.agentchat.draft:";
@@ -114,6 +116,7 @@ export function AgentChatComposer({
   running,
   onSwitchToTerminal,
   docked = false,
+  overlay = false,
 }: {
   agentId: string;
   /** The live PTY child every control here writes into. */
@@ -127,42 +130,57 @@ export function AgentChatComposer({
   onSwitchToTerminal?: () => void;
   /** A question card sits directly above: fuse onto it as one panel. */
   docked?: boolean;
+  /** The pane is showing the terminal, not the conversation, so this composer
+   *  is floating over it rather than sitting under a transcript. It collapses
+   *  to a strip while empty and declares itself over the native surface while
+   *  open — see `composerCollapse` and `composerOverlay`. */
+  overlay?: boolean;
 }) {
   const commands = commandsForAgent(agentId);
-  const composerRef = useRef<TiptapComposerHandle | null>(null);
-  const [text, setText] = useState("");
-  const [mode, setMode] = useState<ChatMode>("build");
-
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const draftKey = composerKey(DRAFT_PREFIX, ptySessionId);
   const histKey = composerKey(HISTORY_PREFIX, ptySessionId);
+  const [text, setText] = useState(() => readDraft(draftKey));
+  const [mode, setMode] = useState<ChatMode>("build");
+
+  /** Put `next` in the field and park the caret at one end of it. */
+  const placeText = useCallback((next: string, caret: "start" | "end" = "end") => {
+    setText(next);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      const at = caret === "start" ? 0 : next.length;
+      el.setSelectionRange(at, at);
+    });
+  }, []);
+  /** Add to the end of the draft, a space after what is already there. */
+  const appendText = useCallback((add: string) => {
+    setText((prev) => (prev.trim() ? `${prev.replace(/\s+$/, "")} ${add}` : add));
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
 
   // The recall ring, loaded once per session. Held in a ref rather than state
   // because nothing renders from it — it only answers arrow keys.
   const historyRef = useRef<string[]>([]);
   const historyPosRef = useRef(0);
   const liveDraftRef = useRef("");
-  // WHETHER there is anything to recall is rendered (the editor only claims
-  // ArrowUp when we say there is), so it cannot live in the ref. Reading
-  // `historyRef.current.length` during render meant the load below — which
-  // mutates a ref and schedules no re-render — never reached the editor: a
-  // freshly opened session had recall switched off, and it only came on after
-  // some unrelated state change, i.e. after you typed. Which is exactly when
-  // you no longer want it.
-  const [hasHistory, setHasHistory] = useState(false);
   const latestText = useRef(text);
   latestText.current = text;
   useEffect(() => () => writeDraft(draftKey, latestText.current), [draftKey]);
+  // A different session: its own draft, its own ring.
+  useEffect(() => {
+    setText(readDraft(draftKey));
+  }, [draftKey]);
   const sending = useRef(false);
   useEffect(() => {
     historyRef.current = readHistory(histKey);
     historyPosRef.current = 0;
-    setHasHistory(historyRef.current.length > 0);
   }, [histKey]);
 
-  // An interrupt is in flight. Rendered (the button says so and refuses to
-  // stack a second attempt on the first) and read from inside the wait loop,
-  // which is why it is both.
-  const [interrupting, setInterrupting] = useState(false);
+  // An interrupt is in flight: a second Stop press must not stack a second
+  // attempt on the first.
   const interruptingRef = useRef(false);
 
   // `running` as the wait loop needs it: the current value, not the one the
@@ -208,19 +226,35 @@ export function AgentChatComposer({
     // Optimistic clear, restored on failure — losing what someone typed to a
     // silent error is the one outcome worth extra code to avoid.
     setText("");
-    composerRef.current?.clear();
     historyRef.current = pushHistory(historyRef.current, body);
     historyPosRef.current = 0;
     writeHistory(histKey, historyRef.current);
-    setHasHistory(true);
     writeDraft(draftKey, "");
     const ok = await sendLine(body.startsWith("/") ? body : promptForChatMode(body, mode));
-    if (!ok) {
-      setText(body);
-      composerRef.current?.setMarkdown(body, "end");
-    }
     sending.current = false;
-    composerRef.current?.focus();
+    if (!ok) placeText(body, "end");
+    else textareaRef.current?.focus();
+  }
+
+  /** Put files (or a folder) in front of the agent the way a CLI reads them:
+   *  by path. There is no upload channel to a terminal agent, so the add menu
+   *  writes the absolute path into the draft, quoted when it has a space —
+   *  the same text a file dropped on the terminal types. */
+  async function attachPaths(directory: boolean) {
+    let picked: string | string[] | null;
+    try {
+      picked = await pickPath({
+        directory,
+        multiple: !directory,
+        title: directory ? "Add a folder for the agent" : "Add files for the agent",
+      });
+    } catch (e) {
+      toast.danger("Couldn't open the file picker", String(e));
+      return;
+    }
+    const paths = (Array.isArray(picked) ? picked : picked ? [picked] : []).filter(Boolean);
+    if (paths.length === 0) return;
+    appendText(paths.map((p) => (/\s/.test(p) ? `"${p}"` : p)).join(" "));
   }
 
   /** Interrupt the running turn, and confirm it actually stopped.
@@ -239,7 +273,6 @@ export function AgentChatComposer({
   async function stop() {
     if (interruptingRef.current) return;
     interruptingRef.current = true;
-    setInterrupting(true);
     try {
       for (let i = 0; i < INTERRUPT_ATTEMPTS; i++) {
         await api.agentPtyWrite(ptySessionId, [ESC_BYTE]);
@@ -258,7 +291,6 @@ export function AgentChatComposer({
       toast.danger("Couldn't interrupt the agent", String(e));
     } finally {
       interruptingRef.current = false;
-      setInterrupting(false);
     }
   }
 
@@ -290,280 +322,218 @@ export function AgentChatComposer({
     });
   }
 
-  // Up/down arrow recall, driven by the editor's own history events. The editor
-  // only claims the key when the caret is at the document edge and no popup is
-  // open, so ordinary cursor movement is untouched.
-  useEffect(() => {
-    function onMove(e: Event) {
-      const dir = (e as CustomEvent<{ dir: number }>).detail?.dir;
-      if (dir == null) return;
-      const ring = historyRef.current;
-      if (ring.length === 0) return;
-      if (dir < 0) {
-        // Stepping back. Snapshot the live draft on the first step so coming
-        // forward again returns what was actually being written.
-        if (historyPosRef.current === 0) liveDraftRef.current = text;
-        if (historyPosRef.current >= ring.length) return;
-        historyPosRef.current += 1;
-        const msg = ring[ring.length - historyPosRef.current];
-        setText(msg);
-        // Park the caret at the start so a held ArrowUp keeps walking back
-        // rather than sticking one message in.
-        composerRef.current?.setMarkdown(msg, "start");
-        return;
-      }
-      if (historyPosRef.current === 0) return;
-      historyPosRef.current -= 1;
-      const msg =
-        historyPosRef.current === 0
-          ? liveDraftRef.current
-          : ring[ring.length - historyPosRef.current];
-      setText(msg);
-      composerRef.current?.setMarkdown(msg, "end");
+  /** Up/down recall: a plain arrow with the caret at the very start (Up) or
+   *  end (Down) of the field walks what was sent in this session, so ordinary
+   *  caret movement through a multi-line draft is untouched. Returns whether
+   *  the key was used. */
+  function moveHistory(up: boolean): boolean {
+    const ring = historyRef.current;
+    if (ring.length === 0) return false;
+    if (up) {
+      // Stepping back. Snapshot the live draft on the first step so coming
+      // forward again returns what was actually being written.
+      if (historyPosRef.current === 0) liveDraftRef.current = text;
+      if (historyPosRef.current >= ring.length) return true;
+      historyPosRef.current += 1;
+      // Caret at the start so a held ArrowUp keeps walking back rather than
+      // sticking one message in.
+      placeText(ring[ring.length - historyPosRef.current], "start");
+      return true;
     }
-    window.addEventListener("aura:composer:history-move", onMove);
-    return () => window.removeEventListener("aura:composer:history-move", onMove);
-  }, [text]);
+    if (historyPosRef.current === 0) return false;
+    historyPosRef.current -= 1;
+    placeText(
+      historyPosRef.current === 0
+        ? liveDraftRef.current
+        : ring[ring.length - historyPosRef.current],
+      "end",
+    );
+    return true;
+  }
 
   const canSend = text.trim().length > 0;
 
-  // The `/` menu lists THIS CLI's commands. Everything typed here is typed into
-  // the child verbatim, so offering the brain's verbs — which only mean
+  // Over the terminal this composer is an overlay on something being read, so
+  // it folds to a strip until there is a reason to be a box. `docked` is one
+  // such reason: a question card above it is waiting on an answer that can
+  // only be typed here.
+  const collapse = useComposerCollapse({
+    overlaying: overlay,
+    empty: !canSend,
+    blocked: docked,
+    field: textareaRef,
+  });
+
+  // The `/` list offers THIS CLI's commands. Everything typed here is typed
+  // into the child verbatim, so offering the brain's verbs — which only mean
   // something to the app — would make every pick an unknown command.
   const slashRows = useCallback(
     (query: string): SlashItem[] =>
       agentSlashRows(agentId, query).map((r) => ({ ...r, source: "cli" as const })),
     [agentId],
   );
+  const caret = textareaRef.current?.selectionStart ?? text.length;
+  const { suggestions, resolvePick } = useComposerSuggestions({
+    repoRoot,
+    before: text.slice(0, caret),
+    slashRows,
+  });
+
+  // ⌘V pressed anywhere in this conversation, with focus outside a text
+  // field, lands in the composer.
+  //
+  // After clicking in the transcript, focus sits on a non-editable element,
+  // and WebKit will not service `paste:` for one — nothing claimed the
+  // keystroke and AppKit rang the error bell, which read as "paste is
+  // broken". Bound to this conversation's own `.aura-chat` so a split showing
+  // two of them each rescues its own, and so a ⌘V in some other pane is none
+  // of our business.
+  useEffect(() => {
+    const host = rootRef.current?.closest(".aura-chat");
+    if (!host) return;
+    const onKeyDown = (ev: Event) => {
+      const e = ev as globalThis.KeyboardEvent;
+      if (!e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key.toLowerCase() !== "v") return;
+      // A real field is pasting into itself; leave it be.
+      if (isEditableTarget(e.target)) return;
+      e.preventDefault();
+      void readClipboardText().then((pasted) => {
+        if (pasted) appendText(pasted);
+      });
+    };
+    host.addEventListener("keydown", onKeyDown);
+    return () => host.removeEventListener("keydown", onKeyDown);
+  }, [appendText]);
+
+  /** Keys the box leaves to its host. */
+  function onFieldKey(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // Esc is Stop while the agent is working. The field stays editable
+    // mid-turn (you queue into a CLI by typing), so this is where it lands.
+    if (e.key === "Escape" && running) {
+      e.preventDefault();
+      void stop();
+      return;
+    }
+    // Opened over the terminal and thought better of it. Dropping focus is
+    // what folds it back — there is no "close" to call, because the collapse
+    // is a reading of state rather than a thing you toggle. Only when the box
+    // is empty: Escape must not hide a draft.
+    if (e.key === "Escape" && overlay && !canSend) {
+      e.preventDefault();
+      e.currentTarget.blur();
+      return;
+    }
+    if (
+      (e.key === "ArrowUp" || e.key === "ArrowDown") &&
+      !e.shiftKey &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey
+    ) {
+      const el = e.currentTarget;
+      const collapsed = el.selectionStart === el.selectionEnd;
+      const atEdge =
+        e.key === "ArrowUp" ? el.selectionStart === 0 : el.selectionEnd === el.value.length;
+      if (collapsed && atEdge && moveHistory(e.key === "ArrowUp")) e.preventDefault();
+    }
+  }
 
   return (
-    <div className="chat-composer">
-      <ComposerFrame
-        className={docked ? "composer composer-docked" : "composer"}
-        onKeyDownCapture={(e) => {
-          // Esc is Stop while the agent is working. Captured at the root
-          // because the editor stays editable mid-turn (you can queue into a
-          // CLI by typing), so its own handler would never see the key.
-          if (e.key === "Escape" && running) {
-            e.preventDefault();
-            e.stopPropagation();
-            void stop();
-          }
-        }}
-      >
-        <TiptapComposer
-          key={ptySessionId}
-          ref={composerRef}
-          repoRoot={repoRoot}
-          initialMarkdown={readDraft(draftKey)}
-          // Never read-only: a CLI REPL accepts input mid-turn and that is how
-          // you queue a follow-up, so locking the field would remove a real
-          // capability the terminal has.
-          busy={false}
-          placeholder={
-            running
-              ? "Queue a follow-up. It lands when the agent finishes"
-              : "Ask to make changes, @mention files, run /commands"
-          }
-          onChange={setText}
-          onSubmit={() => void send()}
-          onEscapeWhileBusy={() => void stop()}
-          onImageFiles={() => {
-            // A PTY has no attachment channel — this agent reads pictures off
-            // disk. Say so rather than swallow the paste.
-            toast.info(
-              "Save the image, then drag the file in",
-              "A terminal agent reads pictures from disk, so it needs a path rather than pasted bytes.",
-            );
-          }}
-          canRecallHistory={hasHistory}
-          slashRows={slashRows}
-        />
-
-        <ComposerToolbar mode={<ChatModePicker value={mode} onChange={setMode} modes={["build", "plan", "ask"]} />} model={<>{commands?.model && (
-            <AgentModelChip
+    <div
+      className="agent-chat-composer"
+      ref={rootRef}
+      {...collapse.handlers}
+      onKeyDownCapture={(e) => {
+        // ⌘U opens the native file picker, as the add menu says it does: a
+        // terminal agent needs a path, which the browser's picker never gives.
+        if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "u") {
+          e.preventDefault();
+          e.stopPropagation();
+          void attachPaths(false);
+        }
+      }}
+    >
+      <Composer
+        className={docked ? "composer-docked" : ""}
+        minimized={collapse.minimized}
+        animateResize={collapse.animate}
+        value={text}
+        onChange={setText}
+        onSend={() => void send()}
+        onStop={() => void stop()}
+        running={running}
+        // Mid-turn this is Queue, not Send: the CLI's own input queue takes
+        // the line and runs it when the current turn ends. Never read-only.
+        mode={running ? "queue" : "send"}
+        placeholder={
+          running
+            ? "Queue a follow-up. It lands when the agent finishes"
+            : "Ask to make changes, @mention files, run /commands"
+        }
+        // A PTY has no attachment channel — this agent reads pictures off
+        // disk. Say so rather than swallow a pasted or dropped file.
+        onAttach={() =>
+          toast.info(
+            "Save the image, then drag the file in",
+            "A terminal agent reads pictures from disk, so it needs a path rather than pasted bytes.",
+          )
+        }
+        suggestions={suggestions}
+        onSuggestionSelect={(pick: ComposerSuggestion) =>
+          setText((prev) => resolvePick(pick, prev) ?? prev)
+        }
+        planMode={mode === "plan"}
+        onPlanModeChange={(on) => setMode(on ? "plan" : "build")}
+        textareaRef={textareaRef}
+        onKeyDown={onFieldKey}
+        renderAddMenu={() => (
+          <ComposerAddMenu
+            onAttach={() => void attachPaths(false)}
+            onDirectory={() => void attachPaths(true)}
+            onPlan={() => setMode(mode === "plan" ? "build" : "plan")}
+            planMode={mode === "plan"}
+          >
+            <ComposerTurnMenu mode={mode} modes={["build", "plan", "ask"]} onModeChange={setMode} />
+            <AgentCommandsMenu
               agentId={agentId}
-              commands={commands}
               onSend={sendLine}
-              onSwitchToTerminal={onSwitchToTerminal}
+              onCompose={(line) => placeText(line, "end")}
             />
-          )}</>} options={<><AgentCommandChip
-            agentId={agentId}
-            onSend={sendLine}
-            onCompose={(line) => {
-              // A command that takes arguments must not fire bare — put it in
-              // the field with the caret after it so the user finishes the line.
-              setText(line);
-              composerRef.current?.setMarkdown(line, "end");
-              composerRef.current?.focus();
-            }}
-          /></>} actions={<div className="right justify-end" style={{ minWidth: 96 }}>
-            {running ? (
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                className="font-mono"
-                disabled={interrupting}
-                aria-label="Stop response"
-              onClick={() => void stop()}
-                title={
-                  interrupting
-                    ? "Waiting for the agent to stop"
-                    : "Interrupt the running turn (Esc)"
-                }
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-                  <rect width="10" height="10" rx="2" fill="currentColor" />
-                </svg>
-                <span className="send-kbd">{interrupting ? "…" : "Esc"}</span>
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              variant={running ? "subtle" : "default"}
-              size="sm"
-              className={running ? "font-mono text-accent" : "font-mono"}
-              aria-label="Send message"
-              disabled={!canSend}
-              onClick={() => void send()}
-              title={running ? "Queue this (↵)" : "Send (↵)"}
-            >
-              {/* The brain's send button draws this arrow from the chat icon
-                  sprite, but that sprite is mounted by ManagerSurface and this
-                  composer lives in the agent pane — a `<use href="#i-arrow-up">`
-                  here would resolve to nothing whenever the brain panel is
-                  closed, i.e. a send button with no glyph on it. Lucide's
-                  ArrowUp is the same path the sprite copied, so drawing it
-                  directly is pixel-identical and depends on nothing outside
-                  this file. */}
-              <ArrowUp className="ico-12" strokeWidth={2} aria-hidden />
-              <span className="send-kbd">⏎</span>
-            </Button>
-          </div>} />
-      </ComposerFrame>
+            <TimelineMenuItems />
+          </ComposerAddMenu>
+        )}
+        footer={
+          <>
+            {commands?.model && (
+              <AgentCliModelPicker
+                agentId={agentId}
+                commands={commands}
+                onSend={sendLine}
+                onSwitchToTerminal={onSwitchToTerminal}
+              />
+            )}
+            <TimelineViewSwitch />
+          </>
+        }
+      />
     </div>
   );
 }
 
-// ── Model switching, scoped to this agent's own provider ───────────────────
-
-/** The model chip.
+/** Every command this CLI ships, as a submenu of the add menu.
  *
- *  Two shapes, because the CLIs genuinely differ (see `agentCliCommands`). When
- *  the CLI takes an id inline we show its provider's real model list and
- *  selecting a row types the switch. When the CLI only opens its own chooser we
- *  show one button that opens it and moves the user to the terminal where that
- *  chooser is drawn — listing models we couldn't actually select would be a
- *  menu that lies. */
-function AgentModelChip({
-  agentId,
-  commands,
-  onSend,
-  onSwitchToTerminal,
-}: {
-  agentId: string;
-  commands: AgentCliCommands;
-  onSend: (line: string) => Promise<boolean>;
-  onSwitchToTerminal?: () => void;
-}) {
-  const model = commands.model;
-  // The last row picked here, so the chip can name what it put the agent on.
-  // Deliberately NOT presented as "the model the agent is running": the user
-  // can also change it by typing in the terminal, and this pane would have no
-  // way to know. It is a record of what we sent, and the label says so.
-  const [sent, setSent] = useState<CatalogModel | null>(null);
-  const [open, setOpen] = useState(false);
-  // The same catalog the native picker reads, so a model that appears for the
-  // Aura brain appears here too. Only the inline case has a list to draw.
-  const live = useLiveModelCatalog(model?.kind === "inline");
-  const [error, setError] = useState<string | null>(null);
-  const [switching, setSwitching] = useState(false);
-  const brain = useMemo(() => agentCatalogBrain(agentId), [agentId]);
-  const { favorites, toggleFavorite, reorderFavorites } = useModelFavorites();
-  if (!model) return null;
-  if (model.kind === "picker")
-    // A chevron on this button was a lie with a cursor on it. Every other chip
-    // in this strip opens a menu under itself; this one types `/model` into the
-    // session and moves you to the Terminal tab, because the chooser is drawn
-    // by the CLI and lives there. Same click, same reason — it just stops
-    // claiming to be a dropdown and says where it goes instead.
-    return (
-      <button
-        type="button"
-        className="composer-selector composer-model-selector"
-        onClick={() => {
-          void onSend(model.line).then((ok) => {
-            if (ok) onSwitchToTerminal?.();
-          });
-        }}
-        title={`${brain.label} draws its own model chooser — this types ${model.line} and takes you to the terminal to use it`}
-      >
-        <SquareTerminal size={12} />
-        <span>{model.label}</span>
-      </button>
-    );
-  return (
-    <ModelCatalogPopover
-      label={sent?.label ?? "Agent default"}
-      open={open}
-      onOpenChange={setOpen}
-    >
-      <BrainSwitcherModal
-        embedded
-        allowDefault={false}
-        brains={[brain]}
-        liveCatalog={live}
-        value={
-          sent
-            ? {
-                brainId: brain.id,
-                family: familyOf(brain),
-                modelId: sent.id,
-                label: sent.label,
-                longContext: !!sent.longContext,
-              }
-            : null
-        }
-        favorites={favorites}
-        activeChoice={brain}
-        loading={switching}
-        loadError={error}
-        onPick={async (_brain, row) => {
-          if (!row.id || switching) return;
-          setSwitching(true);
-          setError(null);
-          try {
-            if (await onSend(model.line(row.id))) {
-              setSent(row);
-              setOpen(false);
-            } else setError("The model did not change. Try again.");
-          } finally {
-            setSwitching(false);
-          }
-        }}
-        onPickAuto={() => {}}
-        onToggleFav={toggleFavorite}
-        onReorderFav={reorderFavorites}
-        onClose={() => setOpen(false)}
-      />
-    </ModelCatalogPopover>
-  );
-}
-
-/** Every command this CLI ships, as a menu.
- *
- *  Not a shortlist. The `/` popup already offers the same set as you type, but
- *  a chip that says "Commands" and then shows four of a hundred teaches exactly
- *  the wrong thing — that the chat is the reduced surface and the terminal is
- *  where the real controls live. It shows what the CLI shows, and if that is
- *  long it scrolls, the way any long menu does.
+ *  Not a shortlist. The `/` list already offers the same set as you type, but
+ *  a "Commands" row that shows four of a hundred teaches exactly the wrong
+ *  thing — that the chat is the reduced surface and the terminal is where the
+ *  real controls live. It shows what the CLI shows, and if that is long it
+ *  scrolls, the way any long menu does.
  *
  *  A row with arguments does NOT fire. `/model set <model>` sent bare would run
  *  the parent command and the user would never see why; instead the line lands
  *  in the composer with the caret after it, ready to finish. Rows without
  *  arguments are complete commands and go straight to the agent. */
-function AgentCommandChip({
+function AgentCommandsMenu({
   agentId,
   onSend,
   onCompose,
@@ -573,41 +543,37 @@ function AgentCommandChip({
   onCompose: (line: string) => void;
 }) {
   const rows = useMemo(() => agentSlashRows(agentId, ""), [agentId]);
-
   if (rows.length === 0) return null;
-
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <ChipButton title={`Run one of ${agentId}'s own commands`}>
-          <span className="chip-label">Commands</span>
-        </ChipButton>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        // Long menus scroll inside themselves. `min-w-0` on the label lets the
-        // summary truncate rather than widen the popup off the edge of the pane.
-        className="min-w-[280px] max-w-[420px] max-h-[340px] overflow-y-auto"
-      >
-        {rows.map((r) => (
-          <DropdownMenuItem
-            key={r.name}
-            onSelect={() => {
-              const line = `/${r.name}`;
-              if (r.args) onCompose(`${line} `);
-              else void onSend(line);
-            }}
-          >
-            <span className="font-mono text-xs whitespace-nowrap">
-              /{r.name}
-              {r.args ? <span className="text-text-4"> {r.args}</span> : null}
-            </span>
-            <span className="flex-1 min-w-0 truncate text-xs text-text-3">
-              {r.summary}
-            </span>
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <>
+      <DropdownMenuSeparator />
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger>
+          <SquareSlash />
+          Commands <span className="ui-menu-value">{rows.length}</span>
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent sideOffset={6} className="max-h-[340px] max-w-[420px] overflow-y-auto">
+          {rows.map((r) => (
+            <DropdownMenuItem
+              key={r.name}
+              title={r.summary}
+              onSelect={() => {
+                const line = `/${r.name}`;
+                if (r.args) onCompose(`${line} `);
+                else void onSend(line);
+              }}
+            >
+              <span className="shrink-0">
+                /{r.name}
+                {r.args ? ` ${r.args}` : ""}
+              </span>
+              {r.summary && (
+                <span className="ui-menu-value flex-1 min-w-0 truncate">{r.summary}</span>
+              )}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+    </>
   );
 }

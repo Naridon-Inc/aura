@@ -513,7 +513,18 @@ pub async fn aurawatch_set_backend(
     };
     // Normalize an empty string to None (clear → auto).
     let pref = preferred.filter(|p| !p.trim().is_empty());
-    state.ensure_session(&repo_root, mode, pref).await;
+    let cleared = pref.is_none();
+    let session = state.ensure_session(&repo_root, mode, pref).await;
+    // `ensure_session` keeps the current pick when handed None — right for
+    // a start, wrong here, where None is "Let Aura pick". Forget the pick
+    // and resolve automatically, or the session keeps the old AI while
+    // Settings shows automatic.
+    if cleared && session.lock().await.preferred.is_some() {
+        let backend = aurawatch_inference::select_backend_preferred(None).await;
+        let mut sess = session.lock().await;
+        sess.preferred = None;
+        sess.backend = backend;
+    }
     state
         .snapshot(&repo_root)
         .await

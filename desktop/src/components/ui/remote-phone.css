@@ -1,0 +1,45 @@
+/* Use Aura on your phone: the Pair phone dialog's frame and QR block, with
+   two tabs for how the phone reaches this computer. Added here: the dot on a
+   tab whose link is live, the panel's rhythm, a QR sized for a dialog that
+   also carries tabs, and the link line with its copy button. */
+
+.ui-remote-phone .ui-tabs-list {
+  margin-bottom: 4px;
+}
+.ui-remote-phone-live {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ui-green);
+}
+.ui-remote-phone-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+}
+.ui-remote-phone-off {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.ui-remote-phone-qr {
+  width: min(40vmin, 280px);
+}
+.ui-remote-phone-url {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+.ui-remote-phone-url code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ui-fg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ui-remote-phone .ui-pair-phone-note {
+  margin-top: 0;
+}

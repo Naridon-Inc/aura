@@ -523,6 +523,7 @@ mod tests {
         Place::Box {
             machine: Box::new(Machine {
                 id: "mo@box:/home/mo/naridon".into(),
+                aliases: Vec::new(),
                 name: "aura-runner".into(),
                 host: "example.invalid".into(),
                 user: "mo".into(),

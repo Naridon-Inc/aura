@@ -31,6 +31,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import { tappedKind } from "./notificationTap";
+
 let permissionState: "unknown" | "granted" | "denied" = "unknown";
 // The single in-flight permission request. Several notifications can fire
 // in the same tick while the window is unfocused — each a distinct
@@ -280,6 +282,63 @@ export async function onChatReply(cb: (r: ChatReply) => void): Promise<void> {
   } catch (err) {
     console.warn("onAction listen failed:", err);
   }
+}
+
+// ── Tap to open ────────────────────────────────────────────────────────────
+//
+// A notification posted with `extra.kind` set (anything but `chat`, which
+// `onChatReply` owns) is routed on a tap to the handler registered for that
+// kind, with the window brought forward first. One listener serves every
+// kind; it is installed on the first registration.
+
+const tapHandlers = new Map<string, (extra: Record<string, unknown>) => void>();
+let tapListenerReady = false;
+
+function routeTap(actionId: string | null | undefined, extra: unknown) {
+  const kind = tappedKind(actionId, extra);
+  const handler = kind ? tapHandlers.get(kind) : undefined;
+  if (!handler) return;
+  void focusWindow();
+  handler(extra as Record<string, unknown>);
+}
+
+async function installTapListener(): Promise<void> {
+  if (tapListenerReady) return;
+  tapListenerReady = true;
+  if (await hasNativePath()) {
+    try {
+      await listen<{ action_id: string; extra: Record<string, unknown> | null }>(
+        NATIVE_ACTION_EVENT,
+        (ev) => routeTap(ev.payload.action_id, ev.payload.extra),
+      );
+    } catch (err) {
+      console.warn("native notification tap listen failed:", err);
+    }
+    return;
+  }
+  try {
+    await onAction((n) => {
+      const payload = n as unknown as Record<string, unknown>;
+      const actionId = (payload["actionId"] ?? payload["action"]) as string | undefined;
+      routeTap(actionId, (n as { extra?: unknown }).extra);
+    });
+  } catch (err) {
+    console.warn("onAction tap listen failed:", err);
+  }
+}
+
+/** When a notification posted with `extra.kind === kind` is tapped, bring the
+ *  window forward and call `cb` with its `extra`. One handler per kind; a
+ *  later registration replaces an earlier one. Returns the unregister. */
+export function onNotificationTap(
+  kind: string,
+  cb: (extra: Record<string, unknown>) => void,
+): () => void {
+  tapHandlers.set(kind, cb);
+  void installTapListener();
+  return () => {
+    if (tapHandlers.get(kind) === cb) tapHandlers.delete(kind);
+  };
 }
 
 /** Bring the window forward — call from notification click handlers

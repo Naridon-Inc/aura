@@ -41,20 +41,24 @@ const FORK_BASE: &str = "fork_base() { \
 /// via `--no-index`. The `--quiet` probes are what let one script make the
 /// same three-way choice the local twin makes with three process spawns.
 /// A `git diff HEAD` that fails (no HEAD yet) is an empty diff, as locally.
-fn diff_script(rel: &str, since_base: bool) -> String {
+/// `ignore_ws` prints the patch with `-w`, whitespace-only changes left out;
+/// the change checks stay plain, so a change that is only whitespace prints
+/// an empty patch rather than falling through to the new-file arm.
+fn diff_script(rel: &str, since_base: bool, ignore_ws: bool) -> String {
     let f = quote(rel);
+    let w = if ignore_ws { " -w" } else { "" };
     let base_arm = if since_base {
         format!(
             "{FORK_BASE}; if base=$(fork_base) && [ -n \"$base\" ]; then \
              git diff --quiet \"$base\" -- {f} 2>/dev/null; \
-             if [ $? -eq 1 ]; then git diff \"$base\" --no-color -- {f}; exit 0; fi; fi; "
+             if [ $? -eq 1 ]; then git diff \"$base\"{w} --no-color -- {f}; exit 0; fi; fi; "
         )
     } else {
         String::new()
     };
     format!(
         "{base_arm}git diff --quiet HEAD -- {f} 2>/dev/null; rc=$?; \
-         if [ $rc -eq 1 ]; then git diff HEAD --no-color -- {f}; exit 0; fi; \
+         if [ $rc -eq 1 ]; then git diff HEAD{w} --no-color -- {f}; exit 0; fi; \
          if [ $rc -ne 0 ]; then exit 0; fi; \
          {untracked}",
         untracked = untracked_add_arm(&f)
@@ -147,10 +151,12 @@ pub async fn place_git_diff(
     remote_root: Option<String>,
     file: String,
     since_base: Option<bool>,
+    ignore_whitespace: Option<bool>,
 ) -> Result<String, String> {
     let w = Work::at_worktree(Place::at_machine(&machine_id)?, &root, remote_root.as_deref())?;
     let rel = w.rel(&file)?;
-    let out = w.ask(&diff_script(&rel, since_base == Some(true))).await?;
+    let script = diff_script(&rel, since_base == Some(true), ignore_whitespace == Some(true));
+    let out = w.ask(&script).await?;
     Ok(if out.ok() { out.stdout } else { String::new() })
 }
 
@@ -332,7 +338,7 @@ mod tests {
 
     #[test]
     fn a_diff_asks_head_then_falls_back_to_a_whole_file_add() {
-        let s = diff_script("src/a b.rs", false);
+        let s = diff_script("src/a b.rs", false, false);
         assert!(!s.contains("fork_base"));
         assert!(s.starts_with("git diff --quiet HEAD -- 'src/a b.rs' 2>/dev/null; rc=$?;"));
         assert!(s.contains("git diff HEAD --no-color -- 'src/a b.rs'; exit 0;"));
@@ -342,11 +348,21 @@ mod tests {
 
     #[test]
     fn since_base_tries_the_fork_point_first() {
-        let s = diff_script("a.rs", true);
+        let s = diff_script("a.rs", true, false);
         assert!(s.starts_with("fork_base() {"));
         let base = s.find("git diff \"$base\" --no-color -- 'a.rs'").unwrap();
         let head = s.find("git diff HEAD --no-color -- 'a.rs'").unwrap();
         assert!(base < head);
+    }
+
+    #[test]
+    fn ignoring_whitespace_prints_with_w_but_checks_plain() {
+        let s = diff_script("a.rs", true, true);
+        assert!(s.contains("git diff \"$base\" -w --no-color -- 'a.rs'"));
+        assert!(s.contains("git diff HEAD -w --no-color -- 'a.rs'"));
+        assert!(s.contains("git diff --quiet HEAD -- 'a.rs'"));
+        assert!(s.contains("git diff --quiet \"$base\" -- 'a.rs'"));
+        assert!(!diff_script("a.rs", true, false).contains(" -w "));
     }
 
     #[test]

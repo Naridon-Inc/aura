@@ -1,5 +1,5 @@
-// Turn-end completion chime — Aura's analog of Conductor's signature
-// "completion sounds" (Conductor 0.52.0). A short, soft two-note rise
+// Turn-end completion chime — Aura's take on a turn-finished sound.
+// A short, soft two-note rise
 // played the moment a turn finishes, so you can look away and still know
 // the agent is done.
 //

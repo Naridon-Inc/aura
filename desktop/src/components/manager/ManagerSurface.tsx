@@ -4,13 +4,14 @@
 // and dispatches subagent work via tool_use cards. Details (DAG / ribbon /
 // per-task drilldown) live in a side pane the user opts into.
 //
-// Visual chrome: ports the Forge Chat-States panel shell (Stage 11.6).
-// The header is the prototype's `.p-tabs` strip — one active tab pill
-// (status dot + objective summary) + new-thread/more icon buttons on
-// the right. The session menu (Show details / Compare worktrees / Cancel)
-// sits under the i-more button.
+// Visual chrome is the shared parts: the header's icon buttons and its
+// More menu are library buttons and the library dropdown; the opening,
+// broken and gone screens are the shared states; Details and Loop open as
+// the task detail's side column, where each task is a board card and the
+// session's events are a timeline.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { requestRenameChat } from "../chat/rename/renameChat";
 import { useDocumentVisibility } from "../../lib/useDocumentVisibility";
 import {
   getManagerSession,
@@ -19,29 +20,24 @@ import {
   useManagerSession,
 } from "../../lib/managerStore";
 // AURA-1296 — tab-menu actions: fork, mark unread, reset chat (+ files).
+import { copyChatTranscript } from "../../lib/chatTranscriptCopy";
 import { forkChatFromTab } from "../../lib/forkFromTab";
-import { markTabUnread } from "../../lib/tabUnread";
+import { clearTabUnread, markTabUnread } from "../../lib/tabUnread";
 import { resetChatFromTab } from "../../lib/resetChat";
 import { peekUncommittedCount, resetFilesLabel } from "../../lib/uncommittedCount";
 import { useEditorStore } from "../../lib/editorStore";
 import { stripSteeringDirective } from "../../lib/steeringDirective";
-import { AsciiSpinner } from "../ui/ascii-spinner";
 import {
   api,
   type AgentDescriptor,
   type AgentInfo,
-  type ClaudeSession,
   type ManagerOverrideMode,
   type ManagerSession,
-  type ManagerStatus,
-  type ManagerSummary,
   type ManagerTask,
   type ManagerTaskStatus,
   type RibbonEntry,
   type UsageReport,
 } from "../../lib/api";
-import { fetchSessions } from "../../lib/sessionsCache";
-import { fetchManagerList } from "../../lib/managerCache";
 import { listen } from "@tauri-apps/api/event";
 import { DagView } from "./DagView";
 import { ManagerChatView } from "./ManagerChatView";
@@ -49,19 +45,55 @@ import "../agent/chatView.css";
 import { LoopPanel } from "./LoopPanel";
 import { MemoryBadge } from "./MemoryBadge";
 import { ChatIconsSprite } from "./ChatIconsSprite";
-import { Radio } from "lucide-react";
-import { StatusChip } from "../ui/statusChip";
+import {
+  ArrowLeft,
+  ArrowLeftRight,
+  ArrowUp,
+  Columns2,
+  GitBranch,
+  MessageSquareOff,
+  MoreHorizontal,
+  Plus,
+  Radio,
+  RotateCcw,
+  Rows2,
+  SquareArrowOutUpRight,
+  ThumbsDown,
+  ThumbsUp,
+  TriangleAlert,
+  X,
+} from "lucide-react";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { EmptyState } from "../ui/state";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
+import { EmptyState, ErrorState, LoadingState } from "../ui/state";
+import { TaskBoardCard, TaskCardContent, TaskFact } from "../ui/tasks-board";
+import { TaskDetailMeta, TaskDetailNote, TaskDetailSection } from "../ui/tasks-detail";
+import { TaskStatusBadge } from "../ui/tasks-status";
+import { Textarea } from "../ui/textarea";
+import { Timeline } from "../ui/timeline";
+import { CodeMessage } from "../ui/transcript-content";
+import type { WorkspaceStage } from "../ui/workspace-preview-card";
 import { AgentIcon } from "../agent/AgentIcon";
 import { ResumeElsewhere } from "./chat/ResumeElsewhere";
 import { computeResumePortability } from "./chat/resumePortability";
-import { relativeAgeFromDelta } from "../../lib/relativeTime";
-import { shortDateFromSecs } from "../../lib/calendarDate";
 import { plainLine, plainPreview } from "../../lib/plainPreview";
+import { canRemoveTaskCopy, removeTaskCopyWith } from "../../lib/taskCopyRemoval";
+import { askConfirm } from "../ui/ask";
 import { compactNumber } from "../../lib/compactNumber";
-import { useDismiss } from "../../lib/useDismiss";
 import { formatCost } from "../../lib/money";
+import { openChatHistory } from "../../lib/chatHistoryEvent";
+import { readAgentsList } from "../../lib/agentsListCache";
 
 const DETAILS_PREF = "aura.manager.details_open";
 const LOOP_PREF = "aura.manager.loop_open";
@@ -140,89 +172,58 @@ function LoadingSession({ sessionId }: { sessionId: string }) {
 
   if (gone) {
     return (
-      <div className="h-full w-full flex items-center justify-center bg-bg-0">
-        <div className="flex max-w-[360px] flex-col items-center gap-3 px-6 text-center">
-          <div className="text-base text-text-1">This conversation is gone</div>
-          <p className="text-sm leading-relaxed text-text-4">
-            It isn’t saved on this device any more, so there’s nothing to
-            reopen. Aura has stopped trying to restore it — it won’t come back
-            the next time you open the app. Your other conversations aren’t
-            affected.
-          </p>
-          <p className="max-h-24 w-full overflow-auto rounded border border-line-soft bg-bg-1 px-2 py-1.5 text-left font-mono text-[11px] leading-snug text-text-4">
-            {failure?.message}
-          </p>
-          <Button size="sm" onClick={() => editor.closeManager(sessionId)}>
-            Close tab
-          </Button>
-        </div>
+      <div className="flex h-full w-full items-center" style={{ background: "var(--ui-bg)" }}>
+        <EmptyState
+          icon={MessageSquareOff}
+          title="This conversation is gone"
+          body="It isn’t saved on this device any more, so there’s nothing to reopen. Aura has stopped trying to restore it — it won’t come back the next time you open the app. Your other conversations aren’t affected."
+          action={{ label: "Close tab", onClick: () => editor.closeManager(sessionId) }}
+          footnote={failure?.message}
+        />
       </div>
     );
   }
 
   if (broken) {
+    // No blanket "nothing has been lost" here: the read may be failing for a
+    // reason that leaves the file intact, and a reassurance that turns out to
+    // be false is worse than none. What IS always true is that this is one
+    // conversation, not the app. The raw backend message rides underneath —
+    // not the headline, because it is written for whoever has to fix it, but
+    // present, since it is the one line that says whether the file is
+    // missing, the disk is unreadable, or the app can no longer parse it.
+    // Try again comes from the shared error state and re-runs this load.
     return (
-      <div className="h-full w-full flex items-center justify-center bg-bg-0">
-        <div className="flex max-w-[360px] flex-col items-center gap-3 px-6 text-center">
-          <div className="text-base text-text-1">This conversation didn’t open</div>
-          {/* No blanket "nothing has been lost" here: the read may be failing
-              for a reason that leaves the file intact, and a reassurance that
-              turns out to be false is worse than none. What IS always true is
-              that this is one conversation, not the app. */}
-          <p className="text-sm leading-relaxed text-text-4">
-            Aura asked {failure?.failures === 1 ? "once" : `${failure?.failures} times`} and
-            got nothing back. Your other conversations aren’t affected.
-          </p>
-          {/* The raw backend message. Not the headline, because it is written
-              for whoever has to fix it, but present — a person who hits this
-              deserves the one line that says whether the file is missing, the
-              disk is unreadable, or the app can no longer parse it. */}
-          {failure?.message && (
-            <p className="max-h-24 w-full overflow-auto rounded border border-line-soft bg-bg-1 px-2 py-1.5 text-left font-mono text-[11px] leading-snug text-text-4">
-              {failure.message}
-            </p>
-          )}
-          <div className="flex items-center gap-2">
-            <Button size="sm" onClick={retry} disabled={retrying}>
-              {retrying ? "Trying…" : "Try again"}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => editor.closeManager(sessionId)}
-            >
-              Close tab
-            </Button>
-          </div>
-        </div>
+      <div className="flex h-full w-full items-center" style={{ background: "var(--ui-bg)" }}>
+        <ErrorState
+          title="This conversation didn’t open"
+          message={
+            <>
+              Aura asked {failure?.failures === 1 ? "once" : `${failure?.failures} times`} and
+              got nothing back. Your other conversations aren’t affected.
+            </>
+          }
+          onRetry={retry}
+          retrying={retrying}
+          action={{ label: "Close tab", onClick: () => editor.closeManager(sessionId) }}
+          footnote={failure?.message}
+        />
       </div>
     );
   }
 
   return (
-    <div className="h-full w-full flex items-center justify-center bg-bg-0">
-      <div className="flex max-w-[300px] flex-col items-center gap-3 px-6 text-center">
-        <AsciiSpinner />
-        <div className="text-base text-text-2">
-          Loading conversation…
-          {elapsed >= 3 && <span className="text-text-4"> · {elapsed}s</span>}
-        </div>
-        {slow && (
-          <>
-            <p className="text-sm leading-relaxed text-text-4">
-              A long session can take a moment to open. You can keep waiting, or
-              close this tab and reopen it.
-            </p>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => editor.closeManager(sessionId)}
-            >
-              Close tab
-            </Button>
-          </>
-        )}
-      </div>
+    <div className="flex h-full w-full items-center" style={{ background: "var(--ui-bg)" }}>
+      <LoadingState
+        size="md"
+        label={`Loading conversation…${elapsed >= 3 ? ` · ${elapsed}s` : ""}`}
+        action={slow ? { label: "Close tab", onClick: () => editor.closeManager(sessionId) } : undefined}
+        footnote={
+          slow
+            ? "A long session can take a moment to open. You can keep waiting, or close this tab and reopen it."
+            : undefined
+        }
+      />
     </div>
   );
 }
@@ -250,24 +251,64 @@ export type ManagerTabMenuItem =
       onSelect: () => void;
       disabled?: boolean;
       tone?: "danger";
+      /** The chord that does the same thing, printed at the row's right edge. */
+      shortcut?: string;
     };
 
-/** Build the chat-tab right-click menu — the controls the old `.p-tabs`
- *  header bar carried. History/Memory open their global popovers; the rest
- *  fire at the live surface via the pane-action bridge. */
+/** Build the chat-tab right-click menu. It opens with the chat tab's own
+ *  items — read state and fork, then the two transcript copies — and
+ *  goes on with Aura's own controls: History/Memory open their global
+ *  popovers; the rest fire at the live surface via the pane-action bridge.
+ *  The tab strip adds Move to pane and the close block after these. */
 export function buildManagerTabMenuItems(opts: {
   sessionId: string;
+  /** The tab's title, named in the toast after a transcript copy. */
+  title?: string;
   /** Suppress "Cancel session" once the session has finished/cancelled. */
   isTerminal?: boolean;
+  /** The tab is flagged unread, so the menu offers "Mark as read". */
+  unread?: boolean;
 }): ManagerTabMenuItem[] {
   const fire = (action: ManagerPaneAction) => () =>
     dispatchManagerPaneAction(opts.sessionId, action);
   const items: ManagerTabMenuItem[] = [];
+  // AURA-1296 — mark unread, fork in place. Neither needs anything from the
+  // live surface, so they act directly.
+  const unread = opts.unread ?? false;
+  items.push({
+    kind: "item",
+    label: unread ? "Mark as read" : "Mark as unread",
+    onSelect: () =>
+      unread ? clearTabUnread(opts.sessionId) : markTabUnread(opts.sessionId),
+  });
+  items.push({
+    kind: "item",
+    label: "Rename chat",
+    onSelect: () => requestRenameChat(opts.sessionId, opts.title ?? ""),
+  });
+  items.push({
+    kind: "item",
+    label: "Fork to new tab",
+    shortcut: "⌘⌥↵",
+    onSelect: () => void forkChatFromTab(opts.sessionId),
+  });
+  items.push({ kind: "separator" });
+  items.push({
+    kind: "item",
+    label: "Copy concise transcript",
+    shortcut: "⌘⌥C",
+    onSelect: () => void copyChatTranscript(opts.sessionId, opts.title ?? "", "concise"),
+  });
+  items.push({
+    kind: "item",
+    label: "Copy full transcript",
+    onSelect: () => void copyChatTranscript(opts.sessionId, opts.title ?? "", "complete"),
+  });
+  items.push({ kind: "separator" });
   items.push({
     kind: "item",
     label: "Chat history",
-    onSelect: () =>
-      window.dispatchEvent(new Event("aura:manager:open-history")),
+    onSelect: () => openChatHistory(opts.sessionId),
   });
   items.push({
     kind: "item",
@@ -303,21 +344,10 @@ export function buildManagerTabMenuItems(opts: {
         }),
       ),
   });
-  // AURA-1296 — fork in place, mark unread, start over. Fork and unread need
-  // nothing from the live surface, so they act directly; reset rides the
-  // bridge (see ManagerPaneAction). The files row names how many
-  // uncommitted files the chat's project has, when that's known yet.
+  // Starting over rides the bridge (see ManagerPaneAction). The files row
+  // names how many uncommitted files the chat's project has, when that's
+  // known yet.
   items.push({ kind: "separator" });
-  items.push({
-    kind: "item",
-    label: "Fork chat",
-    onSelect: () => void forkChatFromTab(opts.sessionId),
-  });
-  items.push({
-    kind: "item",
-    label: "Mark as unread",
-    onSelect: () => markTabUnread(opts.sessionId),
-  });
   items.push({ kind: "item", label: "Reset chat…", onSelect: fire("reset-chat") });
   items.push({
     kind: "item",
@@ -341,7 +371,7 @@ export function buildManagerTabMenuItems(opts: {
 
 type Props = {
   sessionId: string;
-  /** Optional — when provided, the `+` icon-btn in the tabs strip starts
+  /** Optional — when provided, the `+` button in the header starts
    *  a fresh ambient thread (used by AuraRailPanel). When absent the
    *  button is hidden. */
   onNewThread?: () => void;
@@ -370,8 +400,6 @@ export function ManagerSurface({
     () => localStorage.getItem(LOOP_PREF) === "1",
   );
   const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement | null>(null);
   // "Resume this chat elsewhere" sheet — carries this conversation into a real
   // agent CLI's own resume list (single-agent → that one CLI cleanly;
   // multi-agent → replicated into every agent it used). The sheet loads the
@@ -384,8 +412,7 @@ export function ManagerSurface({
 
   useEffect(() => {
     let live = true;
-    void api
-      .agentsList()
+    void readAgentsList()
       .then((list) => {
         if (live) setAgents(list);
       })
@@ -402,9 +429,6 @@ export function ManagerSurface({
   useEffect(() => {
     localStorage.setItem(LOOP_PREF, showLoop ? "1" : "0");
   }, [showLoop]);
-
-  // Click-outside / Esc closes the More menu.
-  useDismiss(menuOpen, () => setMenuOpen(false), menuRef);
 
   // AURA-1296 — the pane-action listener below is bound once per session;
   // the store hook's closer is read through a ref so it stays current.
@@ -497,50 +521,44 @@ export function ManagerSurface({
         <span className="chat-state" role="status">{activityLabel}</span>
         <MemoryBadge repoRoot={session.projects[0]?.root ?? null} />
         <UsageChip session={session} />
-        <SessionHistoryButton
-          currentSessionId={sessionId}
-          repoRoot={session.projects[0]?.root ?? null}
-        />
         {onSplit && (
           <>
-            <button
-              type="button"
-              className="icon-btn"
+            <Button
+              variant="ghost"
+              size="iconSm"
               title="Split right"
+              aria-label="Split right"
               onClick={() => onSplit("row")}
             >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-                <line x1="8" y1="3.5" x2="8" y2="12.5" stroke="currentColor" strokeWidth="1.2" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              className="icon-btn"
+              <Columns2 />
+            </Button>
+            <Button
+              variant="ghost"
+              size="iconSm"
               title="Split down"
+              aria-label="Split down"
               onClick={() => onSplit("column")}
             >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-                <line x1="3" y1="8" x2="13" y2="8" stroke="currentColor" strokeWidth="1.2" />
-              </svg>
-            </button>
+              <Rows2 />
+            </Button>
           </>
         )}
         {onNewThread && (
-          <button
-            type="button"
-            className="icon-btn"
+          <Button
+            variant="ghost"
+            size="iconSm"
             title="New thread"
+            aria-label="New thread"
             onClick={onNewThread}
           >
-            <svg className="ico"><use href="#i-plus" /></svg>
-          </button>
+            <Plus />
+          </Button>
         )}
         {soloAgent && (
-          <button
-            type="button"
-            className="icon-btn"
+          // A box with an arrow leaving it — "take this one out".
+          <Button
+            variant="ghost"
+            size="iconSm"
             title={`Take ${soloAgent.label} out. Reopens as a standalone ${soloAgent.label} session, and shows up in its CLI resume list`}
             aria-label={`Take ${soloAgent.label} out`}
             onClick={() => {
@@ -555,84 +573,46 @@ export function ManagerSurface({
               );
             }}
           >
-            {/* A box with an arrow leaving it — "take this one out". */}
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <path
-                d="M8.5 2.75H3.5A1.25 1.25 0 0 0 2.25 4v8.5A1.25 1.25 0 0 0 3.5 13.75h8.5A1.25 1.25 0 0 0 13.25 12.5v-5"
-                stroke="currentColor"
-                strokeWidth="1.2"
-                strokeLinecap="round"
-              />
-              <path
-                d="M9.5 2.75h4v4M13 3.25 7.75 8.5"
-                stroke="currentColor"
-                strokeWidth="1.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
+            <SquareArrowOutUpRight />
+          </Button>
         )}
-        <div ref={menuRef} className="relative">
-          <button
-            type="button"
-            className="icon-btn"
-            title="More"
-            onClick={() => setMenuOpen((v) => !v)}
-          >
-            <svg className="ico"><use href="#i-more" /></svg>
-          </button>
-          {menuOpen && (
-            <div
-              className="absolute right-0 top-7 z-20 bg-bg-3 border border-line-soft rounded shadow-lg py-1 text-xs min-w-[180px]"
-              onClick={(e) => e.stopPropagation()}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="iconSm" title="More" aria-label="More">
+              <MoreHorizontal />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuCheckboxItem checked={showDetails} onCheckedChange={setShowDetails}>
+              Show details
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem checked={showLoop} onCheckedChange={setShowLoop}>
+              Show loop
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() => window.dispatchEvent(new CustomEvent("aura:open-compare"))}
             >
-              <MenuItem
-                label={showDetails ? "Hide details" : "Show details"}
-                onClick={() => {
-                  setShowDetails((v) => !v);
-                  setMenuOpen(false);
-                }}
-              />
-              <MenuItem
-                label={showLoop ? "Hide loop" : "Show loop"}
-                onClick={() => {
-                  setShowLoop((v) => !v);
-                  setMenuOpen(false);
-                }}
-              />
-              <MenuItem
-                label="Compare parallel copies…"
-                onClick={() => {
-                  window.dispatchEvent(new CustomEvent("aura:open-compare"));
-                  setMenuOpen(false);
-                }}
-              />
-              {/* Carry this conversation into a real coding-agent CLI's own
-                  resume list so it's never stranded inside Aura. The sheet
-                  reads how many agents ran the chat and frames it: single-agent
-                  → move cleanly into that CLI; multi-agent → replicate into
-                  every agent it used as an imported transcript. */}
-              <MenuItem
-                label="Resume this chat elsewhere…"
-                onClick={() => {
-                  setShowResume(true);
-                  setMenuOpen(false);
-                }}
-              />
-              {!isTerminal && (
-                <MenuItem
-                  label="Cancel session"
-                  tone="danger"
-                  onClick={() => {
-                    api.managerCancel(sessionId);
-                    setMenuOpen(false);
-                  }}
-                />
-              )}
-            </div>
-          )}
-        </div>
+              Compare parallel copies…
+            </DropdownMenuItem>
+            {/* Carry this conversation into a real coding-agent CLI's own
+                resume list so it's never stranded inside Aura. The sheet
+                reads how many agents ran the chat and frames it: single-agent
+                → move cleanly into that CLI; multi-agent → replicate into
+                every agent it used as an imported transcript. */}
+            <DropdownMenuItem onSelect={() => setShowResume(true)}>
+              Resume this chat elsewhere…
+            </DropdownMenuItem>
+            {!isTerminal && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem variant="destructive" onSelect={() => api.managerCancel(sessionId)}>
+                  Cancel session
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
       )}
 
@@ -657,43 +637,29 @@ export function ManagerSurface({
           <ManagerChatView session={session} />
         </div>
         {showDetails && (
-          <div className="w-[360px] border-l border-line-soft min-h-0 flex flex-col bg-bg-0">
-            <div className="section-label px-3 py-1.5 border-b border-line-soft flex items-center justify-between">
-              <span>Details</span>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="text-text-3 hover:text-text-1"
-                onClick={() => setShowDetails(false)}
-              >
-                ✕
-              </Button>
-            </div>
+          <aside className="ui-tasks-detail-aside" aria-label="Details">
             <DetailsPane
               session={session}
               sessionId={sessionId}
               selectedTaskId={selectedTaskId}
               onSelectTask={setSelectedTaskId}
+              onHide={() => setShowDetails(false)}
             />
-          </div>
+          </aside>
         )}
         {showLoop && (
-          <div className="w-[320px] border-l border-line-soft min-h-0 flex flex-col bg-bg-0">
+          <aside className="ui-tasks-detail-aside" aria-label="Loop">
             <LoopPanel repoRoot={session.projects[0]?.root ?? null} />
-          </div>
+          </aside>
         )}
       </div>
 
-      {/* No own header bar (rendered inside the shared tab strip): History +
-          Memory live as headless popovers anchored top-right, opened from the
-          chat tab's right-click menu via window events. */}
+      {/* No own header bar (rendered inside the shared tab strip): Memory
+          lives as a headless popover anchored top-right, opened from the chat
+          tab's right-click menu via a window event. Chat history lives in the
+          composer's toolbar and answers the same kind of event. */}
       {!tabChrome && (
         <>
-          <SessionHistoryButton
-            headless
-            currentSessionId={sessionId}
-            repoRoot={session.projects[0]?.root ?? null}
-          />
           <MemoryBadge
             headless
             repoRoot={session.projects[0]?.root ?? null}
@@ -704,271 +670,27 @@ export function ManagerSurface({
   );
 }
 
-// History clock in the tabs strip — the answer to "how do I get back to a
-// previous conversation?". Lists every Aura session (live + persisted, via
-// `manager_list`), most-recent first; picking one re-homes it into the
-// center workpane through `openManager`. Also opens when the `/resume`
-// slash command fires the `aura:manager:open-history` event.
-function SessionHistoryButton({
-  currentSessionId,
-  repoRoot,
-  headless = false,
-}: {
-  currentSessionId: string;
-  repoRoot: string | null;
-  /** When true, render no trigger button — the popover is driven purely by
-   *  the `aura:manager:open-history` event (the chat-tab right-click menu),
-   *  anchored top-right. Used when the surface has no own header bar. */
-  headless?: boolean;
-}) {
-  const editor = useEditorStore();
-  const [open, setOpen] = useState(false);
-  const [sessions, setSessions] = useState<ManagerSummary[] | null>(null);
-  // Cross-agent continuity — Claude Code CLI sessions for this workspace,
-  // importable into a native Aura chat (full history hydrated as bubbles).
-  const [claudeSessions, setClaudeSessions] = useState<ClaudeSession[] | null>(
-    null,
-  );
-  const [importing, setImporting] = useState<string | null>(null);
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  const load = useCallback(() => {
-    setSessions(null);
-    // Scope native Aura sessions to the open workspace — a session from a
-    // different workspace (e.g. New Git while Mixrank is open) must never
-    // appear here, let alone be resumable into and touched. Claude sessions
-    // below are already repoRoot-scoped.
-    // Through managerCache: the sidebar's recents strip and the resume
-    // picker ask for this same list in the same tick as this surface mounts.
-    // Zero window — it only joins a read already running, never remembers one.
-    fetchManagerList(repoRoot)
-      .then(setSessions)
-      .catch(() => setSessions([]));
-    if (repoRoot) {
-      setClaudeSessions(null);
-      fetchSessions(repoRoot)
-        .then(setClaudeSessions)
-        .catch(() => setClaudeSessions([]));
-    } else {
-      setClaudeSessions([]);
-    }
-  }, [repoRoot]);
-
-  // Import a Claude Code transcript into a fresh native Aura session, then
-  // re-home it into the center workpane — same open path as picking an
-  // existing Aura conversation, so history lands in the bubble view.
-  const importClaude = (sess: ClaudeSession) => {
-    if (!repoRoot || importing) return;
-    setImporting(sess.session_id);
-    api
-      .managerImportAgentSession("claude", repoRoot, sess.session_id)
-      .then((newSid) => {
-        // Named after what the imported conversation was ABOUT when it has a
-        // prompt to go on. When it doesn't, the fallback is "Aura" — this is
-        // a native Aura session now, and calling it "Claude Code" put an Aura
-        // tab under another agent's name, beside real Claude Code tabs
-        // wearing the same mark.
-        const label = (sess.last_prompt || sess.first_prompt || "")
-          .trim()
-          .slice(0, 80);
-        editor.openManager(newSid, label || "Aura");
-        setOpen(false);
-      })
-      .catch((e) => console.warn("[manager] import claude session failed", e))
-      .finally(() => setImporting(null));
-  };
-
-  // `/resume` (and aliases) dispatch this so the slash command and the
-  // header button open the same surface.
-  useEffect(() => {
-    function onOpen() {
-      setOpen(true);
-      load();
-    }
-    window.addEventListener("aura:manager:open-history", onOpen);
-    return () => window.removeEventListener("aura:manager:open-history", onOpen);
-  }, [load]);
-
-  // Click-outside / Esc closes the dropdown.
-  useDismiss(open, () => setOpen(false), ref);
-
-  const toggle = () => {
-    setOpen((v) => {
-      if (!v) load();
-      return !v;
-    });
-  };
-
-  const pick = (s: ManagerSummary) => {
-    editor.openManager(s.id, stripSteeringDirective(s.objective ?? "").trim() || "Aura");
-    setOpen(false);
-  };
-
-  return (
-    <div
-      ref={ref}
-      className={headless ? "fixed top-11 right-3 z-40" : "relative"}
-    >
-      {!headless && (
-        <button
-          type="button"
-          className="icon-btn"
-          title="Chat history. Resume a past conversation"
-          onClick={toggle}
-        >
-          <svg className="ico"><use href="#i-history" /></svg>
-        </button>
-      )}
-      {open && (
-        <div className="absolute right-0 top-7 z-30 bg-bg-3 border border-line-soft rounded-lg shadow-xl py-1 text-xs w-[320px] max-h-[420px] overflow-auto">
-          <div className="section-label px-3 py-1.5">
-            Resume a conversation
-          </div>
-          {sessions === null ? (
-            <div className="flex items-center gap-1.5 px-3 py-3 text-text-3">
-              <AsciiSpinner />
-              Loading…
-            </div>
-          ) : sessions.length === 0 ? (
-            <div className="px-3 py-3 text-text-3">No past conversations yet.</div>
-          ) : (
-            sessions.map((s) => {
-              const isCurrent = s.id === currentSessionId;
-              return (
-                <button
-                  key={s.id}
-                  type="button"
-                  disabled={isCurrent}
-                  onClick={() => pick(s)}
-                  className={`w-full text-left px-3 py-2 flex flex-col gap-0.5 transition-colors ${
-                    isCurrent ? "opacity-50 cursor-default" : "hover:bg-state-hover"
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`h-1.5 w-1.5 rounded-full flex-none ${
-                        HISTORY_DOT[s.status] ?? "bg-text-4"
-                      }`}
-                    />
-                    <span className="flex-1 truncate text-text-1">
-                      {s.objective?.trim() || "Untitled chat"}
-                    </span>
-                    {isCurrent && (
-                      <span className="text-2xs text-accent flex-none">current</span>
-                    )}
-                  </div>
-                  <div className="pl-3.5 flex items-center gap-1.5 text-xs text-text-4">
-                    <span>{relTime(s.updated_at)}</span>
-                    {s.task_count > 0 && (
-                      <span>· {s.done_count}/{s.task_count} tasks</span>
-                    )}
-                  </div>
-                </button>
-              );
-            })
-          )}
-          {claudeSessions && claudeSessions.length > 0 && (
-            <>
-              <div className="mt-1 border-t border-line-soft" />
-              <div className="section-label px-3 py-1.5 flex items-center gap-1.5">
-                <AgentIcon agentId="claude" size={11} />
-                Resume from Claude Code
-              </div>
-              {claudeSessions.map((sess) => {
-                const busy = importing === sess.session_id;
-                const label =
-                  (sess.last_prompt || sess.first_prompt || "").trim() ||
-                  "Claude session";
-                return (
-                  <button
-                    key={sess.session_id}
-                    type="button"
-                    disabled={importing != null}
-                    onClick={() => importClaude(sess)}
-                    className={`w-full text-left px-3 py-2 flex flex-col gap-0.5 transition-colors ${
-                      importing != null && !busy
-                        ? "opacity-50 cursor-default"
-                        : "hover:bg-state-hover"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <AgentIcon agentId="claude" size={13} />
-                      <span className="flex-1 truncate text-text-1">{label}</span>
-                      {busy && (
-                        <span className="text-2xs text-accent flex-none">
-                          importing…
-                        </span>
-                      )}
-                    </div>
-                    <div className="pl-[1.35rem] flex items-center gap-1.5 text-xs text-text-4">
-                      <span>{relTime(sess.mtime)}</span>
-                      {sess.turn_count > 0 && <span>· {sess.turn_count} turns</span>}
-                      {sess.cwd_rel && (
-                        <span className="truncate">· {sess.cwd_rel}</span>
-                      )}
-                    </div>
-                  </button>
-                );
-              })}
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-const HISTORY_DOT: Record<ManagerStatus, string> = {
-  awaiting_approval: "bg-accent",
-  running: "bg-accent animate-pulse",
-  paused: "bg-text-4",
-  completed: "bg-text-4",
-  cancelled: "bg-text-5",
-};
-
-// Compact relative time for session rows. `secs` is a unix-seconds stamp
-// (created_at / updated_at), matching the backend's serialization.
-function relTime(secs: number): string {
-  // One ladder for the whole app — see lib/relativeTime.
-  const delta = Math.max(0, Date.now() / 1000 - secs);
-  if (delta >= 604800) return shortDateFromSecs(secs);
-  return relativeAgeFromDelta(delta);
-}
-
-function MenuItem({
-  label,
-  onClick,
-  tone,
-}: {
-  label: string;
-  onClick: () => void;
-  tone?: "danger";
-}) {
-  const cls =
-    tone === "danger"
-      ? "text-red hover:bg-red/10"
-      : "text-text-1 hover:bg-state-hover";
-  return (
-    <button className={`block w-full text-left px-3 py-1.5 ${cls}`} onClick={onClick}>
-      {label}
-    </button>
-  );
-}
-
 function DetailsPane({
   session,
   sessionId,
   selectedTaskId,
   onSelectTask,
+  onHide,
 }: {
   session: ManagerSession;
   sessionId: string;
   selectedTaskId: number | null;
   onSelectTask: (id: number | null) => void;
+  onHide: () => void;
 }) {
   const selected = selectedTaskId
     ? session.tasks.find((t) => t.id === selectedTaskId) ?? null
     : null;
+  const hide = (
+    <Button variant="ghost" size="iconXs" title="Hide details" aria-label="Hide details" onClick={onHide}>
+      <X />
+    </Button>
+  );
 
   if (selected) {
     return (
@@ -976,17 +698,18 @@ function DetailsPane({
         task={selected}
         sessionId={sessionId}
         onClose={() => onSelectTask(null)}
+        hide={hide}
       />
     );
   }
 
+  // The aside's own sections: the plan as a graph, then what has happened.
+  // One scroll for both, so a long plan never squeezes the log to a sliver.
   return (
-    <div className="flex-1 min-h-0 flex flex-col">
-      <div className="flex-1 min-h-0 overflow-auto p-3 border-b border-line-soft">
+    <>
+      <TaskDetailSection title="Tasks" count={session.tasks.length} action={hide}>
         {session.tasks.length === 0 ? (
-          <div className="text-text-3 text-xs">
-            No tasks yet. Ask the Manager to do something.
-          </div>
+          <TaskDetailNote>No tasks yet. Ask the Manager to do something.</TaskDetailNote>
         ) : (
           <DagView
             tasks={session.tasks}
@@ -1005,11 +728,11 @@ function DetailsPane({
             )}
           />
         )}
-      </div>
-      <div className="flex-1 min-h-0 overflow-auto p-3">
+      </TaskDetailSection>
+      <TaskDetailSection title="Activity" count={session.ribbon.length}>
         <RibbonList ribbon={session.ribbon} />
-      </div>
-    </div>
+      </TaskDetailSection>
+    </>
   );
 }
 
@@ -1087,7 +810,7 @@ function UsageChip({ session }: { session: ManagerSession }) {
   const total = agg.totalInputTokens + agg.totalOutputTokens;
   const cacheRead = agg.totalCacheReadTokens;
   const tooltip = [
-    `Today across ${session.projects.length} project${session.projects.length === 1 ? "" : "s"}`,
+    `Today across ${session.projects.length} repositor${session.projects.length === 1 ? "y" : "ies"}`,
     `${compactNumber(agg.totalInputTokens)} in · ${compactNumber(agg.totalOutputTokens)} out`,
     // Cache reads are cheap, not free, and the figure beside them now
     // charges for them. Calling them "saved" here while billing for them
@@ -1105,18 +828,9 @@ function UsageChip({ session }: { session: ManagerSession }) {
     .join("\n");
 
   return (
-    <div
-      title={tooltip}
-      className="flex items-center gap-1.5 text-xs px-2 py-0.5 rounded border border-line-soft"
-    >
-      <span className="font-medium text-text-1 tabular-nums">
-        {compactNumber(total)}
-      </span>
-      <span className="text-text-3">·</span>
-      <span className="font-medium text-text-2 tabular-nums">
-        {formatCost(agg.totalCostUsd)}
-      </span>
-    </div>
+    <Badge variant="outline" title={tooltip} className="tabular-nums">
+      {compactNumber(total)} · {formatCost(agg.totalCostUsd)}
+    </Badge>
   );
 }
 
@@ -1157,6 +871,17 @@ function usageSignature(r: UsageReport | null): string {
   ].join("|");
 }
 
+// A task's status, said with the workspace lifecycle glyphs the board uses.
+// "Needs you" is review-shaped: the work stopped and is waiting on a person.
+const TASK_STAGE: Record<ManagerTaskStatus, { stage: WorkspaceStage; label: string; color?: string }> = {
+  pending: { stage: "backlog", label: "Waiting" },
+  running: { stage: "in-progress", label: "Running" },
+  manual_pending: { stage: "in-review", label: "Needs you" },
+  done: { stage: "done", label: "Done" },
+  failed: { stage: "canceled", label: "Failed", color: "var(--ui-red)" },
+  skipped: { stage: "canceled", label: "Skipped" },
+};
+
 function TaskCard({
   task,
   sessionId,
@@ -1170,7 +895,6 @@ function TaskCard({
   onSelect: () => void;
   cardRef?: (el: HTMLDivElement | null) => void;
 }) {
-  const [open, setOpen] = useState(false);
   // Bucket O — live line counter + activity pulse. Subscribes to the
   // per-task stream channel `manager-task-stream:<sid>:<tid>` and
   // increments locally on each line; the persisted `task.line_count`
@@ -1201,117 +925,90 @@ function TaskCard({
       unlistenP.then((u) => u()).catch(() => {});
     };
   }, [sessionId, task.id, task.status]);
-  const ringClass = selected ? "ring-1 ring-accent/50" : "";
+  const snapshots = task.pre_dispatch_snapshot_ids?.length ?? 0;
+  const terminal = task.status === "done" || task.status === "failed" || task.status === "skipped";
   return (
-    <div
-      ref={cardRef}
-      className={`relative rounded border ${TASK_BORDER[task.status] ?? "border-line-soft"} ${ringClass} bg-bg-3 p-2 min-w-[180px] max-w-[260px] cursor-pointer hover:bg-bg-chrome`}
-      onClick={onSelect}
-    >
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <div className={`h-2 w-2 rounded-full flex-none ${TASK_DOT[task.status] ?? "bg-text-4"}`} />
-          <StatusChip dense>{task.agent_id ?? "auto"}</StatusChip>
-        </div>
-        <button
-          className="flex items-center justify-center w-5 h-5 rounded text-text-3 hover:text-text-1 hover:bg-state-hover flex-shrink-0"
-          onClick={(e) => {
-            e.stopPropagation();
-            setOpen((v) => !v);
-          }}
-          title="More actions"
-        >
-          <svg width="11" height="11" viewBox="0 0 10 10" fill="currentColor">
-            <circle cx="2" cy="5" r="0.9" />
-            <circle cx="5" cy="5" r="0.9" />
-            <circle cx="8" cy="5" r="0.9" />
-          </svg>
-        </button>
-      </div>
-      <div className="text-text-1 t-sm mt-1.5 line-clamp-3">
-        {plainPreview(task.description)}
-      </div>
-      {(task.depends_on.length > 0 ||
-        task.worktree_path ||
-        task.a2a_task_id ||
-        (task.pre_dispatch_snapshot_ids?.length ?? 0) > 0 ||
-        liveCount > 0) && (
-        <div className="flex flex-wrap items-center gap-1 mt-1.5">
-          {task.depends_on.length > 0 && (
-            <StatusChip
-              dense
-              title={`Waits for ${task.depends_on.length === 1 ? "task" : "tasks"} ${task.depends_on.join(", ")} to finish first`}
-            >
-              ↑ {task.depends_on.join(",")}
-            </StatusChip>
-          )}
-          {task.worktree_path && (
-            <StatusChip dense title={`Isolated copy: ${task.worktree_path}`}>
-              ⎇ {task.worktree_path.split("/").slice(-1)[0]}
-            </StatusChip>
-          )}
-          {task.a2a_task_id && (
-            <StatusChip
-              dense
-              title={`Tracked as an agent-to-agent (A2A) task · ${task.a2a_task_id}`}
-            >
-              ⇆ a2a:{task.a2a_task_id.split("-")[0]}
-            </StatusChip>
-          )}
-          {(task.pre_dispatch_snapshot_ids?.length ?? 0) > 0 && (
-            <StatusChip dense
-              title={`Auto-snapshotted ${task.pre_dispatch_snapshot_ids!.length} file(s) before dispatch. Recoverable via 'aura rewind --task ${task.id}'`}
-            >
-              ↺ {task.pre_dispatch_snapshot_ids!.length} snapshot
-              {task.pre_dispatch_snapshot_ids!.length === 1 ? "" : "s"}
-            </StatusChip>
-          )}
-          {liveCount > 0 && (
-            <StatusChip dense
-              title={
-                task.status === "running"
-                  ? `Live stream · ${liveCount} lines so far. Click to expand.`
-                  : `Captured ${liveCount} lines while running.`
-              }
-            >
-              <span
-                className={`inline-block h-1.5 w-1.5 rounded-full mr-1 align-middle ${
-                  pulse ? "bg-accent" : "bg-text-4"
-                } ${pulse ? "animate-pulse" : ""}`}
-              />
-              ≈{liveCount} lines
-            </StatusChip>
-          )}
-        </div>
-      )}
-      {task.blocked_reason && (
-        <div className="mt-1.5">
-          <StatusChip dense tone="amber" title={task.blocked_reason}>
-            ⚠ {task.blocked_reason}
-          </StatusChip>
-        </div>
-      )}
-      {(task.status === "done" ||
-        task.status === "failed" ||
-        task.status === "skipped") && (
-        <RatingButtons sessionId={sessionId} task={task} />
-      )}
-      {open && (
-        <TaskActions
-          sessionId={sessionId}
-          task={task}
-          onClose={() => setOpen(false)}
+    // DagView draws its edges from each card's box, so the ref sits on a
+    // wrapper the board card fills.
+    <div ref={cardRef} className="w-[240px] max-w-full">
+      <TaskBoardCard
+        label={`Task #${task.id}: ${plainLine(task.description)}`}
+        taskId={String(task.id)}
+        selected={selected}
+        onOpen={onSelect}
+      >
+        <TaskCardContent
+          handle={`#${task.id} · ${task.agent_id ?? "auto"}`}
+          stage={<TaskStatusBadge {...TASK_STAGE[task.status]} />}
+          title={plainPreview(task.description)}
+          footer={
+            <>
+              {task.depends_on.length > 0 && (
+                <TaskFact
+                  icon={<ArrowUp />}
+                  title={`Waits for ${task.depends_on.length === 1 ? "task" : "tasks"} ${task.depends_on.join(", ")} to finish first`}
+                >
+                  {task.depends_on.join(",")}
+                </TaskFact>
+              )}
+              {task.worktree_path && (
+                <TaskFact icon={<GitBranch />} title={`Isolated copy: ${task.worktree_path}`}>
+                  {task.worktree_path.split("/").slice(-1)[0]}
+                </TaskFact>
+              )}
+              {task.a2a_task_id && (
+                <TaskFact
+                  icon={<ArrowLeftRight />}
+                  title={`Tracked as an agent-to-agent (A2A) task · ${task.a2a_task_id}`}
+                >
+                  a2a:{task.a2a_task_id.split("-")[0]}
+                </TaskFact>
+              )}
+              {snapshots > 0 && (
+                <TaskFact
+                  icon={<RotateCcw />}
+                  title={`Auto-snapshotted ${snapshots} file(s) before dispatch. Recoverable via 'aura rewind --task ${task.id}'`}
+                >
+                  {snapshots} snapshot{snapshots === 1 ? "" : "s"}
+                </TaskFact>
+              )}
+              {liveCount > 0 && (
+                <TaskFact
+                  icon={<span className="ui-status-dot" data-status={pulse ? "working" : undefined} aria-hidden />}
+                  title={
+                    task.status === "running"
+                      ? `Live stream · ${liveCount} lines so far. Click to expand.`
+                      : `Captured ${liveCount} lines while running.`
+                  }
+                >
+                  ≈{liveCount} lines
+                </TaskFact>
+              )}
+              {task.blocked_reason && (
+                <TaskFact tone="alert" icon={<TriangleAlert />} title={task.blocked_reason}>
+                  {task.blocked_reason}
+                </TaskFact>
+              )}
+              {/* The card opens on any click; these two answer for themselves.
+                  The menu's items are portalled, and React still bubbles
+                  their clicks through here, so the stop covers them too. */}
+              <span className="ml-auto inline-flex items-center" onClick={(e) => e.stopPropagation()}>
+                {terminal && <RatingButtons sessionId={sessionId} task={task} />}
+                <TaskActions sessionId={sessionId} task={task} />
+              </span>
+            </>
+          }
         />
-      )}
+      </TaskBoardCard>
     </div>
   );
 }
 
-/// Bucket F2 — thumbs row shown only on terminal tasks. Optimistic
-/// click: flips the local state immediately, fires the Tauri command in
-/// the background, snapshot reload reconciles. The current vote is read
-/// from `task.pending_skill.user_rating`, which the backend persists
-/// across reloads.
+/// Bucket F2 — thumbs shown only on terminal tasks. Optimistic click: flips
+/// the local state immediately, fires the Tauri command in the background,
+/// snapshot reload reconciles. The current vote is read from
+/// `task.pending_skill.user_rating`, which the backend persists across
+/// reloads. The vote that stands is the filled button.
 function RatingButtons({
   sessionId,
   task,
@@ -1322,8 +1019,7 @@ function RatingButtons({
   const persisted = task.pending_skill?.user_rating ?? null;
   const [optimistic, setOptimistic] = useState<-1 | 1 | null>(null);
   const current = optimistic ?? (persisted === 1 || persisted === -1 ? persisted : null);
-  const fire = (rating: -1 | 1, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const fire = (rating: -1 | 1) => {
     setOptimistic(rating);
     api
       .managerRateTask(sessionId, task.id, rating)
@@ -1332,126 +1028,95 @@ function RatingButtons({
         setOptimistic(null);
       });
   };
-  const baseCls =
-    "inline-flex items-center justify-center h-5 w-5 rounded text-text-3 hover:text-text-1 hover:bg-bg-chrome transition-colors";
   return (
-    <div className="flex items-center gap-1 mt-1.5" onClick={(e) => e.stopPropagation()}>
-      <button
-        className={`${baseCls} ${current === 1 ? "text-text-1" : ""}`}
-        onClick={(e) => fire(1, e)}
+    <>
+      <Button
+        variant={current === 1 ? "secondary" : "ghost"}
+        size="iconXs"
+        aria-pressed={current === 1}
+        onClick={() => fire(1)}
         title="This came out well. Aura remembers which brain did it and reaches for that one on work like this."
         aria-label="Thumbs up"
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M7 10v12" />
-          <path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z" />
-        </svg>
-      </button>
-      <button
-        className={`${baseCls} ${current === -1 ? "text-text-1" : ""}`}
-        onClick={(e) => fire(-1, e)}
+        <ThumbsUp />
+      </Button>
+      <Button
+        variant={current === -1 ? "secondary" : "ghost"}
+        size="iconXs"
+        aria-pressed={current === -1}
+        onClick={() => fire(-1)}
         title="This didn't come out well. Aura remembers, and reaches for a different brain on work like this."
         aria-label="Thumbs down"
       >
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M17 14V2" />
-          <path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z" />
-        </svg>
-      </button>
-    </div>
+        <ThumbsDown />
+      </Button>
+    </>
   );
 }
-
-const TASK_BORDER: Record<ManagerTaskStatus, string> = {
-  pending: "border-line-soft",
-  running: "border-accent/40",
-  done: "border-line-soft",
-  failed: "border-red/50",
-  manual_pending: "border-accent/40",
-  skipped: "border-line-soft",
-};
-
-const TASK_DOT: Record<ManagerTaskStatus, string> = {
-  pending: "bg-text-4/40",
-  running: "bg-accent animate-pulse",
-  done: "bg-accent-green",
-  failed: "bg-red",
-  manual_pending: "bg-accent",
-  skipped: "bg-text-4/40",
-};
 
 function TaskActions({
   sessionId,
   task,
-  onClose,
 }: {
   sessionId: string;
   task: ManagerTask;
-  onClose: () => void;
 }) {
-  const [reassignOpen, setReassignOpen] = useState(false);
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
-  useEffect(() => {
-    if (reassignOpen && agents.length === 0) {
-      api.agentDiscover().then(setAgents).catch(() => setAgents([]));
-    }
-  }, [reassignOpen, agents.length]);
+  // Null until the Reassign submenu first opens: discovery spawns a probe per
+  // installed CLI, which nobody should pay for just by opening the menu.
+  const [agents, setAgents] = useState<AgentInfo[] | null>(null);
+  const loadAgents = (open: boolean) => {
+    if (!open || agents !== null) return;
+    api.agentDiscover().then(setAgents).catch(() => setAgents([]));
+  };
 
   const fire = (mode: ManagerOverrideMode, agentId?: string) => {
     api
       .managerOverride(sessionId, task.id, mode, agentId)
-      .then(onClose)
       .catch((e) => console.warn("[manager] override failed:", e));
   };
 
+  const removeCopy = () => {
+    const path = task.worktree_path;
+    if (!path) return;
+    removeTaskCopyWith(path, {
+      remove: (force) => api.managerRemoveTaskWorktree(sessionId, task.id, force),
+      confirm: (body) =>
+        askConfirm({ title: "Remove this task's copy?", body, confirmLabel: "Remove", tone: "danger" }),
+    }).catch((e) => console.warn("[manager] removing the task's copy failed:", e));
+  };
+
   return (
-    <div
-      className="absolute right-1 top-7 z-10 bg-bg-chrome border border-line-soft rounded shadow-lg p-1 text-xs min-w-[140px]"
-      onClick={(e) => e.stopPropagation()}
-    >
-      {reassignOpen ? (
-        <>
-          <div className="px-2 py-1 text-text-3">Pick agent:</div>
-          {agents.length === 0 ? (
-            <div className="flex items-center gap-1.5 px-2 py-1 text-text-3">
-              <AsciiSpinner />
-              Loading…
-            </div>
-          ) : (
-            agents.map((a) => (
-              <button
-                key={a.id}
-                className="block w-full text-left px-2 py-1 hover:bg-state-hover"
-                onClick={() => fire("reassign", a.id)}
-              >
-                {a.label}
-              </button>
-            ))
-          )}
-          <button className="block w-full text-left px-2 py-1 hover:bg-state-hover" onClick={() => setReassignOpen(false)}>
-            Back
-          </button>
-        </>
-      ) : (
-        <>
-          <button className="block w-full text-left px-2 py-1 hover:bg-state-hover" onClick={() => fire("rerun")}>
-            Rerun
-          </button>
-          <button className="block w-full text-left px-2 py-1 hover:bg-state-hover" onClick={() => fire("skip")}>
-            Skip
-          </button>
-          <button className="block w-full text-left px-2 py-1 hover:bg-state-hover" onClick={() => setReassignOpen(true)}>
-            Reassign…
-          </button>
-          <button className="block w-full text-left px-2 py-1 hover:bg-state-hover" onClick={() => fire("take_over")}>
-            Take over
-          </button>
-          <button className="block w-full text-left px-2 py-1 hover:bg-state-hover" onClick={onClose}>
-            Close
-          </button>
-        </>
-      )}
-    </div>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="iconXs" title="More actions" aria-label={`More actions for task #${task.id}`}>
+          <MoreHorizontal />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={() => fire("rerun")}>Rerun</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => fire("skip")}>Skip</DropdownMenuItem>
+        <DropdownMenuSub onOpenChange={loadAgents}>
+          <DropdownMenuSubTrigger>Reassign</DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            {agents === null ? (
+              <DropdownMenuItem disabled>Finding your agents…</DropdownMenuItem>
+            ) : agents.length === 0 ? (
+              <DropdownMenuItem disabled>No other agents found</DropdownMenuItem>
+            ) : (
+              agents.map((a) => (
+                <DropdownMenuItem key={a.id} onSelect={() => fire("reassign", a.id)}>
+                  {a.label}
+                </DropdownMenuItem>
+              ))
+            )}
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuItem onSelect={() => fire("take_over")}>Take over</DropdownMenuItem>
+        {canRemoveTaskCopy(task) && (
+          <DropdownMenuItem onSelect={removeCopy}>Remove isolated copy</DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -1459,10 +1124,14 @@ function TaskDetailPanel({
   task,
   sessionId,
   onClose,
+  hide,
 }: {
   task: ManagerTask;
   sessionId: string;
   onClose: () => void;
+  /** The aside's own close, kept beside Back so leaving the task isn't the
+   *  only way out of the column. */
+  hide: React.ReactNode;
 }) {
   const [liveOutput, setLiveOutput] = useState("");
   const [manualOutput, setManualOutput] = useState("");
@@ -1500,48 +1169,47 @@ function TaskDetailPanel({
   };
 
   return (
-    <div className="h-full flex flex-col min-h-0">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-line-soft bg-bg-chrome">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="section-label">Task #{task.id}</span>
-          <span className="text-text-1 text-sm truncate">
-            {plainLine(task.description)}
+    <>
+      <TaskDetailSection
+        title={`Task #${task.id}`}
+        action={
+          <span className="inline-flex items-center">
+            <Button variant="ghost" size="iconXs" title="Back to all tasks" aria-label="Back to all tasks" onClick={onClose}>
+              <ArrowLeft />
+            </Button>
+            {hide}
           </span>
-        </div>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="text-text-3 hover:text-text-1 text-xs"
-          onClick={onClose}
-        >
-          ✕
-        </Button>
-      </div>
-      <div className="flex-1 min-h-0 overflow-auto p-3">
-        <pre className="text-xs text-text-1 whitespace-pre-wrap font-mono">{shown}</pre>
-      </div>
+        }
+      >
+        <p className="ui-tasks-detail-objective">{plainLine(task.description)}</p>
+        <TaskDetailMeta
+          parts={[<TaskStatusBadge {...TASK_STAGE[task.status]} />, task.agent_id ?? "auto"]}
+        />
+      </TaskDetailSection>
+      <TaskDetailSection>
+        <CodeMessage language="Output">{shown}</CodeMessage>
+      </TaskDetailSection>
       {(task.status === "manual_pending" || task.status === "failed") && (
-        <div className="border-t border-line-soft p-3 flex flex-col gap-2">
-          <div className="section-label">
-            Mark done manually
+        <TaskDetailSection title="Mark done manually">
+          <div className="flex flex-col gap-2">
+            <Textarea
+              rows={3}
+              value={manualOutput}
+              onChange={(e) => setManualOutput(e.target.value)}
+              placeholder="What did you do? (becomes the task's relay summary)"
+            />
+            <Button
+              size="xs"
+              className="self-end"
+              onClick={submitManual}
+              disabled={submitting || !manualOutput.trim()}
+            >
+              {submitting ? "Saving…" : "Mark done"}
+            </Button>
           </div>
-          <textarea
-            className="w-full bg-bg-3 text-text-1 text-xs rounded border border-line-soft px-2 py-1 outline-none focus:border-line"
-            rows={3}
-            value={manualOutput}
-            onChange={(e) => setManualOutput(e.target.value)}
-            placeholder="What did you do? (becomes the task's relay summary)"
-          />
-          <button
-            className="self-end text-xs px-3 py-1 rounded bg-accent/15 text-accent transition-colors hover:bg-accent/25 disabled:opacity-50"
-            onClick={submitManual}
-            disabled={submitting || !manualOutput.trim()}
-          >
-            {submitting ? "Saving…" : "Mark done"}
-          </button>
-        </div>
+        </TaskDetailSection>
       )}
-    </div>
+    </>
   );
 }
 
@@ -1556,16 +1224,15 @@ function RibbonList({ ribbon }: { ribbon: RibbonEntry[] }) {
       />
     );
   }
-  return (
-    <ol className="flex flex-col gap-1 text-xs">
-      {[...ribbon].reverse().map((entry, idx) => (
-        <li key={idx} className="flex items-start gap-2 py-0.5">
-          <span className="text-text-3 shrink-0 w-14">{formatTime(entry.at)}</span>
-          <span className="text-text-1">{describeEvent(entry)}</span>
-        </li>
-      ))}
-    </ol>
-  );
+  // Newest first, and the newest one's marker is filled: it is where the
+  // session is now.
+  const entries = [...ribbon].reverse().map((entry, idx) => ({
+    id: `${entry.at}-${idx}`,
+    title: describeEvent(entry),
+    detail: formatTime(entry.at),
+    tone: idx === 0 ? ("active" as const) : ("neutral" as const),
+  }));
+  return <Timeline entries={entries} />;
 }
 
 function describeEvent(entry: RibbonEntry): string {

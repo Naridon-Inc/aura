@@ -1,6 +1,7 @@
 // ChangesTab — the "what you're about to save" surface, planned as master /
-// detail instead of a lone sidebar. Left: the real ChangesPanel (staged /
-// modified / untracked + the commit box + live-sync awareness), reused whole.
+// detail instead of a lone sidebar. Left: the real ChangesPanel in its
+// staging form (Staged / Changes, each nested repository under its own
+// heading, live-sync awareness) with the commit box under it.
 // Right: the picked file's diff inline, or — with nothing picked — a calm read
 // of where your uncommitted work stands. A plain click reviews in place; a
 // Cmd/Ctrl-click opens the file in the editor (and closes the surface) for
@@ -8,9 +9,12 @@
 
 import { useState } from "react";
 
+import { useGitChanges } from "../../lib/useGitChanges";
 import { ChangesPanel } from "../rightrail/ChangesPanel";
+import { CommitInput } from "../rightrail/CommitInput";
 import { ChangesSummaryPane } from "./ChangesSummaryPane";
 import { WorkingDiffPane } from "./WorkingDiffPane";
+import "../ui/changes-tab.css";
 
 export function ChangesTab({
   repoRoot,
@@ -24,6 +28,9 @@ export function ChangesTab({
   onBeforeCommit?: () => Promise<boolean>;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
+  const changes = useGitChanges(repoRoot);
+  // Bumped after a commit, push or pull so the box re-reads ahead/behind.
+  const [refreshTick, setRefreshTick] = useState(0);
 
   const openInEditor = (path: string) => {
     window.dispatchEvent(new CustomEvent("aura:open-file", { detail: { path } }));
@@ -31,23 +38,36 @@ export function ChangesTab({
   };
 
   return (
-    <div className="flex h-full min-h-0">
-      {/* Left — the file list + commit box, reused wholesale. */}
-      <div className="flex w-[340px] min-h-0 shrink-0 flex-col border-r border-line-soft">
-        <ChangesPanel
+    <div className="ui-changes-tab">
+      {/* Left — the file list, then the commit box. */}
+      <div className="ui-changes-tab-list">
+        <div className="ui-changes-tab-files">
+          <ChangesPanel
+            repoRoot={repoRoot}
+            staging
+            onBeforeCommit={onBeforeCommit}
+            onOpenFile={(path, mode) => {
+              // Cmd/Ctrl-click = "take me to the editor"; a plain click reviews
+              // the change here without leaving the Git view.
+              if (mode === "edit") openInEditor(path);
+              else setSelected(path);
+            }}
+          />
+        </div>
+        <CommitInput
           repoRoot={repoRoot}
+          hasStagedChanges={changes.staged.length > 0}
+          refreshTick={refreshTick}
           onBeforeCommit={onBeforeCommit}
-          onOpenFile={(path, mode) => {
-            // Cmd/Ctrl-click = "take me to the editor"; a plain click reviews
-            // the change here without leaving the Git view.
-            if (mode === "edit") openInEditor(path);
-            else setSelected(path);
+          onAfterMutation={() => {
+            void changes.refresh();
+            setRefreshTick((t) => t + 1);
           }}
         />
       </div>
 
       {/* Right — review the picked file, or the at-a-glance summary. */}
-      <div className="min-w-0 min-h-0 flex-1">
+      <div className="ui-changes-tab-view">
         {selected ? (
           <WorkingDiffPane
             repoRoot={repoRoot}

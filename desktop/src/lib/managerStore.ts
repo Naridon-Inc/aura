@@ -342,6 +342,26 @@ async function refreshSummaries() {
   }
 }
 
+/** Show a rename everywhere at once — the chat list, and the open session's
+ *  own snapshot — without waiting for the next poll, then re-read the list.
+ *  Without the patch, the tab-title sync would put the old name straight back
+ *  onto the tab from the summary it last fetched. */
+export function applyManagerRename(sid: string, title: string): void {
+  let changed = false;
+  summaries = summaries.map((s) => {
+    if (s.id !== sid || s.objective === title) return s;
+    changed = true;
+    return { ...s, objective: title };
+  });
+  if (changed) notifySummary();
+  const snap = sessions.get(sid);
+  if (snap && snap.objective !== title) {
+    sessions.set(sid, { ...snap, objective: title });
+    notify(sid);
+  }
+  void refreshSummaries();
+}
+
 export function useManagerSummaries(): ManagerSummary[] {
   const [list, setList] = useState<ManagerSummary[]>(summaries);
   useEffect(() => {

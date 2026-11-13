@@ -129,13 +129,18 @@ async function refreshNow(repoRoot: string): Promise<PrSummary[]> {
       return list;
     })
     .catch((e) => {
-      const prev = mem.get(scope) ?? { data: [], fetchedAt: 0 };
+      const had = mem.get(scope);
+      const prev = had ?? { data: [], fetchedAt: 0 };
       mem.set(scope, {
         ...prev,
         failedAt: Date.now(),
         failCount: (prev.failCount ?? 0) + 1,
         lastError: e,
       });
+      // A background refresh fails silently for the caller that kicked it;
+      // tell subscribers so a status row can say the list may be stale. The
+      // list itself is unchanged (same array), so list-only views don't move.
+      if (had) notify(scope, prev.data);
       throw e;
     })
     .finally(() => {
@@ -146,6 +151,22 @@ async function refreshNow(repoRoot: string): Promise<PrSummary[]> {
   cur.inflight = p;
   mem.set(scope, cur);
   return p;
+}
+
+/** Why the latest read of the list failed, or `null` when it landed. Kept
+ *  until the next read succeeds, so a stale list can say it is stale. */
+export function getPrListError(repoRoot: string): string | null {
+  const entry = mem.get(placeScope(repoRoot));
+  if (entry?.failedAt == null) return null;
+  const e = entry.lastError;
+  return e instanceof Error ? e.message : String(e ?? "GitHub request failed");
+}
+
+/** Read the list again now, past any failure backoff: someone asked. */
+export function retryPrList(repoRoot: string): Promise<PrSummary[]> {
+  const entry = mem.get(placeScope(repoRoot));
+  if (entry) entry.failedAt = undefined;
+  return refreshNow(repoRoot);
 }
 
 /** Get the last-known list synchronously for an instant first paint.

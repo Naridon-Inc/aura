@@ -29,15 +29,15 @@ import { describe, expect, test } from "bun:test";
 
 import { readSrc } from "./support/code";
 
-const DIALOG = "components/dialogs/SettingsDialog.tsx";
+const PAGE = "components/settings/pages/HudPage.tsx";
 const CONTROLS = "components/settings/kit/controls.tsx";
 const HUD = "components/hud/HudApp.tsx";
 
 async function hudTab(): Promise<string> {
-  const src = await readSrc(DIALOG);
-  const start = src.indexOf("function HudTab()");
+  const src = await readSrc(PAGE);
+  const start = src.indexOf("export function HudPage()");
   expect(start).toBeGreaterThan(0);
-  return src.slice(start, src.indexOf("\nfunction ", start + 10));
+  return src.slice(start);
 }
 
 describe("HUD settings — nothing pretends to work while the HUD is off", () => {
@@ -68,17 +68,20 @@ describe("HUD settings — nothing pretends to work while the HUD is off", () =>
 });
 
 describe("HUD settings — the Stepper can be switched off whole", () => {
-  test("disabled reaches both buttons, on top of the range clamps", async () => {
+  test("disabled reaches the field, on top of the range clamps", async () => {
     const src = await readSrc(CONTROLS);
     const stepper = src.slice(src.indexOf("export function Stepper("));
-    expect(stepper).toContain("disabled={disabled || value <= min}");
-    expect(stepper).toContain("disabled={disabled || value >= max}");
+    expect(stepper).toContain("disabled={disabled}");
+    expect(stepper).toContain("Math.min(max, Math.max(min,");
   });
 
   test("and it reads as disabled, not merely unclickable", async () => {
+    // The field is the shared Input, whose disabled state is drawn by the
+    // control itself — a native disabled attribute, not a click guard.
     const src = await readSrc(CONTROLS);
     const stepper = src.slice(src.indexOf("export function Stepper("));
-    expect(stepper.slice(0, 1400)).toContain('disabled && "opacity-50"');
+    expect(stepper.slice(0, 1600)).toContain("<Input");
+    expect(stepper).not.toContain("onClick");
   });
 });
 

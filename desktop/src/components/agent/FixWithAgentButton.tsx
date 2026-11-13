@@ -53,14 +53,9 @@ export function FixWithAgentButton({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         {iconOnly ? (
-          <button
-            type="button"
-            title={label}
-            aria-label={label}
-            className="w-6 h-6 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
-          >
-            <Wrench className="h-3.5 w-3.5" />
-          </button>
+          <Button variant="ghost" size="iconXs" title={label} aria-label={label}>
+            <Wrench />
+          </Button>
         ) : (
           <Button size={size} variant="ghost" className="gap-1.5">
             <Wrench className="h-3.5 w-3.5" />

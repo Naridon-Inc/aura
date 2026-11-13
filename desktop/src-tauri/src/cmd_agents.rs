@@ -41,24 +41,34 @@ pub struct AgentInfo {
     pub continuable: bool,
 }
 
+/// The compact agent list the composer and slash commands read.
+///
+/// Versions come from `aura_agents::version_cache`, so only the first call
+/// spawns `<bin> --version` (all at once), and a later one reads memory. The
+/// rest is `which` lookups. All of it runs on the blocking pool, so a cold
+/// probe never parks an async worker.
 #[tauri::command]
 pub async fn agent_discover() -> Vec<AgentInfo> {
-    let reg = registry();
-    reg.iter()
-        .map(|p| {
-            let bin_path = which(p.bin_name());
-            let available = bin_path.is_some() && p.is_available();
-            AgentInfo {
-                id: p.id().to_string(),
-                label: p.label().to_string(),
-                bin: bin_path,
-                version: p.version().unwrap_or_default(),
-                monogram: monogram_for(p.id()),
-                available,
-                continuable: p.capabilities().resume,
-            }
-        })
-        .collect()
+    off_runtime(|| {
+        let reg = registry();
+        reg.iter()
+            .zip(reg.versions())
+            .map(|(p, version)| {
+                let bin_path = which(p.bin_name());
+                let available = bin_path.is_some() && p.is_available();
+                AgentInfo {
+                    id: p.id().to_string(),
+                    label: p.label().to_string(),
+                    bin: bin_path,
+                    version: version.unwrap_or_default(),
+                    monogram: monogram_for(p.id()),
+                    available,
+                    continuable: p.capabilities().resume,
+                }
+            })
+            .collect()
+    })
+    .await
 }
 
 /// Richer descriptor list — used by the Manager UI's reassign menu and
@@ -66,15 +76,25 @@ pub async fn agent_discover() -> Vec<AgentInfo> {
 /// 1:1 so React can deserialise without a custom shape.
 #[tauri::command]
 pub async fn agents_list() -> Vec<AgentDescriptor> {
-    registry().descriptors()
+    off_runtime(|| registry().descriptors()).await
 }
 
 /// Re-read `~/.aura/agents.toml` and rebuild the registry from
 /// defaults. Use after the user edits their TOML to pick up new
-/// providers without restarting the shell.
+/// providers without restarting the shell. It also forgets every cached
+/// binary location and version, so a CLI installed or upgraded since
+/// shows up as it is now.
 #[tauri::command]
 pub async fn agents_reload() -> Vec<AgentDescriptor> {
-    reload().descriptors()
+    off_runtime(|| reload().descriptors()).await
+}
+
+/// Run a registry read on the blocking pool. Each of them may spawn
+/// processes; none of them should hold an async worker while it does.
+async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> Vec<T> + Send + 'static) -> Vec<T> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .unwrap_or_default()
 }
 
 /// One-shot send. Returns the full captured stdout (and stderr appended

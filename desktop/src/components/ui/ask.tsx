@@ -39,19 +39,28 @@
 // A question that silently answers itself is worse than an ugly sheet.
 
 import * as React from "react";
-import { createPortal } from "react-dom";
 
-import { Button } from "./button";
-import { Input } from "./input";
 import {
-  MODAL_BACKDROP,
-  MODAL_BODY,
-  MODAL_FOOTER,
-  MODAL_HEADER,
-  MODAL_PANEL,
-  MODAL_TITLE,
-} from "./modalSurface";
-import { cn } from "../../lib/utils";
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "./alert-dialog";
+import { Button } from "./button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "./dialog";
+import { Input } from "./input";
+import "./ask.css";
 
 export type AskField = {
   /** Key this field's answer lands under. */
@@ -105,8 +114,8 @@ type Pending = { id: number } & (
 let enqueue: ((p: Pending) => void) | null = null;
 let nextId = 1;
 
-/** Ask a yes/no question. Resolves false on Escape, on the backdrop, and on
- *  cancel — the safe answer is always the one you get by leaving. */
+/** Ask a yes/no question. Resolves false on Escape and on cancel — the safe
+ *  answer is always the one you get by leaving. */
 export function askConfirm(req: ConfirmRequest): Promise<boolean> {
   if (!enqueue) {
     return Promise.resolve(
@@ -174,7 +183,9 @@ export function askNotice(req: NoticeRequest): Promise<void> {
 
 function Sheet({ pending, onDone }: { pending: Pending; onDone: () => void }) {
   const firstFieldRef = React.useRef<HTMLInputElement>(null);
-  const primaryRef = React.useRef<HTMLButtonElement>(null);
+  // The action button closes the dialog as well as answering, and the close
+  // arrives as "they left". The first answer is the one that counts.
+  const settled = React.useRef(false);
   const [values, setValues] = React.useState<Record<string, string>>(() =>
     pending.kind === "form"
       ? Object.fromEntries(pending.req.fields.map((f) => [f.name, f.value ?? ""]))
@@ -182,6 +193,8 @@ function Sheet({ pending, onDone }: { pending: Pending; onDone: () => void }) {
   );
 
   const leave = React.useCallback(() => {
+    if (settled.current) return;
+    settled.current = true;
     if (pending.kind === "confirm") pending.resolve(false);
     else if (pending.kind === "form") pending.resolve(null);
     else pending.resolve();
@@ -194,113 +207,103 @@ function Sheet({ pending, onDone }: { pending: Pending; onDone: () => void }) {
       : [];
 
   const accept = React.useCallback(() => {
-    if (pending.kind === "confirm") pending.resolve(true);
-    else if (pending.kind === "form") {
+    if (settled.current) return;
+    if (pending.kind === "form") {
       if (missing.length > 0) return;
       pending.resolve(values);
-    } else pending.resolve();
+    } else if (pending.kind === "confirm") pending.resolve(true);
+    else pending.resolve();
+    settled.current = true;
     onDone();
   }, [pending, values, missing.length, onDone]);
 
-  React.useEffect(() => {
-    // Focus what they came here to do: type in the first box, or answer.
-    const t = window.setTimeout(() => {
-      (firstFieldRef.current ?? primaryRef.current)?.focus();
-      firstFieldRef.current?.select();
-    }, 0);
-    return () => window.clearTimeout(t);
-  }, []);
+  const onOpenChange = (open: boolean) => {
+    if (!open) leave();
+  };
+  const body = pending.req.body;
+  // With no body there is no description to point at; saying so keeps the
+  // dialog from pointing at one that is not there. With a body, the dialog
+  // links it on its own.
+  const describedBy = body ? {} : { "aria-describedby": undefined };
 
-  React.useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        leave();
-      }
-    }
-    // Capture, so a surface underneath does not close on the same Escape.
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [leave]);
+  if (pending.kind === "form") {
+    const req = pending.req;
+    return (
+      <Dialog open onOpenChange={onOpenChange}>
+        <DialogContent
+          className="ui-ask"
+          {...describedBy}
+          // Focus what they came here to do: the first box, its text selected
+          // so a prefilled name can be typed over.
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            firstFieldRef.current?.focus();
+            firstFieldRef.current?.select();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{req.title}</DialogTitle>
+            {body && <DialogDescription className="ui-ask-body">{body}</DialogDescription>}
+          </DialogHeader>
+          {req.fields.map((f, i) => (
+            <label key={f.name} className="ui-form-field">
+              {f.label}
+              <Input
+                ref={i === 0 ? firstFieldRef : undefined}
+                value={values[f.name] ?? ""}
+                placeholder={f.placeholder}
+                onChange={(e) =>
+                  setValues((v) => ({ ...v, [f.name]: e.currentTarget.value }))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    accept();
+                  }
+                }}
+              />
+            </label>
+          ))}
+          <DialogFooter>
+            <Button variant="outline" onClick={leave}>
+              Cancel
+            </Button>
+            <Button disabled={missing.length > 0} onClick={accept}>
+              {req.submitLabel ?? "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   const danger = pending.kind === "confirm" && pending.req.tone === "danger";
-  const body = pending.req.body;
-
-  return createPortal(
-    <div
-      className={cn(MODAL_BACKDROP, "z-[70] flex items-start justify-center pt-[18vh]")}
-      onMouseDown={leave}
-      role="presentation"
-    >
-      <div
-        // Capped and scrolling, because the body is whatever the caller had
-        // to say. The card starts 18vh down; with no cap, a long body — an
-        // error, a pasted path, a list of names — pushed Cancel and the
-        // primary button below the bottom of a 900×600 window, and the panel
-        // is overflow-hidden, so there was no way to scroll to them: a
-        // question that cannot be answered. Header and footer stay put; only
-        // the middle moves.
-        className={cn(MODAL_PANEL, "flex max-h-[70vh] w-full max-w-[420px] flex-col")}
-        onMouseDown={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label={pending.req.title}
-      >
-        <div className={cn(MODAL_HEADER, "shrink-0")}>
-          <span className={MODAL_TITLE}>{pending.req.title}</span>
-        </div>
-
-        {(body || pending.kind === "form") && (
-          <div className={cn(MODAL_BODY, "flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto")}>
-            {body && (
-              <p className="whitespace-pre-line text-sm leading-relaxed text-text-2">{body}</p>
-            )}
-            {pending.kind === "form" &&
-              pending.req.fields.map((f, i) => (
-                <label key={f.name} className="flex flex-col gap-1">
-                  <span className="text-xs text-text-3">{f.label}</span>
-                  <Input
-                    ref={i === 0 ? firstFieldRef : undefined}
-                    value={values[f.name] ?? ""}
-                    placeholder={f.placeholder}
-                    onChange={(e) =>
-                      setValues((v) => ({ ...v, [f.name]: e.currentTarget.value }))
-                    }
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        accept();
-                      }
-                    }}
-                  />
-                </label>
-              ))}
-          </div>
-        )}
-
-        <div className={cn(MODAL_FOOTER, "shrink-0")}>
-          {pending.kind !== "notice" && (
-            <Button variant="secondary" size="sm" onClick={leave}>
-              {pending.kind === "confirm" ? (pending.req.cancelLabel ?? "Cancel") : "Cancel"}
-            </Button>
+  return (
+    <AlertDialog open onOpenChange={onOpenChange}>
+      <AlertDialogContent className="ui-ask" {...describedBy}>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{pending.req.title}</AlertDialogTitle>
+          {body && (
+            <AlertDialogDescription className="ui-ask-body">{body}</AlertDialogDescription>
           )}
-          <Button
-            ref={primaryRef}
-            variant={danger ? "destructive" : "default"}
-            size="sm"
-            disabled={missing.length > 0}
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          {pending.kind === "confirm" && (
+            <AlertDialogCancel onClick={leave}>
+              {pending.req.cancelLabel ?? "Cancel"}
+            </AlertDialogCancel>
+          )}
+          <AlertDialogAction
+            className={danger ? "ui-button-danger" : undefined}
             onClick={accept}
           >
             {pending.kind === "confirm"
               ? (pending.req.confirmLabel ?? "Continue")
-              : pending.kind === "form"
-                ? (pending.req.submitLabel ?? "Save")
-                : (pending.req.dismissLabel ?? "OK")}
-          </Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
+              : (pending.req.dismissLabel ?? "OK")}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 

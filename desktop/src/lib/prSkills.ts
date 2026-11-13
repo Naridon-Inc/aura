@@ -1,4 +1,4 @@
-// Parity W8 — PR skills: reusable prompt templates the Manager brain runs to
+// PR skills: reusable prompt templates the Manager brain runs to
 // shepherd a PR (describe, review, address feedback, ship).
 //
 // Each skill ships with a builtin template here, and a repo can override any
@@ -7,9 +7,9 @@
 // plain markdown with `{{PLACEHOLDER}}` slots; `buildPrSkillPrompt` fills the
 // slots and prepends the live repo-context block from `prFlowState`.
 //
-// Dispatch is intentionally not here: the PrRailPanel and the `/pr` chat verb
-// both build the prompt with this module, then hand it to the ambient Manager
-// session (`sendToAmbientManager`) — one brain path, two entries.
+// Dispatch is intentionally not here: the `/pr` chat verb builds the prompt
+// with this module, then hands it to the ambient Manager session
+// (`sendToAmbientManager`) — one brain path for every entry.
 
 import { api } from "./api";
 import { buildPrContextMarkdown, collectPrContext } from "./prFlowState";

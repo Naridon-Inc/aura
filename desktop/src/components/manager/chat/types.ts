@@ -53,7 +53,7 @@ export type ToolView = {
   mono?: boolean;
   /** A dim mono secondary preview shown right of `subject` on the collapsed
    *  row — e.g. the shell command behind a human-described bash step, so a
-   *  settled step reads "Ran · <description> · `the command`" like Conductor. */
+   *  settled step reads "Ran · <description> · `the command`". */
   aux?: string;
   /** The full shell command behind a terminal tool. When set (with the "run"
    *  glyph) the expanded card renders a single terminal well — a `>`-prefixed

@@ -1,6 +1,6 @@
 [package]
 name = "aura"
-version = "0.19.58"
+version = "0.20.11"
 edition = "2024"
 
 # Public release workspace: the aura CLI (root package) + its vendored
@@ -39,6 +39,9 @@ aura-agents = { path = "crates/aura-agents" }
 aura-attestation = { path = "crates/aura-attestation" }
 aura-plugin-sign = { path = "crates/aura-plugin-sign" }
 aura-blocks      = { path = "crates/aura-blocks" }
+# The one ACP implementation: registry lookup + launch resolution for the
+# engine agent `aura acp-serve` delegates conversation to.
+aura-acp         = { path = "crates/aura-acp" }
 aura-blockstore  = { path = "crates/aura-blockstore" }
 # The project's declared environment — toolchains, packages, services — parsed,
 # signed and turned into an ordered plan. The CLI drives that plan through

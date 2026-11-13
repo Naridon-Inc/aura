@@ -14,6 +14,7 @@
 import { useEffect, useState } from "react";
 
 import { api, type Machine } from "./api";
+import { findMachine } from "./machineRef";
 
 let cache: Machine[] | null = null;
 let inFlight: Promise<Machine[]> | null = null;
@@ -47,7 +48,7 @@ export function forgetMachineNames() {
  *  longer holds it. */
 export function useMachineName(machineId?: string | null): string | null {
   const [name, setName] = useState<string | null>(
-    () => cache?.find((m) => m.id === machineId)?.name ?? null,
+    () => findMachine(cache, machineId)?.name ?? null,
   );
 
   useEffect(() => {
@@ -57,7 +58,7 @@ export function useMachineName(machineId?: string | null): string | null {
     }
     let alive = true;
     void load().then((list) => {
-      if (alive) setName(list.find((m) => m.id === machineId)?.name ?? null);
+      if (alive) setName(findMachine(list, machineId)?.name ?? null);
     });
     return () => {
       alive = false;

@@ -1,0 +1,312 @@
+/* The Code Map: the trace toolbar and details column hold it; these are the
+   few pieces only the map has — its canvas, zoom bar, picked-piece header
+   and the rows its details column lists. Unlayered on purpose: a module
+   stylesheet that opens a layer first would sink every shared control. */
+
+.ui-graph {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  width: 100%;
+  background: var(--ui-bg);
+}
+
+.ui-graph-lead {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+.ui-graph-lead .ui-home-search {
+  max-width: 360px;
+}
+
+.ui-graph-error {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--ui-border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-red);
+}
+
+/* Features view: a column that the map fills. Without it the map's own
+   column collapses to its content height. */
+.ui-graph-features {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ui-graph-stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.ui-graph-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ui-muted-fg);
+}
+
+.ui-graph-canvas {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* The floating zoom bar, bottom-left of the canvas. */
+.ui-graph-zoom {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-sheet);
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-graph-zoom-scale {
+  min-width: 40px;
+  padding-inline: 4px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.ui-graph-zoom-rule {
+  width: 1px;
+  height: 14px;
+  margin-inline: 4px;
+  background: var(--ui-border);
+}
+.ui-graph-zoom-pinned {
+  padding-inline: 6px;
+  color: var(--ui-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The feature map's own bar and its hint pill. */
+.ui-graph-bar {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-graph-bar-meta {
+  color: var(--ui-faint);
+  font-variant-numeric: tabular-nums;
+}
+.ui-graph-bar-end {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+.ui-graph-map {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--ui-bg);
+}
+.ui-graph-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 999px;
+  background: var(--ui-sheet);
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.ui-graph-message {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  gap: 8px;
+  font-size: 13px;
+  text-align: center;
+  color: var(--ui-muted-fg);
+}
+.ui-graph-message[data-tone="danger"] {
+  flex-direction: column;
+  gap: 12px;
+  color: var(--ui-red);
+}
+
+/* Details column: the picked piece. */
+.ui-graph-picked {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 12px 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-graph-picked-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-graph-picked-head strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ui-fg);
+}
+.ui-graph-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 999px;
+}
+.ui-graph-picked-where,
+.ui-graph-picked-id {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ui-faint);
+}
+.ui-graph-picked-where {
+  color: var(--ui-muted-fg);
+}
+.ui-graph-picked-marks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ui-graph-picked-marks .ui-button {
+  margin-left: auto;
+}
+.ui-graph-path-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+.ui-graph-path-form > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Details column: a row — a piece, a link, a hop. */
+.ui-graph-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: calc(100% - 8px);
+  min-height: 32px;
+  margin: 0 4px;
+  padding: 6px 4px;
+  border-radius: 6px;
+  text-align: left;
+  font-size: 12px;
+  color: var(--ui-fg);
+}
+button.ui-graph-row {
+  cursor: pointer;
+}
+button.ui-graph-row:hover {
+  background: var(--ui-hover);
+}
+button.ui-graph-row:focus-visible,
+.ui-graph-row-link:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+.ui-graph-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-graph-row-head > svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--ui-faint);
+}
+.ui-graph-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-graph-row-count {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-muted-fg);
+}
+.ui-graph-row-via {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--ui-faint);
+}
+.ui-graph-row-link {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 4px;
+  color: var(--ui-fg);
+}
+.ui-graph-row-link:hover {
+  color: var(--ui-link);
+  text-decoration: underline;
+}
+.ui-graph-row-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ui-faint);
+}
+.ui-graph-empty {
+  padding: 4px 8px 12px;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-graph-chain-trailing {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}

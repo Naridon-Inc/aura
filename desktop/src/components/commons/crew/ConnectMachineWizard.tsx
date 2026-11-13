@@ -19,34 +19,16 @@
 // `aura runner register` the CLI uses). Everything else is real commands typed
 // into the embedded terminal for you, so nothing is hidden.
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import {
-  Cloud,
-  TerminalSquare,
-  KeyRound,
-  ExternalLink,
-  CircleCheck,
-  CircleAlert,
-} from "lucide-react";
 
 import { FullscreenOverlay } from "../../FullscreenOverlay";
-import { Terminal, releaseTerminalSession } from "../../Terminal";
-import { Button } from "../../ui/button";
-import { Input } from "../../ui/input";
-import { AsciiSpinner } from "../../ui/ascii-spinner";
-import { SegmentedControl } from "../../ui/segmented";
-import { useWizard, WizardStepTabs, type WizardStepMeta } from "../../ui/wizard";
+import { releaseTerminalSession } from "../../Terminal";
+import { SetupFlow } from "../../ui/setup-flow";
+import { ErrorNote } from "../../ui/state";
+import { useWizard } from "../../ui/wizard";
 import { api, type Machine, type MemberAccount } from "../../../lib/api";
-import { openExternal } from "../../../lib/openExternal";
 import { trackFeature } from "../../../lib/track";
 import {
   askBootAt,
@@ -56,8 +38,6 @@ import {
   isDialableAddress,
   openShell,
   placeOfMachine,
-  warmSentence,
-  warmShortfall,
   warmStart,
   type BaseBuild,
   type PlaceAddress,
@@ -82,12 +62,11 @@ import {
   type BoxKind,
 } from "./connectMachine";
 import { decodePtyChunk, type PtyChunk } from "../../../lib/ptyPayload";
+import { ConnectMachineTerminal } from "./ConnectMachineTerminal";
+import { StepMachine, StepSetup, StepStart } from "./connectMachineSteps";
+import "../../ui/connect-machine.css";
 
-const STEPS: WizardStepMeta[] = [
-  { id: "machine", label: "Machine" },
-  { id: "setup", label: "Set up & sign in" },
-  { id: "start", label: "Start" },
-];
+const STEPS = ["Machine", "Set up & sign in", "Start"];
 
 /** A single interactive SSH session — the box's shell, hosted in xterm. We keep
  *  one for the whole wizard so the token we export and the login we run all live
@@ -107,9 +86,14 @@ type Props = {
   onClose: () => void;
   /** Fired once the runner reports online, so the panel can refresh itself. */
   onOnline?: () => void;
+  /** The id of a machine the book lost, when this is "Connect it again" for
+   *  it. The box saved here is that machine wherever it answers now, so it
+   *  keeps the id the workspaces and chats that name it are holding — its
+   *  address is new, its identity is not. Omitted, this connects a new one. */
+  reconnect?: string | null;
 };
 
-export function ConnectMachineWizard({ repoRoot, onClose, onOnline }: Props) {
+export function ConnectMachineWizard({ repoRoot, onClose, onOnline, reconnect }: Props) {
   const wiz = useWizard(STEPS.length);
 
   // ── Step 1: where the box is ────────────────────────────────────────────
@@ -253,7 +237,8 @@ export function ConnectMachineWizard({ repoRoot, onClose, onOnline }: Props) {
   // still leaves you a machine you can open.
   // Anything the user changes afterwards — its board name, who else uses it —
   // is still theirs to change, so this re-saves rather than writing once: the
-  // entry is keyed by `user@host`, so a second write updates it in place.
+  // entry is found by `user@host` (or by `reconnect`, which names it), so a
+  // second write updates it in place.
   //
   // It is saved under the login this session is actually running as, which on a
   // shared box changes mid-flow: we arrive as whatever login the image came
@@ -266,6 +251,7 @@ export function ConnectMachineWizard({ repoRoot, onClose, onOnline }: Props) {
   const rememberMachine = useCallback(async (): Promise<Machine | null> => {
     try {
       const m = await api.machineSave({
+        id: reconnect ?? null,
         name: effectiveName,
         host: host.trim(),
         user: sessionUser,
@@ -287,7 +273,7 @@ export function ConnectMachineWizard({ repoRoot, onClose, onOnline }: Props) {
       console.error("machine save failed:", e);
       return null;
     }
-  }, [effectiveName, host, sessionUser, keyPath, boxKind, memberLogin]);
+  }, [effectiveName, host, sessionUser, keyPath, boxKind, memberLogin, reconnect]);
 
   useEffect(() => {
     if (shellPhase !== "ready") return;
@@ -688,624 +674,85 @@ export function ConnectMachineWizard({ repoRoot, onClose, onOnline }: Props) {
     };
   }, [startPhase, prepared, online, effectiveName, onOnline, tailSetupLog]);
 
-  const tabs = (
-    <WizardStepTabs
-      steps={STEPS}
-      index={wiz.index}
-      onJump={wiz.goTo}
-      canJump={(i) => i <= wiz.index || (i === 1 && launched)}
-      isComplete={(i) =>
-        (i === 0 && launched) || (i === 1 && prepared) || (i === 2 && online)
-      }
-    />
-  );
+  // A step opens once it can be reached: the first always, the second as soon
+  // as a terminal is open, the last once you've moved on to it. The step flow
+  // ticks every step before the furthest one, so a machine that is online
+  // ticks all three.
+  const canJump = (i: number) => i <= wiz.index || (i === 1 && launched);
+  const furthest = online ? STEPS.length : Math.max(wiz.index, launched ? 1 : 0);
 
   return (
-    <FullscreenOverlay onClose={onClose} tabs={tabs}>
-      <div className="flex h-full min-h-0">
-        {/* Left — step guidance + actions. */}
-        <div className="w-[380px] shrink-0 overflow-y-auto border-r border-line-soft">
-          <div className="flex flex-col gap-4 px-6 py-6">
-            {wiz.index === 0 && (
-              <StepMachine
-                host={host}
-                setHost={setHost}
-                user={user}
-                setUser={setUser}
-                keyPath={keyPath}
-                setKeyPath={setKeyPath}
-                name={name}
-                setName={setName}
-                namePlaceholder={host.trim() || "my-machine"}
-                boxKind={boxKind}
-                setBoxKind={setBoxKind}
-                canConnect={canConnect}
-                onConnect={onConnect}
-              />
-            )}
-            {wiz.index === 1 && (
-              <StepSetup
-                phase={shellPhase}
-                preparing={preparing}
-                prepared={prepared}
-                loginUrl={loginUrl}
-                boxKind={boxKind}
-                account={account}
-                warm={warm}
-                warmProblem={warmProblem}
-                warmNote={warmNote}
-                onPrepare={onPrepare}
-                onNext={wiz.next}
-              />
-            )}
-            {wiz.index === 2 && (
-              <StepStart
-                startPhase={startPhase}
-                online={online}
-                setupLog={setupLog}
-                boxKind={boxKind}
-                memberLogin={memberLogin}
-                onStart={onStart}
-                onDone={onClose}
-              />
-            )}
-
-            {error && (
-              <div className="flex items-start gap-2 rounded-[8px] border border-red/40 bg-red/5 px-3.5 py-2.5 text-sm leading-snug text-red">
-                <CircleAlert size={14} className="mt-0.5 shrink-0" />
-                {error}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Right — the live terminal on the box (persists across steps). */}
-        <div className="flex min-w-0 flex-1 flex-col bg-bg-1">
-          <div className="flex items-center gap-2 border-b border-line-soft/60 px-4 py-2 text-sm text-text-4">
-            <TerminalSquare size={13} />
-            {launched ? (
-              <span className="truncate">
-                {/* The login we are, not the one we dialled — after a handover
-                    on a shared box those are two different accounts, and the
-                    header is the only place on screen that says which. */}
-                {sessionUser}@{host} ·{" "}
-                {shellPhase === "ready"
-                  ? "connected"
-                  : shellPhase === "unreachable"
-                    ? "no answer"
-                    : "connecting…"}
-              </span>
-            ) : (
-              <span>The machine's terminal opens here once you connect.</span>
-            )}
-          </div>
-          <div className="min-h-0 flex-1">
-            {launched && bootCommand ? (
-              <Terminal
-                instanceId={TERM_INSTANCE}
-                repoRoot={repoRoot}
-                cwd={repoRoot}
-                bootCommand={bootCommand}
-                onOpened={(id) => setPtyId(id)}
-              />
-            ) : (
-              <div className="grid h-full place-items-center px-8 text-center text-base text-text-5">
-                <div className="flex max-w-[280px] flex-col items-center gap-3">
-                  <Cloud size={26} className="text-text-4" />
-                  Fill in your machine on the left and press{" "}
-                  <span className="text-text-3">Connect</span>. Aura opens a real
-                  SSH session here. You'll see everything it runs.
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    </FullscreenOverlay>
-  );
-}
-
-// ── Step 1 ────────────────────────────────────────────────────────────────
-function StepMachine({
-  host,
-  setHost,
-  user,
-  setUser,
-  keyPath,
-  setKeyPath,
-  name,
-  setName,
-  namePlaceholder,
-  boxKind,
-  setBoxKind,
-  canConnect,
-  onConnect,
-}: {
-  host: string;
-  setHost: (v: string) => void;
-  user: string;
-  setUser: (v: string) => void;
-  keyPath: string;
-  setKeyPath: (v: string) => void;
-  name: string;
-  setName: (v: string) => void;
-  namePlaceholder: string;
-  boxKind: BoxKind;
-  setBoxKind: (k: BoxKind) => void;
-  canConnect: boolean;
-  onConnect: () => void;
-}) {
-  return (
-    <>
-      <Header
-        icon={<Cloud size={17} />}
-        title="Bring a machine"
-        sub="Any Linux box you can reach. A cloud VM or a spare server. Aura connects over SSH; your key stays on your Mac and is never uploaded."
-      />
-      <label className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium text-text-2">Address</span>
-        <Input
-          value={host}
-          onChange={(e) => setHost(e.target.value)}
-          placeholder="e.g. 203.0.113.10 or box.example.com"
-          className="text-base"
-        />
-      </label>
-      <label className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium text-text-2">
-          Sign-in user
-        </span>
-        <Input
-          value={user}
-          onChange={(e) => setUser(e.target.value)}
-          placeholder="ubuntu"
-          className="text-base"
-        />
-      </label>
-      <label className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium text-text-2">
-          SSH key file
-        </span>
-        <Input
-          value={keyPath}
-          onChange={(e) => setKeyPath(e.target.value)}
-          placeholder="~/.ssh/id_ed25519"
-          className="text-base font-mono"
-        />
-        <span className="text-xs text-text-5">
-          The private key that opens this box. Stays local.
-        </span>
-      </label>
-      <label className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium text-text-2">
-          Name on your board{" "}
-          <span className="font-normal text-text-5">(optional)</span>
-        </span>
-        <Input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder={namePlaceholder}
-          className="text-base"
-        />
-        <span className="text-xs text-text-5">
-          What this machine is called on your board. Defaults to its address.
-        </span>
-      </label>
-      {/* Asked here, before anything is done to the box, because it decides
-          what the next step DOES — not just how the last one is labelled. On a
-          shared machine, step 2 makes you a Unix account of your own and moves
-          this session into it before it writes a single credential. */}
-      <div className="flex flex-col gap-1.5">
-        <span className="text-sm font-medium text-text-2">
-          Who uses this machine
-        </span>
-        <SegmentedControl
-          value={boxKind}
-          onChange={setBoxKind}
-          ariaLabel="Who uses this machine"
-          options={[
-            { value: "mine", label: "Just me" },
-            { value: "shared", label: "My team" },
-          ]}
-        />
-        <span className="text-xs leading-snug text-text-5">
-          {boxKind === "mine"
-            ? "One runner on this machine, draining everything you send it, under the login above."
-            : "Aura gives you your own account on it — your own home, your own sign-in, your own runner — so nobody has to share a login with the rest of the team. The login above is only used to set it up."}
-        </span>
-      </div>
-      <Button
-        variant="default"
-        onClick={onConnect}
-        disabled={!canConnect}
-        className="mt-1 w-full"
-      >
-        <KeyRound size={14} />
-        Connect
-      </Button>
-    </>
-  );
-}
-
-// ── Step 2 ────────────────────────────────────────────────────────────────
-function StepSetup({
-  phase,
-  preparing,
-  prepared,
-  loginUrl,
-  boxKind,
-  account,
-  warm,
-  warmProblem,
-  warmNote,
-  onPrepare,
-  onNext,
-}: {
-  phase: "connecting" | "ready" | "unreachable";
-  preparing: boolean;
-  prepared: boolean;
-  loginUrl: string | null;
-  boxKind: BoxKind;
-  /** What the box reported about this member's own account, once it has one. */
-  account: MemberAccount | null;
-  /** What joining cost this member — the install they paid for, or the one
-   *  somebody else already had. */
-  warm: BaseBuild | null;
-  /** Why they were not started from the team's environment, when they weren't. */
-  warmProblem: string | null;
-  /** What the copy is doing, while it is doing it. */
-  warmNote: string | null;
-  onPrepare: () => void;
-  onNext: () => void;
-}) {
-  const shared = boxKind === "shared";
-  return (
-    <>
-      <Header
-        icon={<KeyRound size={17} />}
-        title="Set up & sign in"
-        sub={
-          shared
-            ? "Aura gives you your own account on this machine, joins it to your cloud board and signs Claude in. The sign-in opens in your browser. You approve with your own account, so the box never sees a password."
-            : "Aura joins this machine to your cloud board and signs Claude in. The sign-in opens in your browser. You approve with your own account, so the box never sees a password."
-        }
-      />
-      {phase === "unreachable" ? (
-        <>
-          <Row alert text="The machine never answered." />
-          <p className="text-sm leading-snug text-text-4">
-            Aura opened a connection but nothing on the other end replied. That
-            is usually the address, the sign-in user, or a key this box won't
-            accept. Go back a step, check them, and connect again.
-          </p>
-        </>
-      ) : phase !== "ready" ? (
-        <Row spinner text="Waiting for the machine to answer…" />
-      ) : !prepared ? (
-        <>
-          <Row ok text="Connected to the machine." />
-          <p className="text-sm leading-snug text-text-4">
-            {shared ? (
-              <>
-                Next, Aura makes you a user of your own on this machine, moves
-                this terminal into it, then mints a runner token on your account
-                and runs <code className="text-text-3">claude setup-token</code>{" "}
-                there. Your teammates get their own the same way — nobody shares
-                a login.
-              </>
-            ) : (
-              <>
-                Next, Aura mints a runner token on your account, exports it on
-                the box, and runs{" "}
-                <code className="text-text-3">claude setup-token</code> for you.
-              </>
-            )}
-          </p>
-          <Button
-            variant="accentSoft"
-            onClick={onPrepare}
-            disabled={preparing}
-            className="w-full"
-          >
-            {preparing ? <AsciiSpinner /> : <KeyRound size={14} />}
-            Set up & sign in
-          </Button>
-          {warmNote && <Row spinner text={warmNote} />}
-        </>
-      ) : (
-        <>
-          {account && <AccountRows account={account} />}
-          <WarmRows warm={warm} problem={warmProblem} />
-          <Row ok text="Machine joined to your board." />
-          {loginUrl ? (
-            <>
-              <p className="text-sm leading-snug text-text-4">
-                Open the sign-in page, approve with your Claude account, then
-                paste the code it gives you back into the terminal and press
-                Enter.
-              </p>
-              <Button
-                variant="default"
-                onClick={() => void openExternal(loginUrl)}
-                className="w-full"
-              >
-                <ExternalLink size={14} />
-                Open sign-in page
-              </Button>
-            </>
-          ) : (
-            <Row spinner text="Waiting for the sign-in link…" />
-          )}
-          <Button variant="subtle" onClick={onNext} className="w-full">
-            I've pasted the code. Continue
-          </Button>
-        </>
-      )}
-    </>
-  );
-}
-
-// ── Step 3 ────────────────────────────────────────────────────────────────
-function StepStart({
-  startPhase,
-  online,
-  setupLog,
-  boxKind,
-  memberLogin,
-  onStart,
-  onDone,
-}: {
-  startPhase: "idle" | "starting" | "timeout";
-  online: boolean;
-  setupLog: string | null;
-  boxKind: BoxKind;
-  /** The account this session became in step 2, on a machine that is shared.
-   *  Null on a machine of your own, where the login you connected as is
-   *  already yours alone. */
-  memberLogin: string | null;
-  onStart: () => void;
-  onDone: () => void;
-}) {
-  const starting = startPhase === "starting";
-  return (
-    <>
-      <Header
-        icon={<Cloud size={17} />}
-        title="Start your machine"
-        sub="Turn the runner on as a service, so it comes back on its own after a restart. It stays awake once you close your Mac and drains every project you send it."
-      />
-      {online ? (
-        <>
-          <Row ok text="Your machine is online." />
-          <p className="text-sm leading-snug text-text-4">
-            Work you send to the cloud will start running here. You can close
-            this and check back any time.
-          </p>
-          <Button variant="accentSoft" onClick={onDone} className="w-full">
-            <CircleCheck size={14} />
-            Done
-          </Button>
-        </>
-      ) : startPhase === "timeout" ? (
-        <>
-          <Row alert text="Your machine hasn't checked in yet." />
-          <p className="text-sm leading-snug text-text-4">
-            A cold box can take a minute, but this is longer than usual. Here's
-            the tail of its startup log. It usually says what went wrong (aura
-            not installed on the box, a bad token, or no network).
-          </p>
-          {setupLog ? (
-            <pre className="max-h-[240px] overflow-auto whitespace-pre-wrap rounded-[8px] border border-line-soft bg-bg-1 px-3 py-2.5 font-mono text-xs leading-relaxed text-text-3">
-              {setupLog}
-            </pre>
-          ) : (
-            <Row spinner text="Fetching the startup log…" />
-          )}
-          <Button variant="accentSoft" onClick={onStart} className="w-full">
-            <Cloud size={14} />
-            Try starting again
-          </Button>
-        </>
-      ) : (
-        <>
-          {/* What gets installed follows from who uses the machine, which was
-              answered in step 1 and acted on in step 2. Saying it again here is
-              the last chance to notice it's wrong before a service exists. */}
-          <p className="text-xs leading-snug text-text-4">
-            {boxKind === "mine" ? (
-              "One runner on this machine, draining everything you send it."
-            ) : memberLogin ? (
-              <>
-                Your runner is installed under{" "}
-                <code className="text-text-3">{memberLogin}</code>, the account
-                Aura made for you here, and starts on its own after a reboot
-                without anyone logged in. It keeps its own sign-in, its own
-                files and its own spending. Your teammates connect the same way
-                and get their own.
-              </>
-            ) : (
-              <>
-                Your runner is installed under the account you're signed in as
-                on this machine. Go back to <em>Set up &amp; sign in</em> first
-                if you haven't — that's the step that gives you an account of
-                your own.
-              </>
-            )}
-          </p>
-          <Button
-            variant="accentSoft"
-            onClick={onStart}
-            disabled={starting}
-            className="w-full"
-          >
-            {starting ? <AsciiSpinner /> : <Cloud size={14} />}
-            Start the runner
-          </Button>
-          {starting && (
-            <Row
-              spinner
-              text="Starting your machine. Waiting for your board to see it…"
+    <FullscreenOverlay onClose={onClose}>
+      <div className="ui-connect-machine">
+        <SetupFlow
+          label="Connect a machine"
+          steps={STEPS}
+          step={wiz.index}
+          furthest={furthest}
+          onStep={(i) => {
+            if (canJump(i)) wiz.goTo(i);
+          }}
+        >
+          {wiz.index === 0 && (
+            <StepMachine
+              host={host}
+              setHost={setHost}
+              user={user}
+              setUser={setUser}
+              keyPath={keyPath}
+              setKeyPath={setKeyPath}
+              name={name}
+              setName={setName}
+              namePlaceholder={host.trim() || "my-machine"}
+              boxKind={boxKind}
+              setBoxKind={setBoxKind}
+              canConnect={canConnect}
+              onConnect={onConnect}
             />
           )}
-        </>
-      )}
-    </>
-  );
-}
+          {wiz.index === 1 && (
+            <StepSetup
+              phase={shellPhase}
+              preparing={preparing}
+              prepared={prepared}
+              loginUrl={loginUrl}
+              boxKind={boxKind}
+              account={account}
+              warm={warm}
+              warmProblem={warmProblem}
+              warmNote={warmNote}
+              onPrepare={onPrepare}
+              onNext={wiz.next}
+            />
+          )}
+          {wiz.index === 2 && (
+            <StepStart
+              startPhase={startPhase}
+              online={online}
+              setupLog={setupLog}
+              boxKind={boxKind}
+              memberLogin={memberLogin}
+              onStart={onStart}
+              onDone={onClose}
+            />
+          )}
 
-/**
- * What the box said about this member's own account.
- *
- * Every line is read back off the machine rather than inferred from what we
- * asked for. "Your home is closed to everyone else" because a `chmod` was sent
- * is not the same claim as because the box then said `drwx------`, and on this
- * screen only the second one is worth making — the whole promise is that a
- * teammate cannot read your credentials, and a promise nobody checked is how
- * that stops being true quietly.
- */
-function AccountRows({ account }: { account: MemberAccount }) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <Row
-        ok
-        text={
-          account.created
-            ? `Made you an account of your own here: ${account.login}.`
-            : `You already had an account here: ${account.login}.`
-        }
-      />
-      {account.private ? (
-        <Row ok text="Your home directory is closed to everyone else on this machine." />
-      ) : (
-        <Row
-          alert
-          text={`Aura couldn't close ${account.home} to the other people on this machine. Anything it holds may be readable by them.`}
-        />
-      )}
-      {!account.umask && (
-        <Row
-          alert
-          text="Files you create here later may be readable by the others — Aura couldn't set a umask in your profile."
-        />
-      )}
-      {account.linger === "off" && (
-        <Row
-          alert
-          text="Your runner won't come back on its own after a reboot until someone with root on this machine turns lingering on for you."
-        />
-      )}
-      {account.linger === "unavailable" && (
-        <Row
-          alert
-          text="This machine has no systemd user services, so your runner can only run while you're logged in."
-        />
-      )}
-      {account.key === "absent" && (
-        <Row
-          alert
-          text={`Nothing was installed to let you in as ${account.login} directly, so you'll keep arriving through the login you connected with.`}
-        />
-      )}
-      {account.swap === "added" && (
-        <Row
-          ok
-          text="Added swap to this machine, so a build that runs out of memory slows down instead of taking the box with it."
-        />
-      )}
-      {account.swap === "none" && (
-        <Row
-          alert
-          text="This machine has no swap and Aura couldn't add any. Your runner still has a memory limit, but a build that reaches it will be killed rather than slowed."
-        />
-      )}
-    </div>
-  );
-}
+          {error && <ErrorNote className="ui-connect-machine-error">{error}</ErrorNote>}
+        </SetupFlow>
 
-/** What joining this place cost — the install this member paid, or the one
- *  somebody already paid for them.
- *
- *  Quiet when there is nothing to report. A machine the team has never built an
- *  environment on has no news here, and a row saying so would be a line about
- *  something not happening on every first connection anybody ever makes. The
- *  shortfall is a row of its own because it fails apart from the good news: a
- *  home that looks warm and is short otherwise announces itself in the middle of
- *  a build. */
-function WarmRows({
-  warm,
-  problem,
-}: {
-  warm: BaseBuild | null;
-  problem: string | null;
-}) {
-  if (problem) {
-    return <Row alert text={problem} />;
-  }
-  if (!warm) return null;
-  // Nothing built, nothing copied, nobody waiting — the first person on a box
-  // whose project declares no environment. True, and not worth a line.
-  if (!warm.start.warm && warm.already_built && !warm.start.refused) return null;
-  const short = warmShortfall(warm.start);
-  return (
-    <>
-      <Row
-        ok={!warm.start.refused}
-        alert={!!warm.start.refused}
-        text={warmSentence(warm)}
-      />
-      {short && <Row alert text={short} />}
-    </>
-  );
-}
-
-// ── Small shared bits ───────────────────────────────────────────────────────
-function Header({
-  icon,
-  title,
-  sub,
-}: {
-  icon: ReactNode;
-  title: string;
-  sub: string;
-}) {
-  return (
-    <div className="flex items-start gap-3">
-      <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-[8px] bg-accent-soft text-accent">
-        {icon}
-      </span>
-      <div className="min-w-0">
-        <h2 className="text-md font-semibold text-text-1">{title}</h2>
-        <p className="mt-1 text-sm leading-snug text-text-4">{sub}</p>
+        {/* The live terminal on the box — outside the step pages, which are
+            redrawn on every step, so the one shell persists across all three. */}
+        <ConnectMachineTerminal
+          instanceId={TERM_INSTANCE}
+          repoRoot={repoRoot}
+          launched={launched}
+          bootCommand={bootCommand}
+          sessionUser={sessionUser}
+          host={host}
+          phase={shellPhase}
+          onOpened={(id) => setPtyId(id)}
+        />
       </div>
-    </div>
-  );
-}
-
-function Row({
-  ok,
-  spinner,
-  alert,
-  text,
-}: {
-  ok?: boolean;
-  spinner?: boolean;
-  alert?: boolean;
-  text: string;
-}) {
-  return (
-    <div
-      className={`flex items-center gap-2 text-base ${
-        alert ? "text-amber" : "text-text-3"
-      }`}
-    >
-      {spinner ? (
-        <AsciiSpinner />
-      ) : ok ? (
-        <CircleCheck size={14} className="text-accent-green" />
-      ) : alert ? (
-        <CircleAlert size={14} className="shrink-0 text-amber" />
-      ) : null}
-      {text}
-    </div>
+    </FullscreenOverlay>
   );
 }

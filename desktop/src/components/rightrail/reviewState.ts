@@ -1,4 +1,4 @@
-// Pure deriver for the review-rail state header (Conductor's colored PR /
+// Pure deriver for the review-rail state header (the colored PR /
 // branch lifecycle bar). Given the real git + PR facts, it decides ONE
 // dominant state — a tint colour, a plain-language label, and the primary
 // (and, for a merged PR, secondary) action the bar offers.

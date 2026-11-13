@@ -12,7 +12,9 @@
 // the renderer doesn't have to manage that bookkeeping by hand.
 
 import { useEffect, useMemo, useState } from "react";
+import { Check, Plus, X } from "lucide-react";
 import { Dialog } from "../Dialog";
+import { Alert, AlertDescription } from "../ui/alert";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import {
   api,
@@ -23,7 +25,9 @@ import {
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select } from "../ui/select";
-import { compactNumber } from "../../lib/compactNumber";
+import { Textarea } from "../ui/textarea";
+import "../ui/run-launcher.css";
+import { parseWaves } from "./planWaves";
 
 type Props = {
   open: boolean;
@@ -54,77 +58,6 @@ function emptyTask(defaultRoot: string): DraftTask {
   };
 }
 
-type ParsedWave = {
-  action: string;
-  verify: string;
-  zones: string[];
-};
-
-// `aura plan` emits each wave as `<wave> <action>…</action> <verify>…
-// </verify> [<file>…</file>]* </wave>`. The CLI's own runner uses the
-// same line-walk strategy (gsd::execute_wave) so we mirror it here:
-// pair an <action> with the next <verify>, capture <file> tags as zone
-// hints. Tolerant to whitespace + reordering within a wave block.
-function parseWaves(xml: string): ParsedWave[] {
-  const out: ParsedWave[] = [];
-  let action = "";
-  let verify = "";
-  let zones: string[] = [];
-  const flush = () => {
-    if (action) {
-      out.push({ action: decode(action), verify: decode(verify), zones });
-    }
-    action = "";
-    verify = "";
-    zones = [];
-  };
-  // Strip CDATA wrappers and HTML entities while keeping the inner text.
-  for (const raw of xml.split(/\r?\n/)) {
-    const line = raw.trim();
-    const a = matchTag(line, "action");
-    if (a !== null) {
-      // New action — flush any prior wave that had only an action with
-      // no verify so we don't lose it.
-      if (action && verify) flush();
-      action = a;
-      continue;
-    }
-    const v = matchTag(line, "verify");
-    if (v !== null) {
-      verify = v;
-      // Action+verify together complete a wave.
-      if (action) flush();
-      continue;
-    }
-    const f = matchTag(line, "file") ?? matchTag(line, "path");
-    if (f) zones.push(f);
-  }
-  if (action) flush();
-  return out;
-}
-
-function matchTag(line: string, tag: string): string | null {
-  const open = `<${tag}>`;
-  const close = `</${tag}>`;
-  const i = line.indexOf(open);
-  if (i < 0) return null;
-  const j = line.indexOf(close, i + open.length);
-  if (j < 0) return null;
-  return line.slice(i + open.length, j).trim();
-}
-
-function decode(s: string): string {
-  return s
-    .replace(/<!\[CDATA\[/g, "")
-    .replace(/\]\]>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .trim();
-}
-
 export function ManagerLauncher({
   open,
   onClose,
@@ -141,10 +74,8 @@ export function ManagerLauncher({
   // Discover phase has its own busy + status so the user sees the
   // orchestrator working without disabling the rest of the dialog.
   const [discovering, setDiscovering] = useState(false);
-  const [planSummary, setPlanSummary] = useState<{
-    waveCount: number;
-    estTokensSaved: number;
-  } | null>(null);
+  /** How many steps Aura's plan came back with, once it has. */
+  const [planSteps, setPlanSteps] = useState<number | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -159,7 +90,7 @@ export function ManagerLauncher({
       setError(null);
       setBusy(false);
       setDiscovering(false);
-      setPlanSummary(null);
+      setPlanSteps(null);
     } else if (seedObjective) {
       // Re-seed every time the modal opens so callers can re-use the
       // same launcher with different starting objectives (e.g. multiple
@@ -172,7 +103,7 @@ export function ManagerLauncher({
     if (!objective.trim() || discovering) return;
     setError(null);
     setDiscovering(true);
-    setPlanSummary(null);
+    setPlanSteps(null);
     try {
       // `aura plan` writes the wave plan to `.aura/plans/ACTIVE_MILESTONE.xml`
       // and runs the parallel research pass internally. Headless mode
@@ -202,13 +133,7 @@ export function ManagerLauncher({
         zones: w.zones.join(", "),
       }));
       setTasks(drafts);
-      // Rough token-savings heuristic: each task hides the full objective
-      // context behind a compressed handover (~250 tokens vs the full
-      // codebase context an unstructured prompt would carry).
-      setPlanSummary({
-        waveCount: waves.length,
-        estTokensSaved: Math.max(0, (waves.length - 1) * 1800),
-      });
+      setPlanSteps(waves.length);
     } catch (e) {
       setError(`Discover failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -247,13 +172,13 @@ export function ManagerLauncher({
   const launch = async () => {
     setError(null);
     if (!objective.trim()) {
-      setError("Objective required.");
+      setError("Say what this run should get done first.");
       return;
     }
     const specs: ManagerTaskSpec[] = [];
     for (const [i, t] of tasks.entries()) {
       if (!t.description.trim()) {
-        setError(`Task ${i + 1} missing description.`);
+        setError(`Task ${i + 1} needs a description.`);
         return;
       }
       const deps: number[] = t.depends_on
@@ -305,22 +230,32 @@ export function ManagerLauncher({
   };
 
   return (
-    <Dialog open={open} title="New Manager session" onClose={onClose} width={680}>
-      <div className="p-4 flex flex-col gap-3">
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <label className="text-xs text-text-3">Objective</label>
-            <button
-              type="button"
+    <Dialog
+      open={open}
+      title="Orchestrate a multi-step session"
+      onClose={onClose}
+      width={680}
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button onClick={launch} disabled={busy}>
+            {busy ? "Staging…" : "Stage plan"}
+          </Button>
+        </>
+      }
+    >
+      <div className="ui-launcher">
+        <section className="ui-form-field">
+          <div className="ui-launcher-head">
+            <span id="launcher-objective">Objective</span>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={discover}
               disabled={!objective.trim() || discovering || busy}
               title="Have Aura break this down into steps, and work out which ones can run at the same time"
-              className="text-xs px-2 h-6 rounded inline-flex items-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{
-                background: "color-mix(in srgb, var(--color-accent) 14%, transparent)",
-                color: "var(--color-accent)",
-                border: "1px solid color-mix(in srgb, var(--color-accent) 32%, transparent)",
-              }}
             >
               {discovering ? (
                 <>
@@ -328,134 +263,102 @@ export function ManagerLauncher({
                   Aura is planning…
                 </>
               ) : (
-                <>Discover with Aura</>
+                "Discover with Aura"
               )}
-            </button>
+            </Button>
           </div>
-          <textarea
-            className="w-full bg-bg-3 text-text-1 text-sm rounded border border-line-soft px-2 py-1.5 outline-none focus:border-line"
-            rows={2}
+          <Textarea
+            rows={3}
             value={objective}
             onChange={(e) => setObjective(e.target.value)}
-            placeholder="What should this Manager session accomplish? Discover hands the objective to Aura's orchestrator. It'll decompose into atomic waves, suggest agents, and chain them with dependencies."
+            aria-labelledby="launcher-objective"
+            placeholder="What should this session get done? Discover hands it to Aura, which splits it into steps, suggests an agent for each and chains them in order."
           />
-        </div>
-        {planSummary && (
-          <div
-            className="flex items-center gap-2 px-2.5 py-1.5 text-xs rounded"
-            style={{
-              background: "color-mix(in srgb, var(--color-accent-green) 9%, transparent)",
-              color: "var(--color-accent-green)",
-              border:
-                "1px solid color-mix(in srgb, var(--color-accent-green) 25%, transparent)",
-            }}
-          >
-            <span aria-hidden style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 12, height: 12 }}>
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                <path d="M2.5 6.5l2.5 2.5 5-5.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </span>
-            <span className="text-text-1">
-              Aura decomposed into <b>{planSummary.waveCount} waves</b>.
-            </span>
-            <span className="ml-auto text-text-3 tabular-nums">
-              ≈ {compactNumber(planSummary.estTokensSaved)} tokens saved per
-              full re-prompt
-            </span>
-          </div>
+        </section>
+
+        {planSteps != null && (
+          <p className="ui-launcher-plan" role="status">
+            <Check aria-hidden />
+            Aura split this into {planSteps} {planSteps === 1 ? "step" : "steps"}. Change
+            any of them below before staging.
+          </p>
         )}
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-xs text-text-3">Tasks</span>
-            <button
-              className="text-xs text-text-3 hover:text-text-1"
-              onClick={addTask}
-            >
-              + Add task
-            </button>
+
+        <section className="ui-launcher-tasks-section">
+          <div className="ui-launcher-head">
+            <span id="launcher-tasks">Tasks</span>
+            <Button variant="ghost" size="sm" onClick={addTask}>
+              <Plus />
+              Add task
+            </Button>
           </div>
-          <div className="flex flex-col gap-2">
+          <ol className="ui-launcher-tasks" aria-labelledby="launcher-tasks">
             {tasks.map((t, idx) => (
-              <div
-                key={idx}
-                className="bg-bg-3 rounded border border-line-soft p-2 flex flex-col gap-1.5"
-              >
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-text-3 w-6">#{idx + 1}</span>
-                  <input
-                    className="flex-1 bg-transparent text-sm text-text-1 outline-none"
+              <li key={idx} className="ui-launcher-task">
+                <div className="ui-launcher-task-line">
+                  <span className="ui-launcher-task-no">{idx + 1}</span>
+                  <Input
                     value={t.description}
                     onChange={(e) => updateTask(idx, { description: e.target.value })}
-                    placeholder="Task description"
+                    placeholder="What this step does"
+                    aria-label={`Task ${idx + 1}`}
                   />
                   {tasks.length > 1 && (
-                    <button
-                      className="text-xs text-text-3 hover:text-text-1"
+                    <Button
+                      variant="ghost"
+                      size="iconSm"
                       onClick={() => removeTask(idx)}
+                      aria-label={`Remove task ${idx + 1}`}
+                      title="Remove this task"
                     >
-                      Remove
-                    </button>
+                      <X />
+                    </Button>
                   )}
                 </div>
-                <div className="flex items-center gap-2 text-xs flex-wrap">
+                <div className="ui-launcher-task-options">
                   <Select
-                    className="w-auto min-w-[120px]"
                     value={t.agent_id}
                     onChange={(v) => updateTask(idx, { agent_id: v })}
-                    aria-label="Agent"
+                    aria-label={`Agent for task ${idx + 1}`}
                     options={[
                       { value: "", label: "Smart pick" },
                       ...agents.map((a) => ({ value: a.id, label: a.label })),
                     ]}
                   />
                   <Select
-                    className="w-auto min-w-[120px]"
                     value={t.project_root}
                     onChange={(v) => updateTask(idx, { project_root: v })}
-                    aria-label="Project"
+                    aria-label={`Repository for task ${idx + 1}`}
                     options={projectOptions.map((p) => ({
                       value: p.root,
                       label: p.label,
                     }))}
                   />
                   <Input
-                    className="flex-1 min-w-[100px]"
                     value={t.depends_on}
                     onChange={(e) => updateTask(idx, { depends_on: e.target.value })}
-                    placeholder="Depends on (e.g. 1, 2)"
+                    placeholder="After tasks (e.g. 1, 2)"
+                    aria-label={`Tasks that must finish before task ${idx + 1}`}
                   />
                   <Input
-                    className="flex-1 min-w-[120px]"
                     value={t.zones}
                     onChange={(e) => updateTask(idx, { zones: e.target.value })}
-                    placeholder="Zones (e.g. src/auth, src/db)"
-                    title="Comma-separated paths claimed before dispatch"
+                    placeholder="Folders it owns (e.g. src/auth)"
+                    aria-label={`Folders task ${idx + 1} owns`}
+                    title="Comma-separated paths claimed before it starts, so no other step edits them"
                   />
                 </div>
-              </div>
+              </li>
             ))}
-          </div>
-        </div>
-        {error && <div className="text-xs text-red">{error}</div>}
+          </ol>
+        </section>
+
+        {error && (
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
       </div>
-      <footer className="flex justify-end gap-2 px-4 py-2 border-t border-line-soft">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onClose}
-          disabled={busy}
-        >
-          Cancel
-        </Button>
-        <Button
-          variant="accentSoft"
-          size="sm"
-          onClick={launch}
-          disabled={busy}
-        >
-          {busy ? "Staging…" : "Stage plan"}
-        </Button>
-      </footer>
     </Dialog>
   );
 }

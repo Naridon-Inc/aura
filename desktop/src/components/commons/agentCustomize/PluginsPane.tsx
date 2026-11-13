@@ -7,14 +7,10 @@ import { useState } from "react";
 import { BadgeCheck, Blocks, ShieldAlert } from "lucide-react";
 
 import { api, type PluginRow } from "../../../lib/api";
+import { SettingsRow } from "../../ui/settings-row";
+import { SettingsServiceMark, SettingsServiceTitle } from "../../ui/settings-services-row";
 import { Switch } from "../../ui/switch";
-import {
-  Card,
-  EmptyHint,
-  PaneIntro,
-  PaneScroll,
-  PaneSpinner,
-} from "./customizeShared";
+import { Card, EmptyHint, PaneIntro, PaneScroll, PaneSpinner } from "./customizeShared";
 
 export function PluginsPane({
   plugins,
@@ -59,34 +55,31 @@ export function PluginsPane({
         />
       ) : (
         <Card>
-          {rows.map((row, i) => (
-            <div
+          {rows.map((row) => (
+            <SettingsRow
               key={row.id}
-              className={`flex items-center gap-3 px-3.5 py-3 ${
-                i > 0 ? "border-t border-line-soft" : ""
-              }`}
-            >
-              <Blocks size={15} className="shrink-0 text-text-4" />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="truncate text-base font-medium text-text-1">
-                    {row.id}
-                  </span>
-                  <SignatureMark row={row} />
-                </div>
-                {row.description ? (
-                  <div className="truncate text-sm text-text-4">
-                    {row.description}
-                  </div>
-                ) : null}
-              </div>
-              <Switch
-                checked={row.enabled}
-                disabled={busy === row.id}
-                onCheckedChange={() => toggle(row)}
-                aria-label={row.enabled ? "Turn plugin off" : "Turn plugin on"}
-              />
-            </div>
+              title={
+                <SettingsServiceTitle
+                  mark={
+                    <SettingsServiceMark>
+                      <Blocks />
+                    </SettingsServiceMark>
+                  }
+                  badge={<SignatureMark row={row} />}
+                >
+                  {row.id}
+                </SettingsServiceTitle>
+              }
+              description={row.description || undefined}
+              control={
+                <Switch
+                  checked={row.enabled}
+                  disabled={busy === row.id}
+                  onCheckedChange={() => toggle(row)}
+                  aria-label={row.enabled ? "Turn plugin off" : "Turn plugin on"}
+                />
+              }
+            />
           ))}
         </Card>
       )}
@@ -100,21 +93,22 @@ function SignatureMark({ row }: { row: PluginRow }) {
   if (row.signature === "verified") {
     return (
       <span
-        className="inline-flex items-center gap-0.5 text-2xs"
-        style={{ color: "var(--color-accent)" }}
+        className="ui-customize-signature"
+        data-tone="ok"
         title={row.signed_by ? `Signed by ${row.signed_by}` : "Signed"}
       >
-        <BadgeCheck size={12} />
+        <BadgeCheck />
       </span>
     );
   }
   if (row.signature === "unknown_key") {
     return (
       <span
-        className="inline-flex items-center gap-0.5 text-2xs text-amber"
+        className="ui-customize-signature"
+        data-tone="attention"
         title="Signed by a publisher you haven't trusted yet"
       >
-        <ShieldAlert size={12} />
+        <ShieldAlert />
       </span>
     );
   }

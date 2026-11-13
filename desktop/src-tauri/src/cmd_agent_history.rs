@@ -144,162 +144,172 @@ fn claude_preroll(repo_root: &str, session_id: &str) -> Result<Vec<PrerollTurn>,
             Ok(v) => v,
             Err(_) => continue,
         };
-        let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
-        let ts_ms = v
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .and_then(parse_iso_ts)
-            .unwrap_or(0);
-        match kind {
-            "user" => {
-                if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
-                    continue;
-                }
-                if let Some(origin) = v
-                    .get("origin")
-                    .and_then(|o| o.get("kind"))
-                    .and_then(Value::as_str)
-                {
-                    if matches!(
-                        origin,
-                        "task-notification"
-                            | "slash-command"
-                            | "hook"
-                            | "system-reminder"
-                            | "queue-operation"
-                    ) {
-                        continue;
-                    }
-                }
-                let content = v.get("message").and_then(|m| m.get("content"));
-                if let Some(text) = content.and_then(Value::as_str) {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() && !is_synthetic(trimmed) {
-                        out.push(PrerollTurn {
-                            role: "user".into(),
-                            text: trimmed.to_string(),
-                            ts: ts_ms,
-                            tool_calls: Vec::new(),
-                            thinking: None,
-                        });
-                    }
-                } else if let Some(arr) = content.and_then(Value::as_array) {
-                    // Array-form user line: a mix of `tool_result` blocks (the
-                    // outputs of the PRIOR assistant turn's tool_use calls) and
-                    // any plain `text` the user typed alongside. Back-fill each
-                    // result into the tool_call it answers; surface the typed
-                    // text (if any) as a normal user turn.
-                    let mut typed = String::new();
-                    for block in arr {
-                        match block.get("type").and_then(Value::as_str) {
-                            Some("tool_result") => {
-                                if let Some(id) =
-                                    block.get("tool_use_id").and_then(Value::as_str)
-                                {
-                                    let is_error = block
-                                        .get("is_error")
-                                        .and_then(Value::as_bool)
-                                        .unwrap_or(false);
-                                    let body = tool_result_text(block.get("content"));
-                                    backfill_result(&mut out, id, is_error, body);
-                                }
-                            }
-                            Some("text") => {
-                                if let Some(t) = block.get("text").and_then(Value::as_str) {
-                                    if !typed.is_empty() {
-                                        typed.push_str("\n\n");
-                                    }
-                                    typed.push_str(t);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    let trimmed = typed.trim();
-                    if !trimmed.is_empty() && !is_synthetic(trimmed) {
-                        out.push(PrerollTurn {
-                            role: "user".into(),
-                            text: trimmed.to_string(),
-                            ts: ts_ms,
-                            tool_calls: Vec::new(),
-                            thinking: None,
-                        });
-                    }
-                }
-            }
-            "assistant" => {
-                let blocks = v
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(Value::as_array);
-                if let Some(arr) = blocks {
-                    let mut joined = String::new();
-                    let mut thinking = String::new();
-                    let mut tools: Vec<crate::manager::PersistedToolCall> = Vec::new();
-                    for block in arr {
-                        match block.get("type").and_then(Value::as_str) {
-                            Some("text") => {
-                                if let Some(t) = block.get("text").and_then(Value::as_str) {
-                                    if !joined.is_empty() {
-                                        joined.push_str("\n\n");
-                                    }
-                                    joined.push_str(t);
-                                }
-                            }
-                            Some("thinking") => {
-                                // Claude extended-thinking block: the prose lives
-                                // under `thinking` (the `signature` field is the
-                                // cryptographic seal we don't surface).
-                                if let Some(t) = block.get("thinking").and_then(Value::as_str)
-                                {
-                                    if !thinking.is_empty() {
-                                        thinking.push_str("\n\n");
-                                    }
-                                    thinking.push_str(t);
-                                }
-                            }
-                            Some("tool_use") => {
-                                let id = block
-                                    .get("id")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string();
-                                let name = block
-                                    .get("name")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("tool")
-                                    .to_string();
-                                let input = block
-                                    .get("input")
-                                    .cloned()
-                                    .unwrap_or(Value::Null);
-                                tools.push(crate::manager::PersistedToolCall {
-                                    tool_use_id: id,
-                                    name,
-                                    input,
-                                    result: None,
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                    let has_thinking = !thinking.trim().is_empty();
-                    let has_text = !joined.trim().is_empty();
-                    if has_text || has_thinking || !tools.is_empty() {
-                        out.push(PrerollTurn {
-                            role: "assistant".into(),
-                            text: joined,
-                            ts: ts_ms,
-                            tool_calls: tools,
-                            thinking: if has_thinking { Some(thinking) } else { None },
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
+        push_claude_line(&mut out, &v, 0);
     }
     Ok(out)
+}
+
+/// Fold one line of a Claude transcript into `out`: a user prompt, an
+/// assistant reply (text, thinking and tool calls), or the tool results a user
+/// line carries back for the calls before it. The Claude Agent SDK streams the
+/// same message shapes the CLI writes to its JSONL, so the importer feeds rows
+/// it read from another app's database through here too. `fallback_ts_ms` is
+/// used when the line has no `timestamp` of its own.
+pub(crate) fn push_claude_line(out: &mut Vec<PrerollTurn>, v: &Value, fallback_ts_ms: i64) {
+    let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+    let ts_ms = v
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_iso_ts)
+        .unwrap_or(fallback_ts_ms);
+    match kind {
+        "user" => {
+            if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
+                return;
+            }
+            if let Some(origin) = v
+                .get("origin")
+                .and_then(|o| o.get("kind"))
+                .and_then(Value::as_str)
+            {
+                if matches!(
+                    origin,
+                    "task-notification"
+                        | "slash-command"
+                        | "hook"
+                        | "system-reminder"
+                        | "queue-operation"
+                ) {
+                    return;
+                }
+            }
+            let content = v.get("message").and_then(|m| m.get("content"));
+            if let Some(text) = content.and_then(Value::as_str) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() && !is_synthetic(trimmed) {
+                    out.push(PrerollTurn {
+                        role: "user".into(),
+                        text: trimmed.to_string(),
+                        ts: ts_ms,
+                        tool_calls: Vec::new(),
+                        thinking: None,
+                    });
+                }
+            } else if let Some(arr) = content.and_then(Value::as_array) {
+                // Array-form user line: a mix of `tool_result` blocks (the
+                // outputs of the PRIOR assistant turn's tool_use calls) and
+                // any plain `text` the user typed alongside. Back-fill each
+                // result into the tool_call it answers; surface the typed
+                // text (if any) as a normal user turn.
+                let mut typed = String::new();
+                for block in arr {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("tool_result") => {
+                            if let Some(id) =
+                                block.get("tool_use_id").and_then(Value::as_str)
+                            {
+                                let is_error = block
+                                    .get("is_error")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false);
+                                let body = tool_result_text(block.get("content"));
+                                backfill_result(out, id, is_error, body);
+                            }
+                        }
+                        Some("text") => {
+                            if let Some(t) = block.get("text").and_then(Value::as_str) {
+                                if !typed.is_empty() {
+                                    typed.push_str("\n\n");
+                                }
+                                typed.push_str(t);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let trimmed = typed.trim();
+                if !trimmed.is_empty() && !is_synthetic(trimmed) {
+                    out.push(PrerollTurn {
+                        role: "user".into(),
+                        text: trimmed.to_string(),
+                        ts: ts_ms,
+                        tool_calls: Vec::new(),
+                        thinking: None,
+                    });
+                }
+            }
+        }
+        "assistant" => {
+            let blocks = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_array);
+            if let Some(arr) = blocks {
+                let mut joined = String::new();
+                let mut thinking = String::new();
+                let mut tools: Vec<crate::manager::PersistedToolCall> = Vec::new();
+                for block in arr {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            if let Some(t) = block.get("text").and_then(Value::as_str) {
+                                if !joined.is_empty() {
+                                    joined.push_str("\n\n");
+                                }
+                                joined.push_str(t);
+                            }
+                        }
+                        Some("thinking") => {
+                            // Claude extended-thinking block: the prose lives
+                            // under `thinking` (the `signature` field is the
+                            // cryptographic seal we don't surface).
+                            if let Some(t) = block.get("thinking").and_then(Value::as_str)
+                            {
+                                if !thinking.is_empty() {
+                                    thinking.push_str("\n\n");
+                                }
+                                thinking.push_str(t);
+                            }
+                        }
+                        Some("tool_use") => {
+                            let id = block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string();
+                            let name = block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("tool")
+                                .to_string();
+                            let input = block
+                                .get("input")
+                                .cloned()
+                                .unwrap_or(Value::Null);
+                            tools.push(crate::manager::PersistedToolCall {
+                                tool_use_id: id,
+                                name,
+                                input,
+                                result: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                let has_thinking = !thinking.trim().is_empty();
+                let has_text = !joined.trim().is_empty();
+                if has_text || has_thinking || !tools.is_empty() {
+                    out.push(PrerollTurn {
+                        role: "assistant".into(),
+                        text: joined,
+                        ts: ts_ms,
+                        tool_calls: tools,
+                        thinking: if has_thinking { Some(thinking) } else { None },
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn gemini_preroll(repo_root: &str, session_id: &str) -> Result<Vec<PrerollTurn>, String> {

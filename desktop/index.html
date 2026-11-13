@@ -16,8 +16,8 @@
         var root = document.documentElement;
         try {
           var variant = localStorage.getItem("aura.theme.variant");
-          /* Explicit pick (modal/ember/amber/emerald) wins; `conductor` is the
-             old name for the amber pack and reads forward. Anything else —
+          /* Explicit pick (modal/ember/amber/emerald) wins; one retired pack
+             name still maps onto amber and reads forward. Anything else —
              absent, unknown, or the retired "default" pack — is the ground.
              Keep in sync with themeStore.ts:readVariant. */
           if (variant !== "modal" && variant !== "ember" && variant !== "emerald") {

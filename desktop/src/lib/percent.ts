@@ -10,10 +10,13 @@
 //
 // ── The disagreement ─────────────────────────────────────────────────────
 //
-// TopBar and UpdateBanner both render the update download, both fed by the
-// same `downloadUpdate(info, (done, total) => …)` callback — the same bytes,
-// the same moment. TopBar rounds, UpdateBanner floors. At 49.6% of the file
-// one strip says 50% and the other says 49%.
+// The update download used to be drawn twice, by the More menu's status line
+// and by the update strip above the sidebar, both fed by the same
+// `downloadUpdate(info, (done, total) => …)` callback — the same bytes, the
+// same moment. The menu rounded and the strip floored, so at 49.6% of the
+// file one said 50% and the other 49%. Both are gone now (the download runs
+// silently and one toast, `UpdateToast`, offers the restart), but the pair is
+// still the plainest case of why there is one function for this.
 //
 // ── The part that is not a disagreement ──────────────────────────────────
 //

@@ -1,0 +1,61 @@
+/* The focus overlay: a window-owning panel for wide work (a session, a pull
+   request, a wizard). The dim and the panel are the dialog's own, just inset
+   8px from the window instead of centred. */
+
+.ui-focus {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+}
+.ui-focus-backdrop {
+  position: absolute;
+  inset: 0;
+  background: #0008;
+}
+.ui-focus-panel {
+  position: absolute;
+  inset: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+  box-shadow: 0 16px 48px #0004;
+}
+/* Popped out into its own window: no dim, no inset, no frame. */
+.ui-focus-embedded {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-focus-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.ui-focus-footer {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--ui-border);
+  padding: 12px 16px;
+  background: var(--ui-bg);
+}
+/* The close control: a ghost button that names its key. */
+.ui-button.ui-focus-close {
+  gap: 6px;
+  padding-left: 6px;
+  color: var(--ui-muted-fg);
+}
+.ui-button.ui-focus-close:hover {
+  color: var(--ui-fg);
+}

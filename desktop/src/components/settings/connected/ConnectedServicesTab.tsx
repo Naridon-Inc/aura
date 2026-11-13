@@ -1,14 +1,6 @@
 // Settings → Connected services.
 //
-// One pane where there were two. "Integrations" listed Jira, Linear and Beads
-// whether or not you used any of them; "API keys" listed four model providers
-// whether or not you had keys for any of them. Both were catalogues wearing an
-// inventory's clothes: six cards, and reading all six was the only way to
-// learn that one thing was actually connected. Worse, they answered the same
-// question — what is this app hooked up to — from two different rail rows, so
-// the answer depended on which one you happened to click.
-//
-// This pane shows what you have. The store shows what you could add, and drops
+// This pane shows what you have; the store shows what you could add, and drops
 // anything you already have. That split is what makes the list worth reading:
 // every row on it is a live connection, so a short list means a short answer
 // rather than a page you have to scan.
@@ -16,21 +8,23 @@
 // It is user-scoped, not project-scoped. Both halves are machine-level
 // credentials — a key in `~/.aura/credentials.json`, an OAuth token in the
 // keychain — and neither changes when you switch project. The one genuinely
-// per-project thing, which Jira issues mirror onto which repo, stays inside
-// the connected Jira row where the binding is made.
+// per-project thing, which Jira issues mirror onto which repo, gets its own
+// section under the list once Jira is connected.
 
 import { useCallback, useMemo, useState } from "react";
-import { ChevronRight } from "lucide-react";
+import { Plus, RotateCw } from "lucide-react";
 
-import { ErrorState, LoadingState } from "../../ui/state";
-import type { SettingsView } from "../../../lib/api";
-import { PaneIntro } from "../kit";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { Button } from "../../ui/button";
-import { JiraDetail } from "./JiraDetail";
-import { LinearDetail } from "./LinearDetail";
-import { ProviderKeyControls } from "./ProviderKeys";
-import { ServiceGlyph } from "./ServiceGlyph";
+import { SettingsGroup, SettingsIntro } from "../../ui/settings-blocks";
+import { SettingsRow } from "../../ui/settings-row";
+import type { SettingsView } from "../../../lib/api";
+import { MirrorsSection } from "./JiraMirrors";
+import { PeopleSection } from "./JiraPeople";
+import { ProviderKeyRow } from "./ProviderKeys";
 import { ServiceStore } from "./ServiceStore";
+import { TrackerRow } from "./TrackerRow";
+import { formatExpiry } from "./trackerParts";
 import {
   splitServices,
   type ConnectedService,
@@ -67,10 +61,7 @@ export function ConnectedServicesTab({
     [view, trackers.statuses, trackers.loadError],
   );
 
-  const { connected, available } = useMemo(
-    () => splitServices(facts),
-    [facts],
-  );
+  const { connected, available } = useMemo(() => splitServices(facts), [facts]);
 
   // Connecting something moves it out of the store and into the list, so the
   // row you just acted on is gone from the screen you acted on. Leaving the
@@ -82,190 +73,153 @@ export function ConnectedServicesTab({
     setShopping(false);
   }, []);
 
+  const openStore = useCallback(() => {
+    setOpenId(null);
+    setShopping(true);
+  }, []);
+
   if (trackers.loading) {
-    return <LoadingState label="Looking at what you're connected to…" />;
+    return (
+      <p className="ui-settings-status" role="status">
+        <AsciiSpinner /> Looking at what you're connected to…
+      </p>
+    );
   }
+
+  if (shopping) {
+    return (
+      <ServiceStore
+        available={available}
+        trackers={trackers}
+        repoRoot={repoRoot}
+        openId={openId}
+        onOpen={setOpenId}
+        onBack={leaveStore}
+        onKeySaved={() => {
+          setOpenId(null);
+          onChanged();
+        }}
+      />
+    );
+  }
+
+  const jira = trackers.statuses.find((s) => s.kind === "jira" && s.connected) ?? null;
+  const jiraSites = jira?.sites ?? [];
 
   return (
     <>
-      {shopping ? (
-        <ServiceStore
-          available={available}
-          trackers={trackers}
-          repoRoot={repoRoot}
-          openId={openId}
-          onOpen={setOpenId}
-          onBack={leaveStore}
-          onKeySaved={() => {
-            setOpenId(null);
-            onChanged();
-          }}
-        />
-      ) : (
-        <>
-          <PaneIntro
-            text={
-              <>
-                The model providers and issue trackers this copy of Aura can
-                reach. Keys live in{" "}
-                <code className="rounded bg-bg-2/60 px-1 py-px text-text-2">
-                  ~/.aura/credentials.json
-                </code>{" "}
-                and tracker sign-ins in your keychain — never in the repo.
-              </>
+      <SettingsIntro>
+        The model providers and issue trackers this copy of Aura can reach. Keys
+        live in <code>~/.aura/credentials.json</code> and tracker sign-ins in
+        your keychain — never in the repo.
+      </SettingsIntro>
+
+      <SettingsGroup>
+        {/* The list call is how we know what is connected. When it fails we
+            know nothing, and "nothing is connected" is an answer we do not
+            have. Model keys still render below: they are read from a local
+            file, and a keychain read failing has no bearing on them. */}
+        {trackers.loadError && (
+          <SettingsRow
+            title="Aura couldn't check your trackers."
+            description={trackers.loadError}
+            control={
+              <Button variant="outline" size="sm" onClick={() => void trackers.refresh()}>
+                <RotateCw />
+                Try again
+              </Button>
             }
           />
+        )}
 
-          {/* The list call is how we know what is connected. When it fails we
-              know nothing, and "nothing is connected" is an answer we do not
-              have. Model keys still render below: they are read from a local
-              file, and a keychain read failing has no bearing on them. */}
-          {trackers.loadError && (
-            <div className="mb-4">
-              <ErrorState
-                title="Aura couldn't check your trackers."
-                message={trackers.loadError}
-                onRetry={() => void trackers.refresh()}
-                size="sm"
-              />
-            </div>
-          )}
-
-          {connected.length === 0 ? (
-            <div className="flex flex-col items-start gap-3 border-t border-line-soft py-8">
-              <p className="text-[13px] leading-relaxed text-text-3">
-                Nothing is connected yet. Aura needs at least one model
-                provider to answer anything — that is the one to add first.
-              </p>
-              <Button size="sm" onClick={() => setShopping(true)}>
+        {connected.length === 0 ? (
+          <SettingsRow
+            title="Nothing is connected yet."
+            description="Aura needs at least one model provider to answer anything — that is the one to add first."
+            control={
+              <Button size="sm" onClick={openStore}>
+                <Plus />
                 Add a service
               </Button>
-            </div>
-          ) : (
-            <>
-              <div className="divide-y divide-line-soft border-t border-line-soft">
-                {connected.map((svc) => (
-                  <ConnectedRow
-                    key={svc.entry.id}
-                    svc={svc}
-                    trackers={trackers}
-                    repoRoot={repoRoot}
-                    open={openId === svc.entry.id}
-                    onToggle={() =>
-                      setOpenId(openId === svc.entry.id ? null : svc.entry.id)
-                    }
-                    onChanged={onChanged}
-                  />
-                ))}
-              </div>
-              <div className="pt-5">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => {
-                    setOpenId(null);
-                    setShopping(true);
-                  }}
-                >
-                  Add a service
+            }
+          />
+        ) : (
+          <>
+            {connected.map((svc) => (
+              <ConnectedRow
+                key={svc.entry.id}
+                svc={svc}
+                trackers={trackers}
+                onChanged={onChanged}
+              />
+            ))}
+            <SettingsRow
+              title="Add a service"
+              description="Another model provider, an issue tracker, or a one-time import."
+              control={
+                <Button variant="outline" size="sm" onClick={openStore}>
+                  <Plus />
+                  Add
                 </Button>
-              </div>
-            </>
-          )}
-        </>
+              }
+            />
+          </>
+        )}
+      </SettingsGroup>
+
+      {jira && jiraSites.length > 0 && (
+        <MirrorsSection
+          sites={jiraSites}
+          mirrors={jira.mirrors ?? []}
+          autoMirrorRepoRoot={jira.auto_mirror_repo_root ?? null}
+          repoRoot={repoRoot}
+          onStatusUpdate={trackers.applyStatus}
+        />
+      )}
+      {jira && (
+        <PeopleSection repoRoot={repoRoot} />
       )}
     </>
   );
 }
 
+/** Linear has no per-project binding yet, so its row says so instead of
+ *  leaving you to look for one. */
+const LINEAR_NOTE =
+  "Linear issues arrive alongside your work. Per-project mirroring is Jira only for now.";
+
 function ConnectedRow({
   svc,
   trackers,
-  repoRoot,
-  open,
-  onToggle,
   onChanged,
 }: {
   svc: ConnectedService;
   trackers: ReturnType<typeof useTrackers>;
-  repoRoot: string;
-  open: boolean;
-  onToggle: () => void;
   onChanged: () => void;
 }) {
-  const { entry, detail, active } = svc;
-  const isTracker = entry.category === "tracker";
+  const { entry } = svc;
+  if (entry.category !== "tracker") {
+    return <ProviderKeyRow svc={svc} onChanged={onChanged} />;
+  }
   const kind = entry.id as TrackerKind;
-  const status = isTracker
-    ? trackers.statuses.find((s) => s.kind === entry.id) ?? null
-    : null;
-  const busy = isTracker && trackers.busyKind === kind;
-  const error =
-    isTracker && trackers.error?.kind === kind ? trackers.error.msg : null;
+  const status = trackers.statuses.find((s) => s.kind === entry.id) ?? null;
+  const busy = trackers.busyKind === kind;
+  const error = trackers.error?.kind === kind ? trackers.error.msg : null;
+  const note =
+    kind === "linear"
+      ? LINEAR_NOTE
+      : status?.expires_at
+        ? `Token refreshes in ${formatExpiry(status.expires_at)}.`
+        : null;
 
   return (
-    <div className="py-5">
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        className="flex w-full items-center gap-3 text-left"
-      >
-        <ServiceGlyph id={entry.id} label={entry.label} />
-        <span className="flex min-w-0 flex-col gap-0.5">
-          <span className="flex items-center gap-2">
-            <span className="text-sm font-medium leading-snug text-text-1">
-              {entry.label}
-            </span>
-            {active && (
-              <span className="rounded-full bg-accent-green/10 px-2 py-0.5 text-2xs text-accent-green">
-                In use
-              </span>
-            )}
-          </span>
-          {detail && (
-            <span className="truncate text-[13px] text-text-3">{detail}</span>
-          )}
-        </span>
-        <ChevronRight
-          className={`ml-auto h-4 w-4 shrink-0 text-text-4 transition-transform ${
-            open ? "rotate-90" : ""
-          }`}
-          aria-hidden
-        />
-      </button>
-
-      {open && (
-        <div className="mt-4 pl-10">
-          {entry.category === "model" && (
-            <ProviderKeyControls
-              provider={entry.id}
-              label={entry.label}
-              active={active}
-              onChanged={onChanged}
-            />
-          )}
-          {entry.id === "jira" && status && (
-            <JiraDetail
-              status={status}
-              repoRoot={repoRoot}
-              busy={busy}
-              error={error}
-              onDisconnect={() => void trackers.disconnect("jira")}
-              onStatusUpdate={trackers.applyStatus}
-              onError={(msg) => trackers.setError("jira", msg)}
-            />
-          )}
-          {entry.id === "linear" && status && (
-            <LinearDetail
-              status={status}
-              busy={busy}
-              error={error}
-              onDisconnect={() => void trackers.disconnect("linear")}
-            />
-          )}
-        </div>
-      )}
-    </div>
+    <TrackerRow
+      entry={entry}
+      status={status}
+      busy={busy}
+      error={error}
+      note={note}
+      onDisconnect={() => void trackers.disconnect(kind)}
+    />
   );
 }

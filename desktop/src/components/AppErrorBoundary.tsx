@@ -10,17 +10,26 @@
 // way back — including a one-click "reset appearance" for the most common cause
 // (a color theme that blacked the app out).
 //
-// Everything here is styled with INLINE styles and hard-coded colors on purpose.
-// The fallback must render correctly even when the app's theme tokens are the
-// very thing that's broken — so it can't lean on `--color-*` / Tailwind classes.
+// The screen is drawn from the shared parts (the state anatomy, an alert for
+// what happened, the buttons, an accordion for the technical details), but its
+// wrapper pins the library's own colour values (ui/crash-screen.css). A theme
+// that wrote broken colours onto the page root is the usual cause, so the
+// screen must not read its colours from there.
 
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { AlertTriangle, Check, Copy, RefreshCw } from "lucide-react";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "./ui/accordion";
+import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
+import { Button } from "./ui/button";
+import "./ui/state.css";
+import "./ui/crash-screen.css";
 import {
   isBenignRuntimeNoise,
   isCancellation,
   isEditorWorkerFailure,
 } from "../lib/runtimeNoise";
 import { errorKind, trackError } from "../lib/track";
+import { isStaleModuleError, reloadForStaleModule } from "../lib/staleModule";
 
 type Props = {
   children: ReactNode;
@@ -88,6 +97,9 @@ export class AppErrorBoundary extends Component<Props, State> {
     if (isBenignRuntimeNoise(error?.message ?? "") || isCancellation(error)) {
       return;
     }
+    // A screen loaded on demand whose file was renamed under the page: a reload
+    // draws it. Only when that already failed once does the screen below stay.
+    if (this.reloadIfStale(error?.message ?? "")) return;
     this.setState({ info: info.componentStack ?? null });
     // A render crash blanks the whole app, so it is the single most valuable
     // error to know about. Class name only — never the message or the stack,
@@ -103,12 +115,40 @@ export class AppErrorBoundary extends Component<Props, State> {
     // surface a hard error the same way, rather than leaving a half-dead UI.
     window.addEventListener("error", this.onGlobalError);
     window.addEventListener("unhandledrejection", this.onRejection);
+    // A shipped build announces a lazy screen it couldn't preload here first.
+    window.addEventListener("vite:preloadError", this.onPreloadError);
   }
 
   componentWillUnmount() {
     window.removeEventListener("error", this.onGlobalError);
     window.removeEventListener("unhandledrejection", this.onRejection);
+    window.removeEventListener("vite:preloadError", this.onPreloadError);
   }
+
+  /** Reload once when `message` says an on-demand module is gone (see
+   *  lib/staleModule.ts). True when the reload started. */
+  private reloadIfStale(message: string): boolean {
+    if (!isStaleModuleError(message)) return false;
+    let store: Storage | null = null;
+    try {
+      store = window.sessionStorage;
+    } catch {
+      /* blocked storage: the reload still runs, once */
+    }
+    const started = reloadForStaleModule(store, Date.now(), () => window.location.reload());
+    if (started) console.warn("[AppErrorBoundary] a module went stale under the page; reloading:", message);
+    return started;
+  }
+
+  private onPreloadError = (e: Event) => {
+    let store: Storage | null = null;
+    try {
+      store = window.sessionStorage;
+    } catch {
+      /* ignore */
+    }
+    if (reloadForStaleModule(store, Date.now(), () => window.location.reload())) e.preventDefault();
+  };
 
   private onGlobalError = (e: ErrorEvent) => {
     // Ignore benign ResizeObserver noise + already-shown errors.
@@ -116,6 +156,7 @@ export class AppErrorBoundary extends Component<Props, State> {
     const msg = e.message || "";
     if (isBenignRuntimeNoise(msg) || isCancellation(e.error)) return;
     if (this.editorWorkerFailed(e.error)) return;
+    if (this.reloadIfStale(msg)) return;
     if (e.error instanceof Error) this.setState({ error: e.error });
   };
 
@@ -139,6 +180,7 @@ export class AppErrorBoundary extends Component<Props, State> {
     // a file closed mid-highlight trips the snag screen.
     if (isBenignRuntimeNoise(msg) || isCancellation(reason)) return;
     if (this.editorWorkerFailed(reason)) return;
+    if (this.reloadIfStale(msg)) return;
     if (reason instanceof Error) this.setState({ error: reason });
   };
 
@@ -191,227 +233,84 @@ export class AppErrorBoundary extends Component<Props, State> {
     const message = error.message || String(error);
     const stack = error.stack || "";
 
+    const product = this.props.product ?? "Aura";
+    const reload = (
+      <Button
+        key="reload"
+        size="sm"
+        variant={this.props.primaryAction === "reload" ? "default" : "outline"}
+        onClick={this.reload}
+      >
+        Reload {product}
+      </Button>
+    );
+    const reset = (
+      <Button
+        key="reset"
+        size="sm"
+        variant={this.props.primaryAction === "reload" ? "outline" : "default"}
+        onClick={this.resetAppearanceAndReload}
+      >
+        Reset appearance &amp; reload
+      </Button>
+    );
+
     return (
-      <div style={S.backdrop}>
-        <div style={S.card}>
-          <div style={S.iconRow}>
-            <span style={S.iconDot} aria-hidden />
-            <span style={S.kicker}>Aura hit a snag</span>
+      <div className="ui-crash-screen">
+        <div className="ui-state" data-size="md" data-tone="error" role="alert">
+          <AlertTriangle className="ui-state-icon" strokeWidth={1.25} aria-hidden />
+          <div className="ui-state-copy">
+            <strong>Something went wrong on screen</strong>
+            <p>
+              {this.props.lede ?? (
+                <>
+                  None of your work is lost. This is just the screen failing to draw. The most
+                  common cause is a color theme that doesn’t fit. You can put the look back to
+                  normal, or reload and carry on.
+                </>
+              )}
+            </p>
           </div>
 
-          <h1 style={S.title}>Something went wrong on screen</h1>
-          <p style={S.lede}>
-            {this.props.lede ?? (
-              <>
-                None of your work is lost. This is just the screen failing to
-                draw. The most common cause is a color theme that doesn’t fit.
-                You can put the look back to normal, or reload and carry on.
-              </>
-            )}
-          </p>
+          <Alert variant="destructive" className="ui-crash-what">
+            <AlertTitle>What happened</AlertTitle>
+            <AlertDescription>
+              <code>{message}</code>
+            </AlertDescription>
+          </Alert>
 
-          <div style={S.whatBox}>
-            <div style={S.whatLabel}>What happened</div>
-            <div style={S.whatMsg}>{message}</div>
-          </div>
-
-          <div style={S.actions}>
-            {this.props.primaryAction === "reload" ? (
-              <>
-                <button style={S.primaryBtn} onClick={this.reload}>
-                  Reload {this.props.product ?? "Aura"}
-                </button>
-                <button style={S.btn} onClick={this.resetAppearanceAndReload}>
-                  Reset appearance &amp; reload
-                </button>
-              </>
-            ) : (
-              <>
-                <button style={S.primaryBtn} onClick={this.resetAppearanceAndReload}>
-                  Reset appearance &amp; reload
-                </button>
-                <button style={S.btn} onClick={this.reload}>
-                  Reload {this.props.product ?? "Aura"}
-                </button>
-              </>
-            )}
-            <button style={S.btn} onClick={this.tryAgain}>
+          <div className="ui-crash-actions">
+            {this.props.primaryAction === "reload" ? [reload, reset] : [reset, reload]}
+            <Button size="sm" variant="outline" onClick={this.tryAgain}>
+              <RefreshCw aria-hidden />
               Try again
-            </button>
-            <button style={S.ghostBtn} onClick={this.copyDetails}>
+            </Button>
+            <Button size="sm" variant="ghost" onClick={this.copyDetails}>
+              {this.state.copied ? <Check aria-hidden /> : <Copy aria-hidden />}
               {this.state.copied ? "Copied" : "Copy details"}
-            </button>
+            </Button>
           </div>
 
-          <button
-            style={S.detailsToggle}
-            onClick={() => this.setState((s) => ({ showDetails: !s.showDetails }))}
+          <Accordion
+            type="single"
+            collapsible
+            className="ui-crash-details"
+            value={this.state.showDetails ? "details" : ""}
+            onValueChange={(v) => this.setState({ showDetails: v === "details" })}
           >
-            {this.state.showDetails ? "Hide technical details" : "Show technical details"}
-          </button>
-          {this.state.showDetails && (
-            <pre style={S.stack}>
-              {message}
-              {stack ? `\n\n${stack}` : ""}
-              {this.state.info ? `\n\nComponent stack:${this.state.info}` : ""}
-            </pre>
-          )}
+            <AccordionItem value="details">
+              <AccordionTrigger>Technical details</AccordionTrigger>
+              <AccordionContent>
+                <pre>
+                  {message}
+                  {stack ? `\n\n${stack}` : ""}
+                  {this.state.info ? `\n\nComponent stack:${this.state.info}` : ""}
+                </pre>
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
         </div>
       </div>
     );
   }
 }
-
-// Aura's real palette, hard-coded here on purpose. These MIRROR the app's
-// `--color-*` tokens (the ember surface the app ships with) so the card looks
-// native — but as literals, not `var(--color-*)`, so it stays correct even when
-// a broken theme is the very thing that blanked the screen. Keep in sync with
-// the ember block in styles.css if those tokens ever move.
-//
-// The accent reads through the live token so this screen never contradicts the
-// rest of the app when the accent is retuned — but it carries a literal
-// fallback, so if the stylesheet is the thing that failed, the button is still
-// visible. Radii here are deliberately small (4-6px) to match the app's tight
-// corners, not the soft rounding of a generic dialog.
-const ACCENT = "var(--color-accent, #7ef0a0)"; // primary affordance
-const ACCENT_INK = "var(--color-bg-0, #05140b)"; // ink that stays legible ON the accent
-const BG_CANVAS = "#0a0a0a"; // --color-bg-0 (content canvas)
-const BG_DEEP = "#050505"; // --color-bg-1 (chrome / inset wells)
-const BG_HOVER = "#161616"; // --color-bg-2 (hover / secondary fill)
-const LINE = "#1f1f1f"; // --color-line (hairline)
-const TEXT_1 = "#f3f3f3";
-const TEXT_2 = "#b8b8b8";
-const TEXT_3 = "#7a7a7a";
-const TEXT_4 = "#4d4d4d";
-
-const S: Record<string, React.CSSProperties> = {
-  backdrop: {
-    position: "fixed",
-    inset: 0,
-    zIndex: 2147483000,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-    background: BG_CANVAS,
-    color: TEXT_1,
-    fontFamily:
-      "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
-    overflow: "auto",
-  },
-  card: {
-    width: "100%",
-    maxWidth: 540,
-    background: BG_CANVAS,
-    // --shadow-modal: hairline ring + two soft drop shadows (verbatim values).
-    boxShadow:
-      `0 0 0 1px ${LINE}, 0 8px 24px 0 rgba(0,0,0,0.40), 0 24px 48px 0 rgba(0,0,0,0.46)`,
-    borderRadius: 6,
-    padding: "26px 26px 22px",
-  },
-  iconRow: { display: "flex", alignItems: "center", gap: 8, marginBottom: 16 },
-  iconDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 999,
-    background: ACCENT,
-    boxShadow: "0 0 0 4px color-mix(in srgb, var(--color-accent, #7ef0a0) 16%, transparent)",
-  },
-  // Deliberately inline, like everything else here: this boundary has to
-  // paint when the stylesheet itself is what failed, so it cannot use
-  // .section-label. It carries that rule's values by hand instead — 11px,
-  // medium, one step back in grey, sentence case.
-  kicker: {
-    fontSize: 11,
-    color: TEXT_3,
-    fontWeight: 500,
-  },
-  title: { margin: "0 0 8px", fontSize: 19, fontWeight: 600, color: TEXT_1, letterSpacing: -0.2 },
-  lede: { margin: "0 0 18px", fontSize: 13, lineHeight: 1.65, color: TEXT_2 },
-  whatBox: {
-    background: BG_DEEP,
-    border: `1px solid ${LINE}`,
-    borderRadius: 4,
-    padding: "11px 13px",
-    marginBottom: 18,
-  },
-  whatLabel: {
-    fontSize: 11,
-    color: TEXT_3,
-    marginBottom: 5,
-    fontWeight: 500,
-  },
-  whatMsg: {
-    fontSize: 12.5,
-    lineHeight: 1.5,
-    color: TEXT_1,
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-    wordBreak: "break-word",
-  },
-  actions: { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 6 },
-  // Primary = solid ember-green with dark ink, matching Aura's accent-foreground
-  // convention (dark text on the green accent). The clear, on-brand affordance.
-  primaryBtn: {
-    appearance: "none",
-    border: "1px solid transparent",
-    background: ACCENT,
-    color: ACCENT_INK,
-    fontSize: 12,
-    fontWeight: 600,
-    height: 30,
-    padding: "0 14px",
-    borderRadius: 6,
-    cursor: "pointer",
-  },
-  // Secondary = bg-2 fill + hairline raise (the app's flat secondary button).
-  btn: {
-    appearance: "none",
-    border: `1px solid ${LINE}`,
-    background: BG_HOVER,
-    color: TEXT_1,
-    fontSize: 12,
-    fontWeight: 500,
-    height: 30,
-    padding: "0 13px",
-    borderRadius: 6,
-    cursor: "pointer",
-  },
-  ghostBtn: {
-    appearance: "none",
-    border: "1px solid transparent",
-    background: "transparent",
-    color: TEXT_3,
-    fontSize: 12,
-    fontWeight: 500,
-    height: 30,
-    padding: "0 8px",
-    borderRadius: 6,
-    cursor: "pointer",
-  },
-  detailsToggle: {
-    appearance: "none",
-    border: "none",
-    background: "transparent",
-    color: TEXT_4,
-    fontSize: 11.5,
-    padding: "10px 0 0",
-    cursor: "pointer",
-    textDecoration: "underline",
-    textUnderlineOffset: 2,
-  },
-  stack: {
-    marginTop: 10,
-    padding: 12,
-    background: BG_DEEP,
-    border: `1px solid ${LINE}`,
-    borderRadius: 4,
-    fontSize: 11,
-    lineHeight: 1.5,
-    color: TEXT_3,
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-    maxHeight: 220,
-    overflow: "auto",
-    whiteSpace: "pre-wrap",
-    wordBreak: "break-word",
-  },
-};

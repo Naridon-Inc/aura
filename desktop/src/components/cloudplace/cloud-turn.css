@@ -1,0 +1,34 @@
+/* One row of a cloud workspace's transcript: the turn, then the slot under
+   it. Prompts and replies are plain text, so their line breaks are kept. */
+.ui-cloud-turn .ui-message-body,
+.ui-cloud-turn .ui-shared-message > div {
+  white-space: pre-wrap;
+}
+.ui-cloud-turn > .ui-shared-message,
+.ui-cloud-turn > .ui-shared-agent {
+  margin: 0;
+}
+.ui-cloud-turn-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+/* A computer's answer that says a prompt was not run: muted, small, no bubble. */
+.ui-cloud-turn-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 2px 12px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
+}
+.ui-cloud-turn-notice > svg {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin-top: 2.5px;
+}

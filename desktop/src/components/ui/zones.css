@@ -1,0 +1,67 @@
+/* Zones in the Team Radar: each claim is the details panel's two-line row —
+   what is claimed and how hard, then who and why — with its lock and release
+   buttons showing on hover. Added here: the patterns set in mono, the hover
+   actions, the claim form above the list, and the red the "locked" choice
+   takes when it is picked. */
+
+.ui-zone-row {
+  position: relative;
+}
+.ui-details-pull.ui-zone-row:hover {
+  background: var(--ui-hover);
+}
+.ui-zone-patterns {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-zone-row > div > .ui-status-chip {
+  flex: none;
+}
+.ui-zone-meta {
+  display: flex;
+  min-width: 0;
+  padding-left: 22px;
+}
+.ui-zone-actions {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 4px;
+  border-radius: 6px;
+  background: var(--ui-hover);
+  opacity: 0;
+  transform: translateY(-50%);
+}
+.ui-zone-row:hover .ui-zone-actions,
+.ui-zone-actions:focus-within {
+  opacity: 1;
+}
+
+.ui-zones-error {
+  margin: 0 8px 8px;
+}
+
+.ui-zones-claim {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-zones-claim-patterns {
+  font-family: var(--font-mono);
+}
+.ui-zones-claim-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-zones-claim-submit {
+  margin-left: auto;
+}
+.ui-zones-claim .ui-toggle[data-tone="block"][data-state="on"] {
+  color: var(--ui-red);
+}

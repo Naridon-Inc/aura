@@ -25,9 +25,11 @@ import {
 } from "../../lib/api";
 import { TeamAgentUsage } from "./TeamAgentUsage";
 import { TeamOverview } from "./TeamOverview";
-import { ChevronLeft, Receipt } from "lucide-react";
+import { ChevronLeft, Receipt, RefreshCw } from "lucide-react";
 import { Button } from "../ui/button";
 import { EmptyState, LoadingState } from "../ui/state";
+import { TraceToolbar } from "../ui/trace-page";
+import { TraceLine, TraceReport, TraceSection } from "../ui/trace-report";
 import {
   CumulativeTrend,
   ModelSplitBar,
@@ -38,6 +40,7 @@ import {
 import { currentMonthKey, prettyMonth } from "./usageProviders";
 import { fetchTeam } from "../../lib/teamCache";
 import { fetchBillingUsage } from "../../lib/billingCache";
+import "../trace/usage.css";
 
 /** What the empty state may say about WHY it is empty.
  *
@@ -93,35 +96,13 @@ export function coverageNotes(
 function CoverageNote({ notes }: { notes: string[] }) {
   if (notes.length === 0) return null;
   return (
-    <div className="flex flex-col gap-1 px-0.5">
-      <span className="section-label">What this covers</span>
-      {notes.map((n) => (
-        <span key={n} className="text-xs leading-relaxed text-text-4">
-          {n}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function RefreshIcon() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M23 4v6h-6" />
-      <path d="M1 20v-6h6" />
-      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10" />
-      <path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-    </svg>
+    <TraceSection title="What this covers">
+      <div className="ui-usage-notes">
+        {notes.map((n) => (
+          <TraceLine key={n}>{n}</TraceLine>
+        ))}
+      </div>
+    </TraceSection>
   );
 }
 
@@ -341,47 +322,40 @@ export function CostUsagePane({
     );
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-bg-content">
-      {/* ── Header ─────────────────────────────────────────────────────
-          Actions only. It used to open with "Cost & usage" in 18px and the
+    <div className="ui-usage-page">
+      {/* Actions only. It used to open with "Cost & usage" in 18px and the
           project's name under it — the exact two words on the tab you clicked
-          to get here, over the exact name in the window's breadcrumb. 56px
-          spent telling the reader where they already know they are. */}
-      <div className="flex shrink-0 items-center justify-between border-b border-line-soft px-4 py-1.5">
-        {onBack ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            onClick={onBack}
-            className="-ml-1.5 gap-1 text-text-3 hover:text-text-1"
-          >
-            <ChevronLeft className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />
-            My sessions
-          </Button>
-        ) : (
-          <span />
-        )}
+          to get here, over the exact name in the window's breadcrumb. */}
+      <TraceToolbar
+        search={
+          <div className="ui-usage-toolbar-lead">
+            {onBack ? (
+              <Button type="button" variant="ghost" size="xs" onClick={onBack}>
+                <ChevronLeft aria-hidden />
+                My sessions
+              </Button>
+            ) : null}
+          </div>
+        }
+      >
         <Button
           type="button"
           variant="ghost"
           size="icon-sm"
           onClick={() => void load()}
           disabled={loading}
-          className="text-text-3 hover:text-text-1"
           title="Refresh cost & usage"
           aria-label="Refresh cost & usage"
         >
-          <RefreshIcon />
+          <RefreshCw />
         </Button>
-      </div>
+      </TraceToolbar>
 
-      {/* Body */}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="ui-usage-body">
         {loading && !hasAnything ? (
           <LoadingState label="Adding up what you’ve spent…" />
         ) : !hasAnything ? (
-          <div className="flex h-full items-center justify-center">
+          <div className="ui-usage-empty">
             <EmptyState
               icon={Receipt}
               title="Nothing spent yet"
@@ -395,7 +369,7 @@ export function CostUsagePane({
             />
           </div>
         ) : (
-          <div className="mx-auto flex max-w-[760px] flex-col gap-5 px-4 py-5">
+          <TraceReport>
             {heroMonth ? (
               <UsageHero
                 monthLabel={monthLabel}
@@ -404,7 +378,7 @@ export function CostUsagePane({
                 monthCostUsd={heroMonth.costUsd}
                 accumulatedTokens={accumulated?.tokens ?? 0}
                 accumulatedCostUsd={accumulated?.costUsd ?? 0}
-                accumulatedLabel="Total · all time"
+                accumulatedLabel="All time"
                 scopeNote={heroMonth.scopeNote}
               />
             ) : null}
@@ -435,7 +409,7 @@ export function CostUsagePane({
               localDev={monthUsage?.byDeveloper ?? []}
               nowSecs={nowSecs}
             />
-          </div>
+          </TraceReport>
         )}
       </div>
     </div>

@@ -308,6 +308,7 @@ fn no_row(_org: Option<&str>) -> Option<Machine> {
 fn byoc_row(org: Option<&str>) -> Option<Machine> {
     Some(Machine {
         id: "ubuntu@10.0.0.4:/srv/alpha".into(),
+        aliases: Vec::new(),
         name: "aura-runner".into(),
         host: "10.0.0.4".into(),
         user: "ubuntu".into(),
@@ -500,6 +501,7 @@ fn neighbour() -> Place {
     Place::Box {
         machine: Box::new(Machine {
             id: "ana@10.0.0.9:/srv/beta".into(),
+            aliases: Vec::new(),
             name: "ana-box".into(),
             host: "10.0.0.9".into(),
             user: "ana".into(),

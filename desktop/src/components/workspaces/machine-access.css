@@ -1,0 +1,68 @@
+/* "Who can use" — the dialog that hands out seats on the team's machines. */
+.ui-machine-access-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-machine-access-seats {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-machine-access-error {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--ui-red);
+}
+.ui-machine-access-wait {
+  display: grid;
+  place-items: center;
+  padding: 32px 0;
+}
+.ui-machine-access-list {
+  max-height: 360px;
+  overflow: auto;
+}
+.ui-machine-access-list .ui-cloud-member-row {
+  padding: 10px 0;
+}
+.ui-machine-access-list > div:last-child .ui-cloud-member-row {
+  border-bottom: 0;
+}
+.ui-machine-access-footer {
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+
+/* The every-org machine list: a quiet heading per account, and a chip on each
+   row naming whose it is. */
+.ui-machines-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-sheet);
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-machines-group > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-machines-tag {
+  flex: none;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-machines-tag[data-kind="personal"] {
+  border-color: var(--ui-primary);
+  color: var(--ui-primary);
+}

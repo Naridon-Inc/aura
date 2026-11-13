@@ -27,8 +27,12 @@ import { configureMonacoDiagnostics } from "../../lib/monacoDiagnostics";
 import { useResolvedTheme, useThemeVariant } from "../../lib/themeStore";
 import { auraThemeName, ensureAuraThemes } from "../../lib/monacoTheme";
 import { getIgnoreWhitespace, subscribeIgnoreWhitespace } from "../../lib/ignoreWhitespacePref";
+import { getWrapLines, subscribeWrapLines } from "../../lib/wrapLinesPref";
 import { materializeSides, materializedSpan, type DiffFocus } from "../../lib/diffSides";
 import type { EditableDiffHandle } from "./useEditableDiff";
+import { CommentNav } from "./review/CommentNav";
+import { monacoNavSource } from "./review/navSources";
+import { useMonacoReview, type ReviewHost } from "./review/useMonacoReview";
 
 installMonacoEnvironment();
 
@@ -103,6 +107,7 @@ export function SplitDiff({
   sides: fullSides,
   inline = false,
   edit = null,
+  review = null,
 }: {
   diff: string;
   path: string;
@@ -116,6 +121,8 @@ export function SplitDiff({
   inline?: boolean;
   /** Lets the current side be typed into. Absent → hard read-only. */
   edit?: SplitDiffEdit | null;
+  /** Review comments on the lines of both sides. Absent → none. */
+  review?: ReviewHost | null;
 }) {
   const materialized = useMemo(() => materializeSides(diff), [diff]);
   const sides = useMemo(
@@ -140,6 +147,9 @@ export function SplitDiff({
   // Shared with every diff pane: flip whitespace-hiding once, all panes follow.
   const [ignoreWs, setIgnoreWs] = useState(getIgnoreWhitespace);
   useEffect(() => subscribeIgnoreWhitespace(setIgnoreWs), []);
+  // Wrapping long lines is shared the same way.
+  const [wrap, setWrap] = useState(getWrapLines);
+  useEffect(() => subscribeWrapLines(setWrap), []);
   const monacoRef = useRef<Monaco | null>(null);
   const editorRef = useRef<Parameters<DiffOnMount>[0] | null>(null);
   const origDecoRef = useRef<ReturnType<
@@ -244,12 +254,40 @@ export function SplitDiff({
     }
   }, [focus, target, mounted, diff]);
 
+  const diffEd = mounted ? editorRef.current : null;
+  const reviewOld = useMonacoReview(
+    diffEd?.getOriginalEditor() ?? null,
+    monacoRef.current,
+    "deletions",
+    review,
+    fullSides ? null : sides.origAt,
+  );
+  const reviewNew = useMonacoReview(
+    diffEd?.getModifiedEditor() ?? null,
+    monacoRef.current,
+    "additions",
+    review,
+    fullSides ? null : sides.modAt,
+  );
+
+  const nav = useMemo(
+    () =>
+      diffEd && monacoRef.current && review
+        ? monacoNavSource(diffEd, monacoRef.current, fullSides ? null : sides.origAt, fullSides ? null : sides.modAt)
+        : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [diffEd, !!review, fullSides, sides],
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {reviewOld}
+      {reviewNew}
       {focus ? (
         <FocusStrip focus={focus} located={!!target} onClear={onClearFocus} />
       ) : null}
-      <div className="min-h-0 flex-1">
+      <div className="relative min-h-0 flex-1">
+        {review && <CommentNav source={nav} comments={review.comments} />}
         <DiffEditor
           original={sides.original}
           modified={sides.modified}
@@ -275,7 +313,7 @@ export function SplitDiff({
             fontFamily: "var(--font-mono), Menlo, Monaco, monospace",
             fontSize: 12,
             lineHeight: 20,
-            wordWrap: "off",
+            wordWrap: wrap ? "on" : "off",
             scrollBeyondLastLine: false,
             smoothScrolling: true,
             renderLineHighlight: "all",
@@ -287,6 +325,7 @@ export function SplitDiff({
             },
             automaticLayout: true,
             ignoreTrimWhitespace: ignoreWs,
+            glyphMargin: !!review,
           }}
         />
       </div>

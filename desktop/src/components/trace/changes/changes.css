@@ -1,0 +1,282 @@
+/* The Changes tab: the changed files in the shared file tree on the left, one
+   file's change on the right — its meaning first, then its code. */
+
+.ui-changes-view {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+
+.ui-changes-scope {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--ui-border);
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+
+.ui-changes {
+  display: flex;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+}
+.ui-changes > .ui-changes-files,
+.ui-changes > .ui-changes-pane {
+  width: 100%;
+}
+.ui-changes-list {
+  width: 296px;
+  flex-shrink: 0;
+  min-height: 0;
+  border-right: 1px solid var(--ui-border);
+}
+.ui-changes-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.ui-changes-empty {
+  height: 100%;
+  justify-content: center;
+}
+
+.ui-changes-spacer {
+  flex: 1;
+}
+
+/* ── the file list ─────────────────────────────────────────────────── */
+
+.ui-changes-files {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.ui-changes-files-bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 6px 0 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-changes-files-count {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ui-changes-files-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* ── one file's change ─────────────────────────────────────────────── */
+
+.ui-changes-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+}
+.ui-changes-bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 4px 8px 4px 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-changes-status {
+  width: 12px;
+  flex-shrink: 0;
+  text-align: center;
+  font: 11px/16px var(--font-mono);
+  color: var(--ui-muted-fg);
+}
+.ui-changes-status[data-status="added"] {
+  color: var(--ui-green);
+}
+.ui-changes-status[data-status="deleted"] {
+  color: var(--ui-red);
+}
+.ui-changes-status[data-status="modified"] {
+  color: var(--ui-yellow);
+}
+.ui-changes-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-fg);
+  font: 12px/16px var(--font-mono);
+  /* Right-to-left only so a long path loses its start, not its file name. */
+  text-align: left;
+}
+.ui-changes-tools {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.ui-changes-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ui-changes-reveal {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--ui-border);
+}
+.ui-changes-reveal .ui-button-ghost {
+  color: var(--ui-muted-fg);
+}
+.ui-changes-reveal-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ui-changes-state {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-changes-state[data-stack] {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.ui-changes-state .ui-trace-line {
+  margin: 0;
+}
+.ui-changes-error {
+  color: var(--ui-faint);
+  font: 11px/16px var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ui-changes-symbols h4 {
+  margin: 4px 0;
+  color: var(--ui-faint);
+  font-size: 11px;
+  font-weight: 500;
+}
+.ui-changes-symbols ul {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-changes-symbols li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 24px;
+}
+.ui-changes-symbols code {
+  color: var(--ui-fg);
+  font: 12px/16px var(--font-mono);
+}
+.ui-changes-symbols small {
+  color: var(--ui-faint);
+  font-size: 11px;
+}
+
+/* ── the unified read, in the shared file diff ─────────────────────── */
+
+.ui-changes-code {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+/* Full-bleed inside the pane: the bar above already names the file, and a
+   bordered box inside a column would be a card in a card. */
+.ui-changes-code > .ui-file-diff {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+}
+.ui-changes-code > .ui-file-diff > header {
+  display: none;
+}
+.ui-changes-code > .ui-file-diff > [role="table"] {
+  flex: 1;
+  min-height: 0;
+}
+
+.ui-changes-focus {
+  display: flex;
+  flex-shrink: 0;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid var(--ui-border);
+  border-left: 2px solid var(--ui-info);
+  background: var(--ui-hover);
+}
+.ui-changes-focus > div {
+  flex: 1;
+  min-width: 0;
+}
+.ui-changes-focus p {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 18px;
+}
+.ui-changes-focus p[data-quiet] {
+  color: var(--ui-faint);
+}
+.ui-changes-focus strong {
+  margin-right: 6px;
+  color: var(--ui-fg);
+  font-size: 13px;
+  font-weight: 500;
+}
+.ui-changes-focus code {
+  color: var(--ui-faint);
+  font: 11px var(--font-mono);
+}
+
+.ui-changes-more {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 12px;
+  border-top: 1px solid var(--ui-border);
+  color: var(--ui-faint);
+  font-size: 12px;
+}

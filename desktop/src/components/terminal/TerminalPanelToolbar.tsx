@@ -1,39 +1,56 @@
-// The terminal panel's top toolbar — mirrors VS Code's terminal toolbar:
-//   [ zsh ⌄ ]  [ + ]  [ ⫼ split ]  [ 🗑 ]  [ … ]  [ ⛶ ]  [ ✕ ]
-// The profile chip + the `+` and `...` buttons open the shared menus; the
-// rest are direct actions on the active terminal / the panel itself.
+// The terminal panel's own actions, drawn into the terminal strip after the
+// tabs and the run controls: one More actions menu holding a new terminal in
+// another shell or folder, split / find / close the active one, the terminal
+// list, moving it into the editor area and maximizing the panel. The tabs and
+// the new-terminal button are the strip's; these are what is left.
 
 import {
-  Plus,
   ChevronDown,
   ChevronUp,
-  Trash2,
   MoreHorizontal,
-  SquareArrowOutUpRight,
   PanelRight,
   PanelRightClose,
+  Plus,
   Search,
-  X,
+  SquareArrowOutUpRight,
 } from "lucide-react";
 import type { TerminalProfile } from "../../lib/api";
+import { Button } from "../ui/button";
+import {
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuShortcut,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+} from "../ui/dropdown-menu";
 import { SplitIcon } from "./icons";
-import { TerminalNewMenu } from "./TerminalNewMenu";
+import { TerminalNewMenuItems } from "./TerminalNewMenu";
 import { TerminalOverflowMenu } from "./TerminalOverflowMenu";
 
-type Props = {
-  activeProfileName: string;
+/** Every shell, split, a new window, a folder, the default shell and
+ *  terminal settings — the rows of the "New Terminal" submenu. */
+export type ShellMenuProps = {
   profiles: TerminalProfile[];
   defaultProfileId: string | null;
+  onNewTerminal: (profileId?: string) => void;
+  onSplit: (profileId?: string) => void;
+  onNewWindow?: () => void;
+  /** Open a terminal in a folder the user picks. */
+  onNewTerminalInFolder?: (profileId?: string, folder?: string) => void;
+  /** Folders already opened that way, newest first. */
+  recentFolders?: string[];
+  onSelectDefaultProfile: (profileId: string) => void;
+  onConfigureSettings: () => void;
+};
+
+type ActionsProps = {
   /** Whether the active terminal has a current text selection (gates Copy). */
   hasSelection: boolean;
   maximized: boolean;
   sideListOpen: boolean;
   hasActive: boolean;
-  onNewTerminal: (profileId?: string) => void;
-  onSplit: (profileId?: string) => void;
-  onNewWindow?: () => void;
-  onSelectDefaultProfile: (profileId: string) => void;
-  onConfigureSettings: () => void;
+  onSplit: () => void;
   onKill: () => void;
   onClear: () => void;
   onCopy: () => void;
@@ -41,29 +58,19 @@ type Props = {
   onSelectAll: () => void;
   onFind: () => void;
   onToggleMaximize: () => void;
-  /** Move the active terminal into the center editor area as its own tab
-   *  (VS Code's "Move Terminal into Editor Area"). */
+  /** Move the active terminal into the center editor area as its own tab. */
   onOpenInEditor: () => void;
   onToggleSideList: () => void;
-  onClosePanel: () => void;
+  /** The shells a new terminal can open in. */
+  shellMenu: ShellMenuProps;
 };
 
-const BTN =
-  "h-6 w-6 grid place-items-center rounded text-text-4 transition-colors hover:text-text-2 hover:bg-state-hover disabled:opacity-40 disabled:hover:bg-transparent";
-
-export function TerminalPanelToolbar({
-  activeProfileName,
-  profiles,
-  defaultProfileId,
+export function TerminalPanelActions({
   hasSelection,
   maximized,
   sideListOpen,
   hasActive,
-  onNewTerminal,
   onSplit,
-  onNewWindow,
-  onSelectDefaultProfile,
-  onConfigureSettings,
   onKill,
   onClear,
   onCopy,
@@ -73,113 +80,58 @@ export function TerminalPanelToolbar({
   onToggleMaximize,
   onOpenInEditor,
   onToggleSideList,
-  onClosePanel,
-}: Props) {
+  shellMenu,
+}: ActionsProps) {
   return (
-    <div className="h-8 px-2 flex items-center gap-1 border-b border-line-soft bg-bg-chrome flex-shrink-0">
-      <span className="text-text-3 text-xs font-medium mr-1 flex-shrink-0">Terminal</span>
-
-      <TerminalNewMenu
-        trigger={
-          <button
-            type="button"
-            title="Choose which shell to open"
-            className="h-6 px-2 flex items-center gap-1 min-w-0 rounded text-text-3 text-xs transition-colors hover:text-text-1 hover:bg-state-hover"
-          >
-            <span className="font-mono text-text-4 text-2xs">{">_"}</span>
-            <span className="max-w-[120px] truncate">{activeProfileName}</span>
-            <ChevronDown className="h-3.5 w-3.5 flex-shrink-0" />
-          </button>
-        }
-        profiles={profiles}
-        defaultProfileId={defaultProfileId}
-        onNewTerminal={onNewTerminal}
-        onSplit={onSplit}
-        onNewWindow={onNewWindow}
-        onSelectDefaultProfile={onSelectDefaultProfile}
-        onConfigureSettings={onConfigureSettings}
-        align="start"
-      />
-
-      <div className="flex-1" />
-
-      <button type="button" title="New Terminal" className={BTN} onClick={() => onNewTerminal()}>
-        <Plus className="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        title="Split Terminal"
-        className={BTN}
-        disabled={!hasActive}
-        onClick={() => onSplit()}
-      >
-        <SplitIcon className="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        title="Find (⌘F)"
-        className={BTN}
-        disabled={!hasActive}
-        onClick={onFind}
-      >
-        <Search className="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        title="Close Terminal"
-        className={BTN}
-        disabled={!hasActive}
-        onClick={onKill}
-      >
-        <Trash2 className="h-3.5 w-3.5" />
-      </button>
-
-      <TerminalOverflowMenu
-        trigger={
-          <button type="button" title="More Actions" className={BTN} disabled={!hasActive}>
-            <MoreHorizontal className="h-3.5 w-3.5" />
-          </button>
-        }
-        hasSelection={hasSelection}
-        onClear={onClear}
-        onCopy={onCopy}
-        onPaste={onPaste}
-        onSelectAll={onSelectAll}
-        onKill={onKill}
-      />
-
-      <button
-        type="button"
-        title={sideListOpen ? "Hide Terminal List" : "Show Terminal List"}
-        className={BTN}
-        onClick={onToggleSideList}
-      >
-        {sideListOpen ? (
-          <PanelRightClose className="h-3.5 w-3.5" />
-        ) : (
-          <PanelRight className="h-3.5 w-3.5" />
-        )}
-      </button>
-      <button
-        type="button"
-        title="Open Terminal in Editor"
-        className={BTN}
-        disabled={!hasActive}
-        onClick={onOpenInEditor}
-      >
-        <SquareArrowOutUpRight className="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        title={maximized ? "Restore Panel" : "Maximize Panel"}
-        className={BTN}
-        onClick={onToggleMaximize}
-      >
-        {maximized ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
-      </button>
-      <button type="button" title="Close Panel" className={BTN} onClick={onClosePanel}>
-        <X className="h-3.5 w-3.5" />
-      </button>
-    </div>
+    <TerminalOverflowMenu
+      trigger={
+        <Button size="iconXs" variant="ghost" aria-label="More actions">
+          <MoreHorizontal />
+        </Button>
+      }
+      hasSelection={hasSelection && hasActive}
+      canPaste={hasActive}
+      onClear={onClear}
+      onCopy={onCopy}
+      onPaste={onPaste}
+      onSelectAll={onSelectAll}
+      onKill={onKill}
+      extra={
+        <>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <Plus />
+              New Terminal
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="min-w-[14rem] max-w-[20rem]">
+              <TerminalNewMenuItems {...shellMenu} />
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={onSplit} disabled={!hasActive}>
+            <SplitIcon />
+            Split Terminal
+            <DropdownMenuShortcut>{"⌘\\"}</DropdownMenuShortcut>
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onFind} disabled={!hasActive}>
+            <Search />
+            Find
+            <DropdownMenuShortcut>⌘F</DropdownMenuShortcut>
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onOpenInEditor} disabled={!hasActive}>
+            <SquareArrowOutUpRight />
+            Open Terminal in Editor
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onToggleSideList}>
+            {sideListOpen ? <PanelRightClose /> : <PanelRight />}
+            {sideListOpen ? "Hide Terminal List" : "Show Terminal List"}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onToggleMaximize}>
+            {maximized ? <ChevronDown /> : <ChevronUp />}
+            {maximized ? "Restore Panel" : "Maximize Panel"}
+          </DropdownMenuItem>
+        </>
+      }
+    />
   );
 }

@@ -67,12 +67,18 @@ pub struct WorkspaceLaunchManifest {
 pub async fn workspace_launch(
     app: AppHandle,
     state: State<'_, AgentPtyRegistry>,
+    scripts: State<'_, crate::workspace_scripts::ScriptRegistry>,
     repo_root: String,
     branch: String,
     start_raw: String,
     agents: Vec<LaunchAgentSpec>,
     cols: Option<u16>,
     rows: Option<u16>,
+    // The copy works on `branch` as GitHub has it — a pull request's own
+    // branch — instead of a new branch off `start_raw`. `base` is the
+    // branch that pull request merges into.
+    continue_branch: Option<bool>,
+    base: Option<String>,
 ) -> Result<WorkspaceLaunchManifest, String> {
     // A project folder doesn't have to be a git repo — that's fine. When it is
     // one we provision an isolated managed worktree (a fresh copy on its own
@@ -82,14 +88,24 @@ pub async fn workspace_launch(
     // (place tabs from `sessions`, point the in-flight tile at `worktree.path`)
     // is identical for both.
     let worktree = if is_git_work_tree(&repo_root) {
-        let start = resolve_start_point(&repo_root, &start_raw)?;
-        create_managed_worktree(&repo_root, &branch, &start)?
+        let made = if continue_branch.unwrap_or(false) {
+            crate::worktree_continue::continue_managed_worktree(&repo_root, &branch, base.as_deref())?
+        } else {
+            let start = resolve_start_point(&repo_root, &start_raw)?;
+            create_managed_worktree(&repo_root, &branch, &start)?
+        };
+        // A fresh checkout gets the repository's copy list (its `.env` and
+        // the like) before any agent opens it, and its setup script starts
+        // alongside them; the Setup tab shows it as it runs.
+        crate::cmd_workspace_scripts::begin_setup_after_create(&app, scripts.inner(), &repo_root, &made.path);
+        made
     } else {
         ManagedWorktree {
             project_id: project_id_for(&repo_root),
             branch: String::new(),
             path: repo_root.clone(),
             start_point: String::new(),
+            nested: Vec::new(),
         }
     };
 
@@ -128,6 +144,8 @@ pub async fn workspace_launch(
             // `workspaceCreateStore` says out loud when a launch names a
             // machine. When a machine can hold a worktree of its own, this
             // is the line that carries it.
+            None,
+            // A just-cut worktree has no linked folders yet.
             None,
         )
         .await

@@ -14,9 +14,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { SquareTerminal } from "lucide-react";
 import { useAgentSession } from "../../lib/agentSessionStore";
 import { useScrollHost } from "../../lib/useScrollHost";
 import type { BlockEnvelope } from "../../lib/api";
+import { EmptyState } from "../ui/state";
 import { BlockCard } from "./BlockCard";
 
 type Props = { sessionId: string };
@@ -74,9 +76,12 @@ export function AgentBlocksView({ sessionId }: Props) {
   if (pairs.length === 0) {
     return (
       <div className="h-full w-full flex items-center justify-center">
-        <div className="text-text-4 text-sm">
-          send a prompt to start the conversation
-        </div>
+        <EmptyState
+          icon={SquareTerminal}
+          size="sm"
+          title="No blocks yet"
+          body="Send a prompt to start the conversation."
+        />
       </div>
     );
   }

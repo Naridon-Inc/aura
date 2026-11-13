@@ -24,6 +24,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::Processor;
 
 use crate::color::{Palette, Rgba, blend};
+use crate::search::{SearchHit, SearchOpts};
 
 /// Default dimensions when the caller does not specify a size up front.
 const DEFAULT_COLS: u16 = 80;
@@ -86,6 +87,13 @@ pub struct GridSnapshot {
     pub cells: Vec<Vec<RenderCell>>,
     pub cursor_col: u16,
     pub cursor_row: u16,
+    /// How far back into history this snapshot was taken, in lines. Carried on
+    /// the snapshot rather than read separately because a search highlight is
+    /// placed by absolute line and drawn in viewport rows: the two have to be
+    /// converted against the same scroll position, and reading the offset in a
+    /// second lock lets a wheel event land between them and paint the wash a
+    /// row off the text it belongs to.
+    pub display_offset: usize,
 }
 
 impl GridSnapshot {
@@ -102,6 +110,7 @@ impl GridSnapshot {
             cells,
             cursor_col: 0,
             cursor_row: 0,
+            display_offset: 0,
         }
     }
 
@@ -155,6 +164,12 @@ struct TermState {
     palette: Palette,
     cols: u16,
     rows: u16,
+    /// Bumped on anything that can move a line: new output and resizes.
+    ///
+    /// alacritty numbers lines relative to the bottom of the screen, so every
+    /// line in the buffer shifts up by one each time output scrolls. A hit
+    /// list is therefore only valid for the revision it was scanned at.
+    revision: u64,
 }
 
 impl TermState {
@@ -174,11 +189,13 @@ impl TermState {
             palette,
             cols,
             rows,
+            revision: 0,
         }
     }
 
     fn apply(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
+        self.revision = self.revision.wrapping_add(1);
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
@@ -192,6 +209,8 @@ impl TermState {
         self.term.resize(dims);
         self.cols = cols;
         self.rows = rows;
+        // A reflow rewraps every row, so columns move as well as lines.
+        self.revision = self.revision.wrapping_add(1);
     }
 
     fn snapshot(&self) -> GridSnapshot {
@@ -260,7 +279,56 @@ impl TermState {
             cells,
             cursor_col,
             cursor_row,
+            display_offset: display_offset.max(0) as usize,
         }
+    }
+
+    /// Every physical row, as text with the grid column each character sits
+    /// in. Physical rather than logical (unlike [`Self::transcript`]) because
+    /// a highlight is drawn per row: a search answer has to name a row and a
+    /// column span, and rejoining soft-wrapped rows first would lose exactly
+    /// that.
+    fn search_rows(&self) -> Vec<crate::search::RowText> {
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        if cols == 0 {
+            return Vec::new();
+        }
+        let mut out: Vec<crate::search::RowText> = Vec::with_capacity(grid.total_lines());
+        for l in grid.topmost_line().0..=grid.bottommost_line().0 {
+            let row = &grid[Line(l)];
+            let width = cols.min(row.len());
+            let mut text = String::with_capacity(width);
+            let mut map: Vec<u16> = Vec::with_capacity(width);
+            for c in 0..width {
+                let cell = &row[Column(c)];
+                // The second cell of a wide glyph carries no character of its
+                // own; the glyph's column is the first one, which is already
+                // recorded.
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(cell.c);
+                map.push(c as u16);
+            }
+            // Terminals pad rows with blanks. Trimming them keeps a query for
+            // a space from matching the empty half of every short line.
+            let keep = text.trim_end().chars().count();
+            let cut = text
+                .char_indices()
+                .nth(keep)
+                .map(|(b, _)| b)
+                .unwrap_or(text.len());
+            text.truncate(cut);
+            map.truncate(keep);
+            out.push(crate::search::RowText {
+                line: l,
+                text,
+                cols: map,
+                end_col: width as u16,
+            });
+        }
+        out
     }
 
     fn transcript(&self) -> Vec<String> {
@@ -335,6 +403,11 @@ impl TermState {
             alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
         }
     }
+
+    /// Has the child asked for bracketed paste (DECSET 2004)?
+    fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
 }
 
 /// Owns a terminal + parser and exposes byte-in / snapshot-out. UI-agnostic:
@@ -347,6 +420,40 @@ pub struct GridTerminal {
     focused: bool,
     /// Active mouse selection over the viewport, if any.
     selection: Option<Selection>,
+    /// Whether "Select All" is in force.
+    ///
+    /// Its own flag rather than a [`Selection`] covering everything, because
+    /// a selection is viewport coordinates and "all" includes the scrollback
+    /// above the viewport — which no pair of `(col, row)` can name. Copying
+    /// reads the transcript when this is set, and the wash covers every
+    /// visible row, which is what a user sees of a buffer-wide selection
+    /// whatever its extent above the window.
+    select_all: bool,
+    /// The live find-in-terminal query, its hits and which one is current.
+    find: Option<FindState>,
+}
+
+/// A search in progress over one terminal.
+struct FindState {
+    /// Kept so the search can be re-run when the buffer moves under it.
+    query: String,
+    opts: SearchOpts,
+    hits: Vec<SearchHit>,
+    /// Index into `hits` of the match the viewport is showing.
+    index: usize,
+    /// The buffer revision `hits` was scanned at.
+    revision: u64,
+}
+
+/// Where a search stands: which hit is current and how many there are.
+///
+/// `index` is zero-based and only meaningful when `total` is non-zero — the
+/// find widget renders "N of M" from these two, and the engine on the other
+/// side of the IPC boundary reports the same shape.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FindResult {
+    pub index: usize,
+    pub total: usize,
 }
 
 impl GridTerminal {
@@ -367,6 +474,8 @@ impl GridTerminal {
             palette,
             focused: false,
             selection: None,
+            select_all: false,
+            find: None,
         }
     }
 
@@ -394,11 +503,26 @@ impl GridTerminal {
     /// step. The renderer supplies cell metrics from its font; focus state and
     /// palette come from this terminal. When a selection is active its wash
     /// rects are appended so the same solid-quad pass paints them.
-    pub fn render_list(&self, metrics: crate::render::CellMetrics) -> crate::render::RenderList {
+    pub fn render_list(&mut self, metrics: crate::render::CellMetrics) -> crate::render::RenderList {
+        // Hit lines shift as output scrolls, so re-anchor before painting.
+        self.refresh_find();
         let snap = self.snapshot();
         let mut list =
             crate::render::build_render_list(&snap, metrics, &self.palette, self.focused);
-        if let Some(sel) = self.selection {
+        // Select-all washes the whole window. It is drawn as one selection
+        // over the viewport because that is all of it there is to see — the
+        // history above is selected too, and scrolling into it finds the wash
+        // already there, since this is recomputed per frame against wherever
+        // the viewport has moved to.
+        if self.select_all && snap.rows > 0 && snap.cols > 0 {
+            crate::render::append_selection_rects(
+                &mut list,
+                &snap,
+                &Selection::new((0, 0), (snap.cols - 1, snap.rows - 1)),
+                metrics,
+                self.palette.selection,
+            );
+        } else if let Some(sel) = self.selection {
             crate::render::append_selection_rects(
                 &mut list,
                 &snap,
@@ -407,6 +531,31 @@ impl GridTerminal {
                 self.palette.selection,
             );
         }
+        // Search hits last, so the current match reads over a selection wash
+        // rather than under it. Only the hits the viewport is showing: the
+        // rest are real matches at lines this frame does not draw.
+        if let Some(find) = &self.find {
+            let viewport_top = -(snap.display_offset as i32);
+            for (i, hit) in find.hits.iter().enumerate() {
+                let row = hit.line - viewport_top;
+                if row < 0 || row >= snap.rows as i32 {
+                    continue;
+                }
+                let row = row as u16;
+                let color = if i == find.index {
+                    self.palette.search_active
+                } else {
+                    self.palette.search_match
+                };
+                crate::render::append_selection_rects(
+                    &mut list,
+                    &snap,
+                    &Selection::new((hit.col, row), (hit.col + hit.len - 1, row)),
+                    metrics,
+                    color,
+                );
+            }
+        }
         list
     }
 
@@ -414,22 +563,60 @@ impl GridTerminal {
     /// viewport cells; callers map pointer pixels to cells before calling.
     pub fn set_selection(&mut self, selection: Option<Selection>) {
         self.selection = selection;
+        // A drag replaces select-all rather than adding to it, the way it does
+        // in every editor: the moment you pick something smaller, that is the
+        // selection, and leaving the flag on would copy the whole transcript
+        // out of a two-word drag.
+        self.select_all = false;
     }
 
     /// Drop any active selection (e.g. on a fresh keystroke).
     pub fn clear_selection(&mut self) {
         self.selection = None;
+        self.select_all = false;
+    }
+
+    /// Select everything the terminal is holding — the viewport and the
+    /// scrollback above it. The toolbar's "Select All", and the step a ⌘A then
+    /// ⌘C makes sense as.
+    pub fn select_all(&mut self) {
+        self.selection = None;
+        self.select_all = true;
     }
 
     pub fn has_selection(&self) -> bool {
-        self.selection.is_some()
+        self.selection.is_some() || self.select_all
     }
 
     /// Plain text of the current selection, or `None` when nothing is selected.
     /// Trailing padding is trimmed per line and rows join with `\n`.
+    ///
+    /// Under select-all this is the transcript, scrollback included, with
+    /// soft-wrapped rows rejoined — the text the terminal has shown rather
+    /// than the part of it the window happens to be over.
     pub fn selected_text(&self) -> Option<String> {
+        if self.select_all {
+            return Some(self.transcript_text());
+        }
         let sel = self.selection?;
         Some(snapshot_selection_text(&self.snapshot(), &sel))
+    }
+
+    /// Clear the screen and the scrollback, and put the cursor home — the
+    /// toolbar's "Clear Terminal".
+    ///
+    /// Written into our own parser rather than sent to the child, because this
+    /// is a view action: the shell is mid-command as often as not, and a `\f`
+    /// down the PTY would be a keystroke in whatever is running there. ED 2
+    /// then ED 3 is how a terminal clears itself (screen, then saved lines),
+    /// and routing it through the parser means the one implementation of
+    /// "clear" is alacritty's.
+    pub fn clear_all(&mut self) {
+        self.apply_output(b"\x1b[2J\x1b[3J\x1b[H");
+        self.selection = None;
+        self.select_all = false;
+        // Hits name lines that no longer exist.
+        self.find = None;
     }
 
     /// Feed raw PTY bytes into the terminal parser.
@@ -522,6 +709,20 @@ impl GridTerminal {
             .unwrap_or_default()
     }
 
+    /// Has the program on the other end asked for bracketed paste (DECSET
+    /// 2004)?
+    ///
+    /// Only a program that has asked gets the `ESC[200~ … ESC[201~` envelope.
+    /// One that has not — a bare `cat`, a shell mid-heredoc — reads the escape
+    /// as ordinary input and leaves `[200~` sitting in the line, so the
+    /// envelope is strictly worse than nothing there.
+    pub fn bracketed_paste(&self) -> bool {
+        self.state
+            .lock()
+            .map(|s| s.bracketed_paste())
+            .unwrap_or(false)
+    }
+
     /// Act on a wheel movement of `lines` (positive = toward older output),
     /// with the pointer over cell `at`.
     ///
@@ -584,6 +785,164 @@ impl GridTerminal {
     /// the last line is the live one and may still be being written.
     pub fn transcript_text(&self) -> String {
         self.transcript_lines().join("\n")
+    }
+
+    /// Search everything the terminal holds, highlight the hits, and land on
+    /// the first one at or after the viewport.
+    ///
+    /// Re-run from scratch on each call, which is what the find widget does on
+    /// every keystroke: the buffer is live, and a hit list cached across new
+    /// output would point at lines that have since scrolled or been
+    /// overwritten. Hits are per grid row, so a match split across a
+    /// soft-wrapped line is not found — the row is where a highlight can be
+    /// drawn, and a span that leaves the row has no single rectangle.
+    ///
+    /// An unparseable regular expression comes back as `Err` so the widget can
+    /// say so, rather than as zero hits, which means something else.
+    pub fn find(&mut self, query: &str, opts: SearchOpts) -> Result<FindResult, String> {
+        let revision = self.revision();
+        let rows = self.search_rows();
+        let hits = crate::search::scan(&rows, query, opts)?;
+        if hits.is_empty() {
+            self.find = None;
+            return Ok(FindResult::default());
+        }
+        let total = hits.len();
+        let viewport_top = -(self.display_offset() as i32);
+        let index = crate::search::hit_at_or_after(&hits, viewport_top).unwrap_or(0);
+        self.find = Some(FindState {
+            query: query.to_string(),
+            opts,
+            hits,
+            index,
+            revision,
+        });
+        self.reveal_current_hit();
+        Ok(FindResult { index, total })
+    }
+
+    /// Re-run the live query when the buffer has moved since it was scanned.
+    ///
+    /// Called before anything reads the hit list, because a stored hit names a
+    /// line number and those shift: output that scrolls pushes every existing
+    /// line one further into history, so yesterday's hit at line 0 is today's
+    /// hit at line -1, and painting it unchanged would highlight whatever
+    /// scrolled in underneath. Cheap enough to do on the frames that need it —
+    /// the scan is bounded by the scrollback cap — and only ever while a find
+    /// is actually open.
+    ///
+    /// The current match is kept where the hit count is unchanged, which is the
+    /// common case for a quiescent buffer, and clamped otherwise. Stepping
+    /// re-anchors it either way.
+    pub fn refresh_find(&mut self) {
+        let Some(find) = &self.find else { return };
+        let revision = self.revision();
+        if find.revision == revision {
+            return;
+        }
+        let (query, opts, was_index, was_total) =
+            (find.query.clone(), find.opts, find.index, find.hits.len());
+        let rows = self.search_rows();
+        match crate::search::scan(&rows, &query, opts) {
+            Ok(hits) if hits.is_empty() => self.find = None,
+            Ok(hits) => {
+                let index = if hits.len() == was_total {
+                    was_index
+                } else {
+                    was_index.min(hits.len() - 1)
+                };
+                self.find = Some(FindState {
+                    query,
+                    opts,
+                    hits,
+                    index,
+                    revision,
+                });
+            }
+            // The query parsed once already; if it somehow cannot now, drop the
+            // highlights rather than keep painting stale ones.
+            Err(_) => self.find = None,
+        }
+    }
+
+    /// Where the live find stands, for a caller that wants to report "N of M"
+    /// without re-running the query.
+    pub fn find_status(&mut self) -> FindResult {
+        self.refresh_find();
+        match &self.find {
+            Some(find) => FindResult {
+                index: find.index,
+                total: find.hits.len(),
+            },
+            None => FindResult::default(),
+        }
+    }
+
+    /// The buffer's current revision — changes when output scrolls or the grid
+    /// is resized.
+    fn revision(&self) -> u64 {
+        self.state.lock().map(|s| s.revision).unwrap_or(0)
+    }
+
+    /// Move to the next hit (`forward`) or the previous one, wrapping at either
+    /// end, and scroll it into view. A no-op with nothing to step through.
+    pub fn find_step(&mut self, forward: bool) -> FindResult {
+        self.refresh_find();
+        let Some(find) = &mut self.find else {
+            return FindResult::default();
+        };
+        let total = find.hits.len();
+        if total == 0 {
+            return FindResult::default();
+        }
+        find.index = if forward {
+            (find.index + 1) % total
+        } else {
+            (find.index + total - 1) % total
+        };
+        let index = find.index;
+        self.reveal_current_hit();
+        FindResult { index, total }
+    }
+
+    /// Drop the query and its highlights — the find widget closing.
+    pub fn clear_find(&mut self) {
+        self.find = None;
+    }
+
+    /// Scroll so the current hit is on screen, leaving the viewport alone when
+    /// it already is.
+    ///
+    /// Not re-centring a hit that is already visible is deliberate: stepping
+    /// through four matches in one screenful should move the highlight, not the
+    /// text under it.
+    fn reveal_current_hit(&mut self) {
+        let Some(find) = &self.find else { return };
+        let Some(line) = find.hits.get(find.index).map(|h| h.line) else {
+            return;
+        };
+        let (_, rows) = self.dims();
+        let offset = self.display_offset() as i32;
+        let viewport_top = -offset;
+        if line >= viewport_top && line < viewport_top + rows as i32 {
+            return;
+        }
+        // A third of the way down, so the lines around the hit are context
+        // rather than the hit being the first thing on screen.
+        let want = ((rows as i32 / 3) - line).max(0);
+        let delta = want - offset;
+        if delta != 0 {
+            self.scroll_lines(delta);
+        }
+    }
+
+    /// Every physical row the terminal holds, as text plus its column map, for
+    /// [`crate::search`] to scan.
+    fn search_rows(&self) -> Vec<crate::search::RowText> {
+        match self.state.lock() {
+            Ok(state) => state.search_rows(),
+            Err(poisoned) => poisoned.into_inner().search_rows(),
+        }
     }
 }
 
@@ -827,7 +1186,6 @@ mod tests {
         assert!(term.selected_text().is_none());
     }
 
-    #[test]
     // A wheel on the normal screen reaches history, and says so.
     #[test]
     fn apply_wheel_scrolls_history_on_the_normal_screen() {
@@ -849,6 +1207,22 @@ mod tests {
             top.starts_with("line-26"),
             "expected the view to have moved into history, got {top:?}"
         );
+    }
+
+    // What decides whether a paste is wrapped: the child's own request, read
+    // from the live mode rather than assumed. Pasting multiline text into a
+    // TUI that asked for brackets inserts it; sending brackets to a program
+    // that did not ask leaves `[200~` in its input.
+    #[test]
+    fn bracketed_paste_follows_the_mode_the_child_set() {
+        let mut term = GridTerminal::with_size(20, 10);
+        assert!(!term.bracketed_paste(), "off until the child asks");
+
+        term.apply_output(b"\x1b[?2004h");
+        assert!(term.bracketed_paste(), "DECSET 2004 turns it on");
+
+        term.apply_output(b"\x1b[?2004l");
+        assert!(!term.bracketed_paste(), "DECRST 2004 turns it back off");
     }
 
     // A pane being dragged wider, or the app's text size changing, both land
@@ -1054,5 +1428,203 @@ mod tests {
         // of a line that isn't wrapped is trimmed — so "keep this", not
         // "keep this ".
         assert_eq!(term.transcript_lines(), vec!["keep this"]);
+    }
+    #[test]
+    fn select_all_takes_the_scrollback_not_just_the_window() {
+        let mut term = GridTerminal::with_size(20, 3);
+        for i in 0..8 {
+            term.apply_output(format!("line{i}\r\n").as_bytes());
+        }
+
+        term.select_all();
+        assert!(term.has_selection());
+        let text = term.selected_text().expect("select-all is a selection");
+        // line0 scrolled out of a 3-row window long ago; ⌘A then ⌘C should
+        // still hand over what the terminal has shown.
+        assert!(text.contains("line0"), "scrollback missing from {text:?}");
+        assert!(text.contains("line7"), "last line missing from {text:?}");
+    }
+
+    #[test]
+    fn a_drag_replaces_select_all_rather_than_adding_to_it() {
+        let mut term = GridTerminal::with_size(20, 3);
+        term.apply_output(b"alpha\r\nbeta\r\n");
+
+        term.select_all();
+        term.set_selection(Some(Selection::new((0, 0), (4, 0))));
+
+        let text = term.selected_text().expect("drag is a selection");
+        assert_eq!(text, "alpha");
+    }
+
+    #[test]
+    fn clearing_empties_the_scrollback_and_drops_the_find() {
+        let mut term = GridTerminal::with_size(20, 3);
+        for i in 0..8 {
+            term.apply_output(format!("needle{i}\r\n").as_bytes());
+        }
+        let found = term.find("needle", SearchOpts::default()).expect("valid query");
+        assert!(found.total > 0);
+
+        term.clear_all();
+
+        assert_eq!(term.transcript_text().trim(), "");
+        assert!(!term.has_selection());
+        // Hits pointed at lines that no longer exist; a stale highlight would
+        // be painted over whatever scrolled in next.
+        assert_eq!(term.find_step(true), FindResult::default());
+    }
+
+    #[test]
+    fn find_lands_on_a_hit_and_steps_through_them_with_a_wrap() {
+        let mut term = GridTerminal::with_size(20, 4);
+        term.apply_output(b"one match\r\ntwo match\r\nthree match\r\n");
+
+        let first = term.find("match", SearchOpts::default()).expect("valid query");
+        assert_eq!(first.total, 3);
+
+        let second = term.find_step(true);
+        assert_eq!(second.total, 3);
+        assert_eq!(second.index, (first.index + 1) % 3);
+
+        // Three steps forward from anywhere is back where it started.
+        term.find_step(true);
+        let wrapped = term.find_step(true);
+        assert_eq!(wrapped.index, first.index);
+    }
+
+    #[test]
+    fn find_scrolls_a_hit_in_the_scrollback_into_view() {
+        let mut term = GridTerminal::with_size(20, 3);
+        term.apply_output(b"needle here\r\n");
+        for i in 0..20 {
+            term.apply_output(format!("filler{i}\r\n").as_bytes());
+        }
+        assert!(!term.visible_text().contains("needle"));
+
+        let res = term.find("needle", SearchOpts::default()).expect("valid query");
+        assert_eq!(res.total, 1);
+        assert!(
+            term.visible_text().contains("needle"),
+            "find should have scrolled the only hit into view, saw {:?}",
+            term.visible_text()
+        );
+    }
+
+    #[test]
+    fn a_visible_hit_is_washed_in_the_render_list() {
+        let mut term = GridTerminal::with_size(20, 3);
+        term.apply_output(b"needle\r\n");
+
+        let metrics = crate::render::CellMetrics::new(8.0, 16.0);
+        let before = term.render_list(metrics).bg_rects.len();
+
+        term.find("needle", SearchOpts::default()).expect("valid query");
+        let after = term.render_list(metrics).bg_rects;
+
+        assert!(
+            after.len() > before,
+            "expected a highlight rect for the hit, rects went {before} -> {}",
+            after.len()
+        );
+        let active = Palette::default().search_active;
+        assert!(
+            after.iter().any(|r| r.color.approx_eq(active)),
+            "current hit should be washed in search_active"
+        );
+    }
+
+    #[test]
+    fn a_hit_scrolled_out_of_the_viewport_is_not_washed() {
+        let mut term = GridTerminal::with_size(20, 3);
+        term.apply_output(b"needle\r\n");
+        term.find("needle", SearchOpts::default()).expect("valid query");
+
+        // Push the hit out of the window: highlights are drawn per visible
+        // row, so an absolute line above the viewport must drop out entirely
+        // rather than wrap round to row 0.
+        for i in 0..20 {
+            term.apply_output(format!("filler{i}\r\n").as_bytes());
+        }
+
+        let metrics = crate::render::CellMetrics::new(8.0, 16.0);
+        let rects = term.render_list(metrics).bg_rects;
+        let active = Palette::default().search_active;
+        assert!(
+            !rects.iter().any(|r| r.color.approx_eq(active)),
+            "an off-screen hit must not paint a highlight"
+        );
+    }
+
+    #[test]
+    fn a_bad_regex_leaves_the_previous_hits_alone() {
+        let mut term = GridTerminal::with_size(20, 3);
+        term.apply_output(b"needle\r\n");
+
+        let opts = SearchOpts {
+            regex: true,
+            ..SearchOpts::default()
+        };
+        let err = term.find("needle(", opts).expect_err("unbalanced paren");
+        assert!(!err.is_empty(), "the widget needs something to show");
+    }
+    #[test]
+    fn a_highlight_stops_being_painted_once_its_line_leaves_the_window() {
+        let mut term = GridTerminal::with_size(20, 10);
+        term.apply_output(b"needle\r\n");
+
+        let metrics = crate::render::CellMetrics::new(8.0, 16.0);
+        let active = Palette::default().search_active;
+        term.find("needle", SearchOpts::default()).expect("valid query");
+
+        let y_before = term
+            .render_list(metrics)
+            .bg_rects
+            .iter()
+            .find(|r| r.color.approx_eq(active))
+            .map(|r| r.y)
+            .expect("the hit is on screen");
+        assert_eq!(y_before, 0.0);
+
+        // More output does not move a match that is still on screen: the
+        // window is pinned to the bottom and fills downward.
+        term.apply_output(b"a\r\nb\r\nc\r\n");
+
+        let y_after = term
+            .render_list(metrics)
+            .bg_rects
+            .iter()
+            .find(|r| r.color.approx_eq(active))
+            .map(|r| r.y)
+            .expect("the hit is still on screen, three rows lower");
+        assert_eq!(y_after, 0.0, "nothing scrolled off a 10-row window yet");
+
+        // Now overflow the window so the match really does move.
+        for i in 0..9 {
+            term.apply_output(format!("pad{i}\r\n").as_bytes());
+        }
+        let rects = term.render_list(metrics).bg_rects;
+        assert!(
+            !rects.iter().any(|r| r.color.approx_eq(active)),
+            "the match scrolled into history, so no row of this frame holds it"
+        );
+    }
+
+    #[test]
+    fn new_matching_output_changes_the_count_without_a_new_query() {
+        let mut term = GridTerminal::with_size(20, 10);
+        term.apply_output(b"needle one\r\n");
+        assert_eq!(
+            term.find("needle", SearchOpts::default())
+                .expect("valid query")
+                .total,
+            1
+        );
+
+        term.apply_output(b"needle two\r\n");
+
+        // The find widget asks for its own "N of M" each frame; a second
+        // match arriving has to show up there without the user retyping.
+        assert_eq!(term.find_status().total, 2);
     }
 }

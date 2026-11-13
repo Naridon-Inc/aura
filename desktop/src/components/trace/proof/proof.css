@@ -1,0 +1,269 @@
+/* The proof trail: the commit rail across the top, the commit on the left,
+   its evidence on the right. Status lives in the glyphs; the only other colour
+   is the change-id stripe, which is an identity, not a verdict. */
+
+.ui-proof-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-trace-toolbar-meta.ui-proof-lede {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-proof-tally {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ui-proof-tally [data-tone="bad"] {
+  color: var(--ui-destructive);
+}
+
+.ui-proof-error {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-proof-error code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ui-faint);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ui-proof-rail {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-proof-rail-caption {
+  padding: 10px 16px 2px;
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--ui-muted-fg);
+}
+.ui-proof-rail-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px 14px;
+  font-size: 13px;
+  color: var(--ui-muted-fg);
+}
+.ui-proof-rail-scroll {
+  overflow-x: auto;
+  padding: 6px 12px 10px;
+}
+.ui-proof-pins {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: max-content;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-proof-pin {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 68px;
+  padding: 6px 4px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ui-muted-fg);
+  cursor: pointer;
+}
+.ui-proof-pin:hover {
+  background: var(--ui-hover);
+}
+.ui-proof-pin[data-active] {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-proof-pin:focus-visible {
+  outline: 2px solid var(--ui-ring);
+  outline-offset: -2px;
+}
+.ui-proof-pin-sha {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-proof-pin-date {
+  width: 100%;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--ui-faint);
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-proof-pin-stripe {
+  display: block;
+  width: 100%;
+  height: 3px;
+  margin-top: 2px;
+  border-radius: 999px;
+}
+
+.ui-proof-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  container-type: inline-size;
+}
+
+.ui-proof-commit {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.ui-proof-commit-empty {
+  margin: auto;
+}
+.ui-proof-commit-head {
+  flex-shrink: 0;
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-proof-commit-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--ui-fg);
+}
+.ui-proof-commit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-proof-commit-meta code {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ui-faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-proof-commit-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 20px 32px;
+}
+/* A scrolling column: its pieces keep their height rather than squeezing to
+   fit, or each file's diff would clip to a sliver. */
+.ui-proof-commit-body > * {
+  flex-shrink: 0;
+}
+.ui-proof-message {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 720px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ui-muted-fg);
+}
+.ui-proof-message p {
+  margin: 0;
+  white-space: pre-line;
+}
+.ui-proof-commit-body .ui-file-diff > header {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-proof-raw {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ui-proof-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ui-proof-evidence {
+  display: flex;
+  flex-direction: column;
+  width: 300px;
+  flex-shrink: 0;
+  min-height: 0;
+  border-left: 1px solid var(--ui-border);
+}
+.ui-proof-evidence-title {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 36px;
+  padding: 0 16px;
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--ui-muted-fg);
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-proof-evidence-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+}
+.ui-proof-facts {
+  width: 100%;
+}
+.ui-proof-facts code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-proof-detail {
+  width: 100%;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ui-muted-fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ui-proof-detail[data-tone="fail"] {
+  color: var(--ui-destructive);
+}
+
+/* In a narrow window the commit keeps the room; the evidence column slims. */
+@container (max-width: 760px) {
+  .ui-proof-evidence {
+    width: 240px;
+  }
+}

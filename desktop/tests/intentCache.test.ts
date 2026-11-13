@@ -13,7 +13,7 @@
 
 import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test";
 
-import { readSrc, stripComments } from "./support/code";
+import { readSrc, stripComments, strippedSrcTree } from "./support/code";
 
 /** Every call the fake backend has been asked to make. */
 let asks: (number | undefined)[] = [];
@@ -343,13 +343,8 @@ describe("every surface reads through the cache", () => {
     // straight to `api` re-introduces the serial branch walk and the network
     // pull for itself, and nothing about the app looks wrong when it does.
     const callers: string[] = [];
-    const glob = new Bun.Glob("**/*.{ts,tsx}");
-    // `import.meta.dir`, not a URL pathname — this repo lives under a path
-    // with a space in it, and a URL would percent-encode it into nothing.
-    const root = `${import.meta.dir}/../src/`;
-    for await (const rel of glob.scan(root)) {
+    for (const [rel, body] of await strippedSrcTree()) {
       if (rel === "lib/api.ts" || rel === "lib/intentCache.ts") continue;
-      const body = stripComments(await Bun.file(root + rel).text());
       if (body.includes("auraIntentRecent")) callers.push(rel);
     }
     expect(callers).toEqual([]);

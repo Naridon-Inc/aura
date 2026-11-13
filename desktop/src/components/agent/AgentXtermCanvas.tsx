@@ -156,6 +156,9 @@ export function AgentXtermCanvas({ sessionId }: Props) {
       if (
         handleClipboardKey(e, {
           getSelection: () => term.getSelection(),
+          // xterm fences the block per the CLI's own bracketed-paste mode and
+          // emits it through onData, which is already wired to the agent PTY.
+          paste: (text) => term.paste(text),
           writeBytes: (bytes) => {
             api.agentPtyWrite(sessionId, bytes).catch(() => {});
           },

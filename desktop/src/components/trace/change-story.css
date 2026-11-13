@@ -1,0 +1,60 @@
+/* The change story: the commits down the left, the one you are on to the right. */
+
+.ui-story-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-trace-toolbar-meta.ui-story-lede {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-story-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+/* Same width as the Time machine's rail: a two-line subject beside the marker
+   column, and the story itself still gets 440px in a 1000px window. */
+.ui-story-rail {
+  width: 280px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--ui-border);
+}
+.ui-story-rail-state {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px;
+  font-size: 13px;
+  color: var(--ui-muted-fg);
+}
+.ui-story-rail-state[role="status"] {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.ui-story-error {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ui-faint);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ui-story-sha {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-story-author {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

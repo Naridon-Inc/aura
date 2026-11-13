@@ -1,0 +1,211 @@
+/* The cloud place inside the app's work area: the column the cloud screens
+   sit in, the header over one workspace, and setup covering the window. */
+
+.ui-cloud-place {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  height: 100%;
+  min-width: 320px;
+  min-height: 0;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-cloud-place-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-sidebar);
+}
+.ui-cloud-place-header .ui-cloud-title {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-cloud-place-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.ui-cloud-place-transcript > .ui-message .ui-message-body {
+  white-space: pre-wrap;
+}
+.ui-cloud-place > .ui-cloud-gate,
+.ui-cloud-place > .ui-state {
+  flex: 1;
+}
+/* Setup covers the whole window, as it does on the web. The header leaves
+   room for the window's own buttons. */
+.ui-cloud-place-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  height: auto;
+}
+/* A wizard opened from setup — get, make or connect a computer — comes up
+   over it. Setup covers the window at 60 and the overlay's own layer is 50,
+   so the wizard used to open underneath, with the setup steps (the Agents
+   step's heading among them) showing through it. */
+body:has(.ui-cloud-place-fullscreen) > .ui-focus {
+  z-index: 61;
+}
+.ui-cloud-place-fullscreen > header {
+  padding-left: 84px;
+  -webkit-app-region: drag;
+}
+.ui-cloud-place-fullscreen > header > * {
+  -webkit-app-region: no-drag;
+}
+.ui-cloud-place-fullscreen > .ui-cloud-setup {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.ui-cloud-create-error {
+  max-width: 280px;
+  color: var(--ui-red);
+  font-size: 12px;
+}
+.ui-cloud-create-step {
+  max-width: 280px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+/* Why a workspace made now would go unanswered, with the fix beside it. */
+.ui-cloud-create-blocked {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 14px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  color: var(--ui-fg);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.ui-cloud-create-blocked > span {
+  flex: 1;
+}
+.ui-cloud-create-blocked > button {
+  flex: none;
+}
+/* One workspace: its main column, and the right panel beside it reaching
+   the top of the window. */
+.ui-cloud-place-split {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.ui-cloud-place-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+/* A chat that runs on one of the org's machines: the local chat view, given
+   the room the transcript and composer take for other workspaces. */
+.ui-cloud-box-chat {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.ui-cloud-box-chat > * {
+  flex: 1;
+  min-height: 0;
+}
+.ui-cloud-place-split .ui-git-toolbar {
+  flex-shrink: 0;
+}
+/* The branch row reads, it doesn't open anything. */
+.ui-cloud-branch {
+  cursor: default;
+}
+.ui-cloud-right-files > .ui-state {
+  height: 100%;
+}
+/* The pull request row: the toolbar takes the width, the panel's own
+   buttons sit at its end on the same strip. */
+.ui-cloud-pr-bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-sidebar);
+}
+.ui-cloud-pr-bar > .ui-git-toolbar {
+  flex: 1;
+  border-bottom: 0;
+}
+/* The Checks tab: the pull request, then one flat list of counts. */
+.ui-cloud-pr-checks {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+}
+.ui-cloud-pr-checks-title {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ui-fg);
+}
+.ui-cloud-pr-checks > ul {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-cloud-pr-checks li {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 12px;
+}
+.ui-cloud-pr-checks li[data-tone="danger"] > :first-child {
+  color: var(--ui-red);
+}
+.ui-cloud-pr-checks li[data-tone="warning"] > :first-child {
+  color: var(--ui-yellow);
+}
+.ui-cloud-pr-checks li[data-tone="success"] > :first-child {
+  color: var(--ui-green);
+}
+/* The Changes tab counts its files, in mono figures. */
+.ui-cloud-right-count {
+  margin-left: 5px;
+  font-family: var(--font-mono);
+  color: var(--ui-muted-fg);
+}
+
+/* A workspace no computer runs: the plain line, then what's happening or
+   what's missing under it. */
+.ui-cloud-run-banner > span {
+  flex: 1;
+  color: var(--ui-fg);
+}
+.ui-cloud-run-banner em {
+  display: block;
+  margin-top: 2px;
+  font-style: normal;
+  color: var(--ui-muted-fg);
+}
+.ui-cloud-run-banner em[data-tone="error"] {
+  color: var(--ui-red);
+}
+.ui-cloud-run-banner > button {
+  flex: none;
+}

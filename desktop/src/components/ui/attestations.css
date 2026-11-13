@@ -1,0 +1,56 @@
+/* Genuine records: the story's count line with the Chain / List switch, then
+   the records on the trace page's timeline or its row list. The only
+   additions are the lock a record wears and its short fingerprint in mono. */
+.ui-attest {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ui-attest[data-scroll] {
+  max-height: 64vh;
+  overflow-y: auto;
+}
+.ui-chain .ui-trace-timeline {
+  margin: 4px -8px 0;
+}
+.ui-chain-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-seal {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-seal[data-sealed] {
+  color: var(--ui-green);
+}
+
+/* A run's Genuine record tab: the check's own error under the verdict, file
+   names in the scope check, and the Technical details disclosure. */
+.ui-attest-error {
+  display: block;
+  margin-top: 6px;
+  font: 11px/1.5 var(--font-mono);
+  color: var(--ui-faint);
+  overflow-wrap: anywhere;
+}
+.ui-attest-file {
+  font: 12px var(--font-mono);
+  color: var(--ui-fg);
+}
+.ui-attest-file[data-outside] {
+  color: var(--ui-yellow);
+}
+.ui-attest-more {
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
+}
+.ui-attest-more > .ui-button {
+  align-self: flex-start;
+  margin-left: -8px;
+  color: var(--ui-muted-fg);
+}
+.ui-attest-more > .ui-button:hover {
+  color: var(--ui-fg);
+}

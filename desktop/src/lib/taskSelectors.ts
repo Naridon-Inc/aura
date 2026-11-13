@@ -110,9 +110,8 @@ export type SprintWorkStats = {
   unit: "pts" | "tasks";
 };
 
-/** The sprint done/total math previously duplicated (identically) in
- *  TasksBoard's SprintView and in SprintProgress. Pass the output of
- *  `sprintTasksOf` so both surfaces measure the same population. */
+/** The sprint done/total math TasksBoard's SprintView reads. Pass the output
+ *  of `sprintTasksOf` so every surface measures the same population. */
 export function sprintWorkStats(sprintTasks: Task[]): SprintWorkStats {
   const usePoints =
     sprintTasks.length > 0 &&

@@ -16,6 +16,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import {
   CheckCircle2,
@@ -25,6 +26,7 @@ import {
   Layers,
   Maximize2,
   Minus,
+  Network,
   Plus,
   RadioTower,
   Sparkles,
@@ -33,6 +35,13 @@ import {
 
 import type { LoopTask, ReadyViewDto } from "../../../lib/api";
 import { AsciiSpinner } from "../../ui/ascii-spinner";
+import { Badge } from "../../ui/badge";
+import { Button } from "../../ui/button";
+import { Progress } from "../../ui/progress";
+import { EmptyState } from "../../ui/state";
+import { TaskFact } from "../../ui/tasks-board";
+import { TaskStatusBadge } from "../../ui/tasks-status";
+import { WorkspaceStageIcon, type WorkspaceStage } from "../../ui/workspace-preview-card";
 import { AgentIcon } from "../../agent/AgentIcon";
 import { agentDisplayLabel, canonicalAgentId } from "../../../lib/agentIdentity";
 import {
@@ -52,8 +61,10 @@ import {
 import { AssigneeBit } from "./crewShared";
 import { bestProof, proofForCommit, type CrewProof } from "./crewProof";
 import { CrewLiveTranscript } from "./CrewLiveTranscript";
-import { WORK_STATE, nodeState } from "../../../lib/workState";
+import { WORK_STATE, nodeState, type WorkState } from "../../../lib/workState";
 import { percent } from "../../../lib/percent";
+import "../../ui/code-map.css";
+import "../../ui/crew-canvas.css";
 
 // A stable empty proof map, so a canvas mounted before the ledger loads (or in a
 // repo with no goals) never re-renders on an identity change.
@@ -81,7 +92,12 @@ const hueFor = (id: string) => {
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
   return PARALLEL_HUES[h % PARALLEL_HUES.length];
 };
-const CREW_DONE_GREEN = "var(--color-accent-green)";
+// The board's own colours for what an edge means. Library tokens, so the
+// canvas follows the theme the cards beside it follow.
+const CREW_DONE_GREEN = "var(--ui-green)";
+const CREW_PICKED = "var(--ui-link)";
+const CREW_EDGE_GREY = "var(--ui-muted-fg)";
+const CREW_REGION_THREAD = "var(--ui-faint)";
 
 // A big synced board (900+ tasks) is a tall sheet; allow zooming further out so
 // "fit to view" can actually frame the whole thing before you pan in.
@@ -446,30 +462,20 @@ export function CrewCanvas({
       onPointerUp={endDrag}
       onPointerLeave={endDrag}
       onWheel={onWheel}
-      className="relative h-full w-full overflow-hidden bg-bg-0"
+      className="ui-crew-canvas"
       style={{
         cursor: drag.current ? "grabbing" : "grab",
         // The dotted board. Dots move + scale with the content so panning feels
         // like sliding an infinite sheet under the work.
-        backgroundImage:
-          "radial-gradient(circle, var(--color-line-soft) 1px, transparent 1px)",
         backgroundSize: `${22 * zoom}px ${22 * zoom}px`,
         backgroundPosition: `${pan.x}px ${pan.y}px`,
       }}
     >
-      {/* Flowing-dash animation for a selected task's chain — the dashes stream
-          from roots toward ends, so the path reads as a direction, not a static
-          highlight. Honours reduced-motion. */}
-      <style>{`
-        @keyframes crew-edge-flow { to { stroke-dashoffset: -24; } }
-        .crew-edge-flow { animation: crew-edge-flow 0.7s linear infinite; }
-        @media (prefers-reduced-motion: reduce) { .crew-edge-flow { animation: none; } }
-      `}</style>
       {layout.nodes.length === 0 && layout.clusters.length === 0 ? (
         <CanvasEmpty />
       ) : (
         <div
-          className="absolute left-0 top-0 origin-top-left"
+          className="ui-crew-canvas-sheet"
           style={{
             width: layout.width,
             height: layout.height,
@@ -478,14 +484,14 @@ export function CrewCanvas({
         >
           {/* Edges, drawn first so node cards sit on top. */}
           <svg
-            className="pointer-events-none absolute inset-0 overflow-visible"
+            className="ui-crew-canvas-edges"
             width={layout.width}
             height={layout.height}
           >
             <defs>
               {/* `context-stroke` makes the arrowhead inherit each edge's own
-                  stroke — accent on a selected edge, muted grey otherwise — so
-                  it never falls back to SVG's default black fill. */}
+                  stroke — the selection colour on a picked edge, muted grey
+                  otherwise — so it never falls back to SVG's default black. */}
               <marker
                 id="crew-arrow"
                 viewBox="0 0 8 8"
@@ -530,22 +536,22 @@ export function CrewCanvas({
               const x2 = b.x;
               const y2 = b.y + CREW_NODE_H / 2;
               const dx = Math.max(40, (x2 - x1) / 2);
-              // Colour carries meaning: a selected chain is accent; an arrow into
-              // a flow's last step is green ("leads to the result"); a fan-out
-              // from one step into many takes that step's hue so the parallel
-              // branches read as one family; everything else is a plain grey
-              // sequential link.
+              // Colour carries meaning: a selected chain takes the selection
+              // colour; an arrow into a flow's last step is green ("leads to
+              // the result"); a fan-out from one step into many takes that
+              // step's hue so the parallel branches read as one family;
+              // everything else is a plain grey sequential link.
               const restStroke = sinkIds.has(e.to)
                 ? CREW_DONE_GREEN
                 : (outDeg.get(e.from) ?? 0) >= 2
                   ? hueFor(e.from)
-                  : "var(--color-text-3)";
+                  : CREW_EDGE_GREY;
               return (
                 <path
                   key={i}
                   d={`M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2 - 6} ${y2}`}
                   fill="none"
-                  stroke={active ? "var(--color-accent)" : restStroke}
+                  stroke={active ? CREW_PICKED : restStroke}
                   // At rest the intra-zone links ARE the graph — bump them so the
                   // left→right dependency flow reads as the primary structure
                   // (they're all short + local, so density never becomes
@@ -555,8 +561,9 @@ export function CrewCanvas({
                   strokeDasharray={active ? "7 5" : undefined}
                   markerEnd="url(#crew-arrow)"
                   // Flowing dashes animate the direction of a selected chain —
-                  // the path visibly streams from roots toward ends.
-                  className={active ? "crew-edge-flow" : undefined}
+                  // the path visibly streams from roots toward ends. Honours
+                  // reduced motion (ui/crew-canvas.css).
+                  className={active ? "ui-crew-edge-flow" : undefined}
                 />
               );
             })}
@@ -581,7 +588,7 @@ export function CrewCanvas({
                   key={`re-${i}`}
                   d={`M ${acx} ${acy} C ${mx} ${acy}, ${mx} ${bcy}, ${bcx} ${bcy}`}
                   fill="none"
-                  stroke="var(--color-text-4)"
+                  stroke={CREW_REGION_THREAD}
                   strokeWidth={1.5}
                   strokeOpacity={0.22}
                   strokeDasharray="3 7"
@@ -614,7 +621,7 @@ export function CrewCanvas({
                         key={`gr-${n.id}`}
                         d={`M ${gx} ${gy} C ${gx + dx} ${gy}, ${x2 - dx} ${y2}, ${x2} ${y2}`}
                         fill="none"
-                        stroke="var(--color-accent)"
+                        stroke={CREW_PICKED}
                         strokeWidth={1.4}
                         strokeOpacity={op}
                       />
@@ -629,7 +636,7 @@ export function CrewCanvas({
                         key={`sr-${n.id}`}
                         d={`M ${x1} ${y1} C ${x1 + dx} ${y1}, ${rx - dx} ${ry}, ${rx} ${ry}`}
                         fill="none"
-                        stroke="var(--color-accent-green)"
+                        stroke={CREW_DONE_GREEN}
                         strokeWidth={1.4}
                         strokeOpacity={op}
                       />
@@ -660,15 +667,11 @@ export function CrewCanvas({
                   <div
                     key={`wave-${r.id}-${c.col}`}
                     data-node
-                    className="absolute flex items-center gap-1 text-xs font-medium text-text-4"
+                    className="ui-crew-wave"
                     style={{ left: c.x, top: gm.labelY, width: CREW_NODE_W }}
                   >
                     <span>Wave {c.col + 1}</span>
-                    {c.count > 1 ? (
-                      <span className="font-normal text-text-4">
-                        · {c.count} in parallel
-                      </span>
-                    ) : null}
+                    {c.count > 1 ? <small>· {c.count} in parallel</small> : null}
                   </div>
                 ));
               })
@@ -700,33 +703,29 @@ export function CrewCanvas({
           {layout.gridStartY !== null && layout.freeCount > 0 ? (
             <div
               data-node
-              className="absolute flex items-center gap-2"
+              className="ui-crew-order"
               style={{
                 left: CREW_PAD,
                 top: layout.gridStartY - 26,
                 width: Math.max(layout.width - CREW_PAD * 2, CREW_NODE_W),
               }}
             >
-              <span className="text-xs font-medium text-text-4">
+              <span>
                 No set order yet · {layout.freeCount}{" "}
                 {layout.freeCount === 1 ? "task" : "tasks"}
               </span>
-              <span className="h-px flex-1 bg-line-soft" />
+              <span className="ui-crew-order-rule" aria-hidden />
               {onPlanOrder ? (
-                <button
-                  type="button"
+                <Button
+                  variant="outline"
+                  size="xs"
                   onClick={ordering ? undefined : onPlanOrder}
                   disabled={ordering}
-                  className="inline-flex items-center gap-1 rounded-full border border-line-soft px-2 py-0.5 text-xs font-medium text-text-3 hover:border-accent hover:text-accent disabled:opacity-60 disabled:hover:border-line-soft disabled:hover:text-text-3"
                   title="Let the brain work out which of these must finish before which, and connect them"
                 >
-                  {ordering ? (
-                    <AsciiSpinner className="text-xs" />
-                  ) : (
-                    <Sparkles size={11} />
-                  )}
+                  {ordering ? <AsciiSpinner size={11} /> : <Sparkles />}
                   {ordering ? "Working out the order…" : "Plan an order"}
-                </button>
+                </Button>
               ) : null}
             </div>
           ) : null}
@@ -766,51 +765,82 @@ export function CrewCanvas({
         />
       ) : null}
 
-      {/* Zoom controls — bottom-right, the node-editor convention. */}
+      {/* Zoom controls — bottom-right, the node-editor convention. The same
+          floating bar the code map uses; its scale doubles as "fit". */}
       {layout.nodes.length > 0 || layout.clusters.length > 0 ? (
-        <div className="absolute bottom-3 right-3 flex items-center gap-1 rounded-lg border border-line-soft bg-bg-1/90 p-1 shadow-sm backdrop-blur">
-          <CtrlButton label="Zoom out" onClick={() => zoomBy(1 / 1.2)}>
-            <Minus size={13} />
-          </CtrlButton>
-          <button
-            type="button"
+        <div className="ui-graph-zoom ui-crew-zoom">
+          <ZoomTool label="Zoom out" onClick={() => zoomBy(1 / 1.2)}>
+            <Minus />
+          </ZoomTool>
+          <Button
+            variant="ghost"
+            size="xs"
+            className="ui-graph-zoom-scale"
             onClick={fitView}
-            className="min-w-[42px] rounded px-1.5 py-1 text-xs tabular-nums text-text-3 hover:bg-state-hover"
             title="Fit to view"
           >
             {Math.round(zoom * 100)}%
-          </button>
-          <CtrlButton label="Zoom in" onClick={() => zoomBy(1.2)}>
-            <Plus size={13} />
-          </CtrlButton>
-          <CtrlButton label="Fit to view" onClick={fitView}>
-            <Maximize2 size={13} />
-          </CtrlButton>
+          </Button>
+          <ZoomTool label="Zoom in" onClick={() => zoomBy(1.2)}>
+            <Plus />
+          </ZoomTool>
+          <span className="ui-graph-zoom-rule" />
+          <ZoomTool label="Fit to view" onClick={fitView}>
+            <Maximize2 />
+          </ZoomTool>
         </div>
       ) : null}
     </div>
   );
 }
 
-function CtrlButton({
+function ZoomTool({
   label,
   onClick,
   children,
 }: {
   label: string;
   onClick: () => void;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
+    <Button
+      variant="ghost"
+      size="iconXs"
       onClick={onClick}
-      className="grid h-6 w-6 place-items-center rounded text-text-4 hover:bg-state-hover hover:text-text-1"
       title={label}
       aria-label={label}
     >
       {children}
-    </button>
+    </Button>
+  );
+}
+
+// A plan node's state → the board's lifecycle glyph, so a card here carries
+// the same mark as the same task on the board and in its detail.
+const NODE_STAGE: Record<WorkState, WorkspaceStage> = {
+  queued: "backlog",
+  ready: "backlog",
+  working: "in-progress",
+  blocked: "backlog",
+  paused: "backlog",
+  conflict: "canceled",
+  done: "done",
+  failed: "canceled",
+  cancelled: "canceled",
+};
+// The two states that need someone keep the alarm colour on their glyph.
+const NODE_ALARM: ReadonlySet<WorkState> = new Set(["conflict", "failed"]);
+
+function NodeMark({ state }: { state: WorkState }) {
+  return (
+    <span
+      className="ui-tasks-status-glyph"
+      style={NODE_ALARM.has(state) ? { color: "var(--ui-red)" } : undefined}
+      title={WORK_STATE[state].label}
+    >
+      <WorkspaceStageIcon stage={NODE_STAGE[state]} />
+    </span>
   );
 }
 
@@ -838,7 +868,8 @@ const CanvasNode = memo(function CanvasNode({
   onWatch?: (id: string, title: string) => void;
 }) {
   const canonical = node.agentKind ? canonicalAgentId(node.agentKind) : null;
-  const state = WORK_STATE[nodeState(node.status)];
+  const stateKey = nodeState(node.status);
+  const state = WORK_STATE[stateKey];
   const done = node.status === "done";
   const working = node.status === "working";
   return (
@@ -846,32 +877,26 @@ const CanvasNode = memo(function CanvasNode({
       type="button"
       data-node
       onClick={onSelect ? () => onSelect(node.id) : undefined}
-      // `z-10 hover:z-50` — a node's hover card overflows its box; without lifting
-      // the whole node on hover, later-painted neighbours sit on top of the card
-      // and clip it. Hovering raises this node (card included) above all siblings.
-      className="group absolute z-10 flex flex-col justify-between rounded-[10px] border border-line-soft bg-bg-0 px-3 py-2.5 text-left transition-all hover:z-50 hover:-translate-y-px hover:border-line-strong"
+      // A node's hover card overflows its box; the card class lifts the
+      // hovered node above its later-painted neighbours so they never clip it.
+      className="ui-dashboard-card ui-tasks-card ui-crew-node"
+      data-selected={selected || undefined}
+      data-chain={inChain || undefined}
+      data-dimmed={dimmed || undefined}
+      data-done={done || undefined}
       style={{
         left: node.x,
         top: node.y,
         width: CREW_NODE_W,
         height: CREW_NODE_H,
-        boxShadow: selected
-          ? "0 0 0 2px var(--color-accent), 0 4px 14px -6px rgba(0,0,0,0.4)"
-          : inChain
-            ? "0 0 0 1.5px var(--color-accent), 0 2px 8px -4px rgba(0,0,0,0.3)"
-            : "0 1px 2px rgba(0,0,0,0.18)",
-        borderColor: selected || inChain ? "var(--color-accent)" : undefined,
-        // On-chain cards stay bright; off-chain fade so the path stands out;
-        // a done card is always a touch quieter.
-        opacity: dimmed ? 0.32 : done ? 0.85 : 1,
       }}
     >
       {/* Title row — the agent avatar grounds it; the teammate who owns it (if
-          any) rides alongside; a quiet status dot (or a spinner while an agent's
-          on it) sits far-right, the only colour. */}
-      <div className="flex min-w-0 items-center gap-2">
+          any) rides alongside; the lifecycle glyph (or a spinner while an
+          agent's on it) sits far-right. */}
+      <div className="ui-crew-node-head">
         {canonical ? (
-          <span className={done ? "opacity-55" : undefined}>
+          <span className="ui-crew-node-agent">
             <AgentIcon
               agentId={canonical}
               label={agentDisplayLabel(canonical)}
@@ -879,17 +904,11 @@ const CanvasNode = memo(function CanvasNode({
             />
           </span>
         ) : (
-          <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-bg-2 text-2xs font-medium text-text-5">
+          <span className="ui-crew-node-agent" data-empty title="No agent yet">
             ?
           </span>
         )}
-        <span
-          className={`min-w-0 flex-1 truncate text-sm font-medium leading-tight ${
-            done ? "text-text-3 line-through decoration-text-5/50" : "text-text-1"
-          }`}
-        >
-          {node.title}
-        </span>
+        <strong className="ui-crew-node-title">{node.title}</strong>
         {node.assignee ? <AssigneeBit name={node.assignee} size={15} /> : null}
         {working ? (
           // An agent is on it — offer a way to watch it work. The spinner is
@@ -915,101 +934,83 @@ const CanvasNode = memo(function CanvasNode({
                 }
               }}
               title="Watch this agent work. Open its live output"
-              className="shrink-0 cursor-pointer rounded-full p-0.5 text-text-4 hover:bg-accent/12 hover:text-accent"
+              aria-label="Watch this agent work"
+              className="ui-crew-node-watch"
             >
-              {/* Spinner at rest, the watch glyph on card hover. Amber already
-                  IS the "an agent is on it" colour, so the shared spinner needs
-                  no per-node tint here. */}
-              <AsciiSpinner className="text-xs group-hover:hidden" />
-              <RadioTower size={12} className="hidden group-hover:block" />
+              {/* Spinner at rest, the watch glyph on card hover. */}
+              <AsciiSpinner size={11} className="ui-crew-node-watch-rest" />
+              <RadioTower className="ui-crew-node-watch-hover" />
             </span>
           ) : (
-            <AsciiSpinner className="shrink-0 text-xs" />
+            <AsciiSpinner size={11} />
           )
-        ) : done ? (
-          // A finished step reads as DONE at a glance — a solid green check, not
-          // a quiet dot you have to decode. "Once an item is done it should be
-          // properly noted."
-          <CheckCircle2
-            size={13}
-            className="shrink-0"
-            style={{ color: CREW_DONE_GREEN }}
-          />
         ) : (
-          <span
-            className="h-[7px] w-[7px] shrink-0 rounded-full"
-            style={{ background: state.color }}
-          />
+          // A finished step reads as DONE at a glance — the board's filled
+          // check, not a quiet dot you have to decode.
+          <NodeMark state={stateKey} />
         )}
       </div>
 
       {/* The story — what this task is doing / waiting on / delivered, in plain
           words. This is the line that evolves as the work moves. */}
-      <div className="truncate text-xs leading-snug text-text-4">
-        {node.story}
-      </div>
+      <p className="ui-crew-node-story">{node.story}</p>
 
       {/* Hover card — a richer read without opening the detail: the full title,
           its state in words, who (robot + teammate) is on it, its priority, and
           where it sits in the flow. Sits below the card, doesn't catch the
           pointer, and only the hovered node's card lifts above its neighbours. */}
-      <div className="pointer-events-none absolute left-0 top-full z-30 mt-1.5 hidden w-[260px] rounded-xl border border-line bg-bg-content p-3 text-left shadow-[var(--shadow-modal)] group-hover:block">
-        <div className="text-sm font-semibold leading-snug text-text-1">
-          {node.title}
-        </div>
-        <div className="mt-1.5 flex items-center gap-1.5 text-xs text-text-3">
-          <span
-            className="h-[7px] w-[7px] shrink-0 rounded-full"
-            style={{ background: state.color }}
-          />
-          {state.hint}
-        </div>
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-4">
-          <span className="inline-flex items-center gap-1">
-            {canonical ? (
-              <AgentIcon
-                agentId={canonical}
-                label={agentDisplayLabel(canonical)}
-                size={13}
-              />
-            ) : null}
+      <div className="ui-crew-node-card" aria-hidden>
+        <strong>{node.title}</strong>
+        <TaskStatusBadge
+          stage={NODE_STAGE[stateKey]}
+          label={state.hint}
+          color={NODE_ALARM.has(stateKey) ? "var(--ui-red)" : undefined}
+        />
+        <div className="ui-crew-node-card-facts">
+          <TaskFact
+            icon={
+              canonical ? (
+                <AgentIcon
+                  agentId={canonical}
+                  label={agentDisplayLabel(canonical)}
+                  size={13}
+                />
+              ) : undefined
+            }
+          >
             {canonical ? agentDisplayLabel(canonical) : "No agent yet"}
-          </span>
+          </TaskFact>
           {node.assignee ? (
-            <span className="inline-flex items-center gap-1">
-              <AssigneeBit name={node.assignee} size={13} />
+            <TaskFact icon={<AssigneeBit name={node.assignee} size={13} />}>
               {node.assignee}
-            </span>
+            </TaskFact>
           ) : null}
           {node.priority && node.priority !== "low" ? (
-            <span className="capitalize">{node.priority} priority</span>
+            <TaskFact>
+              <span className="ui-crew-node-priority">{node.priority} priority</span>
+            </TaskFact>
           ) : null}
         </div>
         {node.waitingCount > 0 || node.unblockCount > 0 ? (
-          <div className="mt-1.5 text-xs text-text-4">
-            {node.waitingCount > 0
-              ? `Waiting on ${node.waitingCount}`
-              : ""}
+          <p>
+            {node.waitingCount > 0 ? `Waiting on ${node.waitingCount}` : ""}
             {node.waitingCount > 0 && node.unblockCount > 0 ? " · " : ""}
             {node.unblockCount > 0 ? `Unblocks ${node.unblockCount}` : ""}
-          </div>
+          </p>
         ) : null}
-        {node.story ? (
-          <div className="mt-1.5 border-t border-line-soft pt-1.5 text-xs leading-snug text-text-3">
-            {node.story}
-          </div>
-        ) : null}
+        {node.story ? <p className="ui-crew-node-card-story">{node.story}</p> : null}
       </div>
     </button>
   );
 });
 
 // Who's on it + a quiet progress bar — the shape of a group at a glance,
-// reused by goal regions and objective sections so every header reads the same.
+// reused by goal regions, objective sections and work groups so every header
+// reads the same.
 function RollupChips({ stat }: { stat: CrewClusterStat }) {
   const pct = percent(stat.done, stat.total);
   return (
-    <div className="flex shrink-0 items-center gap-2.5">
+    <div className="ui-crew-rollup">
       {stat.agentKinds.slice(0, 3).map((ak) => {
         const c = canonicalAgentId(ak);
         return (
@@ -1017,19 +1018,14 @@ function RollupChips({ stat }: { stat: CrewClusterStat }) {
         );
       })}
       {stat.assignees.length > 0 ? (
-        <span className="inline-flex items-center gap-1 text-xs text-text-4">
-          <Users size={12} /> {stat.assignees.length}
-        </span>
+        <TaskFact icon={<Users />}>{stat.assignees.length}</TaskFact>
       ) : null}
-      <div
-        className="h-1.5 w-16 overflow-hidden rounded-full bg-bg-2"
+      <Progress
+        value={pct}
+        className="ui-crew-rollup-bar"
+        data-tone="done"
         title={`${pct}% done`}
-      >
-        <div
-          className="h-full rounded-full"
-          style={{ width: `${pct}%`, background: "var(--color-accent-green)" }}
-        />
-      </div>
+      />
     </div>
   );
 }
@@ -1043,7 +1039,7 @@ function ObjectiveBand({ objective }: { objective: CrewObjective }) {
   const { stat } = objective;
   return (
     <div
-      className="absolute"
+      className="ui-crew-objective"
       style={{
         left: objective.x,
         top: objective.y,
@@ -1051,21 +1047,17 @@ function ObjectiveBand({ objective }: { objective: CrewObjective }) {
       }}
     >
       <div
-        className="flex items-center gap-2.5"
+        className="ui-crew-objective-head"
         style={{ height: objective.headerHeight }}
       >
-        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-accent/12 text-accent">
-          <Flag size={15} />
+        <span className="ui-crew-tile" data-tone="goal">
+          <Flag />
         </span>
-        <div className="min-w-0 flex-1">
-          <div className="text-xs font-medium text-text-4">
-            Objective
-          </div>
-          <div className="truncate text-md font-semibold leading-tight text-text-1">
-            {objective.title}
-          </div>
+        <div className="ui-crew-objective-name">
+          <small>Objective</small>
+          <strong>{objective.title}</strong>
         </div>
-        <span className="hidden shrink-0 text-xs text-text-4 sm:block">
+        <span className="ui-crew-objective-meta">
           {objective.regionCount}{" "}
           {objective.regionCount === 1 ? "goal" : "goals"} · {stat.total}{" "}
           {stat.total === 1 ? "step" : "steps"}
@@ -1075,17 +1067,11 @@ function ObjectiveBand({ objective }: { objective: CrewObjective }) {
       </div>
       {/* The only line — a faint full-width rule that says "this objective's
           goals start here", without a box wrapping them. */}
-      <div className="h-px w-full bg-line-soft/70" />
+      <div className="ui-crew-objective-rule" />
     </div>
   );
 }
 
-// A GOAL ZONE — one goal's worth of work. NOT a box (a vibecoder asked us to
-// drop the outer containers and keep "just the goals naming"): this is only the
-// goal's TITLE label, sitting in the header strip the layout reserved above its
-// cards. The cards below it are grouped by their own proximity + the dependency
-// edges that thread through them — no frame needed to say "these belong
-// together". Drawn under the cards so they always sit on top.
 // The GOAL anchor — the far-left bookend of a flow. A vibecoder asked every flow
 // to "start with a goal block" so there's a clear point to read from: this is
 // what the steps to its right are building toward. It's also the flow's ONLY
@@ -1098,17 +1084,15 @@ function GoalBlock({ region, waves }: { region: CrewRegion; waves: number }) {
   return (
     <div
       data-node
-      className="absolute flex flex-col rounded-[10px] border border-accent/35 bg-accent/[0.07] px-3 py-2.5"
+      className="ui-crew-bookend ui-crew-goal"
       style={{ left: g.x, top: g.y, width: g.w, height: g.h }}
     >
-      <div className="flex items-center gap-1.5 text-accent">
-        <Flag size={12} />
-        <span className="text-xs font-medium">
-          Goal
-        </span>
+      <div className="ui-crew-bookend-head">
+        <Flag />
+        <span>Goal</span>
         {/* Who'll work it — the robots this flow's steps are handed to. */}
         {stat.agentKinds.length > 0 ? (
-          <span className="ml-auto flex items-center gap-1">
+          <span className="ui-crew-bookend-agents">
             {stat.agentKinds.slice(0, 3).map((ak) => {
               const c = canonicalAgentId(ak);
               return (
@@ -1123,13 +1107,11 @@ function GoalBlock({ region, waves }: { region: CrewRegion; waves: number }) {
           </span>
         ) : null}
       </div>
-      <div className="mt-1 line-clamp-2 text-sm font-semibold leading-tight text-text-1">
-        {region.title}
-      </div>
-      <div className="mt-auto pt-1 text-2xs text-text-4">
+      <strong className="ui-crew-bookend-title">{region.title}</strong>
+      <small className="ui-crew-bookend-foot">
         {stat.total} {stat.total === 1 ? "step" : "steps"}
         {waves > 1 ? ` · ${waves} waves` : ""}
-      </div>
+      </small>
     </div>
   );
 }
@@ -1153,48 +1135,33 @@ function ResultBlock({
   return (
     <div
       data-node
-      className={`absolute flex flex-col rounded-[10px] border px-3 py-2.5 ${
-        allProven
-          ? "border-accent-green/45 bg-accent-green/[0.08]"
-          : "border-line bg-bg-1"
-      }`}
+      className="ui-crew-bookend ui-crew-result"
+      data-proven={allProven || undefined}
       style={{ left: r.x, top: r.y, width: r.w, height: r.h }}
     >
-      <div
-        className={`flex items-center gap-1.5 ${
-          allProven ? "text-accent-green" : "text-text-4"
-        }`}
-      >
-        <CheckCircle2 size={12} />
-        <span className="text-xs font-medium">
-          Result
-        </span>
-        <span className="ml-auto text-md font-semibold tabular-nums text-text-1">
-          {pct}%
-        </span>
+      <div className="ui-crew-bookend-head">
+        <CheckCircle2 />
+        <span>Result</span>
+        <strong className="ui-crew-result-pct">{pct}%</strong>
       </div>
-      <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-bg-2">
-        <div
-          className="h-full rounded-full"
-          style={{
-            width: `${pct}%`,
-            background: allProven ? "var(--color-accent-green)" : "var(--color-accent)",
-          }}
-        />
-      </div>
-      <div className="mt-auto pt-1.5 text-2xs leading-snug">
+      <Progress
+        value={pct}
+        className="ui-crew-result-bar"
+        data-tone={allProven ? "done" : undefined}
+      />
+      <small className="ui-crew-bookend-foot">
         {allProven ? (
-          <span className="font-medium text-accent-green">
+          <span className="ui-crew-result-proven">
             Delivered &amp; proven · {proven}/{stat.total} checks
           </span>
         ) : (
-          <span className="text-text-4">
+          <>
             {stat.done}/{stat.total} done
             {proven > 0 ? ` · ${proven} proven` : ""}
             {stat.done === 0 ? " · not started" : ""}
-          </span>
+          </>
         )}
-      </div>
+      </small>
     </div>
   );
 }
@@ -1211,7 +1178,6 @@ function ClusterBox({
   onToggle: () => void;
 }) {
   const { stat } = cluster;
-  const pct = percent(stat.done, stat.total);
   const kindLabel =
     cluster.kind === "epic"
       ? "Epic"
@@ -1223,7 +1189,7 @@ function ClusterBox({
   return (
     <div
       data-node
-      className="absolute rounded-2xl border border-line-soft bg-bg-1/25"
+      className="ui-crew-cluster"
       style={{
         left: cluster.x,
         top: cluster.y,
@@ -1234,72 +1200,39 @@ function ClusterBox({
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center gap-2.5 rounded-2xl px-3 text-left hover:bg-state-hover"
+        className="ui-crew-cluster-head"
         style={{ height: CREW_CLUSTER_HEADER_H }}
+        aria-expanded={cluster.expanded}
         title={cluster.expanded ? "Collapse this group" : "Open this group"}
       >
         {cluster.expanded ? (
-          <ChevronDown size={15} className="shrink-0 text-text-4" />
+          <ChevronDown className="ui-crew-cluster-chevron" />
         ) : (
-          <ChevronRight size={15} className="shrink-0 text-text-4" />
+          <ChevronRight className="ui-crew-cluster-chevron" />
         )}
-        <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-bg-2 text-text-4">
-          <Layers size={13} />
+        <span className="ui-crew-tile">
+          <Layers />
         </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-base font-semibold text-text-1">
-              {cluster.title}
-            </span>
-            <span className="shrink-0 rounded-full bg-bg-2 px-1.5 py-0.5 text-xs font-medium text-text-4">
-              {kindLabel}
-            </span>
+        <div className="ui-crew-cluster-name">
+          <div>
+            <strong>{cluster.title}</strong>
+            <Badge variant="secondary">{kindLabel}</Badge>
           </div>
-          <div className="mt-0.5 truncate text-xs text-text-4">
+          <small>
             {stat.total} {stat.total === 1 ? "task" : "tasks"}
             {stat.attention > 0 ? ` · ${stat.attention} need attention` : ""}
             {stat.done > 0 ? ` · ${stat.done} done` : ""}
             {stat.working > 0 ? ` · ${stat.working} in progress` : ""}
-          </div>
+          </small>
         </div>
         {/* Who's on it + a quiet progress bar — the shape of the group at a
             glance, without opening it. */}
-        <div className="flex shrink-0 items-center gap-2.5">
-          {stat.agentKinds.slice(0, 3).map((ak) => {
-            const c = canonicalAgentId(ak);
-            return (
-              <AgentIcon
-                key={ak}
-                agentId={c}
-                label={agentDisplayLabel(c)}
-                size={14}
-              />
-            );
-          })}
-          {stat.assignees.length > 0 ? (
-            <span className="inline-flex items-center gap-1 text-xs text-text-4">
-              <Users size={12} /> {stat.assignees.length}
-            </span>
-          ) : null}
-          <div
-            className="h-1.5 w-16 overflow-hidden rounded-full bg-bg-2"
-            title={`${pct}% done`}
-          >
-            <div
-              className="h-full rounded-full"
-              style={{ width: `${pct}%`, background: "var(--color-accent-green)" }}
-            />
-          </div>
-        </div>
+        <RollupChips stat={stat} />
       </button>
     </div>
   );
 }
 
 function CanvasEmpty() {
-  return (
-    <div className="flex h-full items-center justify-center">
-      <p className="text-sm text-text-5">Nothing to plot yet.</p>
-    </div>
-  );
+  return <EmptyState icon={Network} title="Nothing to plot yet." size="sm" />;
 }

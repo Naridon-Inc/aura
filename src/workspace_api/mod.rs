@@ -1,7 +1,7 @@
 //! `aura workspace …` — an agent drives cloud workspaces from a shell.
 //!
 //! AURA-1295. The cloud already exposes `/api/v2/public/workspaces` (the
-//! "Conductor API" parity surface); nothing on the client side called it. This
+//! public API surface); nothing on the client side called it. This
 //! module is that client, in three thin layers:
 //!
 //!   * [`client`] — auth/base-URL resolution and one method per endpoint. No

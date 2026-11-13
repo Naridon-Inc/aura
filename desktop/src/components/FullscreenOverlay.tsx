@@ -1,7 +1,7 @@
 // FullscreenOverlay — an app-level focus surface for wide content the ADE v2
-// layout can't fit in the squeezed center column. Modelled on Medusa's
-// FocusModal: a backdrop dim + a floating panel inset 8px from the viewport
-// (rounded, shadowed) rather than an edge-to-edge sheet.
+// layout can't fit in the squeezed center column: the dialog's dim and panel,
+// inset 8px from the viewport (rounded, shadowed) rather than centred or
+// edge-to-edge.
 //
 // While the overlay is open it owns the whole window, so its Esc/close chip
 // takes the top-left corner — and we drop the native macOS traffic lights DOWN
@@ -10,7 +10,7 @@
 // pushed to the side to clear the lights.
 //
 // The top bar carries the esc/close chip, an optional tab strip (short pill
-// tabs *or* a full-height Medusa-style ProgressTabs — the header stretches to
+// tabs *or* a full-height step strip — the header stretches to
 // fit), and right-aligned actions. There is deliberately NO title slot: the
 // wizard/focus surface never shows a title — its tabs carry the context, and a
 // redundant "Session"/"Task"/"Pull request" label is noise. Below the bar: a
@@ -20,10 +20,13 @@
 
 import { useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { X } from "lucide-react";
 import { captureFocus } from "../lib/focusReturn";
 import { cn } from "../lib/utils";
 import { SurfaceHeader } from "./ui/SurfaceHeader";
+import { Button } from "./ui/button";
 import { Kbd } from "./ui/kbd";
+import "./ui/focus-overlay.css";
 import {
   dropTrafficLightsForOverlay,
   restoreTrafficLights,
@@ -108,32 +111,30 @@ export function FullscreenOverlay({
           tabs carry the context. */}
       <SurfaceHeader
         leading={
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            size="sm"
             onClick={onClose}
             title="Close (Esc)"
             aria-label="Close (Esc)"
-            className="flex items-center gap-1.5 h-7 pl-1.5 pr-2 rounded-md text-text-2 hover:text-text-1 hover:bg-state-hover transition-colors"
+            className="ui-focus-close"
           >
-            <CloseIcon />
+            <X />
             <Kbd>{closeHint}</Kbd>
-          </button>
+          </Button>
         }
         tabs={tabs}
         actions={actions}
       />
 
       {/* Body — full panel width; flex-col so flex-1 children fill height. */}
-      <div className={cn("flex-1 min-h-0 flex flex-col", contentClassName)}>
+      <div className={cn("ui-focus-body", contentClassName)}>
         {children}
       </div>
 
-      {/* Sticky action footer (right-aligned), Medusa-style. */}
-      {footer && (
-        <footer className="flex items-center justify-end gap-2 px-4 py-3 border-t border-line bg-bg-content flex-shrink-0">
-          {footer}
-        </footer>
-      )}
+      {/* Sticky action footer, right-aligned. */}
+      {footer && <footer className="ui-focus-footer">{footer}</footer>}
     </>
   );
 
@@ -141,40 +142,23 @@ export function FullscreenOverlay({
   // popout window's own bar is the chrome.
   if (embedded) {
     return (
-      <div className="h-full min-h-0 flex flex-col overflow-hidden bg-bg-content">
-        {panel}
-      </div>
+      <div className="ui-focus-embedded">{panel}</div>
     );
   }
 
   // z-50 = the app modal layer. Mounted before the dialog stack in App.tsx so
   // dialogs / the agent gate (later in DOM, equal or higher z) stack above it.
   return createPortal(
-    <div role="dialog" aria-modal="true" className="fixed inset-0 z-50">
+    <div role="dialog" aria-modal="true" className="ui-focus">
       {/* Backdrop dim. No click-to-close: focus surfaces (esp. the wizard)
           hold unsaved input — Esc is the single, deliberate exit. */}
-      <div className="absolute inset-0 bg-black/50" aria-hidden />
+      <div className="ui-focus-backdrop" aria-hidden />
 
-      {/* Floating panel — inset 8px from the viewport. Hairline + depth via
-          --shadow-modal. The native traffic lights are dropped below this top
-          bar (see the effect above), so the Esc chip sits flush in the corner. */}
-      <div className="absolute inset-2 flex flex-col overflow-hidden rounded-lg bg-bg-content shadow-[var(--shadow-modal)]">
-        {panel}
-      </div>
+      {/* Floating panel — inset 8px from the viewport, the dialog's hairline
+          and depth. The native traffic lights are dropped below this top bar
+          (see the effect above), so the Esc chip sits flush in the corner. */}
+      <div className="ui-focus-panel">{panel}</div>
     </div>,
     document.body,
-  );
-}
-
-function CloseIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path
-        d="M4 4l8 8M12 4l-8 8"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }

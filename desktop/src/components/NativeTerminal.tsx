@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { clipboardHasImage, readClipboardText, writeClipboardText } from "../lib/clipboard";
 import { keyEventToBytes } from "../lib/nativeTerminalKeys";
 import { estimatedTerminalLineHeightPx } from "../lib/terminalAppearance";
 import { createWheelAccumulator, wheelToLines } from "../lib/terminalWheel";
@@ -11,9 +12,12 @@ import {
   clearRect,
   dropSurface,
   isCovered,
+  isWithheld,
+  NATIVE_OVERLAYS_CHANGED,
   openOverlayRects,
   placementFor,
   sameBounds,
+  surfaceHeld,
   takeSurface,
   toWindowPoints,
   webviewZoom,
@@ -63,6 +67,140 @@ const encoder = new TextEncoder();
 
 function toBytes(text: string): number[] {
   return Array.from(encoder.encode(text));
+}
+
+/** Copy a native pane's selection to the pasteboard. `false` when there was
+ *  nothing selected, or no such pane.
+ *
+ *  The selection lives in the Rust grid, so copying it means asking for it
+ *  first — and that await is why this cannot use `navigator.clipboard`: WebKit
+ *  allows a write only while the keydown's user gesture is still live, and the
+ *  round-trip spends it. The write was rejected every time, into a `catch`,
+ *  so ⌘C quietly copied nothing. Rust has no gesture to spend.
+ *
+ *  Exported because the terminal toolbar's Copy reaches for xterm's session
+ *  map, and a GPU pane — the default engine — is not in it. */
+export async function copyNativeTerminalSelection(termId: string): Promise<boolean> {
+  if (!liveNativeTerms.has(termId)) return false;
+  try {
+    const text = await invoke<string>("native_term_copy", { termId });
+    return text ? await writeClipboardText(text) : false;
+  } catch {
+    return false; /* the terminal is gone */
+  }
+}
+
+/** Paste the pasteboard into a native pane. `false` when there is no such
+ *  pane, so a caller can fall through to another engine.
+ *
+ *  Text goes to `native_term_paste`, which fences it per the child's own
+ *  bracketed-paste mode — a mode only Rust can see. An image cannot go down a
+ *  PTY at all, so it is forwarded as Ctrl+V for the agent CLI to read off the
+ *  pasteboard itself. */
+export async function pasteIntoNativeTerminal(termId: string): Promise<boolean> {
+  if (!liveNativeTerms.has(termId)) return false;
+  const text = await readClipboardText();
+  if (text) {
+    invoke("native_term_paste", { termId, text }).catch(() => {});
+    return true;
+  }
+  if (await clipboardHasImage()) {
+    invoke("native_term_write", { termId, data: [0x16] }).catch(() => {});
+  }
+  return true;
+}
+
+/** Clear a native pane's screen and scrollback. `false` when there is no such
+ *  pane, so a caller can fall through to the xterm engine.
+ *
+ *  Handled by the Rust grid rather than written down the PTY: clearing the
+ *  view is not a keystroke, and a `\f` would land in whatever command happens
+ *  to be running in the pane. */
+export async function clearNativeTerminal(termId: string): Promise<boolean> {
+  if (!liveNativeTerms.has(termId)) return false;
+  await invoke("native_term_clear", { termId }).catch(() => {});
+  return true;
+}
+
+/** Select a native pane's whole transcript — the scrollback as well as the
+ *  visible window, which is what makes ⌘A then ⌘C worth having. */
+export async function selectAllNativeTerminal(termId: string): Promise<boolean> {
+  if (!liveNativeTerms.has(termId)) return false;
+  await invoke("native_term_select_all", { termId }).catch(() => {});
+  return true;
+}
+
+/** Where a find stands in a native pane: the zero-based current hit and how
+ *  many there are. `null` means the pane is not native, so the caller should
+ *  try the other engine. */
+export type NativeFindResult = { index: number; total: number };
+
+/** Run a find over a native pane's buffer, highlight the hits in the GPU
+ *  grid, and scroll the first hit at or after the viewport into view.
+ *
+ *  Rejects with the regex error message when `regex` is on and the pattern
+ *  will not compile — a pattern that cannot be parsed is a different thing
+ *  from one that matched nothing, and the widget shows them differently. */
+export async function findInNativeTerminal(
+  termId: string,
+  query: string,
+  opts: { caseSensitive?: boolean; wholeWord?: boolean; regex?: boolean } = {},
+): Promise<NativeFindResult | null> {
+  if (!liveNativeTerms.has(termId)) return null;
+  return invoke<NativeFindResult>("native_term_find", {
+    termId,
+    query,
+    caseSensitive: opts.caseSensitive ?? false,
+    wholeWord: opts.wholeWord ?? false,
+    regex: opts.regex ?? false,
+  });
+}
+
+/** Step to the next (`forward`) or previous hit in a native pane, wrapping at
+ *  either end, and scroll it into view. */
+export async function stepNativeTerminalFind(
+  termId: string,
+  forward: boolean,
+): Promise<NativeFindResult | null> {
+  if (!liveNativeTerms.has(termId)) return null;
+  return invoke<NativeFindResult>("native_term_find_step", { termId, forward }).catch(
+    () => null,
+  );
+}
+
+/** Drop a native pane's query and its highlights (the widget closing). */
+export async function clearNativeTerminalFind(termId: string): Promise<boolean> {
+  if (!liveNativeTerms.has(termId)) return false;
+  await invoke("native_term_find_clear", { termId }).catch(() => {});
+  return true;
+}
+
+/** Subscribe to a native pane's live match count.
+ *
+ *  The count moves without anyone touching the widget — new output matches the
+ *  query, or matched lines scroll out of the scrollback — so the engine pushes
+ *  it and nothing here polls. Returns an unsubscribe function; note that the
+ *  listener is registered asynchronously, so unsubscribing before it lands is
+ *  honoured once it does. */
+export function onNativeTerminalFind(
+  termId: string,
+  cb: (result: NativeFindResult) => void,
+): () => void {
+  let unlisten: UnlistenFn | null = null;
+  let cancelled = false;
+  listen<{ termId: string; index: number; total: number }>("native-term:find", (evt) => {
+    if (evt.payload.termId !== termId) return;
+    cb({ index: evt.payload.index, total: evt.payload.total });
+  })
+    .then((u) => {
+      if (cancelled) u();
+      else unlisten = u;
+    })
+    .catch(() => {});
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
 }
 
 /**
@@ -193,8 +331,28 @@ export function NativeTerminal({
      *  answer because the thing doing the covering is an ordinary page the
      *  router mounted and never registered as an overlay. */
     function isShown(): boolean {
+      // The shell says so outright when a page covers the work surface or the
+      // transcript replaces this terminal: the subtree is `inert`. Asked first
+      // because it is a fact rather than an inference. `visibility` cannot say
+      // it for a page: a descendant's own `visibility: visible` (the agent
+      // pane sets one) wins over an ancestor's `hidden`.
+      if (isWithheld(el)) return false;
       if (getComputedStyle(el).visibility !== "visible") return false;
       return !isCovered(el, clientRect(), (x, y) => document.elementFromPoint(x, y));
+    }
+
+    /** Send the surface offscreen without asking what this loop last sent —
+     *  for the two paths that run after the loop has stopped tracking it. */
+    function parkNow() {
+      invoke("native_term_set_bounds", {
+        termId,
+        x: PARKED.x,
+        y: PARKED.y,
+        width: PARKED.w,
+        height: PARKED.h,
+        clip: { x: PARKED.x, y: PARKED.y, w: PARKED.w, h: PARKED.h },
+        scale: 1,
+      }).catch(() => {});
     }
 
     /** Size the surface against the hole `b` and show the part of it `clip`
@@ -266,7 +424,13 @@ export function NativeTerminal({
         // popout). Each loop dedupes against what it alone last sent, so a
         // hidden pane parking what a shown pane just placed never settles —
         // the surface flickers offscreen and back every sweep tick.
-        if (dropSurface(termId, token)) moveTo(PARKED, PARKED);
+        //
+        // A surface nobody owns is parked as well. Nobody is showing it, so it
+        // can only be on screen because a placement landed after its pane
+        // stepped away — an attach that resolved after the pane had parked —
+        // and left alone it paints over the page that replaced the pane for as
+        // long as the page is up.
+        if (dropSurface(termId, token) || !surfaceHeld(termId)) moveTo(PARKED, PARKED);
         // Someone else owns the bounds now, so what we last sent says nothing
         // about where the surface is; forget it, or we would skip the move
         // that puts it back under us when this pane is shown again.
@@ -313,7 +477,14 @@ export function NativeTerminal({
           // Register before the cancel check so an unmount mid-open still parks
           // (not closes) the session — the cleanup below keys off this set.
           liveNativeTerms.add(termId);
-          if (cancelled) return;
+          if (cancelled) {
+            // The pane went away while the attach was in flight, and the
+            // attach has just placed the surface at a hole that is gone. The
+            // cleanup could not park it (it was not live yet), so do it here —
+            // unless a newer pane has already taken it.
+            if (!surfaceHeld(termId)) parkNow();
+            return;
+          }
           // Take the keyboard the moment the pane is live, the way xterm does
           // on mount. Keys only reach the shell through this hole's handlers,
           // so without it a terminal that just appeared — or an agent putting
@@ -362,6 +533,10 @@ export function NativeTerminal({
         // clip it now rather than at the next sweep tick. A no-op in the
         // ordinary case, where the clip IS the hole and `moveTo` drops it.
         moveTo(hole, clip);
+        // Everything above was decided before the await. A page may have been
+        // drawn over the pane while the attach was in flight, so decide again
+        // now rather than leave the surface where that decision put it.
+        schedule();
         return;
       }
 
@@ -420,7 +595,7 @@ export function NativeTerminal({
     // ancestors, not just the hole.
     const attrs = new MutationObserver(schedule);
     for (let p: HTMLElement | null = el; p; p = p.parentElement) {
-      attrs.observe(p, { attributes: true, attributeFilter: ["style", "class", "hidden"] });
+      attrs.observe(p, { attributes: true, attributeFilter: ["style", "class", "hidden", "inert"] });
     }
     // Capture-phase so any scrolling ancestor (panes, split views) re-aligns the
     // surface, not just the window.
@@ -454,6 +629,9 @@ export function NativeTerminal({
     // path for both of the menus the user reported: the agent tab's context
     // menu and the roster's.
     window.addEventListener("contextmenu", scheduleOverlayCheck, true);
+    // A toast opens and closes with no gesture at all — a download finishing,
+    // a timer running out — so the stack announces it instead.
+    window.addEventListener(NATIVE_OVERLAYS_CHANGED, scheduleOverlayCheck);
     // The safety net, and it is not optional. Everything above reports a hole
     // that RESIZES or a window that moves under it; nothing in the platform
     // reports a hole that merely MOVES. For this pane that is the common case
@@ -461,7 +639,7 @@ export function NativeTerminal({
     // between a work body and a composer that each change height on their own,
     // so a neighbour growing slides the hole down while its own box never
     // changes and no observer fires. The browser hole reached the same
-    // conclusion (`RailBrowser`, 400ms) after the same class of bug. A tick
+    // conclusion (`BrowserTab`, 400ms) after the same class of bug. A tick
     // costs one rect read, and `moveTo` drops it when nothing moved.
     const sweep = window.setInterval(schedule, SWEEP_MS);
     // A surface cannot paint while the window is hidden, so the sweep above
@@ -493,6 +671,7 @@ export function NativeTerminal({
       window.removeEventListener("click", scheduleOverlayCheck, true);
       window.removeEventListener("keyup", scheduleOverlayCheck, true);
       window.removeEventListener("contextmenu", scheduleOverlayCheck, true);
+      window.removeEventListener(NATIVE_OVERLAYS_CHANGED, scheduleOverlayCheck);
       for (const t of overlayTimers) window.clearTimeout(t);
       overlayTimers.clear();
       document.removeEventListener("visibilitychange", schedule);
@@ -505,42 +684,20 @@ export function NativeTerminal({
       // pane may already be showing this surface (a split, or a remount whose
       // new loop started before this cleanup ran), and parking it then would
       // blank a terminal someone is looking at.
-      if (liveNativeTerms.has(termId) && dropSurface(termId, token)) {
-        invoke("native_term_set_bounds", {
-          termId,
-          x: PARKED.x,
-          y: PARKED.y,
-          width: PARKED.w,
-          height: PARKED.h,
-          clip: { x: PARKED.x, y: PARKED.y, w: PARKED.w, h: PARKED.h },
-          scale: 1,
-        }).catch(() => {});
-      }
+      //
+      // Ownership is handed back whether or not the surface is live yet. A
+      // pane unmounted mid-attach used to keep it, and a surface held by a
+      // pane that no longer exists can never be parked by anyone else.
+      const mine = dropSurface(termId, token);
+      if (mine && liveNativeTerms.has(termId)) parkNow();
     };
     // Only the things that describe WHICH terminal this is. See the refs above
     // for why the callbacks are deliberately absent.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd, repoRoot, bootCommand, attachSessionId]);
 
-  async function copySelection() {
-    try {
-      const text = await invoke<string>("native_term_copy", { termId: termIdRef.current });
-      if (text) await navigator.clipboard.writeText(text);
-    } catch {
-      /* clipboard denied or nothing selected — nothing to do */
-    }
-  }
-
-  async function pasteClipboard() {
-    try {
-      const text = await navigator.clipboard.readText();
-      if (text) {
-        await invoke("native_term_write", { termId: termIdRef.current, data: toBytes(text) });
-      }
-    } catch {
-      /* clipboard read denied — nothing to do */
-    }
-  }
+  const copySelection = () => copyNativeTerminalSelection(termIdRef.current);
+  const pasteClipboard = () => pasteIntoNativeTerminal(termIdRef.current);
 
   function onKeyDown(e: React.KeyboardEvent) {
     const key = e.key.toLowerCase();
@@ -554,8 +711,16 @@ export function NativeTerminal({
       void copySelection();
       return;
     }
-    // Paste: Ctrl+Shift+V (Linux). ⌘V (macOS) rides the native paste event.
-    if (e.ctrlKey && e.shiftKey && key === "v" && !e.metaKey) {
+    // Paste: ⌘V (macOS) or Ctrl+Shift+V (Linux).
+    //
+    // ⌘V used to be left to "the native paste event", which never arrives:
+    // the hole is a plain div, and WebKit will not dispatch a paste to an
+    // element it cannot edit. The keystroke reached nothing that could service
+    // `paste:`, so AppKit rang the bell — the error beep with nothing pasted.
+    const isPaste =
+      (e.metaKey && key === "v" && !e.ctrlKey && !e.altKey) ||
+      (e.ctrlKey && e.shiftKey && key === "v" && !e.metaKey);
+    if (isPaste) {
       e.preventDefault();
       void pasteClipboard();
       return;
@@ -626,14 +791,14 @@ export function NativeTerminal({
     selecting.current = false;
   }
 
+  // A paste that does arrive as an event — a middle-click on X11, a context
+  // menu — takes the same encoder as the shortcut rather than writing the raw
+  // text, so a multiline paste behaves the same however it got here.
   function onPaste(e: React.ClipboardEvent) {
     const text = e.clipboardData.getData("text");
     if (!text) return;
     e.preventDefault();
-    invoke("native_term_write", {
-      termId: termIdRef.current,
-      data: toBytes(text),
-    }).catch(() => {});
+    invoke("native_term_paste", { termId: termIdRef.current, text }).catch(() => {});
   }
 
   function onWheel(e: React.WheelEvent) {

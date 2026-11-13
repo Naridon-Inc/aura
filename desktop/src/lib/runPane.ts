@@ -30,7 +30,7 @@
 // the box's own boot line (`bootCommandFor`) so it starts in that checkout,
 // not in the laptop's copy of it.
 
-import type { RunSuggestion } from "./api";
+import { repoWorktreeSettingsGet, type RunSuggestion } from "./api";
 import { bootCommandFor } from "./place/runAt";
 import { placeScope, rootOfScope, runDetect } from "./place/workApi";
 import { readShared, sharedReader, dropShared } from "./sharedRead";
@@ -95,16 +95,30 @@ export function invalidateRunDetection(): void {
   dropShared(detector);
 }
 
+/** The run script saved in the repository's settings (`[worktree] run`), or
+ *  `null` when none is saved or the settings can't be read. */
+export async function savedRunScript(repoRoot: string): Promise<string | null> {
+  try {
+    const run = (await repoWorktreeSettingsGet(repoRoot))?.run;
+    return typeof run === "string" && run.trim() ? run.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The command Run would use right now: the pin if there is one, else the
- *  best candidate the repo justified, else `null`.
+ *  run script saved in the repository's settings, else the best candidate
+ *  the repo justified, else `null`.
  *
  *  `null` is a real answer and callers must render it as one — a project with
  *  no dev script gets asked, not given `npm run dev` and a failure. */
 export async function resolveRunCommand(repoRoot: string): Promise<string | null> {
   const pinned = runCommandOverride(repoRoot);
   if (pinned) return pinned;
+  const saved = await savedRunScript(repoRoot);
+  if (saved) return saved;
   try {
-    return (await detectRun(repoRoot)).command;
+    return (await detectRun(repoRoot)).command ?? null;
   } catch {
     return null;
   }

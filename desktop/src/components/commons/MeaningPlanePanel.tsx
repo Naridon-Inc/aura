@@ -8,24 +8,21 @@
 // Two reads on mount:
 //   • `metaPlaneVerify` → the top banner ("Verified on this clone", or "N
 //     things need a look").
-//   • `metaPlaneLog`    → the recent commits, each with its proof pill and an
-//     expandable "Why" (the recorded reasons + the goals that were checked).
+//   • `metaPlaneLog`    → the recent commits, told day by day on Trace's
+//     story timeline: each change, the newest reason it was made, and whether
+//     it checks out. Opening one reads every reason and every goal checked.
 //
 // We never invent a datum. If a proof or a reason isn't recorded, the row
-// simply omits it — nothing is faked to look complete. Arctic-blue is reserved
-// for the one primary affordance (Refresh); green means "good", amber means
-// "needs a look".
+// simply omits it — nothing is faked to look complete. Green means "good",
+// yellow means "needs a look"; everything else stays quiet.
 
-import { useCallback, useEffect, useState } from "react";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  RefreshCw,
-  ShieldCheck,
-} from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ShieldCheck } from "lucide-react";
 import { EmptyState, ErrorState, LoadingState } from "../ui/state";
+import { ShellNotice, type ShellNoticeTone } from "../ui/shell-notice";
+import { TraceMark } from "../ui/trace-list";
+import { TraceStoryChapter, TraceStoryDay, TraceStoryText } from "../ui/trace-story";
+import { TraceTimeline, TraceTimelineEntry } from "../ui/trace-timeline";
 
 import {
   metaPlaneLog,
@@ -34,14 +31,40 @@ import {
   type MetaVerifyReport,
 } from "../../lib/metaPlane";
 import { verifyBanner, type VerifyTone } from "../../lib/metaVerifyBanner";
-import { cn } from "../../lib/utils";
-import { Button } from "../ui/button";
+import { dayLabel, fullStamp, relTime } from "../trace/sessionsFeed";
+import { MomentFacts } from "../trace/story/SessionMoment";
+import "../ui/meaning-record.css";
 
 type Props = {
   repoRoot: string;
 };
 
 type LoadState = "loading" | "ready" | "error";
+
+/** When the newest reason was written: the one time this record carries. */
+function latestOf(entry: MetaLogEntry): number {
+  return entry.rows.reduce((t, row) => Math.max(t, row.ts), 0);
+}
+
+type ChangeDay = { key: string; label: string; entries: MetaLogEntry[] };
+
+/** The log's own order (newest commit first), cut into days. A change with no
+ *  recorded reason has no time of its own, so it stays with the day before it
+ *  rather than being moved somewhere it never happened. */
+function byDay(entries: MetaLogEntry[]): ChangeDay[] {
+  const days: ChangeDay[] = [];
+  for (const entry of entries) {
+    const at = latestOf(entry);
+    const label = at > 0 ? dayLabel(new Date(at * 1000)) : null;
+    const last = days[days.length - 1];
+    if (last && (label === null || label === last.label)) {
+      last.entries.push(entry);
+    } else {
+      days.push({ key: `${days.length}:${label ?? ""}`, label: label ?? "Not dated", entries: [entry] });
+    }
+  }
+  return days;
+}
 
 export function MeaningPlanePanel({ repoRoot }: Props) {
   const [state, setState] = useState<LoadState>("loading");
@@ -73,6 +96,8 @@ export function MeaningPlanePanel({ repoRoot }: Props) {
 
   useEffect(() => load(), [load]);
 
+  const days = useMemo(() => byDay(entries), [entries]);
+
   const toggle = (sha: string) =>
     setOpen((prev) => {
       const next = new Set(prev);
@@ -82,142 +107,94 @@ export function MeaningPlanePanel({ repoRoot }: Props) {
     });
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-bg-0">
-      <header className="flex h-12 flex-shrink-0 items-center gap-3 border-b border-line-soft px-4">
-        <div className="min-w-0">
-          <div className="text-base font-semibold leading-tight text-text-1">
-            Why &amp; proof
-          </div>
-          <div className="text-xs leading-tight text-text-3">
-            The reason behind each change, checked on this copy
-          </div>
-        </div>
-        <Button
-          variant="subtle"
-          size="xs"
-          onClick={() => load()}
-          disabled={state === "loading"}
-          className="ml-auto gap-1.5 text-text-2"
-        >
-          <RefreshCw
-            size={12}
-            className={cn(state === "loading" && "animate-spin")}
-          />
-          Refresh
-        </Button>
-      </header>
-
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {state === "loading" && <LoadingState label="Reading the record…" size="md" />}
-        {state === "error" && (
-          <ErrorState
-            title="Couldn’t read the record"
-            message={error}
-            onRetry={() => void load()}
-          />
-        )}
-        {state === "ready" && (
-          <>
-            {report && <VerifyBanner report={report} />}
-            {entries.length === 0 ? (
-              <EmptyState
-                icon={ShieldCheck}
-                title="Nothing recorded yet"
-                body="This is where the reason behind each change is kept, so anyone can see why it was made, not just what moved. Make a change and the first entry appears."
-              />
-            ) : (
-              <ul className="flex flex-col gap-1.5 p-3">
-                {entries.map((entry) => (
-                  <CommitRow
-                    key={entry.sha}
-                    entry={entry}
-                    open={open.has(entry.sha)}
-                    onToggle={() => toggle(entry.sha)}
-                  />
-                ))}
-              </ul>
-            )}
-          </>
-        )}
-      </div>
+    <div className="ui-meaning">
+      {state === "loading" && <LoadingState label="Reading the record…" size="md" />}
+      {state === "error" && (
+        <ErrorState
+          title="Couldn’t read the record"
+          message={error}
+          onRetry={() => void load()}
+        />
+      )}
+      {state === "ready" && (
+        <>
+          {report && <VerifyBanner report={report} onRefresh={() => void load()} />}
+          {entries.length === 0 ? (
+            <EmptyState
+              icon={ShieldCheck}
+              title="Nothing recorded yet"
+              body="This is where the reason behind each change is kept, so anyone can see why it was made, not just what moved. Make a change and the first entry appears."
+              size="sm"
+            />
+          ) : (
+            days.map((day) => (
+              <TraceStoryDay key={day.key} label={day.label}>
+                <TraceTimeline label={`Changes and the reasons behind them, ${day.label}`}>
+                  {day.entries.map((entry) => (
+                    <ChangeMoment
+                      key={entry.sha}
+                      entry={entry}
+                      open={open.has(entry.sha)}
+                      onToggle={() => toggle(entry.sha)}
+                    />
+                  ))}
+                </TraceTimeline>
+              </TraceStoryDay>
+            ))
+          )}
+        </>
+      )}
     </div>
   );
 }
 
 // ── Top banner ─────────────────────────────────────────────────────────────
 
+const NOTICE_TONE: Record<VerifyTone, ShellNoticeTone> = {
+  ok: "ok",
+  warn: "attention",
+  calm: "neutral",
+};
+
 // Green is earned by a verdict, never by a file being present — the fold in
 // `metaVerifyBanner` is the one place that decides which of the three states
 // this report has earned, so the wording and the number can't drift apart.
-function VerifyBanner({ report }: { report: MetaVerifyReport }) {
+function VerifyBanner({
+  report,
+  onRefresh,
+}: {
+  report: MetaVerifyReport;
+  onRefresh: () => void;
+}) {
   const banner = verifyBanner(report);
-  const Icon =
-    banner.tone === "ok"
-      ? ShieldCheck
-      : banner.tone === "warn"
-        ? AlertTriangle
-        : CheckCircle2;
-
   return (
-    <BannerShell tone={banner.tone}>
-      <div className="flex min-w-0 items-center gap-2">
-        <Icon
-          size={15}
-          className={cn(
-            "shrink-0",
-            banner.tone === "ok" && "text-accent-green",
-            banner.tone === "warn" && "text-amber",
-            banner.tone === "calm" && "text-text-3",
-          )}
-        />
-        <span
-          className={cn(
-            "shrink-0 text-sm font-medium",
-            banner.tone === "calm" ? "text-text-2" : "text-text-1",
-          )}
-        >
-          {banner.title}
-        </span>
+    <div className="ui-meaning-banner">
+      <ShellNotice
+        tone={NOTICE_TONE[banner.tone]}
+        action={{ label: "Refresh", onClick: onRefresh, title: "Read the record again" }}
+        detail={banner.scope && (<span className="ui-meaning-scope">{banner.scope}</span>)}
+      >
+        <strong>{banner.title}</strong>
         {banner.detail && (
           <span
-            className="truncate text-sm text-text-3"
+            className="ui-meaning-banner-detail"
             title={report.issues.length > 0 ? report.issues.join("\n") : undefined}
           >
-            {banner.detail}
+            {" "}
+            · {banner.detail}
           </span>
         )}
-      </div>
-      {banner.scope && (
-        <span className="mt-0.5 text-xs text-text-4">{banner.scope}</span>
-      )}
-    </BannerShell>
-  );
-}
-
-function BannerShell({
-  tone,
-  children,
-}: {
-  tone: VerifyTone;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className={cn(
-        "flex flex-col border-b border-line-soft px-4 py-2.5",
-        tone === "ok" && "bg-[color-mix(in_srgb,var(--color-accent-green)_8%,transparent)]",
-        tone === "warn" && "bg-[color-mix(in_srgb,var(--color-amber)_8%,transparent)]",
-        tone === "calm" && "bg-bg-1/40",
-      )}
-    >
-      {children}
+      </ShellNotice>
     </div>
   );
 }
 
-// ── One commit ──────────────────────────────────────────────────────────────
+// ── One change ──────────────────────────────────────────────────────────────
 
-function CommitRow({
+/** A change on the timeline: what moved, the newest reason it was made, and
+ *  whether it checks out. Opening it reads every reason and every goal that
+ *  was checked — only offered when there is more than the moment already says. */
+function ChangeMoment({
   entry,
   open,
   onToggle,
@@ -226,111 +203,89 @@ function CommitRow({
   open: boolean;
   onToggle: () => void;
 }) {
-  const hasWhy = entry.rows.length > 0;
-  const hasProof = !!entry.proof;
-  const expandable = hasWhy || hasProof;
+  const latest = latestOf(entry);
+  const newest = entry.rows.reduce<MetaLogEntry["rows"][number] | null>(
+    (best, row) => (best === null || row.ts >= best.ts ? row : best),
+    null,
+  );
+  const goals = entry.proof?.goals ?? [];
+  const more = entry.rows.length > 1 || goals.length > 0;
 
   return (
-    <li className="overflow-hidden rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)]">
-      <button
-        type="button"
-        onClick={expandable ? onToggle : undefined}
-        className={cn(
-          "flex w-full items-center gap-2.5 px-3 py-2 text-left",
-          expandable && "hover:bg-state-hover",
-        )}
-      >
-        <code className="shrink-0 font-mono text-xs text-text-4">
-          {entry.short}
-        </code>
-        <span className="min-w-0 flex-1 truncate text-base text-text-1" title={entry.summary}>
-          {entry.summary}
-        </span>
-        <ProofPill proof={entry.proof} />
-        {expandable &&
-          (open ? (
-            <ChevronDown size={13} className="shrink-0 text-text-4" />
-          ) : (
-            <ChevronRight size={13} className="shrink-0 text-text-4" />
-          ))}
-      </button>
+    <>
+      <TraceTimelineEntry
+        title={<span title={entry.summary}>{entry.summary}</span>}
+        active={open}
+        onSelect={more ? onToggle : undefined}
+        detail={
+          <>
+            {newest && <span className="ui-meaning-reason">{newest.intent}</span>}
+            <MomentFacts
+              facts={[
+                <ProofMark key="proof" proof={entry.proof} />,
+                newest?.agent_id,
+                <code key="sha" className="ui-meaning-sha" title={entry.sha}>
+                  {entry.short}
+                </code>,
+                latest > 0 ? (
+                  <span key="at" title={fullStamp(latest)}>
+                    {relTime(Math.floor(Date.now() / 1000) - latest)}
+                  </span>
+                ) : null,
+              ]}
+            />
+          </>
+        }
+      />
 
-      {open && expandable && (
-        <div className="flex flex-col gap-2.5 border-t border-line-soft px-3 py-2.5">
-          {hasWhy && (
-            <div className="flex flex-col gap-1.5">
-              <div className="section-label">
-                Why
-              </div>
+      {open && more && (
+        <li className="ui-meaning-detail" aria-label={`Why ${entry.short}`}>
+          {entry.rows.length > 1 && (
+            <TraceStoryChapter title="Every reason recorded">
               {entry.rows.map((row, i) => (
-                <div key={`${row.ts}-${i}`} className="flex flex-col">
-                  <p className="text-sm leading-relaxed text-text-2">{row.intent}</p>
-                  <span className="text-xs text-text-4">{row.agent_id}</span>
+                <div key={`${row.ts}-${i}`} className="ui-meaning-why">
+                  <TraceStoryText>{row.intent}</TraceStoryText>
+                  <span>
+                    {row.agent_id}
+                    {row.ts > 0 && <> · {fullStamp(row.ts)}</>}
+                  </span>
                 </div>
               ))}
-            </div>
+            </TraceStoryChapter>
           )}
 
-          {entry.proof && entry.proof.goals.length > 0 && (
-            <div className="flex flex-col gap-1.5">
-              <div className="section-label">
-                What was checked
-              </div>
-              {entry.proof.goals.map((goal) => (
-                <div key={goal.id} className="flex items-start gap-2">
-                  <GoalDot verdict={goal.verdict} />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm leading-relaxed text-text-2">{goal.text}</p>
-                    <span className="text-xs text-text-4">
-                      {goalLabel(goal.verdict)} · {goal.ok}/{goal.total}
-                    </span>
-                  </div>
+          {goals.length > 0 && (
+            <TraceStoryChapter title="What was checked">
+              {goals.map((goal) => (
+                <div key={goal.id} className="ui-meaning-goal">
+                  <TraceStoryText>{goal.text}</TraceStoryText>
+                  <TraceMark tone={goalTone(goal.verdict)}>
+                    {goalLabel(goal.verdict)} · {goal.ok}/{goal.total}
+                  </TraceMark>
                 </div>
               ))}
-            </div>
+            </TraceStoryChapter>
           )}
-        </div>
+        </li>
       )}
-    </li>
+    </>
   );
 }
 
-function ProofPill({ proof }: { proof?: MetaLogEntry["proof"] }) {
-  if (!proof) {
-    return (
-      <span className="shrink-0 rounded-full px-2 py-0.5 text-2xs font-medium text-text-4">
-        Not checked
-      </span>
-    );
-  }
+function ProofMark({ proof }: { proof?: MetaLogEntry["proof"] }) {
+  if (!proof) return <TraceMark>Not checked</TraceMark>;
   const proven = proof.verdict === "verified" || (proof.total > 0 && proof.ok === proof.total);
-  if (proven) {
-    return (
-      <span className="shrink-0 rounded-full bg-[color-mix(in_srgb,var(--color-accent-green)_14%,transparent)] px-2 py-0.5 text-2xs font-medium text-accent-green">
-        Proven · {proof.ok}/{proof.total}
-      </span>
-    );
-  }
   return (
-    <span className="shrink-0 rounded-full bg-[color-mix(in_srgb,var(--color-amber)_14%,transparent)] px-2 py-0.5 text-2xs font-medium text-amber">
-      Almost · {proof.ok}/{proof.total}
-    </span>
+    <TraceMark tone={proven ? "good" : "warn"}>
+      {proven ? "Proven" : "Almost"} · {proof.ok}/{proof.total}
+    </TraceMark>
   );
 }
 
-function GoalDot({ verdict }: { verdict: string }) {
-  const ok = verdict === "verified";
-  const partial = verdict === "partial";
-  return (
-    <span
-      className={cn(
-        "mt-1 h-1.5 w-1.5 shrink-0 rounded-full",
-        ok && "bg-accent-green",
-        partial && "bg-amber",
-        !ok && !partial && "bg-text-5",
-      )}
-    />
-  );
+function goalTone(verdict: string): "good" | "warn" | undefined {
+  if (verdict === "verified") return "good";
+  if (verdict === "partial") return "warn";
+  return undefined;
 }
 
 function goalLabel(verdict: string): string {
@@ -345,6 +300,3 @@ function goalLabel(verdict: string): string {
       return "Not checked";
   }
 }
-
-// ── Loading / empty / error ─────────────────────────────────────────────────
-

@@ -268,7 +268,7 @@ export function buildTurnCost(input: TurnCostInput): TurnCost {
       label: "All time",
       usd: total,
       estimated: input.totalEstimated === true,
-      hint: "Every API key, every project, since each key was added.",
+      hint: "Every API key, every repository, since each key was added.",
     });
   }
 

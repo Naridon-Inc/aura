@@ -139,6 +139,9 @@ pub struct BrainChatContext {
     // AURA-1296 — the composer's Concise chip ("concise" | absent). Handed to
     // Claude Code as `--output-style`; other brains ignore it.
     pub output_style: Option<String>,
+    /// Folders linked to this workspace that the agent may also read. Handed
+    /// to a CLI through its own extra-directory flag; empty → nothing added.
+    pub linked_dirs: Vec<String>,
 }
 
 /// What the brain currently in use looks like — surfaced to the UI so
@@ -220,7 +223,7 @@ pub async fn brain_chat_turn(
     // user's own message renders the instant this command reaches Rust instead
     // of waiting on the ~100ms macOS Keychain read that brain resolution
     // incurs. That wait was why the native chat felt slow to "start showing
-    // things" next to the Conductor PTY (which echoes locally). Moving the
+    // things" next to a local PTY (which echoes locally). Moving the
     // persist above brain-resolution changes nothing downstream: it still lands
     // before `load_session_for_request` (so the request is rebuilt from the
     // authoritative `session.chat`, current message included exactly once) and
@@ -231,6 +234,16 @@ pub async fn brain_chat_turn(
     // now matches the legacy `manager_chat` path in one more way: if brain
     // resolution below fails, the user's message stays on screen alongside the
     // error reply instead of vanishing.
+    // A turn to a chat on one of the org's machines is keyed once, here, so
+    // both of its sides filed below and their copies on the workspace's log
+    // carry the same key (see `cloud_turn_keys`).
+    if let Some(machine) = brain_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| registry::on_a_machine(p))
+    {
+        crate::cloud_turn_keys::begin(machine, &session_id);
+    }
     if !user_text.is_empty() {
         persist_turn(&app, &session_id, ChatRole::User, user_text.clone(), None);
     }
@@ -257,14 +270,20 @@ pub async fn brain_chat_turn(
     // had simply been ignored, and only whichever caller happened to hold the
     // promise saw the reason. Record the failure where the conversation lives,
     // then still return it so the caller can react.
-    let resolved = match explicit_override.as_deref() {
-        Some(provider_id) => mgr.resolve(provider_id),
-        None => mgr.active(),
+    // A chat on one of the org's machines answers only from that machine's
+    // agent; a turn naming any other engine is refused rather than run here.
+    let pinned = load_session_for_request(&app, &session_id).and_then(|s| s.brain_override);
+    let resolved = match registry::stays_on_machine(pinned.as_deref(), explicit_override.as_deref()) {
+        Err(off) => Err(off),
+        Ok(()) => match explicit_override.as_deref() {
+            Some(provider_id) => mgr.resolve(provider_id),
+            None => mgr.active(),
+        }
+        .map_err(|e| e.to_string()),
     };
     let active = match resolved {
         Ok(brain) => brain,
-        Err(e) => {
-            let said = e.to_string();
+        Err(said) => {
             persist_turn(
                 &app,
                 &session_id,
@@ -280,6 +299,27 @@ pub async fn brain_chat_turn(
     // produced it (WW-B1). Captured now — `active` moves into the stream
     // task below.
     let brain_id = active.provider_id().to_string();
+
+    // In a cloud workspace's chat on one of the org's machines, a message
+    // opening with teammates' @logins is for them: it goes onto the shared
+    // log and never reaches the agent. The note it leaves here says so.
+    if registry::on_a_machine(&brain_id) {
+        if let Some((room, named)) = crate::cloud_box_people::addressed(&brain_id, &user_text) {
+            let note = match crate::cloud_box_people::post(&room, &user_text).await {
+                Ok(()) => crate::cloud_box_people::sent_note(&named),
+                Err(e) => {
+                    tracing::warn!(target: "cloud::box_chat", "a message to people was not kept: {e}");
+                    format!(
+                        "Couldn't reach Aura's cloud, so {} didn't get this. The agent didn't either. Send it again in a moment.",
+                        crate::cloud_box_people::named(&named)
+                    )
+                }
+            };
+            persist_turn(&app, &session_id, ChatRole::System, note, None);
+            let _ = app.emit(&format!("manager-chat-chunk:{session_id}"), &ChatChunk::End { stop_reason: None });
+            return Ok(());
+        }
+    }
 
     // Continuity spine — compact the older transcript (if it has grown past
     // budget) BEFORE rebuilding the request from `session.chat`, so the brain
@@ -324,6 +364,11 @@ pub async fn brain_chat_turn(
                 .and_then(|s| s.projects.first().map(|p| p.root.clone()))
         })
         .unwrap_or_default();
+    // How many projects this conversation is bound to. One is a workspace
+    // chat, whose tools default to its own project. Several is Aura's own
+    // conversation, which has no current project: its tools resolve from an
+    // empty root, so every call names the project it acts on.
+    let bound_projects = session.as_ref().map(|s| s.projects.len()).unwrap_or(0);
 
     // Rebuild the conversation server-side from the authoritative
     // `session.chat` via the shared `chat_to_messages` shaper — the SAME
@@ -339,7 +384,7 @@ pub async fn brain_chat_turn(
     // it again. When there's no session on disk yet (a turn that raced ahead
     // of session creation), fall back to a single-turn request built from the
     // raw `user_message` so the very first send still works.
-    let messages = match session.as_ref() {
+    let mut messages = match session.as_ref() {
         Some(s) => brain::chat_to_messages(&s.chat, Some(brain_id.as_str())),
         None => {
             if user_text.is_empty() {
@@ -352,6 +397,13 @@ pub async fn brain_chat_turn(
             }
         }
     };
+
+    // Where the person is looking when it isn't this conversation's project —
+    // their organization's cloud. Model-facing only; see `view_note`.
+    crate::manager::view_note::onto_last_user(
+        &mut messages,
+        crate::manager::view_note::get(&session_id).as_deref(),
+    );
 
     let request = ChatRequest {
         messages,
@@ -372,6 +424,7 @@ pub async fn brain_chat_turn(
         // runs THERE — the same binding the native brain's tools honour
         // through `Place::resolve`. AURA-1308.
         machine_id: session.as_ref().and_then(|s| s.machine_id.clone()),
+        linked_dirs: ctx.linked_dirs,
     };
 
     let channel = format!("manager-chat-chunk:{session_id}");
@@ -401,6 +454,7 @@ pub async fn brain_chat_turn(
             &brain_id,
             "",
             &repo_root,
+            bound_projects,
         )
         .await;
 
@@ -420,32 +474,27 @@ pub async fn brain_chat_turn(
                 //   • Not failover-worthy (ContextOverflow / Canceled / Fatal)
                 //     → never retry. A too-big prompt, a user cancel, or a
                 //     config bug fails identically on any engine; surface it.
-                //   • Aura Pro (the zero-config cloud brain) → always retry
-                //     when failover-worthy. It has NO user-fixable key, so a
-                //     working local brain always beats a dead end — including
-                //     on auth/quota, which the user can't act on.
-                //   • Any explicitly-configured native/CLI/compat brain → retry
-                //     ONLY on RateLimited or Transient. NOT AuthRequired: a
-                //     bad/expired key the user must fix should surface, not be
-                //     silently hidden behind another brain.
+                //   • Otherwise → retry ONLY on RateLimited or Transient. NOT
+                //     AuthRequired: a bad/expired key the user must fix should
+                //     surface, not be silently hidden behind another brain.
                 //
                 // When we do retry, the failed engine is recorded in the
                 // cooldown ledger and the exclude set covers every cooling
                 // engine, so repeat turns skip dead providers instead of
                 // hammering them.
                 let limit = brain::limits::classify_limit(&e);
-                let fallback = if !limit.failover_worthy {
+                // A chat on one of the org's machines never falls back: any
+                // other brain would answer from this laptop's checkout, not
+                // the worktree on the machine the workspace names.
+                let on_machine = brain_id.starts_with(registry::PLACE_PREFIX);
+                let fallback = if !limit.failover_worthy || on_machine {
                     None
                 } else {
-                    let eligible = if brain_id == brain::aura_pro::PROVIDER_ID {
-                        true
-                    } else {
-                        matches!(
-                            limit.class,
-                            brain::limits::LimitClass::RateLimited
-                                | brain::limits::LimitClass::Transient
-                        )
-                    };
+                    let eligible = matches!(
+                        limit.class,
+                        brain::limits::LimitClass::RateLimited
+                            | brain::limits::LimitClass::Transient
+                    );
                     if eligible {
                         // Mark the dead engine so future turns skip it for its
                         // cooldown window (when the classifier supplies one).
@@ -473,7 +522,7 @@ pub async fn brain_chat_turn(
                         // prose notice. The user's standing rule is "just use
                         // what's available and work"; the only record of which
                         // brain answered is the per-turn brain-provenance chip,
-                        // which is enough. A visible "_Aura Pro is unavailable_"
+                        // which is enough. A visible "<brain> is unavailable"
                         // line on every fallback reply (and on every reload) is
                         // exactly the spam they asked never to see.
                         let retry = stream_one_brain(
@@ -485,6 +534,7 @@ pub async fn brain_chat_turn(
                             &fallback_id,
                             "",
                             &repo_root,
+                            bound_projects,
                         )
                         .await;
                         // If the fallback itself fails, surface that error —
@@ -774,8 +824,8 @@ struct RoundToolCall {
 /// fallback notice already emitted by the caller lands in the persisted,
 /// reload-safe turn.
 ///
-/// Tools are injected only for Anthropic-shaped brains (`aura_pro` /
-/// `anthropic_native`) when `repo_root` is non-empty and the caller left
+/// Tools are injected only for the Anthropic-shaped brain
+/// (`anthropic_native`) when `repo_root` is non-empty and the caller left
 /// `request.tools` empty. Every other provider keeps its prior, tool-free
 /// behaviour and the request stays byte-identical — which is why injection
 /// is decided per-brain here rather than once at the call site (an Auto
@@ -793,6 +843,7 @@ async fn stream_one_brain(
     brain_id: &str,
     seed_text: &str,
     repo_root: &str,
+    bound_projects: usize,
 ) -> TurnResult {
     // Hard cap on tool rounds in one turn — a runaway-loop backstop. A real
     // task settles in 1–3 rounds; past this we stop and persist whatever the
@@ -808,8 +859,11 @@ async fn stream_one_brain(
         && native_tools::supports(brain_id);
     if tools_enabled {
         request.tools = native_tools::all_tool_schemas();
-        request.system =
-            Some(native_tools::augment_system(request.system.as_deref(), repo_root));
+        request.system = Some(native_tools::augment_system_for(
+            request.system.as_deref(),
+            repo_root,
+            bound_projects,
+        ));
     }
 
     // Accumulates every assistant text fragment across all rounds — this is
@@ -1099,7 +1153,10 @@ async fn stream_one_brain(
                 // with it. Everything else ignores both.
                 let (content, is_error, saved) = native_tools::execute_board_tool_with_app(
                     Some(app),
-                    repo_root,
+                    crate::manager::brain::project_plane::resolution_root(
+                        repo_root,
+                        bound_projects,
+                    ),
                     sid,
                     name,
                     input,
@@ -1461,6 +1518,13 @@ fn persist_turn_with_tools(
     bill: &TurnBill,
 ) {
     use tauri::Manager as _;
+    // The key a machine chat's turn is copied onto the workspace's log under,
+    // when this is one of its sides.
+    let cloud_key = match role {
+        ChatRole::User => crate::cloud_turn_keys::stamp(session_id, true),
+        ChatRole::Manager => crate::cloud_turn_keys::stamp(session_id, false),
+        _ => None,
+    };
     // `manager_status` returns the in-memory `ManagerRuntime` snapshot when
     // one exists, falling back to disk only otherwise. Every chat session is
     // registered in that map at creation (`start_session`), but a native turn
@@ -1512,6 +1576,9 @@ fn persist_turn_with_tools(
                 // fields absent is what lets the card say "no rate for this
                 // model" instead of printing a $0.00 nobody was billed.
                 last.model = bill.model_id.clone();
+                if cloud_key.is_some() {
+                    last.cloud_key = cloud_key.clone();
+                }
                 if let Some(cost) = bill.cost_usd {
                     last.cost_usd = Some(cost);
                     last.cost_estimated = Some(bill.estimated);
@@ -1552,6 +1619,9 @@ fn persist_turn_with_tools(
                 // fields absent is what lets the card say "no rate for this
                 // model" instead of printing a $0.00 nobody was billed.
                 last.model = bill.model_id.clone();
+                if cloud_key.is_some() {
+                    last.cloud_key = cloud_key.clone();
+                }
                 if let Some(cost) = bill.cost_usd {
                     last.cost_usd = Some(cost);
                     last.cost_estimated = Some(bill.estimated);

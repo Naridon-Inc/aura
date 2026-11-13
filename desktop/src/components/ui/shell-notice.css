@@ -1,0 +1,97 @@
+.ui-shell-notice-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 8px;
+}
+.ui-shell-notice-stack:has(> *) {
+  padding-bottom: 8px;
+}
+.ui-shell-notice {
+  flex-wrap: wrap;
+  align-items: flex-start;
+  row-gap: 6px;
+}
+.ui-shell-notice > .ui-shell-notice-mark {
+  flex: none;
+  margin-top: 5px;
+}
+.ui-shell-notice > .ui-shell-notice-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ui-shell-notice-text strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-shell-notice > button {
+  flex: none;
+  margin: -2px -4px 0 0;
+}
+.ui-shell-notice-dot {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ui-muted-fg);
+}
+.ui-shell-notice[data-tone="ok"] .ui-shell-notice-dot {
+  background: var(--ui-green);
+}
+.ui-shell-notice[data-tone="attention"] .ui-shell-notice-dot {
+  background: var(--ui-yellow);
+}
+.ui-shell-notice[data-tone="error"] .ui-shell-notice-dot {
+  background: var(--ui-red);
+}
+.ui-shell-notice-actions {
+  display: flex;
+  gap: 6px;
+  flex-basis: 100%;
+}
+.ui-shell-notice-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-basis: 100%;
+  min-width: 0;
+}
+.ui-shell-notice-detail pre,
+.ui-shell-notice-detail code {
+  margin: 0;
+  font: 11px/15px var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.ui-shell-notice-detail code {
+  padding: 4px 6px;
+  border: 1px solid var(--ui-border);
+  border-radius: 4px;
+}
+.ui-shell-notice-detail > button {
+  align-self: flex-start;
+}
+.ui-shell-notice-inline > .ui-shell-notice-stack:has(> *) {
+  padding-top: 8px;
+}
+/* Across the top of the work column there is room for the session banner's
+   own single row: sentence, then its button, then dismiss. */
+.ui-shell-notice-inline .ui-shell-notice {
+  align-items: center;
+}
+.ui-shell-notice-inline .ui-shell-notice > .ui-shell-notice-mark {
+  margin-top: 0;
+}
+.ui-shell-notice-inline .ui-shell-notice-actions {
+  flex-basis: auto;
+  order: 1;
+}
+.ui-shell-notice-inline .ui-shell-notice > button {
+  order: 2;
+  margin-top: 0;
+}
+.ui-shell-notice-inline .ui-shell-notice-detail {
+  order: 3;
+}

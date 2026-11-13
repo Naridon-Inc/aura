@@ -178,7 +178,7 @@ export function standingWord(standing: DriftStanding): string {
  *  reading. */
 export function driftHeadline(drift: Drift): string {
   if (!drift.declares_environment) {
-    return "This project declares no environment — below is what this place has";
+    return "This repository declares no environment — below is what this place has";
   }
   if (drift.at_spec) return `At spec v${drift.version}`;
   const parts: string[] = [];

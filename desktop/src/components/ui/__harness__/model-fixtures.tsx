@@ -1,0 +1,72 @@
+import { type ModelOption } from "../model-picker";
+export const previewModels: ModelOption[] = [
+  {
+    id: "opus",
+    name: "Opus 5.5",
+    provider: "Claude Code",
+    preferredEffort: "High",
+    newChat: true,
+    efforts: ["Low", "Medium", "High", "Extra high", "Max", "Ultracode"],
+  },
+  {
+    id: "sol",
+    name: "GPT-5.6 Sol",
+    provider: "Codex",
+    preferredEffort: "High",
+    shortcut: "⌃⌘2",
+    efforts: ["Low", "Medium", "High"],
+    fast: true,
+  },
+  {
+    id: "astra",
+    name: "GPT-6 Astra",
+    provider: "Codex",
+    efforts: ["Low", "Medium", "High"],
+    fast: true,
+  },
+  {
+    id: "fable",
+    name: "Fable 5.1",
+    provider: "Claude Code",
+    efforts: ["Low", "Medium", "High", "Extra high", "Max", "Ultracode"],
+  },
+  {
+    id: "opus5",
+    name: "Opus 5",
+    provider: "Claude Code",
+    efforts: ["Low", "Medium", "High", "Extra high", "Max", "Ultracode"],
+  },
+  {
+    id: "sonnet",
+    name: "Sonnet 5.5",
+    provider: "Claude Code",
+    efforts: ["Low", "Medium", "High", "Extra high", "Max"],
+  },
+  {
+    id: "haiku",
+    name: "Haiku 5.5",
+    provider: "Claude Code",
+    efforts: ["Low", "Medium", "High", "Extra high", "Max"],
+  },
+  {
+    id: "sol61",
+    name: "GPT-6.1 Sol",
+    provider: "Codex",
+    efforts: ["Low", "Medium", "High"],
+    fast: true,
+  },
+  {
+    id: "terra",
+    name: "GPT-6.1 Terra",
+    provider: "Codex",
+    efforts: ["Low", "Medium", "High"],
+  },
+  {
+    id: "luna",
+    name: "GPT-6 Luna",
+    provider: "Codex",
+    efforts: ["Low", "Medium", "High"],
+  },
+  { id: "kimi", name: "Kimi K2.6", provider: "OpenCode" },
+  { id: "kimi3", name: "Kimi K3", provider: "OpenCode" },
+];

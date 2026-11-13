@@ -106,7 +106,7 @@ describe("the menu still routes everything it used to", () => {
     }
   });
 
-  it("does not claim the update item, which UpdateBanner owns", async () => {
+  it("does not claim the update item, which UpdateToast owns", async () => {
     const src = stripComments(await readSrc("lib/keymap.ts"));
     // Two listeners on `menu:check_for_updates` would run the update flow
     // twice from one click.

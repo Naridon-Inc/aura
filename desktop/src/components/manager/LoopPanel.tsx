@@ -11,16 +11,23 @@
 //              Orchestrator uses, not a shelled-out CLI.
 //   • lanes  → ready / working / blocked partitions, each node carrying its
 //              priority and (when imported) a JIRA chip.
+//
+// It sits in the manager's side aside beside the plan, so it is built from the
+// same task-detail sections: a "Loop" section carrying the counts, the two
+// verbs and the last result, then one section per lane of task rows.
 
 import { useCallback, useEffect, useState } from "react";
-import { ListChecks, Play, RefreshCw } from "lucide-react";
+import { Play, RefreshCw } from "lucide-react";
 
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { api } from "../../lib/api";
 import type { LoopTask, ReadyViewDto } from "../../lib/api";
 import { fetchReadyView } from "../../lib/loopCache";
 import { Button } from "../ui/button";
+import { ErrorNote, LoadingState } from "../ui/state";
 import { StatusChip, type ChipTone } from "../ui/statusChip";
+import { TaskDetailMeta, TaskDetailNote, TaskDetailSection } from "../ui/tasks-detail";
+import "../ui/loop-panel.css";
 
 type Props = {
   /** Repo whose `.aura/a2a/` graph this panel reads. Null → inert empty state. */
@@ -40,25 +47,27 @@ function LoopRow({ task, note }: { task: LoopTask; note?: string }) {
   const showPriority = task.priority && task.priority !== "low";
   const isJira = task.external_source === "jira" && !!task.external_id;
   return (
-    <div className="flex items-start gap-2 px-2.5 py-1.5 rounded border border-line-soft bg-bg-1">
-      <div className="min-w-0 flex-1">
-        <div className="text-sm text-text-1 leading-snug truncate" title={task.title}>
-          {task.title}
-        </div>
-        {note && <div className="text-xs text-text-3 mt-0.5">{note}</div>}
-      </div>
-      <div className="flex items-center gap-1 shrink-0">
-        {isJira && (
-          <StatusChip tone="blue" dense>
-            JIRA {task.external_id}
-          </StatusChip>
-        )}
-        {showPriority && (
-          <StatusChip tone={PRIORITY_TONE[task.priority] ?? "neutral"} dense dot>
-            {task.priority}
-          </StatusChip>
-        )}
-      </div>
+    <div className="ui-task-dependency ui-loop-row">
+      <span className="ui-tasks-dependency-text">
+        <span className="ui-tasks-dependency-label">
+          <span title={task.title}>{task.title}</span>
+        </span>
+        {note && <small className="ui-tasks-dependency-detail">{note}</small>}
+      </span>
+      {(isJira || showPriority) && (
+        <span className="ui-tasks-dependency-end">
+          {isJira && (
+            <StatusChip tone="blue" dense>
+              JIRA {task.external_id}
+            </StatusChip>
+          )}
+          {showPriority && (
+            <StatusChip tone={PRIORITY_TONE[task.priority] ?? "neutral"} dense dot>
+              {task.priority}
+            </StatusChip>
+          )}
+        </span>
+      )}
     </div>
   );
 }
@@ -74,13 +83,9 @@ function Lane({
 }) {
   if (count === 0) return null;
   return (
-    <div className="flex flex-col gap-1">
-      <div className="section-label flex items-center gap-1.5">
-        {title}
-        <span className="text-text-3/70">· {count}</span>
-      </div>
-      <div className="flex flex-col gap-1">{children}</div>
-    </div>
+    <TaskDetailSection title={title} count={count}>
+      <div className="ui-tasks-dependency-list">{children}</div>
+    </TaskDetailSection>
   );
 }
 
@@ -88,7 +93,7 @@ export function LoopPanel({ repoRoot }: Props) {
   const [view, setView] = useState<ReadyViewDto | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<null | "sync" | "run">(null);
-  const [note, setNote] = useState<string | null>(null);
+  const [note, setNote] = useState<{ text: string; failed: boolean } | null>(null);
 
   const refresh = useCallback(async () => {
     if (!repoRoot) return;
@@ -96,7 +101,7 @@ export function LoopPanel({ repoRoot }: Props) {
     try {
       setView(await fetchReadyView(repoRoot));
     } catch (e) {
-      setNote(`Couldn't read the loop graph: ${String(e)}`);
+      setNote({ text: `Couldn't read the loop graph: ${String(e)}`, failed: true });
     } finally {
       setLoading(false);
     }
@@ -112,12 +117,13 @@ export function LoopPanel({ repoRoot }: Props) {
     setNote(null);
     try {
       const r = await api.loopSyncBoard(repoRoot);
-      setNote(
-        `Synced ${r.synced} node${r.synced === 1 ? "" : "s"} (${r.created} new, ${r.updated} updated) · ${r.edges} edge${r.edges === 1 ? "" : "s"}.`,
-      );
+      setNote({
+        text: `Synced ${r.synced} node${r.synced === 1 ? "" : "s"} (${r.created} new, ${r.updated} updated) · ${r.edges} edge${r.edges === 1 ? "" : "s"}.`,
+        failed: false,
+      });
       await refresh();
     } catch (e) {
-      setNote(`Sync failed: ${String(e)}`);
+      setNote({ text: `Sync failed: ${String(e)}`, failed: true });
     } finally {
       setBusy(null);
     }
@@ -129,14 +135,16 @@ export function LoopPanel({ repoRoot }: Props) {
     setNote(null);
     try {
       const r = await api.loopRunNative(repoRoot);
-      setNote(
-        r.dispatched.length === 0
-          ? "Nothing ready to dispatch. Try Sync first."
-          : `Dispatched ${r.dispatched.length} into the Aura brain${r.ready_remaining > 0 ? ` · ${r.ready_remaining} more ready` : ""}.`,
-      );
+      setNote({
+        text:
+          r.dispatched.length === 0
+            ? "Nothing ready to dispatch. Try Sync first."
+            : `Dispatched ${r.dispatched.length} into the Aura brain${r.ready_remaining > 0 ? ` · ${r.ready_remaining} more ready` : ""}.`,
+        failed: false,
+      });
       await refresh();
     } catch (e) {
-      setNote(`Run failed: ${String(e)}`);
+      setNote({ text: `Run failed: ${String(e)}`, failed: true });
     } finally {
       setBusy(null);
     }
@@ -147,92 +155,95 @@ export function LoopPanel({ repoRoot }: Props) {
     !!view &&
     counts!.ready + counts!.blocked + counts!.working + counts!.done + counts!.other === 0;
 
+  const actions = (
+    <span className="ui-loop-actions">
+      <Button
+        variant="ghost"
+        size="xs"
+        onClick={onSync}
+        disabled={!repoRoot || busy !== null}
+        title="Project the task board (incl. Jira) into the dependency graph"
+      >
+        {/* Work in flight wears the library's activity mark, as the
+            repository's own sync button does. */}
+        {busy === "sync" ? <AsciiSpinner size={12} /> : <RefreshCw />}
+        Sync
+      </Button>
+      <Button
+        variant="secondary"
+        size="xs"
+        onClick={onRun}
+        disabled={!repoRoot || busy !== null || (counts?.ready ?? 0) === 0}
+        title="Claim the ready set and dispatch it into the native Aura brain"
+      >
+        {/* Run is not: its resting glyph is a triangle, and a spinning
+            triangle is nothing. So the house spinner takes over while the
+            dispatch is in flight. */}
+        {busy === "run" ? <AsciiSpinner size={12} /> : <Play />}
+        Run
+      </Button>
+    </span>
+  );
+
   return (
-    <div className="flex flex-col h-full min-h-0">
-      <div className="px-3 py-2 border-b border-line-soft flex items-center gap-2">
-        <ListChecks size={14} className="text-text-3 shrink-0" />
-        <span className="section-label flex-1">Loop</span>
+    <>
+      <TaskDetailSection title="Loop" action={actions}>
         {counts && (
-          <span className="text-xs text-text-3">
-            {counts.ready} ready · {counts.working} working · {counts.blocked} blocked
-          </span>
+          <TaskDetailMeta
+            parts={[
+              `${counts.ready} ready`,
+              `${counts.working} working`,
+              `${counts.blocked} blocked`,
+            ]}
+          />
         )}
-        <Button
-          variant="subtle"
-          size="xs"
-          onClick={onSync}
-          disabled={!repoRoot || busy !== null}
-          title="Project the task board (incl. Jira) into the dependency graph"
-        >
-          {/* This one is the refresh case: the glyph you pressed is already a
-              circular arrow, so it turns rather than being swapped out for a
-              different mark mid-press. */}
-          <RefreshCw size={12} className={busy === "sync" ? "animate-spin" : undefined} />
-          <span className="ml-1">Sync</span>
-        </Button>
-        <Button
-          variant="accentSoft"
-          size="xs"
-          onClick={onRun}
-          disabled={!repoRoot || busy !== null || (counts?.ready ?? 0) === 0}
-          title="Claim the ready set and dispatch it into the native Aura brain"
-        >
-          {/* Run is not: its resting glyph is a triangle, and a spinning
-              triangle is nothing. So the house spinner takes over while the
-              dispatch is in flight. */}
-          {busy === "run" ? <AsciiSpinner size={12} /> : <Play size={12} />}
-          <span className="ml-1">Run</span>
-        </Button>
-      </div>
-
-      {note && (
-        <div className="px-3 py-1.5 text-xs text-text-2 border-b border-line-soft bg-bg-1">
-          {note}
-        </div>
-      )}
-
-      <div className="flex-1 min-h-0 overflow-auto p-3 flex flex-col gap-3">
+        {note &&
+          (note.failed ? (
+            <ErrorNote className="ui-loop-note">{note.text}</ErrorNote>
+          ) : (
+            <TaskDetailNote>{note.text}</TaskDetailNote>
+          ))}
         {!repoRoot ? (
-          <div className="text-text-3 text-xs">Open a project to use the loop.</div>
+          <TaskDetailNote>Open a repository to use the loop.</TaskDetailNote>
         ) : loading && !view ? (
-          <div className="text-text-3 text-xs flex items-center gap-2">
-            <AsciiSpinner /> Reading loop graph…
-          </div>
+          <LoadingState label="Reading loop graph…" className="ui-loop-loading" />
         ) : empty ? (
-          <div className="text-text-3 text-xs leading-relaxed">
+          <TaskDetailNote>
             The dependency graph is empty. <strong>Sync</strong> to project the task board
             (including any Jira-imported cards) into the graph, then <strong>Run</strong> to
             dispatch the ready set into the Aura brain.
-          </div>
-        ) : view ? (
-          <>
-            <Lane title="Ready" count={view.ready.length}>
-              {view.ready.map((t) => (
-                <LoopRow key={t.id} task={t} />
-              ))}
-            </Lane>
-            <Lane title="Working" count={view.working.length}>
-              {view.working.map((t) => (
-                <LoopRow key={t.id} task={t} note="dispatched · running on the Aura brain" />
-              ))}
-            </Lane>
-            <Lane title="Blocked" count={view.blocked.length}>
-              {view.blocked.map((b) => (
-                <LoopRow
-                  key={b.task.id}
-                  task={b.task}
-                  note={`waiting on ${b.unmet.length} dependenc${b.unmet.length === 1 ? "y" : "ies"}`}
-                />
-              ))}
-            </Lane>
-            <Lane title="Done" count={view.done.length}>
-              {view.done.slice(0, 8).map((t) => (
-                <LoopRow key={t.id} task={t} />
-              ))}
-            </Lane>
-          </>
+          </TaskDetailNote>
         ) : null}
-      </div>
-    </div>
+      </TaskDetailSection>
+
+      {view && !empty && (
+        <>
+          <Lane title="Ready" count={view.ready.length}>
+            {view.ready.map((t) => (
+              <LoopRow key={t.id} task={t} />
+            ))}
+          </Lane>
+          <Lane title="Working" count={view.working.length}>
+            {view.working.map((t) => (
+              <LoopRow key={t.id} task={t} note="dispatched · running on the Aura brain" />
+            ))}
+          </Lane>
+          <Lane title="Blocked" count={view.blocked.length}>
+            {view.blocked.map((b) => (
+              <LoopRow
+                key={b.task.id}
+                task={b.task}
+                note={`waiting on ${b.unmet.length} dependenc${b.unmet.length === 1 ? "y" : "ies"}`}
+              />
+            ))}
+          </Lane>
+          <Lane title="Done" count={view.done.length}>
+            {view.done.slice(0, 8).map((t) => (
+              <LoopRow key={t.id} task={t} />
+            ))}
+          </Lane>
+        </>
+      )}
+    </>
   );
 }

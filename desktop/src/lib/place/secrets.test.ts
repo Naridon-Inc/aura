@@ -254,7 +254,7 @@ describe("what a surface says", () => {
   });
 
   test("holding nothing is a sentence rather than an empty line", () => {
-    expect(bootSentence(boot({ names: [] }))).toContain("has nothing kept for this project");
+    expect(bootSentence(boot({ names: [] }))).toContain("has nothing kept for this repository");
   });
 });
 

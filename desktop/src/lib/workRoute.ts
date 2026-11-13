@@ -112,18 +112,19 @@ export const WORK_LENS_VALUES: readonly WorkLens[] = WORK_LENSES.map(
 
 const KEY = "aura.work.lens";
 
-/** The lens the destination reopens on: the work itself, as a list.
+/** The lens the destination reopens on: the one you left, or, the first
+ *  time, the Dashboard's board of columns by stage.
  *
  *  The membership test is also the migration. Anyone whose last lens was
  *  `plan`, `sprint` or `map` — or `graph`, while the crew map is flagged off —
- *  has a string in storage the strip no longer offers, and reopens on the list
- *  rather than on a cell that isn't there. */
+ *  has a string in storage the strip no longer offers, and reopens on the
+ *  board rather than on a cell that isn't there. */
 export function readWorkLens(): WorkLens {
   try {
     const raw = localStorage.getItem(KEY) as WorkLens | null;
-    return raw && WORK_LENS_VALUES.includes(raw) ? raw : "list";
+    return raw && WORK_LENS_VALUES.includes(raw) ? raw : "board";
   } catch {
-    return "list";
+    return "board";
   }
 }
 

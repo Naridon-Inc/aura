@@ -9,8 +9,8 @@
 // code" matches the Time machine's vocabulary, so the same concept reads the
 // same everywhere. Cross-branch and unknown findings pass through untouched.
 //
-// Shared by the Safety check pane (ReviewDialog) and the PR right-rail review
-// card (PrRightRail) so both surfaces speak the same plain language.
+// Shared by the Safety check pane (ReviewDialog) and the PR surfaces so both
+// speak the same plain language.
 
 const RULES: [RegExp, string][] = [
   [/^Protected Node Deleted\s*:?\s*/i, "A protected piece of code was deleted. "],

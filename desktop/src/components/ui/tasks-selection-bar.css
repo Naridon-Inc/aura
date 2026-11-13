@@ -1,0 +1,49 @@
+.ui-tasks-selection-bar {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: min(720px, calc(100% - 32px));
+  padding: 6px 6px 6px 12px;
+  transform: translateX(-50%);
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-popover);
+  box-shadow: 0 4px 12px #0003;
+  color: var(--ui-fg);
+  font-size: 13px;
+}
+.ui-tasks-selection-count {
+  padding-right: 4px;
+  font-weight: 500;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.ui-tasks-selection-divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: var(--ui-border);
+}
+.ui-tasks-selection-status {
+  min-width: 0;
+  padding: 0 6px;
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-tasks-selection-status[data-tone="error"] {
+  color: var(--ui-red);
+}
+.ui-tasks-selection-swatch {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--ui-faint);
+}

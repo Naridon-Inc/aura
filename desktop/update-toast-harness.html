@@ -1,0 +1,23 @@
+<!doctype html>
+<!--
+  Visual harness for the update toast: the real toast, the real updater code
+  and the real updater plugin, on a stand-in for the native side that serves a
+  release and streams its download.
+
+  Dev-server only: Vite's build input is index.html, so this page never
+  reaches a bundle. `bun run dev` serves it at
+  /update-toast-harness.html?scene=<name>; the scenes are listed in
+  src/components/__harness__/updateToast.tsx. Add `&theme=light` for the
+  light palette.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Update toast harness</title>
+  </head>
+  <body>
+    <div id="update-toast-harness"></div>
+    <script type="module" src="/src/components/__harness__/updateToast.tsx"></script>
+  </body>
+</html>

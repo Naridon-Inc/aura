@@ -79,7 +79,11 @@ describe("chat dock", () => {
 
   test("usage, controls and composer render inside the dock", () => {
     const src = read("components/agent/normalized/NormalizedTranscript.tsx");
-    const dock = src.slice(src.indexOf('<div className="chat-dock">'));
+    // The opening tag carries a ref now (the band publishes its own height
+    // when it floats over the terminal), so anchor on the class, not on `>`.
+    const at = src.indexOf('<div className="chat-dock"');
+    expect(at).toBeGreaterThan(0);
+    const dock = src.slice(at);
     expect(dock.indexOf("SessionUsageStrip")).toBeGreaterThan(0);
     expect(dock.indexOf("{controls}")).toBeGreaterThan(0);
     expect(dock.indexOf("{composer}")).toBeGreaterThan(0);
@@ -90,33 +94,24 @@ describe("chat dock", () => {
     const src = read("components/agent/normalized/NormalizedTranscript.tsx");
     expect(src).toContain("docked={questionDock != null}");
     const composer = read("components/agent/chat/AgentChatComposer.tsx");
-    expect(composer).toContain('"composer composer-docked"');
+    expect(composer).toContain('className={docked ? "composer-docked" : ""}');
   });
 });
 
 describe("one model picker", () => {
   const pickers = [
-    "components/manager/BrainPicker.tsx",
-    "components/agent/chat/AgentChatComposer.tsx",
-    "components/chat/ModelCatalogPopover.tsx",
+    "components/chat/model/ManagerModelPicker.tsx",
+    "components/chat/model/AgentModelPickers.tsx",
   ];
 
-  test("every picker mounts the shared shell", () => {
-    expect(read("components/manager/BrainPicker.tsx")).toContain("<ModelCatalogPopover");
-    expect(read("components/agent/chat/AgentChatComposer.tsx")).toContain("<ModelCatalogPopover");
-    expect(read("components/agent/StreamChatView.tsx")).toContain("<AgentTurnModelPicker");
-    expect(read("components/chat/ModelCatalogPopover.tsx")).toMatch(
-      /export function AgentTurnModelPicker[\s\S]*<ModelCatalogPopover/,
-    );
-  });
-
-  test("the shell carries the class the stylesheet actually styles", () => {
-    const shell = read("components/chat/ModelCatalogPopover.tsx");
-    expect(shell).toContain('className="chat-menu-surface chat-catalog-popover"');
-    expect(chatComposer).toContain(".chat-catalog-popover.chat-menu-surface");
+  test("every picker mounts the shared ModelPicker", () => {
     for (const file of pickers) {
-      expect(read(file)).not.toContain("composer-catalog-popover");
+      expect(read(file)).toMatch(/import \{[^}]*\bModelPicker\b[^}]*\} from "\.\.\/\.\.\/ui\/model-picker"/);
+      expect(read(file)).toMatch(/<ModelPicker\b/);
     }
+    expect(read("components/manager/ManagerComposer.tsx")).toContain("<ManagerModelPicker");
+    expect(read("components/agent/chat/AgentChatComposer.tsx")).toContain("<AgentCliModelPicker");
+    expect(read("components/agent/StreamChatView.tsx")).toContain("<AgentTurnModelPicker");
   });
 
   test("no picker keeps favorites to itself", () => {
@@ -124,18 +119,19 @@ describe("one model picker", () => {
       const src = read(file);
       expect(src).not.toMatch(/useState<string\[\]>\(\[\]\)/);
       expect(src).not.toContain('"aura.manager.modelFavorites"');
+      expect(src).toContain("useModelFavorites()");
     }
   });
 
   test("the agent chat names its agent, not its id", () => {
-    const shell = read("components/chat/ModelCatalogPopover.tsx");
-    expect(shell).toMatch(/label:\s*agentName\(agentId\)/);
-    expect(read("components/agent/chat/AgentChatComposer.tsx")).toContain(
-      "agentCatalogBrain(agentId)",
-    );
+    expect(read("components/chat/model/catalogHooks.ts")).toMatch(/label:\s*agentName\(agentId\)/);
+    expect(read("components/chat/model/AgentModelPickers.tsx")).toContain("agentCatalogBrain(agentId)");
   });
 
   test("the free-text-only picker is gone", () => {
-    expect(read("components/chat/ChatComposer.tsx")).not.toContain("export function ChatModelPicker");
+    for (const file of pickers) {
+      expect(read(file)).not.toContain("export function ChatModelPicker");
+    }
   });
 });
+

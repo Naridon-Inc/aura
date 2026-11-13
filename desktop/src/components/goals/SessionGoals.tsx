@@ -11,7 +11,10 @@
 // updates the same verdict instead of piling duplicates.
 
 import { useEffect, useRef, useState } from "react";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
+import { TraceItem, TraceLine, TraceSection } from "../ui/trace-report";
+import "./goals.css";
 import type { IntentRow } from "../../lib/api";
 import { GOALS_V2 } from "../../lib/featureFlags";
 import { splitIntent } from "../workpanes/IntentProse";
@@ -121,7 +124,7 @@ export function SessionGoals({
 
   const probes =
     goals.length > 0 ? (
-      <div className="mb-2.5 flex flex-col gap-2">
+      <div className="ui-goal-list">
         {goals.map((g) => (
           <GoalProbe
             key={g.id}
@@ -132,7 +135,7 @@ export function SessionGoals({
             agentId={row.agent_id}
             currentRunKey={runKey}
             atCommit={atCommit}
-            // This surface is reviewing one particular run's code, so each card
+            // This surface is reviewing one particular run's code, so each goal
             // can say whether its verdict was actually measured against it.
             // `row.timestamp` is in seconds; the staleness rule works in millis.
             underReview={{
@@ -151,45 +154,38 @@ export function SessionGoals({
   // demoted to "track another goal".
   if (GOALS_V2) {
     return (
-      <section>
-        <h2 className="section-label mb-2.5">
-          What you asked here
-        </h2>
-
+      <TraceSection title="What you asked here">
         {hasAsk && !askTracked ? (
-          <div className="mb-2.5 rounded-md border border-line-soft bg-bg-1/40 px-3 py-2.5">
-            <div className="text-base leading-snug text-text-1">{runLabel}</div>
-            <div className="mt-2 flex items-center gap-2">
-              {hasChanges ? (
-                // This run changed code → Aura proves the ask on its own; the
-                // verdict replaces this line as soon as the check finishes. No
-                // button to remember to click.
-                <span className="text-xs text-text-3">
-                  Checking whether the AI built this…
-                </span>
-              ) : (
+          <TraceItem
+            // Not checked yet: the open circle.
+            tone="muted"
+            title={runLabel}
+            actions={
+              hasChanges ? null : (
                 <>
-                  <Button
-                    type="button"
-                    variant="subtle"
-                    size="sm"
-                    onClick={() => void addForRun(runLabel)}
-                    disabled={busy}
-                  >
+                  <Button type="button" variant="secondary" size="sm" onClick={() => void addForRun(runLabel)} disabled={busy}>
                     {busy ? "Checking…" : "Check whether the AI built this"}
                   </Button>
-                  <span className="text-xs text-text-4">
-                    proves it against the code, right now
-                  </span>
+                  <span className="ui-goal-meta">proves it against the code, right now</span>
                 </>
-              )}
-            </div>
-          </div>
+              )
+            }
+          >
+            {hasChanges ? (
+              // This run changed code → Aura proves the ask on its own; the
+              // verdict replaces this line as soon as the check finishes. No
+              // button to remember to click.
+              <p className="ui-trace-line ui-goal-wait" role="status">
+                <AsciiSpinner />
+                Checking whether the AI built this…
+              </p>
+            ) : null}
+          </TraceItem>
         ) : !hasAsk && goals.length === 0 ? (
-          <p className="mb-2.5 text-base leading-relaxed text-text-4">
-            This run didn&apos;t record what it was asked to do. Add what it was meant to
-            achieve and Aura checks whether the AI actually built it.
-          </p>
+          <TraceLine>
+            This run didn&apos;t record what it was asked to do. Add what it was meant to achieve and
+            Aura checks whether the AI actually built it.
+          </TraceLine>
         ) : null}
 
         {probes}
@@ -201,26 +197,17 @@ export function SessionGoals({
           busy={busy}
           onSubmit={(t) => void addForRun(t)}
         />
-      </section>
+      </TraceSection>
     );
   }
 
   return (
-    <section>
-      <div className="mb-2.5 flex items-baseline justify-between gap-3">
-        <h2 className="section-label">Goals</h2>
-        {goals.length > 0 ? (
-          <span className="text-xs text-text-4">
-            {goals.length} aligned with this run
-          </span>
-        ) : null}
-      </div>
-
+    <TraceSection title="Goals" count={goals.length > 0 ? `${goals.length} aligned with this run` : undefined}>
       {probes ?? (
-        <p className="mb-2.5 text-base leading-relaxed text-text-4">
-          No goals on this run yet. Describe what it was meant to do and Aura checks,
-          right now, whether the AI actually built it.
-        </p>
+        <TraceLine>
+          No goals on this run yet. Describe what it was meant to do and Aura checks, right now,
+          whether the AI actually built it.
+        </TraceLine>
       )}
 
       <GoalComposer
@@ -230,6 +217,6 @@ export function SessionGoals({
         busy={busy}
         onSubmit={(t) => void addForRun(t)}
       />
-    </section>
+    </TraceSection>
   );
 }

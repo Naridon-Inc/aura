@@ -145,7 +145,7 @@ export function RunRow({ repoRoot, runPtyId, active, open, onRun, onFocus, onSto
     ? source
       ? `${command}, from ${source}`
       : command
-    : "No dev command found in this project. Click to set one.";
+    : "No dev command found in this repository. Click to set one.";
 
   return (
     <div

@@ -1,33 +1,72 @@
-// Send a note to another copy of this project.
+// Send a note to another workspace of this project.
 //
-// The thing that makes several parallel copies survivable is that they can
-// talk. Aura already carries messages between them in the shared record, and
-// an agent reads its inbox when it starts work — so a line typed here reaches
-// whoever picks that copy up next, human or agent, without anyone leaving the
-// app or knowing where the mailbox lives.
+// The thing that makes several parallel workspaces survivable is that they
+// can talk. Aura already carries messages between them in the shared record,
+// and an agent reads its inbox when it starts work — so a line typed here
+// reaches whoever picks that workspace up next, human or agent, without
+// anyone leaving the app or knowing where the mailbox lives.
 //
 // The one honest thing this has to do is say when nobody is listening. A note
-// to a copy with no session running is stored, not delivered, and pretending
-// otherwise is how people end up believing they warned someone.
+// to a workspace with no session running is stored, not delivered, and
+// pretending otherwise is how people end up believing they warned someone.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Dialog } from "../../Dialog";
+import { Alert, AlertDescription } from "../../ui/alert";
 import { Button } from "../../ui/button";
+import { Kbd } from "../../ui/kbd";
+import { Textarea } from "../../ui/textarea";
 import { api } from "../../../lib/api";
+import "../../ui/ask-aura.css";
+import "../../ui/note-to-workspace.css";
 
 type Props = {
   repoRoot: string;
-  /** Folder name of the copy being written to. */
+  /** The checkout's name as the record knows it: `main` for the main
+   *  checkout, otherwise its folder name. */
   toWorktree: string;
+  /** What the person calls it, when that differs from the folder name. */
+  label?: string;
   onClose: () => void;
 };
 
-export function SayToWorktreeDialog({ repoRoot, toWorktree, onClose }: Props) {
+export type NoteToWorkspaceRequest = Omit<Props, "onClose">;
+
+const NOTE_EVENT = "aura:note-to-workspace";
+
+/** Open the note dialog from anywhere (a row menu, a command). */
+export function requestNoteToWorkspace(request: NoteToWorkspaceRequest): void {
+  window.dispatchEvent(new CustomEvent(NOTE_EVENT, { detail: request }));
+}
+
+/** Mounted once; shows the dialog for whichever row asked last. */
+export function NoteToWorkspaceHost() {
+  const [request, setRequest] = useState<NoteToWorkspaceRequest | null>(null);
+  useEffect(() => {
+    const open = (e: Event) => {
+      const detail = (e as CustomEvent<NoteToWorkspaceRequest>).detail;
+      if (detail?.repoRoot && detail.toWorktree) setRequest(detail);
+    };
+    window.addEventListener(NOTE_EVENT, open);
+    return () => window.removeEventListener(NOTE_EVENT, open);
+  }, []);
+  if (!request) return null;
+  return (
+    <SayToWorktreeDialog
+      key={`${request.repoRoot}\u0000${request.toWorktree}`}
+      {...request}
+      onClose={() => setRequest(null)}
+    />
+  );
+}
+
+export function SayToWorktreeDialog({ repoRoot, toWorktree, label, onClose }: Props) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState<{ recipients: number } | null>(null);
+  const name = label || toWorktree;
 
   async function send() {
     const message = text.trim();
@@ -48,19 +87,20 @@ export function SayToWorktreeDialog({ repoRoot, toWorktree, onClose }: Props) {
     <Dialog
       open
       width={460}
-      title={sent ? "Note sent" : `Note to ${toWorktree}`}
+      title={sent ? "Note sent" : `Note to ${name}`}
       onClose={onClose}
       footer={
         sent ? (
-          <Button size="xs" onClick={onClose}>
-            Done
-          </Button>
+          <Button onClick={onClose}>Done</Button>
         ) : (
           <>
-            <Button variant="ghost" size="xs" onClick={onClose}>
+            <p className="ui-ask-aura-keys">
+              <Kbd>⌘↵</Kbd> to send
+            </p>
+            <Button variant="outline" onClick={onClose}>
               Cancel
             </Button>
-            <Button size="xs" onClick={send} disabled={!text.trim() || sending}>
+            <Button onClick={send} disabled={!text.trim() || sending}>
               {sending ? "Sending…" : "Send"}
             </Button>
           </>
@@ -68,14 +108,14 @@ export function SayToWorktreeDialog({ repoRoot, toWorktree, onClose }: Props) {
       }
     >
       {sent ? (
-        <p className="text-base leading-relaxed" style={{ color: "var(--color-text-2)" }}>
+        <p className="ui-note-to-workspace-sent">
           {sent.recipients > 0
-            ? `Delivered to ${sent.recipients} ${sent.recipients === 1 ? "session" : "sessions"} working in ${toWorktree}.`
-            : `Nothing is running in ${toWorktree} right now, so the note is waiting there. Whoever opens it next, you or an agent, reads it before starting.`}
+            ? `Delivered to ${sent.recipients} ${sent.recipients === 1 ? "session" : "sessions"} working in ${name}.`
+            : `Nothing is running in ${name} right now, so the note is waiting there. Whoever opens it next, you or an agent, reads it before starting.`}
         </p>
       ) : (
-        <>
-          <textarea
+        <div className="ui-note-to-workspace">
+          <Textarea
             autoFocus
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -86,23 +126,18 @@ export function SayToWorktreeDialog({ repoRoot, toWorktree, onClose }: Props) {
               }
             }}
             rows={4}
+            aria-label={`Note to ${name}`}
             placeholder="e.g. I'm rewriting the login check in here. Leave it alone for now"
-            className="w-full resize-none rounded-sm px-2.5 py-2 text-base leading-relaxed outline-none"
-            style={{
-              background: "var(--color-bg-2)",
-              color: "var(--color-text-1)",
-              border: "1px solid var(--color-line-soft)",
-            }}
           />
-          <p className="mt-2 text-xs" style={{ color: "var(--color-text-4)" }}>
-            Goes to whoever works in that copy next. ⌘↵ to send.
+          <p className="ui-note-to-workspace-help">
+            Goes to whoever works in that workspace next, you or an agent.
           </p>
           {error && (
-            <p className="mt-2 text-sm" style={{ color: "var(--color-red)" }}>
-              {error}
-            </p>
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
           )}
-        </>
+        </div>
       )}
     </Dialog>
   );

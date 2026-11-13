@@ -30,6 +30,8 @@ import { proveRunGoals } from "../../lib/proveRun";
 import { useGoalsForRun } from "../../lib/goalStore";
 import { useRunEvidence } from "../../lib/useRunEvidence";
 import { Button } from "../ui/button";
+import { TraceMark } from "../ui/trace-list";
+import { TraceItem, TraceItems, TraceLine, TraceSection } from "../ui/trace-report";
 
 export function SessionOutstanding({
   repoRoot,
@@ -110,14 +112,11 @@ export function SessionOutstanding({
   }
 
   return (
-    <section>
-      <div className="mb-2.5">
-        <h2 className="section-label">Still open</h2>
-      </div>
-      <p className="mb-2.5 text-base leading-snug text-text-3">{outstandingLead(items)}</p>
+    <TraceSection title="Still open" count={items.length || undefined}>
+      <TraceLine>{outstandingLead(items)}</TraceLine>
 
       {items.length > 0 ? (
-        <div className="overflow-hidden rounded-lg border border-line-soft bg-bg-1">
+        <TraceItems>
           {items.map((item) => (
             <OutstandingRow
               key={item.id}
@@ -146,9 +145,9 @@ export function SessionOutstanding({
               onOpenMatch={onOpenMatch}
             />
           ))}
-        </div>
+        </TraceItems>
       ) : null}
-    </section>
+    </TraceSection>
   );
 }
 
@@ -160,12 +159,6 @@ function targetKind(item: OutstandingItem): ActionKind | null {
   if (item.action.kind === "open_match") return "match";
   return null;
 }
-
-const TONE_COLOR = {
-  bad: "var(--color-red)",
-  warn: "var(--color-amber)",
-  muted: "var(--color-text-4)",
-} as const;
 
 function OutstandingRow({
   item,
@@ -196,70 +189,48 @@ function OutstandingRow({
   onCheckGoal: () => void;
   onOpenMatch?: () => void;
 }) {
+  const target = targetKind(item);
   return (
-    <div className="border-b border-line-soft px-3.5 py-3 last:border-b-0">
-      <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
-        <span
-          aria-hidden
-          className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full"
-          style={{ background: TONE_COLOR[item.tone] }}
-        />
-        <span className="min-w-0 flex-1 text-base leading-snug text-text-1">{item.title}</span>
-        {item.awaitingHuman ? (
-          <span
-            className="shrink-0 rounded px-1.5 py-px text-2xs"
-            style={{
-              color: "var(--color-amber)",
-              background: "color-mix(in oklab, var(--color-amber) 12%, transparent)",
-            }}
+    <TraceItem
+      tone={item.tone}
+      title={item.title}
+      marks={
+        item.awaitingHuman ? (
+          <TraceMark
+            tone="warn"
             title="Aura can't do this one — it needs a person, and it stays here until someone says what happened."
           >
             Needs a person
-          </span>
-        ) : null}
-      </div>
-
-      <p className="mt-1 pl-3.5 text-base leading-snug text-text-3">{item.need}</p>
-
-      {failure ? (
-        <p className="mt-1 pl-3.5 text-sm leading-snug" style={{ color: "var(--color-red)" }}>
-          {failure}
-        </p>
-      ) : null}
-
-      <div className="mt-1.5 flex flex-wrap items-center gap-2 pl-3.5">
-        {item.action.kind === "run_checks" ? (
-          <Button type="button" variant="subtle" size="xs" onClick={onRunChecks} disabled={busy}>
+          </TraceMark>
+        ) : null
+      }
+      actions={
+        item.action.kind === "run_checks" ? (
+          <Button type="button" variant="secondary" size="sm" onClick={onRunChecks} disabled={busy}>
             {busy ? "Running…" : "Run them now"}
           </Button>
-        ) : null}
-
-        {item.action.kind === "check_goal" ? (
-          <Button type="button" variant="subtle" size="xs" onClick={onCheckGoal} disabled={busy}>
+        ) : item.action.kind === "check_goal" ? (
+          <Button type="button" variant="secondary" size="sm" onClick={onCheckGoal} disabled={busy}>
             {busy ? "Checking…" : "Check it again"}
           </Button>
-        ) : null}
-
-        {item.action.kind === "open_match" && onOpenMatch ? (
-          <Button type="button" variant="subtle" size="xs" onClick={onOpenMatch}>
+        ) : item.action.kind === "open_match" && onOpenMatch ? (
+          <Button type="button" variant="secondary" size="sm" onClick={onOpenMatch}>
             Compare them
           </Button>
-        ) : null}
-
-        {item.action.kind === "record_manual" && manual ? (
+        ) : item.action.kind === "record_manual" && manual ? (
           <ManualOutcomeControl repoRoot={repoRoot} check={manual} revision={revision} />
-        ) : null}
-      </div>
-
-      {/* What the button above would touch. The checks run on the checkout,
+        ) : null
+      }
+    >
+      <TraceLine>{item.need}</TraceLine>
+      {failure ? <TraceLine tone="danger">{failure}</TraceLine> : null}
+      {/* What the button below would touch. The checks run on the checkout,
           which beside a run from another branch is a different thing from what
           this page is about — and the reader has to be told that before they
           press it, not after they've read the result as this run's. */}
-      {targetKind(item) ? (
-        <p className="mt-1 pl-3.5 text-sm leading-snug text-text-4">
-          {actionTarget(targetKind(item)!, scope, working)}
-        </p>
+      {target ? (
+        <TraceLine tone="note">{actionTarget(targetKind(item)!, scope, working)}</TraceLine>
       ) : null}
-    </div>
+    </TraceItem>
   );
 }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { forkPrLocalBranch, prStartPoint, sanitizeBranchName } from "./prStartPoint";
+import { forkPrLocalBranch, prStartPoint, prStartSelection, sanitizeBranchName } from "./prStartPoint";
 
 describe("prStartPoint", () => {
   test("a same-repo PR starts from its head branch as before", () => {
@@ -35,5 +35,37 @@ describe("sanitizeBranchName", () => {
     expect(sanitizeBranchName("  weird name~^:?*[ ")).toBe("weird-name");
     expect(sanitizeBranchName("a..b//c/")).toBe("a.b/c");
     expect(sanitizeBranchName("-lead")).toBe("lead");
+  });
+});
+
+describe("prStartSelection", () => {
+  const pr = {
+    number: 41,
+    title: "Retry with backoff",
+    head_ref: "feat/login",
+    base_ref: "main",
+    is_cross_repository: false,
+  };
+
+  test("a pull request from this repo continues on its own branch", () => {
+    expect(prStartSelection(pr)).toEqual({
+      kind: "pr",
+      ref: "feat/login",
+      label: "#41 Retry with backoff",
+      continues: { branch: "feat/login", base: "main" },
+    });
+  });
+
+  test("a fork's pull request starts a branch of its own, as before", () => {
+    const picked = prStartSelection({ ...pr, is_cross_repository: true });
+    expect(picked.ref).toBe("pull/41/head:pr-41-feat/login");
+    expect(picked.continues).toBeUndefined();
+  });
+
+  test("a missing base still continues, merging into nothing named", () => {
+    expect(prStartSelection({ ...pr, base_ref: "" }).continues).toEqual({
+      branch: "feat/login",
+      base: null,
+    });
   });
 });

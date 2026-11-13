@@ -18,12 +18,7 @@
 // is part of what it matches on, so "terminal" finds terminals whatever they
 // have been renamed to. One filter, not two that disagree.
 
-import {
-  useEffect,
-  useMemo,
-  useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-} from "react";
+import { useEffect, useMemo, useState } from "react";
 import { SearchX } from "lucide-react";
 import { placeForNewWork, writeAmbientSid } from "../../lib/ambientSession";
 import { TRACE_V2 } from "../../lib/featureFlags";
@@ -54,9 +49,10 @@ import { usePinned } from "../../lib/agentPrefs";
 import { isManagedWorktreeRoot } from "../../lib/hudProjects";
 import { AgentIcon } from "../agent/AgentIcon";
 import { TabMark, projectName } from "../TabMark";
+import { cn } from "../../lib/utils";
+import { Command, CommandInput, CommandList } from "../ui/command";
 import { EmptyState } from "../ui/state";
-import { Input } from "../ui/input";
-import { Segment } from "../ui/segment";
+import { Tabs, TabsList, TabsTrigger } from "../ui/tab-panels";
 import { titleCaseName } from "@shared/textCase";
 import { toast } from "../../lib/toast";
 import { EarlierBody, useEarlierSessions } from "./earlierSessions";
@@ -66,7 +62,6 @@ import {
   LaneSpawnMenu,
   LocalModelsSpawnMenu,
   ProjectSpawnTarget,
-  SearchGlyph,
 } from "./starters";
 
 /** Which half of the panel is showing. Two questions, not two filters: one is
@@ -110,7 +105,6 @@ export function Launcher({
 }) {
   const store = useEditorStore();
   const [filter, setFilter] = useState("");
-  const [cursor, setCursor] = useState(0);
   const [mode, setMode] = useState<Mode>("now");
   const live = useLiveAgentSessions();
   const { agents, loading: agentsLoading } = useAgents();
@@ -184,7 +178,7 @@ export function Launcher({
    *  binaries, so handing it `aura-manager` asked for an executable that was
    *  never meant to exist and the click came back as
    *  "unknown agent: aura-manager". `App` has had the right branch all along
-   *  behind the sidebar row and ⌘⌥A; this door didn't — and it is the first
+   *  behind the sidebar row; this door didn't — and it is the first
    *  tile in the list, on the surface you LAND on, which in a fresh worktree
    *  is the only thing on screen.
    *
@@ -527,176 +521,143 @@ export function Launcher({
     () => earlier.rows.filter(match),
     [earlier.rows, q],
   );
-  // One cursor over whatever the panel is currently showing — Enter must pick
-  // the row the reader can see, never one on the side they switched away from.
+  // Whatever the panel is currently showing, for telling "your search found
+  // none of it" apart from "there is nothing here".
   const flat = useMemo(
     () =>
       showing === "earlier" ? shownEarlier : [...shownStarters, ...shownOpen],
     [showing, shownEarlier, shownStarters, shownOpen],
   );
 
-  // A search box that autofocuses and then ignores the keyboard is a control
-  // that looks finished and isn't: you could type to narrow the list and then
-  // had to reach for the mouse to choose from it.
-  useEffect(() => {
-    setCursor(0);
-  }, [q, showing]);
-  const active = flat[Math.min(cursor, Math.max(flat.length - 1, 0))];
-  function onKeyDown(e: ReactKeyboardEvent) {
-    if (flat.length === 0) return;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setCursor((c) => (c + 1) % flat.length);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setCursor((c) => (c - 1 + flat.length) % flat.length);
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      active?.onPick();
-    }
-  }
-
   return (
-    <div className={`flex flex-col min-h-0 ${className ?? ""}`}>
-      <div
-        className={`flex items-center gap-2 border-b border-line-soft flex-shrink-0 ${
-          variant === "compact" ? "px-2 py-1.5" : "px-2 py-2"
-        }`}
-      >
-        <Input
+    <div className={cn("ui-launcher-panel", className)} data-variant={variant}>
+      {/* The shared command list: it owns the cursor, ↑↓ and Enter, so a
+          search box that autofocuses also lets you choose from what it found
+          without reaching for the mouse. The rows are ranked here, not by the
+          list — every row's kind is part of what it matches on. */}
+      <Command shouldFilter={false} loop className="ui-launcher-command">
+        <CommandInput
           autoFocus={autoFocus}
           value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          onKeyDown={onKeyDown}
-          // The glyph says "search"; the placeholder is then free to say what
-          // is searchable instead of spending its width on the word. Compact
-          // gets the short one — the long sentence truncates in a pane.
-          prefix={<SearchGlyph />}
+          onValueChange={setFilter}
+          // Compact gets the short placeholder — the long sentence truncates
+          // in a pane.
           placeholder={
-            variant === "compact"
-              ? "Search or start…"
-              : "Anything running, in any project…"
+            variant === "compact" ? "Search or start…" : "Anything running, in any repository…"
           }
-          size="small"
-          className="flex-1 min-w-0 text-sm"
+          trailing={
+            // Its own keys: Enter in these menus picks a project or a place,
+            // never the row under the list's cursor.
+            <span className="ui-launcher-targets" onKeyDown={(e) => e.stopPropagation()}>
+              {hasOtherProjects && (
+                <ProjectSpawnTarget
+                  projects={projects}
+                  value={spawnRoot}
+                  currentRepoRoot={currentRepoRoot}
+                  onChange={setSpawnRoot}
+                />
+              )}
+              {/* Always, and with the same rows as the New-workspace dialog.
+                  Where a person has no box and the project has no cloud it
+                  reads "This laptop" and opens onto that one row — a true
+                  answer, not a disabled one. */}
+              <WherePicker places={places} />
+            </span>
+          }
         />
-        {hasOtherProjects && (
-          <ProjectSpawnTarget
-            projects={projects}
-            value={spawnRoot}
-            currentRepoRoot={currentRepoRoot}
-            onChange={setSpawnRoot}
-          />
-        )}
-        {/* Always, and with the same rows as the New-workspace dialog. Where a
-            person has no box and the project has no cloud it reads "This
-            laptop" and opens onto that one row — a true answer, not a disabled
-            one — and the question is in the same place, worded the same way,
-            on the day they connect their first box. */}
-        <WherePicker places={places} />
-      </div>
 
-      {/* Two questions, one panel. "What can I start" is answered by everything
-          on this machine right now; "what was I doing here" is answered by this
-          repo's own transcripts, and the reader arriving at an empty surface
-          has as often come for the second. A segmented switch is the app's one
-          way of saying these are two views of one thing rather than two
-          places. Only where a reader LANDS — see `variant`. */}
-      {canSwitch && (
-        <div className="flex-shrink-0 px-2 py-1.5 border-b border-line-soft">
-          <Segment<Mode>
-            size="xs"
-            stretch
-            ariaLabel="What this pane is showing"
+        {/* Two questions, one panel. "What can I start" is answered by
+            everything on this machine right now; "what was I doing here" is
+            answered by this repo's own transcripts, and the reader arriving at
+            an empty surface has as often come for the second. Only where a
+            reader LANDS — see `variant`. */}
+        {canSwitch && (
+          <Tabs
+            className="ui-launcher-switch"
             value={showing}
-            onChange={setMode}
-            options={[
-              { value: "now", label: "Start something new" },
-              {
-                value: "earlier",
-                label:
-                  earlier.total > 0
-                    ? `Earlier sessions · ${earlier.total}`
-                    : "Earlier sessions",
-              },
-            ]}
-          />
-        </div>
-      )}
+            onValueChange={(v) => setMode(v as Mode)}
+            // ←→ move between the two halves; Enter here must not pick the
+            // row under the list's cursor.
+            onKeyDown={(e) => e.stopPropagation()}
+          >
+            <TabsList aria-label="What this pane is showing">
+              <TabsTrigger value="now">Start something new</TabsTrigger>
+              <TabsTrigger value="earlier">
+                {earlier.total > 0 ? `Earlier sessions · ${earlier.total}` : "Earlier sessions"}
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+        )}
 
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        {flat.length === 0 && q ? (
-          <EmptyState
-            icon={SearchX}
-            title="Nothing matches"
-            body={
-              showing === "earlier"
-                ? earlier.total > 0
-                  ? `${earlier.total} earlier session${earlier.total === 1 ? "" : "s"} here. None of them match “${filter.trim()}”.`
-                  : "Nothing has run here yet to match."
-                : openRows.length > 0
-                  ? `${openRows.length} thing${openRows.length === 1 ? "" : "s"} could go in this pane. None of them match “${filter.trim()}”.`
-                  : "Nothing is open to match yet."
-            }
-            action={{ label: "Clear search", onClick: () => setFilter("") }}
-            size="sm"
-          />
-        ) : showing === "earlier" ? (
-          <EarlierBody
-            rows={shownEarlier}
-            state={earlier}
-            activeKey={active?.key}
-            onOpenHistory={
-              TRACE_V2 ? () => store.openSessions("sessions") : undefined
-            }
-          />
-        ) : (
-          <>
-            <Group label="Start something new">
-              {shownStarters.map((r) => (
-                <PickRow key={r.key} row={r} active={active?.key === r.key} />
-              ))}
-              {noAgents && (
-                <p className="px-3 pt-1 pb-1 text-xs leading-relaxed text-text-4">
-                  No coding agents found on this machine. Install one and it
-                  shows up here. Settings ▸ Coding agents lists the ones Aura
-                  looks for.
+        <CommandList className="ui-launcher-list">
+          {flat.length === 0 && q ? (
+            <EmptyState
+              icon={SearchX}
+              title="Nothing matches"
+              body={
+                showing === "earlier"
+                  ? earlier.total > 0
+                    ? `${earlier.total} earlier session${earlier.total === 1 ? "" : "s"} here. None of them match “${filter.trim()}”.`
+                    : "Nothing has run here yet to match."
+                  : openRows.length > 0
+                    ? `${openRows.length} thing${openRows.length === 1 ? "" : "s"} could go in this pane. None of them match “${filter.trim()}”.`
+                    : "Nothing is open to match yet."
+              }
+              action={{ label: "Clear search", onClick: () => setFilter("") }}
+              size="sm"
+            />
+          ) : showing === "earlier" ? (
+            <EarlierBody
+              rows={shownEarlier}
+              state={earlier}
+              onOpenHistory={TRACE_V2 ? () => store.openSessions("sessions") : undefined}
+            />
+          ) : (
+            <>
+              <Group label="Start something new">
+                {shownStarters.map((r) => (
+                  <PickRow key={r.key} row={r} />
+                ))}
+                {noAgents && (
+                  <p className="ui-launcher-note">
+                    No coding agents found on this machine. Install one and it
+                    shows up here. Settings ▸ Coding agents lists the ones Aura
+                    looks for.
+                  </p>
+                )}
+              </Group>
+              {shownOpen.length > 0 ? (
+                <Group label="Or move something here">
+                  {shownOpen.map((r) => (
+                    <PickRow key={r.key} row={r} />
+                  ))}
+                </Group>
+              ) : (
+                // Genuinely nothing else on the machine — a different fact
+                // from "your search found nothing", and it earns a different
+                // sentence. It points UP, into this same list, because
+                // starting something is a row above rather than an errand
+                // elsewhere in the app.
+                <p className="ui-launcher-note">
+                  Nothing else is open or running. Anywhere. Start something
+                  from the rows above.
                 </p>
               )}
-            </Group>
-            {shownOpen.length > 0 ? (
-              <Group label="Or move something here">
-                {shownOpen.map((r) => (
-                  <PickRow key={r.key} row={r} active={active?.key === r.key} />
-                ))}
-              </Group>
-            ) : (
-              // Genuinely nothing else on the machine — a different fact from
-              // "your search found nothing", and it earns a different sentence.
-              // It points UP, into this same list, because starting something
-              // is a row above rather than an errand elsewhere in the app.
-              <p className="px-3 pb-3 pt-2 text-xs leading-relaxed text-text-4">
-                Nothing else is open or running. Anywhere. Start something from
-                the rows above.
-              </p>
-            )}
-          </>
-        )}
-      </div>
+            </>
+          )}
+        </CommandList>
+      </Command>
 
-      {/* The three starts that need a choice made first — which endpoint, which
-          login, which lane. They sit below the scrolling list, not in it: each
-          one asks a second question instead of doing the thing, and a row that
-          opens a menu behaves differently from every row above it.
-          Outside the scroll area is also the only place their flyouts can open
-          without being clipped by it. Not in `compact` — see `variant`.
+      {/* The three starts that need a choice made first — which endpoint,
+          which login, which lane. Below the list, not in it, and outside the
+          command list's keys: each asks a second question instead of doing
+          the thing. Not in `compact` — see `variant`.
 
           All three are this laptop's own machinery — an HTTP endpoint here, a
           login container here, a worktree here — so they step aside entirely
-          when the work is going to a box, rather than sitting there offering
-          something that place cannot do. */}
+          when the work is going to a box. */}
       {variant === "panel" && !onABox && (
-        <div className="flex items-center gap-1.5 flex-wrap px-3 py-2 border-t border-line-soft flex-shrink-0">
+        <div className="ui-launcher-foot">
           <LocalModelsSpawnMenu onSpawn={startLocalModel} />
           <IsolatedSpawnMenu onSpawn={startAgent} />
           <LaneSpawnMenu repoRoot={spawnRoot} onFocusLane={placeLaneAgent} />

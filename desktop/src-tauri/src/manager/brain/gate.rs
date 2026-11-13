@@ -131,6 +131,21 @@ pub trait HostPolicy: Send + Sync {
     /// content — an in-place edit tool, say — and the content-dependent
     /// capabilities are skipped rather than guessed at.
     async fn before_write(&self, path: &Path, proposed: Option<&str>) -> Result<(), String>;
+
+    /// Whether [`Self::elicit`] really puts the question to somebody. Told
+    /// to the agent at the handshake, so an agent never sends a form to a
+    /// host that would only decline it.
+    fn can_elicit(&self) -> bool {
+        false
+    }
+
+    /// The agent asked the person for something (`elicitation/create`): a
+    /// form to fill, or a link to open. Returns the ACP result — accepted
+    /// with the answers, declined, or cancelled — or the error for a
+    /// request that cannot be shown. A host with nobody to ask declines.
+    async fn elicit(&self, _params: &Value) -> Result<Value, aura_acp::RpcError> {
+        Ok(aura_acp::elicit::decline())
+    }
 }
 
 /// Builds the policy for one agent, given its provider id.

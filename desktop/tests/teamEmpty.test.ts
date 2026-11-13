@@ -114,7 +114,7 @@ describe("what the empty feed is allowed to say", () => {
   });
 
   test("each state names its own cause in words a non-engineer reads", () => {
-    expect(teamEmptyCopy("no_project").body).toContain("Open a project");
+    expect(teamEmptyCopy("no_project").body).toContain("Open a repository");
     expect(teamEmptyCopy("signed_out").body).toContain(
       "stays on this computer only",
     );

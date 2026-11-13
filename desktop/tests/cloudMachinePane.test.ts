@@ -30,6 +30,8 @@ import { describe, expect, test } from "bun:test";
 import { readSrc } from "./support/code";
 
 const PANE = "components/commons/crew/CloudRunnerPanel.tsx";
+// The job composer is its own part of the page; the brief lives there.
+const COMPOSER = "components/commons/crew/CloudSendJob.tsx";
 
 describe("the sign-in gate offers the sign-in", () => {
   test("it raises the welcome surface the rest of the app uses", async () => {
@@ -92,7 +94,7 @@ describe("a board it never read is not a board with nothing on it", () => {
 
 describe("the example brief is text, because a placeholder can't be", () => {
   test("the placeholder is short enough for one clipped line", async () => {
-    const src = await readSrc(PANE);
+    const src = await readSrc(COMPOSER);
     expect(src).toContain('placeholder="What should it work on?"');
     expect(src).not.toContain(
       'placeholder="What should it work on? e.g. “Add rate-limit',
@@ -100,7 +102,7 @@ describe("the example brief is text, because a placeholder can't be", () => {
   });
 
   test("and the example renders as real, wrapping copy", async () => {
-    const src = await readSrc(PANE);
+    const src = await readSrc(COMPOSER);
     expect(src).toContain("{!text && (");
     expect(src).toContain("e.g. “Add rate-limit retries to the billing client");
   });

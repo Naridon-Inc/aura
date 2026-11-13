@@ -1,0 +1,27 @@
+/* The label over an agent's turn in a shared chat: its icon, its name and
+   the word "Agent", in the same line height as a person's. */
+.ui-shared-agent {
+  margin: 16px 0;
+}
+.ui-shared-agent > header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ui-muted-fg);
+}
+.ui-shared-agent > header > strong {
+  font-weight: 500;
+  color: var(--ui-fg);
+}
+.ui-shared-agent > header > span {
+  padding: 0 5px;
+  border: 1px solid var(--ui-border);
+  border-radius: 4px;
+  font-size: 10px;
+}
+.ui-shared-agent > header > time {
+  font-size: 10px;
+}

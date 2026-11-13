@@ -1,0 +1,23 @@
+/* Create or edit a pull request: the source branch, then plain stacked
+   fields (title, description, target branch), the draft tick and a help
+   line, spaced like the other redesigned forms. */
+.ui-pr-form {
+  display: flex;
+  flex-direction: column;
+}
+.ui-pr-form > * + * {
+  margin-top: 16px;
+}
+.ui-pr-form-source {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-pr-form-help {
+  margin-bottom: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}

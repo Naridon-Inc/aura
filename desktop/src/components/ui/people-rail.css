@@ -1,0 +1,168 @@
+/* The people rail at the top of the sidebar. It is the workspace list's own
+   parts: a sidebar group titled People, one repository-style section per
+   person with their face in the folder's slot, and a workspace-height sidebar
+   item per session, so the rail and the list under it read as one column.
+   Added here are only what the list does not draw: a session's second line
+   (who is in it, what just happened), its live dot, the faces and their
+   presence marks, and the rail's own notes. Library tokens only. */
+
+.ui-people-rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.ui-people-rail > .ui-sidebar-group-header small {
+  opacity: 0.7;
+}
+.ui-people-rail .ui-navigation-title > span.ui-activity-loader {
+  flex: none;
+}
+
+/* ── faces ─────────────────────────────────────────────────────────── */
+
+.ui-rail-avatar {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  line-height: 0;
+}
+.ui-rail-avatar-dim[data-away] {
+  opacity: 0.45;
+}
+.ui-rail-presence {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  line-height: 0;
+}
+/* A person's face takes the folder's slot in their section header. */
+.ui-rail-person-face {
+  display: inline-grid;
+  place-items: center;
+  font-style: normal;
+  line-height: 0;
+}
+
+/* ── a session ─────────────────────────────────────────────────────── */
+
+.ui-rail-session .ui-sidebar-item-target {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 1px;
+  height: auto;
+  min-height: 36px;
+}
+.ui-rail-session-line,
+.ui-rail-session-detail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-rail-session-trailing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* The second line starts under the title, past the status slot. */
+.ui-rail-session-detail {
+  padding-left: 22px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 16px;
+}
+.ui-rail-session > .ui-sidebar-item-actions {
+  top: 6px;
+}
+.ui-rail-join[data-failed] {
+  color: var(--ui-red);
+}
+
+.ui-rail-live-dot {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--ui-faint);
+}
+.ui-rail-live-dot[data-live] {
+  background: var(--ui-green);
+  box-shadow: none;
+}
+
+/* Who is in it: discs that overlap, then +N. */
+.ui-rail-pips {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+}
+.ui-rail-pip {
+  position: relative;
+  display: inline-flex;
+  border-radius: 999px;
+}
+.ui-rail-pips > small {
+  margin-left: 4px;
+  color: var(--ui-faint);
+  font: 11px var(--font-mono);
+  line-height: 1;
+}
+
+/* What just happened in it. */
+.ui-rail-activity {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.ui-rail-activity > svg {
+  flex: none;
+  color: var(--ui-yellow);
+}
+.ui-rail-activity-dot {
+  flex: none;
+  width: 3px;
+  height: 3px;
+  margin-inline: 3px;
+  border-radius: 50%;
+  background: var(--ui-faint);
+}
+.ui-rail-activity > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-rail-activity[data-kind="impact"] .ui-rail-activity-who {
+  color: var(--ui-yellow);
+}
+.ui-rail-activity code {
+  color: var(--ui-link);
+  font-family: var(--font-mono);
+}
+.ui-rail-activity-said {
+  color: var(--ui-faint);
+}
+
+/* ── the rail's notes ──────────────────────────────────────────────── */
+
+.ui-people-rail .ui-state-row {
+  padding: 6px 8px;
+}
+.ui-people-rail .ui-error-note {
+  margin: 4px 0 8px;
+}
+.ui-people-rail .ui-error-note .ui-button {
+  margin-top: 6px;
+}
+.ui-people-rail .ui-navigation-empty > p {
+  margin: 0;
+}
+.ui-people-rail .ui-navigation-empty > p + p {
+  margin-top: 2px;
+  color: var(--ui-faint);
+}

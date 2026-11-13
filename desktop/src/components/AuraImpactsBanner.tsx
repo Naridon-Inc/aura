@@ -1,5 +1,5 @@
-// Global top strip rendered above WorkSurface when the workspace has
-// unresolved cross-branch impact alerts. The Impacts sidebar tab is
+// Sidebar notice shown while the workspace has unresolved cross-branch
+// impact alerts. The Impacts sidebar tab is
 // the proper review surface; this banner is the *don't miss it* signal
 // so the user can't accidentally code over a function someone broke
 // on another branch.
@@ -16,6 +16,7 @@ import { type ImpactAlert } from "../lib/api";
 import { useDocumentVisibility } from "../lib/useDocumentVisibility";
 import { relativeAgeFromSecs } from "../lib/relativeTime";
 import { fetchImpacts } from "../lib/ambientCache";
+import { ShellNotice, type ShellNoticeTone } from "./ui/shell-notice";
 
 type Props = {
   repoRoot: string;
@@ -67,59 +68,23 @@ export function AuraImpactsBanner({
   const top = ranked[0];
   const more = ranked.length - 1;
 
-  const tone = severityTone(top.severity);
-
   return (
-    <div
-      className="flex items-center gap-2 h-7 px-3 text-sm border-b"
-      style={{ background: tone.bg, borderColor: tone.border, color: tone.text }}
-      role="status"
+    <ShellNotice
+      tone={severityTone(top.severity)}
+      action={{
+        label: more > 0 ? `Open all ${ranked.length}` : "Open",
+        onClick: onOpenImpacts,
+        title:
+          more > 0
+            ? `${more} more unresolved alert${more === 1 ? "" : "s"}`
+            : undefined,
+      }}
+      onDismiss={() => onDismiss(top.id)}
+      dismissLabel="Dismiss this alert for the session"
     >
-      <span
-        className="inline-block w-1.5 h-1.5 rounded-full"
-        style={{ background: tone.dot }}
-      />
-      <span className="font-mono truncate">
-        {top.function || "(unknown)"}
-      </span>
-      <span className="text-text-3 truncate flex-1">
-        · {top.message || "impact alert"}
-      </span>
-      {more > 0 && (
-        <button
-          type="button"
-          onClick={onOpenImpacts}
-          className="text-xs px-1.5 py-0.5 rounded font-medium"
-          style={{
-            background: "color-mix(in oklab, currentColor 14%, transparent)",
-          }}
-          title={`${more} more unresolved alert${more === 1 ? "" : "s"}`}
-        >
-          +{more} more
-        </button>
-      )}
-      <span className="text-text-4 tabular-nums text-xs">
-        {relAge(top.timestamp)}
-      </span>
-      <button
-        type="button"
-        onClick={onOpenImpacts}
-        className="text-xs px-2 py-0.5 rounded font-medium hover:opacity-80"
-        style={{
-          background: "color-mix(in oklab, currentColor 14%, transparent)",
-        }}
-      >
-        open
-      </button>
-      <button
-        type="button"
-        onClick={() => onDismiss(top.id)}
-        className="text-sm w-5 h-5 rounded hover:bg-state-hover transition-colors text-text-4 hover:text-text-1"
-        title="Dismiss this alert for the session"
-      >
-        ✕
-      </button>
-    </div>
+      <strong>{top.function || "(unknown)"}</strong> ·{" "}
+      {top.message || "impact alert"} · {relAge(top.timestamp)}
+    </ShellNotice>
   );
 }
 
@@ -138,37 +103,13 @@ function severityRank(s: string): number {
   }
 }
 
-function severityTone(s: string): {
-  bg: string;
-  border: string;
-  text: string;
-  dot: string;
-} {
-  if (s === "critical" || s === "high") {
-    return {
-      bg: "color-mix(in oklab, var(--color-red) 12%, transparent)",
-      border: "color-mix(in oklab, var(--color-red) 35%, transparent)",
-      text: "var(--color-red)",
-      dot: "var(--color-red)",
-    };
-  }
-  if (s === "medium") {
-    return {
-      bg: "color-mix(in oklab, var(--color-amber) 12%, transparent)",
-      border: "color-mix(in oklab, var(--color-amber) 35%, transparent)",
-      text: "var(--color-amber)",
-      dot: "var(--color-amber)",
-    };
-  }
-  // Low severity is the "worth knowing, nothing to do" case, so it stays on
-  // the neutral ramp — colour is reserved for the two tiers that actually
-  // want the user to stop and look.
-  return {
-    bg: "var(--color-bg-1)",
-    border: "var(--color-line-soft)",
-    text: "var(--color-text-2)",
-    dot: "var(--color-text-4)",
-  };
+// Low severity is the "worth knowing, nothing to do" case, so it stays
+// unmarked — a mark is reserved for the two tiers that actually want the user
+// to stop and look.
+function severityTone(s: string): ShellNoticeTone {
+  if (s === "critical" || s === "high") return "error";
+  if (s === "medium") return "attention";
+  return "neutral";
 }
 
 function relAge(unixSecs: number): string {

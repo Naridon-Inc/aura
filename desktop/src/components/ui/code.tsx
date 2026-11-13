@@ -1,22 +1,23 @@
-import * as React from "react";
-import { Code as MedusaCode } from "@medusajs/ui";
-
+import { forwardRef, type HTMLAttributes } from "react";
 import { cn } from "../../lib/utils";
-
-export interface CodeProps extends React.ComponentPropsWithoutRef<typeof MedusaCode> {
+export interface CodeProps extends HTMLAttributes<HTMLElement> {
   size?: "sm" | "default";
   nowrap?: boolean;
 }
-
-export const Code = React.forwardRef<HTMLElement, CodeProps>(
+export const codeVariants = ({ className }: { className?: string } = {}) =>
+  cn("ui-code", className);
+export const Code = forwardRef<HTMLElement, CodeProps>(
   ({ className, size = "default", nowrap = true, ...props }, ref) => (
-    <MedusaCode
+    <code
       ref={ref}
-      className={cn(size === "sm" && "txt-compact-xsmall", nowrap && "whitespace-nowrap", className)}
+      className={cn(
+        codeVariants(),
+        size === "sm" && "ui-code-small",
+        nowrap && "whitespace-nowrap",
+        className,
+      )}
       {...props}
     />
   ),
 );
 Code.displayName = "Code";
-
-export const codeVariants = ({ className }: { className?: string } = {}) => cn(className);

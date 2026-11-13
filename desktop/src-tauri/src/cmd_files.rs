@@ -424,11 +424,18 @@ pub async fn git_diff(
     repo_root: String,
     file: String,
     since_base: Option<bool>,
+    ignore_whitespace: Option<bool>,
 ) -> Result<String, String> {
     crate::blocking::run(move || {
-        let cwd = PathBuf::from(&repo_root);
-        let p = PathBuf::from(&file);
-        let rel = p.strip_prefix(&cwd).unwrap_or(&p);
+        // A file inside a nested repository is read from that repository;
+        // the project's own git can't see it.
+        let (cwd, rel) = crate::nested_repos::owning_repo(Path::new(&repo_root), Path::new(&file));
+        let rel = rel.as_path();
+        let repo_root = cwd.to_string_lossy().into_owned();
+        // `-w`: the patch with whitespace-only changes left out, for a diff
+        // view showing changes with whitespace hidden. A change that is only
+        // whitespace comes back empty.
+        let ws: &[&str] = if ignore_whitespace == Some(true) { &["-w"] } else { &[] };
 
         // "All work since this worktree forked": this file's patch from the
         // fork-base commit to the working tree (committed + uncommitted), via
@@ -437,7 +444,9 @@ pub async fn git_diff(
         if since_base == Some(true) {
             if let Some(base) = crate::cmd_aura_fs::worktree_fork_base(&repo_root) {
                 let out = std::process::Command::new("git")
-                    .args(["diff", &base, "--no-color", "--"])
+                    .args(["diff", &base, "--no-color"])
+                    .args(ws)
+                    .arg("--")
                     .arg(rel)
                     .current_dir(&cwd)
                     .output()
@@ -454,7 +463,9 @@ pub async fn git_diff(
         }
 
         let out = std::process::Command::new("git")
-            .args(["diff", "HEAD", "--no-color", "--"])
+            .args(["diff", "HEAD", "--no-color"])
+            .args(ws)
+            .arg("--")
             .arg(rel)
             .current_dir(&cwd)
             .output()
@@ -733,7 +744,7 @@ pub struct WorktreeEntry {
     pub locked: bool,
     /// Unix seconds of the worktree HEAD's commit (committer date). Lets the
     /// Workspaces center view group copies by recency ("Today / This week /
-    /// Earlier") the way Conductor does — real time, never invented. `None`
+    /// Earlier") on real time, never invented. `None`
     /// when the branch tip can't be resolved (e.g. a detached or empty head).
     pub head_committed_at: Option<i64>,
     /// Unix seconds of when this copy APPEARED — the birth time of the admin
@@ -1031,6 +1042,10 @@ mod worktree_tests {
 /// otherwise it tracks HEAD detached. Used by the Manager loop to
 /// isolate each task in its own working dir so multiple subagents on
 /// adjacent files don't collide. Errors return their stderr verbatim.
+///
+/// Nested repositories inside the project get a copy of their own at the
+/// same place, the same way a workspace's copy does; one that can't be
+/// copied is logged and never fails the add.
 #[tauri::command]
 pub async fn git_worktree_add(
     repo_root: String,
@@ -1053,6 +1068,13 @@ pub async fn git_worktree_add(
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).to_string());
         }
+        // Git read a relative path against the project root; so do we.
+        let target = cwd.join(&worktree_path);
+        for o in crate::nested_repos::create_nested_worktrees(&cwd, &target, branch.as_deref()) {
+            if let Some(detail) = o.detail.filter(|_| o.state != crate::nested_repos::NestedCopyState::Created) {
+                eprintln!("[worktree] nested repository {} not copied: {detail}", o.rel_path);
+            }
+        }
         Ok(worktree_path)
     })
     .await
@@ -1074,6 +1096,9 @@ pub async fn git_worktree_remove(
             args.push("--force".to_string());
         }
         args.push(worktree_path.clone());
+        // Read before the folder goes: afterwards nothing on disk says which
+        // nested repositories had a copy in it.
+        let nested = crate::nested_repos::nested_worktree_commons(&cwd.join(&worktree_path));
         let out = std::process::Command::new("git")
             .args(&args)
             .current_dir(&cwd)
@@ -1082,6 +1107,7 @@ pub async fn git_worktree_remove(
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).to_string());
         }
+        crate::nested_repos::prune_nested(&nested);
         Ok(())
     })
     .await
@@ -1302,9 +1328,10 @@ pub async fn git_merge_branch(
 #[tauri::command]
 pub async fn git_show_head(repo_root: String, file: String) -> String {
     crate::blocking::run(move || {
-        let cwd = PathBuf::from(&repo_root);
-        let p = PathBuf::from(&file);
-        let rel = p.strip_prefix(&cwd).unwrap_or(&p);
+        // A file inside a nested repository is read from that repository;
+        // the project's own git can't see it.
+        let (cwd, rel) = crate::nested_repos::owning_repo(Path::new(&repo_root), Path::new(&file));
+        let rel = rel.as_path();
         let rel_str = rel.to_string_lossy();
         let spec = format!("HEAD:{}", rel_str);
         let Ok(out) = std::process::Command::new("git")
@@ -1343,9 +1370,10 @@ pub async fn git_blame_lines(
     file: String,
 ) -> Vec<BlameLine> {
     crate::blocking::run(move || {
-        let cwd = PathBuf::from(&repo_root);
-        let p = PathBuf::from(&file);
-        let rel = p.strip_prefix(&cwd).unwrap_or(&p);
+        // A file inside a nested repository is read from that repository;
+        // the project's own git can't see it.
+        let (cwd, rel) = crate::nested_repos::owning_repo(Path::new(&repo_root), Path::new(&file));
+        let rel = rel.as_path();
         let Ok(out) = std::process::Command::new("git")
             .args(["blame", "--line-porcelain", "--", &rel.to_string_lossy()])
             .current_dir(&cwd)
@@ -1446,7 +1474,7 @@ pub async fn git_last_commit_age(repo_root: String) -> i64 {
 #[tauri::command]
 pub async fn git_stage(repo_root: String, paths: Vec<String>) -> Result<String, String> {
     crate::blocking::run(move || {
-        git_simple(&repo_root, "add", &paths)
+        per_owner(&repo_root, &paths, |root, group| git_simple(root, "add", group))
     })
     .await
 }
@@ -1456,15 +1484,16 @@ pub async fn git_stage(repo_root: String, paths: Vec<String>) -> Result<String, 
 #[tauri::command]
 pub async fn git_unstage(repo_root: String, paths: Vec<String>) -> Result<String, String> {
     crate::blocking::run(move || {
-        let cwd = PathBuf::from(&repo_root);
-        let mut args = vec!["reset".to_string(), "HEAD".to_string(), "--".to_string()];
-        args.extend(paths);
-        let out = std::process::Command::new("git")
-            .args(&args)
-            .current_dir(&cwd)
-            .output()
-            .map_err(|e| e.to_string())?;
-        git_output_result(&out)
+        per_owner(&repo_root, &paths, |root, group| {
+            let mut args = vec!["reset".to_string(), "HEAD".to_string(), "--".to_string()];
+            args.extend(group.iter().cloned());
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(root)
+                .output()
+                .map_err(|e| e.to_string())?;
+            git_output_result(&out)
+        })
     })
     .await
 }
@@ -1483,8 +1512,12 @@ pub async fn git_commit(repo_root: String, message: String) -> Result<String, St
         // the intent. Best-effort: any IO failure is swallowed; the hook
         // will still abort with its existing message if it can't find the
         // marker.
-        let aura_dir = cwd.join(".aura");
-        if std::fs::create_dir_all(&aura_dir).is_ok() {
+        //
+        // A nested repository is a history of its own: Aura makes no
+        // `.aura/` folder in it, and puts none into its commits unless its
+        // history already has one (`nested_repos::aura_dir`).
+        crate::nested_repos::unstage_aura_in_nested(&cwd);
+        if let Some(aura_dir) = crate::nested_repos::commit_marker_dir(&cwd) {
             let _ = std::fs::write(aura_dir.join(".intent_logged"), "1");
             let log_path = aura_dir.join("intent_log.jsonl");
             let now = std::time::SystemTime::now()
@@ -1907,15 +1940,16 @@ fn current_branch(cwd: &Path) -> Option<String> {
 #[tauri::command]
 pub async fn git_discard(repo_root: String, paths: Vec<String>) -> Result<String, String> {
     crate::blocking::run(move || {
-        let cwd = PathBuf::from(&repo_root);
-        let mut args = vec!["checkout".to_string(), "--".to_string()];
-        args.extend(paths);
-        let out = std::process::Command::new("git")
-            .args(&args)
-            .current_dir(&cwd)
-            .output()
-            .map_err(|e| e.to_string())?;
-        git_output_result(&out)
+        per_owner(&repo_root, &paths, |root, group| {
+            let mut args = vec!["checkout".to_string(), "--".to_string()];
+            args.extend(group.iter().cloned());
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(root)
+                .output()
+                .map_err(|e| e.to_string())?;
+            git_output_result(&out)
+        })
     })
     .await
 }
@@ -2154,6 +2188,27 @@ pub async fn git_status_v2(repo_root: String) -> Vec<StatusEntry> {
     .await
 }
 
+/// Run a path-taking git command once per repository that owns some of
+/// `paths`: the project for its own files, a nested repository for files
+/// inside it. Outputs are joined; the first failure stops and is returned.
+fn per_owner(
+    repo_root: &str,
+    paths: &[String],
+    run: impl Fn(&str, &[String]) -> Result<String, String>,
+) -> Result<String, String> {
+    if paths.is_empty() {
+        return run(repo_root, paths);
+    }
+    let mut outs = Vec::new();
+    for (owner, group) in crate::nested_repos::group_by_owner(repo_root, paths) {
+        let out = run(&owner, &group)?;
+        if !out.is_empty() {
+            outs.push(out);
+        }
+    }
+    Ok(outs.join("\n"))
+}
+
 fn git_simple(repo_root: &str, sub: &str, paths: &[String]) -> Result<String, String> {
     let cwd = PathBuf::from(repo_root);
     let mut args = vec![sub.to_string()];
@@ -2238,4 +2293,45 @@ pub(crate) fn language_for(path: &Path) -> String {
         _ => "plaintext",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod git_diff_whitespace_tests {
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    #[tokio::test]
+    async fn ignoring_whitespace_passes_w() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let root = fs::canonicalize(td.path()).expect("canonical tempdir");
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "t@example.com"]);
+        git(&root, &["config", "user.name", "t"]);
+        fs::write(root.join("f.txt"), "a\nb\n  c\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "first"]);
+        let repo = root.to_string_lossy().into_owned();
+
+        // Only the indent moved: a patch normally, nothing with -w.
+        fs::write(root.join("f.txt"), "a\nb\n    c\n").unwrap();
+        let plain = git_diff(repo.clone(), "f.txt".into(), None, None).await.unwrap();
+        assert!(plain.contains("+    c"));
+        let hidden = git_diff(repo.clone(), "f.txt".into(), None, Some(true)).await.unwrap();
+        assert_eq!(hidden.trim(), "");
+
+        // A real change still shows, with the re-indented line as context.
+        fs::write(root.join("f.txt"), "a\nB\n    c\n").unwrap();
+        let mixed = git_diff(repo, "f.txt".into(), None, Some(true)).await.unwrap();
+        assert!(mixed.contains("+B"));
+        assert!(mixed.contains("\n     c"));
+        assert!(!mixed.contains("+    c"));
+    }
 }

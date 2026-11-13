@@ -21,34 +21,51 @@ type Props = {
   /** True when the active terminal currently has a text selection — gates
    *  Copy so it doesn't look actionable on an empty selection. */
   hasSelection: boolean;
+  /** False for a pane that cannot be typed into — a session joined read-only.
+   *  Clear and Select All are actions on the local grid and stay available;
+   *  Paste writes to the session, so it does not. */
+  canPaste?: boolean;
   onClear: () => void;
   onCopy: () => void;
   onPaste: () => void;
   onSelectAll: () => void;
   onKill: () => void;
+  /** What the last item is called. A local terminal's close ends the shell, so
+   *  it reads as destructive; closing the view of a session running on another
+   *  machine leaves it running, and must not. */
+  killLabel?: string;
+  killDestructive?: boolean;
   align?: "start" | "end";
+  /** Rows drawn first, above the selection rows. */
+  extra?: ReactNode;
 };
 
 export function TerminalOverflowMenu({
   trigger,
   hasSelection,
+  canPaste = true,
   onClear,
   onCopy,
   onPaste,
   onSelectAll,
   onKill,
+  killLabel = "Close Terminal",
+  killDestructive = true,
   align = "end",
+  extra,
 }: Props) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
       <DropdownMenuContent align={align} className="min-w-[14rem]">
+        {extra}
+        {extra && <DropdownMenuSeparator />}
         <DropdownMenuItem onSelect={onCopy} disabled={!hasSelection}>
           <Copy />
           Copy Selection
           <DropdownMenuShortcut>⌘C</DropdownMenuShortcut>
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={onPaste}>
+        <DropdownMenuItem onSelect={onPaste} disabled={!canPaste}>
           <ClipboardPaste />
           Paste
           <DropdownMenuShortcut>⌘V</DropdownMenuShortcut>
@@ -65,9 +82,12 @@ export function TerminalOverflowMenu({
           <DropdownMenuShortcut>⌘K</DropdownMenuShortcut>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={onKill} variant="destructive">
+        <DropdownMenuItem
+          onSelect={onKill}
+          variant={killDestructive ? "destructive" : "default"}
+        >
           <Trash2 />
-          Close Terminal
+          {killLabel}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

@@ -47,9 +47,12 @@
 //! itself — working perfectly, and leaving whatever it does out of every other
 //! way of getting a machine. [`sole_ssh`] is the test that fails when one does.
 
+pub mod chat_script;
+pub mod continue_branch;
 pub mod domain;
 pub mod managed_key;
 pub mod parse;
+pub mod restore_folder;
 pub mod script;
 mod sole_ssh;
 
@@ -308,17 +311,35 @@ fn spawn_ssh(
     feed_stdin: bool,
     kill_on_drop: bool,
 ) -> std::io::Result<tokio::process::Child> {
-    Command::new("ssh")
-        .args(args)
-        .stdin(if feed_stdin {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(kill_on_drop)
-        .spawn()
+    let mut cmd = ssh_command(args);
+    cmd.stdin(if feed_stdin {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(kill_on_drop)
+    .spawn()
+}
+
+/// The one place `ssh` is named as a program. Everything that reaches a box —
+/// a question, a streamed turn, a chat that is reattached — is this, with
+/// different stdio.
+fn ssh_command(args: Vec<String>) -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.args(args);
+    cmd
+}
+
+/// A streamed connection to a box, not yet started.
+///
+/// For a caller that owns the spawn itself — an agent protocol client that sets
+/// its own pipes and must be able to make a fresh one at a new offset each time
+/// a dropped link comes back. Same argv as [`stream`], so the same multiplexed
+/// connection and the same refusals; only who calls `spawn` differs.
+pub(crate) fn stream_command(m: &Machine, remote: &str) -> Command {
+    ssh_command(ssh_args(m, remote))
 }
 
 /// Ask ssh something and wait for everything it says.
@@ -663,6 +684,7 @@ mod tests {
     fn machine(host: &str, user: &str, key: &str) -> Machine {
         Machine {
             id: "ubuntu@h:/p".into(),
+            aliases: Vec::new(),
             name: "aura-runner".into(),
             host: host.into(),
             user: user.into(),
@@ -960,6 +982,7 @@ mod live {
                 title: Some("livetest shell".into()),
                 branch: None,
                 prompt: None,
+                run: None,
             },
         ))
         .expect("start");
@@ -997,6 +1020,7 @@ mod live {
                 title: Some("livetest worktree".into()),
                 branch: Some(branch.clone()),
                 prompt: None,
+                run: None,
             },
         ))
         .expect("start");
@@ -1039,6 +1063,7 @@ mod live {
                 title: Some("livetest durability".into()),
                 branch: None,
                 prompt: None,
+                run: None,
             },
         ))
         .expect("start");
@@ -1064,6 +1089,7 @@ mod live {
                 title: Some("livetest agent".into()),
                 branch: None,
                 prompt: None,
+                run: None,
             },
         ))
         .expect("start");

@@ -96,7 +96,10 @@ async function read(entry: Entry) {
 }
 
 function schedule(entry: Entry) {
-  if (entry.subs.size === 0) return;
+  // One chain per repo. A subscriber mounting while the chain is mid-read used
+  // to see no timer and start a second chain beside it, and nothing ever
+  // folded them back — each repo ended up polled twice or more.
+  if (entry.subs.size === 0 || entry.timer) return;
   entry.timer = setTimeout(() => {
     entry.timer = null;
     void read(entry).then(() => schedule(entry));

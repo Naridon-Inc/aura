@@ -2,41 +2,32 @@
 // `[workspace] open_in`.
 //
 // Global, not per-project: which tool you reach for is a fact about you, not
-// about a repo. It therefore sits ABOVE the "open a project first" gate in the
-// Copies pane, so it can be changed with no project loaded — the state someone
-// is most likely in the first time they go looking for it.
+// about a repo. It is shown on each repository's page beside the other
+// new-copy settings, and its description says it applies everywhere so
+// changing it on one project's page is not a surprise on the next.
 //
 // The agent entries are the CLIs actually installed on this machine, read from
 // `agents_list`. Offering Codex to someone who doesn't have it would be a
 // setting that silently does nothing, and the resolver would send them back to
 // "Just the code" anyway.
 
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
 
-import { api, type AgentDescriptor } from "../../lib/api";
+import type { AgentDescriptor } from "../../lib/api";
 import { setWorkspaceOpenIn, useWorkspacePrefs } from "../../lib/settingsStore";
 import { LANDING_CHAT, LANDING_CODE } from "../../lib/workspaceLanding";
-import { Row, Section, SelectField } from "./kit";
+import { Row, SelectField } from "./kit";
+import { useAgentsList } from "../../lib/agentsListCache";
 
 export function WorkspaceLandingRow() {
   const prefs = useWorkspacePrefs();
-  const [agents, setAgents] = useState<AgentDescriptor[]>([]);
-
-  useEffect(() => {
-    let alive = true;
-    api
-      .agentsList()
-      .then((list) => {
-        if (alive) setAgents(list.filter((a) => a.available));
-      })
-      .catch(() => {
-        // Enumeration failed — the two built-in choices still work, and the
-        // resolver already treats an un-listable agent as "Just the code".
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
+  // When the list can't be read, the two built-in choices still work, and the
+  // resolver already treats an un-listable agent as "Just the code".
+  const list = useAgentsList();
+  const agents = useMemo<AgentDescriptor[]>(
+    () => (list.data ?? []).filter((a) => a.available),
+    [list.data],
+  );
 
   // A stored agent that isn't installed right now would otherwise render as a
   // blank select — the control would look broken rather than overridden. Show
@@ -56,23 +47,20 @@ export function WorkspaceLandingRow() {
   ];
 
   return (
-    <Section title="New parallel copies">
-      <Row
-        label="When a copy opens"
-        description="A parallel copy is a second checkout of this project you can work in without disturbing the first. This is what Aura opens in it once it's ready."
-        hint={
-          missing
-            ? `${stored} isn't on this machine right now, so copies open in the code until it's back.`
-            : "Whatever you typed as the objective is carried into the chat or the agent you pick."
-        }
-      >
-        <SelectField
-          value={stored}
-          onChange={setWorkspaceOpenIn}
-          options={options}
-          widthClass="min-w-[200px]"
-        />
-      </Row>
-    </Section>
+    <Row
+      label="When a copy opens"
+      description="A parallel copy is a second checkout of this repository you can work in without disturbing the first. This is what Aura opens in it once it's ready, in every repository."
+      hint={
+        missing
+          ? `${stored} isn't on this machine right now, so copies open in the code until it's back.`
+          : "Whatever you typed as the objective is carried into the chat or the agent you pick."
+      }
+    >
+      <SelectField
+        value={stored}
+        onChange={setWorkspaceOpenIn}
+        options={options}
+      />
+    </Row>
   );
 }

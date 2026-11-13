@@ -1,14 +1,14 @@
-import { Button, Text } from "@medusajs/ui";
+import { useEffect, useState } from "react";
 
-import { cn } from "../../../lib/utils";
+import { Badge } from "../../ui/badge";
 import { Checkbox } from "../../ui/checkbox";
-import { Segment } from "../../ui/segment";
+import { Input } from "../../ui/input";
 import { Select, type SelectOption } from "../../ui/select";
-import { StatusChip, type ChipTone } from "../../ui/statusChip";
+import "../../ui/settings-blocks.css";
 
-// The right-hand side of a row: the things a setting is actually set with.
-// Thin wrappers over the app-wide primitives, sized for a settings row so
-// every pane's controls line up on the same right edge.
+// The right-hand side of a row: the things a setting is set with. Every
+// enumeration is a select, every number a number field, the way the rest
+// of the settings pages draw them.
 
 export function CheckboxLabel({
   checked,
@@ -20,31 +20,36 @@ export function CheckboxLabel({
   label: string;
 }) {
   return (
-    <label className="flex cursor-pointer items-center gap-2">
+    <label className="ui-settings-choice">
       <Checkbox checked={checked} onCheckedChange={(next) => onChange(next === true)} />
-      <Text size="small">{label}</Text>
+      <span>{label}</span>
     </label>
   );
 }
 
-export function SegControl<T extends string>({
+/** A choice between a few named values. */
+export function ChoiceSelect<T extends string>({
   value,
   options,
   onChange,
   disabled = false,
+  label,
 }: {
   value: T;
   options: { value: T; label: string }[];
   onChange: (v: T) => void;
   disabled?: boolean;
+  /** Spoken name of the control; the row title it sits in. */
+  label?: string;
 }) {
   return (
-    <Segment<T>
+    <Select
       value={value}
-      onChange={onChange}
+      onChange={(next) => onChange(next as T)}
       options={options}
-      size="sm"
       disabled={disabled}
+      align="end"
+      aria-label={label}
     />
   );
 }
@@ -55,14 +60,14 @@ export function SelectField({
   options,
   disabled,
   placeholder,
-  widthClass = "min-w-[168px]",
+  label,
 }: {
   value: string;
   onChange: (v: string) => void;
   options: SelectOption[];
   disabled?: boolean;
   placeholder?: string;
-  widthClass?: string;
+  label?: string;
 }) {
   return (
     <Select
@@ -72,11 +77,14 @@ export function SelectField({
       disabled={disabled}
       placeholder={placeholder}
       align="end"
-      className={cn("w-auto", widthClass)}
+      aria-label={label}
     />
   );
 }
 
+/** A bounded whole number. Typing is free; the value is clamped into range
+ *  when it is committed (blur or Enter), so a two-digit entry is never cut
+ *  short by its own first digit. */
 export function Stepper({
   value,
   onChange,
@@ -85,6 +93,7 @@ export function Stepper({
   step = 1,
   suffix,
   disabled = false,
+  label,
 }: {
   value: number;
   onChange: (v: number) => void;
@@ -92,30 +101,43 @@ export function Stepper({
   max: number;
   step?: number;
   suffix?: string;
-  /** Whole control is inert — the setting it drives can't take effect yet.
-   *  Distinct from the per-button min/max clamps, which are about the range. */
+  /** Whole control is inert — the setting it drives can't take effect yet. */
   disabled?: boolean;
+  label?: string;
 }) {
-  const dec = () => onChange(Math.max(min, value - step));
-  const inc = () => onChange(Math.min(max, value + step));
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+  const commit = () => {
+    const n = Number(draft);
+    if (!Number.isFinite(n) || draft.trim() === "") {
+      setDraft(String(value));
+      return;
+    }
+    const next = Math.min(max, Math.max(min, Math.round(n / step) * step));
+    setDraft(String(next));
+    if (next !== value) onChange(next);
+  };
   return (
-    <div
-      className={cn(
-        "inline-flex items-center overflow-hidden rounded-md border border-line-soft bg-bg-2",
-        disabled && "opacity-50",
-      )}
-    >
-      <Button type="button" variant="transparent" size="small" onClick={dec} disabled={disabled || value <= min} aria-label="Decrease">
-        −
-      </Button>
-      <Text size="small" className="w-[52px] border-x border-line-soft py-1 text-center tabular-nums">
-        {value}
-        {suffix}
-      </Text>
-      <Button type="button" variant="transparent" size="small" onClick={inc} disabled={disabled || value >= max} aria-label="Increase">
-        +
-      </Button>
-    </div>
+    <Input
+      type="number"
+      className="ui-settings-number"
+      aria-label={label}
+      min={min}
+      max={max}
+      step={step}
+      value={draft}
+      disabled={disabled}
+      suffix={suffix}
+      onChange={(event) => {
+        setDraft(event.target.value);
+        const n = Number(event.target.value);
+        if (event.target.value !== "" && Number.isFinite(n) && n >= min && n <= max) onChange(n);
+      }}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") commit();
+      }}
+    />
   );
 }
 
@@ -126,6 +148,7 @@ export function StatusPill({
   tone: "muted" | "amber" | "red" | "green";
   text: string;
 }) {
-  const chipTone: ChipTone = tone === "muted" ? "neutral" : tone;
-  return <StatusChip tone={chipTone} dense>{text}</StatusChip>;
+  const variant =
+    tone === "green" ? "highlight" : tone === "red" ? "destructive" : tone === "amber" ? "tip" : "outline";
+  return <Badge variant={variant}>{text}</Badge>;
 }

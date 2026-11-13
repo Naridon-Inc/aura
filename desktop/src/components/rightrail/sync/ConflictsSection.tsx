@@ -1,13 +1,21 @@
 // "Conflicts" — open semantic conflicts from the M1 ConflictedNode store
 // (.aura/conflicts.jsonl): the same node edited two ways during a live
-// session. Each row carries quick "keep mine / keep theirs" resolutions
-// (the node already holds both bodies) plus click-through to the file for
-// a hand-merge. Resolving writes back through aura_conflicts_resolve.
+// session. Each row is the details panel's two-line row, like a radar zone:
+// who else changed it and what on the first line, the file under it, and
+// "keep mine / keep theirs" showing on hover (the node already holds both
+// bodies). Clicking the row opens the file for a hand-merge. Resolving
+// writes back through aura_conflicts_resolve.
 
 import { CategorySection } from "../CategorySection";
+import { ActorMark } from "../radar/ActorMark";
+import { nameLooksLikeAgent } from "../radar/radarFormat";
+import { Button } from "../../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip";
 import type { ConflictedNode } from "../../../lib/api";
 import { agoShort, baseName } from "./syncFormat";
+import "../../ui/details-pulls.css";
+import "../../ui/radar-rows.css";
+import "../../ui/sync-rows.css";
 
 type Props = {
   /** `null` while the conflict store hasn't been read. No Conflicts group
@@ -44,85 +52,63 @@ export function ConflictsSection({
     >
       {(conflicts ?? []).map((c) => {
         const busy = busyId === c.id;
+        const them = c.theirs_agent || "teammate";
         return (
-          <div
-            key={c.id}
-            className="group w-full flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-state-hover transition-colors min-w-0"
-          >
+          <div key={c.id} className="ui-sync-row">
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   type="button"
                   onClick={() => onOpenFile?.(c.file)}
-                  className="flex items-center gap-2 flex-1 min-w-0 text-left"
+                  className="ui-details-pull ui-radar-row"
                 >
-                  <span className="shrink-0 w-4 h-4 rounded-sm flex items-center justify-center text-2xs font-mono font-semibold bg-bg-1 text-red">
-                    !
-                  </span>
-                  <span className="flex-1 min-w-0 flex items-center gap-1.5">
-                    <span className="text-sm text-text-1 truncate">
+                  <div>
+                    <ActorMark
+                      actor={them}
+                      isAgent={nameLooksLikeAgent(them)}
+                      size={16}
+                    />
+                    <span className="ui-details-pull-title">
                       {c.identifier || baseName(c.file)}
                     </span>
-                    <span className="text-xs text-text-4 font-mono truncate shrink min-w-0">
-                      {baseName(c.file)}
-                    </span>
-                  </span>
+                    <span className="ui-radar-age">{agoShort(c.opened_at)}</span>
+                  </div>
+                  <div className="ui-details-pull-meta ui-radar-meta">
+                    <span>you &amp; {them} edited this</span>
+                    <span className="ui-details-pull-branch">{baseName(c.file)}</span>
+                  </div>
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="left" className="text-xs">
-                <div className="font-medium mb-0.5 truncate max-w-[260px]">
-                  {c.file}
-                </div>
-                <div className="text-text-3 leading-snug">
-                  you &amp; {c.theirs_agent || "teammate"} edited this ·{" "}
-                  {agoShort(c.opened_at)}
-                </div>
+              <TooltipContent side="left" className="ui-radar-tip">
+                <strong>{c.file}</strong>
+                <p className="ui-radar-tip-quiet">
+                  you &amp; {them} edited this · {agoShort(c.opened_at)}
+                </p>
               </TooltipContent>
             </Tooltip>
-            <div className="shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-              <ResolveBtn
-                label="Keep mine"
+            <span className="ui-sync-actions">
+              <Button
+                variant="ghost"
+                size="xs"
                 disabled={busy}
                 onClick={() => onResolve(c.id, "ours")}
-              />
-              <ResolveBtn
-                label="Keep theirs"
+                title="Keep your version and drop theirs"
+              >
+                Keep mine
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
                 disabled={busy}
                 onClick={() => onResolve(c.id, "theirs")}
-              />
-            </div>
+                title={`Take ${them}'s version and drop yours`}
+              >
+                Keep theirs
+              </Button>
+            </span>
           </div>
         );
       })}
     </CategorySection>
-  );
-}
-
-function ResolveBtn({
-  label,
-  disabled,
-  onClick,
-}: {
-  label: string;
-  disabled?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onClick();
-          }}
-          disabled={disabled}
-          className="px-1.5 h-5 rounded text-2xs text-text-3 hover:text-text-1 hover:bg-state-hover disabled:opacity-50 transition-colors whitespace-nowrap"
-        >
-          {label}
-        </button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom">{label}</TooltipContent>
-    </Tooltip>
   );
 }

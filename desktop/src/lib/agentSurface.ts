@@ -24,10 +24,16 @@ const EMPTY: AgentSurface = {
 
 /** Whether this brain is one that *hosts* an agent process — the only
  *  kind with a session surface to read. Every other brain is an API key
- *  and a model id, and asking it would build a client to be told nothing. */
+ *  and a model id, and asking it would build a client to be told nothing.
+ *  `place:` is an agent running on one of the org's machines, reached
+ *  through the workspace that holds it. */
 export function hostsLiveAgent(providerId: string | null | undefined): boolean {
   if (!providerId) return false;
-  return providerId === "pi" || providerId.startsWith("acp:");
+  return (
+    providerId === "pi" ||
+    providerId.startsWith("acp:") ||
+    providerId.startsWith("place:")
+  );
 }
 
 /** Display name for a live-agent provider id, for badging the commands it
@@ -38,6 +44,9 @@ export function liveAgentLabel(
   providerId: string | null | undefined,
 ): string | null {
   if (!hostsLiveAgent(providerId) || !providerId) return null;
+  // A machine chat's id names the workspace, not the agent; the label the
+  // workspace chose ("Claude on build-box") travels with the brain choice.
+  if (providerId.startsWith("place:")) return null;
   const stem = providerId.startsWith("acp:")
     ? providerId.slice("acp:".length)
     : providerId;

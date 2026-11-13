@@ -17,7 +17,9 @@
 //!               — the `[models."…"]` tables carry id + `display_name`.
 //!   - **Codex** `~/.codex/models_cache.json` — the CLI's own cached list.
 //!   - **Antigravity** `agy models` — a fast subcommand that prints one id
-//!               per line (the only one of the three that shells out).
+//!               per line.
+//!   - **Claude Code** the stream-json `initialize` reply — the same list
+//!               its own `/model` menu shows (see [`claude_code`]).
 //!
 //! The pure parsers (`parse_kimi_config` / `parse_codex_cache` /
 //! `parse_agy_models`) take text/bytes so they're unit-testable without a real
@@ -28,6 +30,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::cmd_models::ModelInfo;
+
+mod claude_code;
 
 /// One model a locally-installed CLI reports it can run. `label` is the CLI's
 /// own display name when it has one, else a humanized form of the id.
@@ -48,8 +52,9 @@ pub struct FamilyBrand {
 }
 
 /// Probe every installed CLI and return models keyed by the same vendor family
-/// the catalog uses (`kimi` / `openai` / `antigravity`). Absent/failed probes
-/// are simply omitted — the map only carries families we positively discovered.
+/// the catalog uses (`anthropic` / `kimi` / `openai` / `antigravity`).
+/// Absent/failed probes are simply omitted — the map only carries families we
+/// positively discovered.
 pub async fn discover_all() -> BTreeMap<String, Vec<DiscoveredModel>> {
     let mut out: BTreeMap<String, Vec<DiscoveredModel>> = BTreeMap::new();
     if let Some(v) = probe_kimi() {
@@ -58,7 +63,13 @@ pub async fn discover_all() -> BTreeMap<String, Vec<DiscoveredModel>> {
     if let Some(v) = probe_codex() {
         out.insert("openai".to_string(), v);
     }
-    if let Some(v) = probe_antigravity().await {
+    // The two subprocess probes are independent; run them side by side so
+    // the catalog refresh pays for the slower one, not both.
+    let (claude, agy) = tokio::join!(claude_code::probe(), probe_antigravity());
+    if let Some(v) = claude {
+        out.insert("anthropic".to_string(), v);
+    }
+    if let Some(v) = agy {
         out.insert("antigravity".to_string(), v);
     }
     for (family, models) in probe_acp_agents().await {
@@ -115,7 +126,7 @@ async fn probe_pi() -> Option<Vec<DiscoveredModel>> {
 /// asked directly — it publishes `configOptions` from `session/new`, which is
 /// the same list its own UI offers. Each agent gets a family of its own,
 /// named for its registry id (`opencode`), so the picker can show it as its
-/// own section the way Conductor does — and so a model shipped this morning
+/// own section — and so a model shipped this morning
 /// reaches the picker without anyone editing a table.
 ///
 /// Costs nothing: the probe never prompts, so no tokens are spent. See
@@ -431,10 +442,6 @@ fn humanize_agy_id(id: &str) -> String {
 /// hand-authored row for the same id lines up: `kimi-code/k3` → `kimi-k3`,
 /// `gemini-3.6-flash-high` → `agy-gemini-3-6-flash-high`.
 fn derive_key(family: &str, id: &str) -> String {
-    let prefix = match family {
-        "antigravity" => "agy",
-        other => other,
-    };
     let slug: String = id
         .rsplit('/')
         .next()
@@ -442,6 +449,13 @@ fn derive_key(family: &str, id: &str) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
         .collect();
+    let prefix = match family {
+        // The Claude rows are keyed by the model alone (`claude-fable-5-2` →
+        // `fable-5-2`), like the hand-written ones beside them.
+        "anthropic" => return slug.strip_prefix("claude-").unwrap_or(&slug).to_string(),
+        "antigravity" => "agy",
+        other => other,
+    };
     format!("{prefix}-{slug}")
 }
 
@@ -458,6 +472,7 @@ fn derive_key(family: &str, id: &str) -> String {
 ///     authoritative shape; discovery only *appends* ids it doesn't already
 ///     carry, never reordering or dropping a curated row — same contract as the
 ///     BYOK live-append.
+///   - **Claude Code-ordered** (`anthropic`): see [`merge_claude_code`].
 ///
 /// `existing` is the family's curated rows (already brand-stamped);
 /// `discovered` is what the probe found; `brand` supplies vendor marks for
@@ -471,6 +486,9 @@ pub fn merge_discovered(
     // An engine's family IS its published list — there is no curated
     // catalog behind it, so every row would otherwise wear a NEW pill and
     // the pill would mean nothing.
+    if family == "anthropic" {
+        return merge_claude_code(existing, discovered, brand);
+    }
     let agent_published = is_engine_published_family(family);
     let authoritative = agent_published || matches!(family, "kimi" | "antigravity");
     let mark_new = !agent_published;
@@ -500,6 +518,62 @@ pub fn merge_discovered(
         }
         out
     }
+}
+
+/// Fold Claude Code's own list into the Claude rows.
+///
+/// Claude Code's order leads: its models come first, in the order its own
+/// menu shows them. A model the catalog already knows keeps the catalog's
+/// rows — every row with that id, so a model's "1M" sibling travels with it —
+/// and a model the catalog has never heard of joins under Claude Code's
+/// label, flagged NEW. Then every catalog row Claude Code didn't mention
+/// follows in catalog order: the same family also serves the API-key brain,
+/// and discovery may only add, never take a row away.
+///
+/// An older Claude Code reports bare aliases (`opus`) with no resolved id;
+/// those are matched to a catalog row by label so one model isn't listed
+/// twice under two names.
+fn merge_claude_code(
+    existing: Vec<ModelInfo>,
+    discovered: Vec<DiscoveredModel>,
+    brand: &FamilyBrand,
+) -> Vec<ModelInfo> {
+    let mut used = vec![false; existing.len()];
+    let mut out = Vec::with_capacity(existing.len() + discovered.len());
+    for d in discovered {
+        let target = if existing.iter().any(|m| m.id == d.id) {
+            Some(d.id.clone())
+        } else if claude_code::is_alias(&d.id) {
+            existing
+                .iter()
+                .find(|m| m.long_context != Some(true) && m.label.eq_ignore_ascii_case(&d.label))
+                .map(|m| m.id.clone())
+        } else {
+            None
+        };
+        match target {
+            Some(id) => {
+                for (i, row) in existing.iter().enumerate() {
+                    if !used[i] && row.id == id {
+                        used[i] = true;
+                        out.push(row.clone());
+                    }
+                }
+            }
+            None => {
+                if out.iter().all(|m| m.id != d.id) {
+                    out.push(row_for("anthropic", d, brand, true));
+                }
+            }
+        }
+    }
+    out.extend(
+        existing
+            .into_iter()
+            .zip(used)
+            .filter_map(|(row, was_used)| (!was_used).then_some(row)),
+    );
+    out
 }
 
 /// Is this family an engine's own section (`opencode`, `pi`, …) — one where
@@ -802,6 +876,94 @@ display_name = "K3"
         assert_eq!(ids, vec!["gpt-5.6-sol", "gpt-5.4-mini"]);
         // Curated row untouched (label preserved, not overwritten by "dup").
         assert_eq!(merged[0].label, "GPT-5.6 Sol");
+    }
+
+    fn claude_row(key: &str, id: &str, label: &str, long: bool) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            label: label.to_string(),
+            created: None,
+            key: Some(key.to_string()),
+            vendor: Some("Anthropic".to_string()),
+            brand: Some("claude".to_string()),
+            brand_name: Some("Claude".to_string()),
+            long_context: long.then_some(true),
+            is_new: None,
+        }
+    }
+
+    fn claude_brand() -> FamilyBrand {
+        FamilyBrand {
+            vendor: Some("Anthropic".to_string()),
+            brand: Some("claude".to_string()),
+            brand_name: Some("Claude".to_string()),
+        }
+    }
+
+    fn found(id: &str, label: &str) -> DiscoveredModel {
+        DiscoveredModel {
+            id: id.to_string(),
+            label: label.to_string(),
+        }
+    }
+
+    #[test]
+    fn claude_code_orders_the_claude_rows_and_adds_what_the_catalog_lacks() {
+        let curated = vec![
+            claude_row("fable-5-1", "claude-fable-5-1", "Fable 5.1", false),
+            claude_row("opus-5-5", "claude-opus-5-5", "Opus 5.5", false),
+            claude_row("opus-4-8-1m", "claude-opus-4-8", "Opus 4.8 1M", true),
+            claude_row("opus-4-8", "claude-opus-4-8", "Opus 4.8", false),
+            claude_row("sonnet-4-6", "claude-sonnet-4-6", "Sonnet 4.6", false),
+        ];
+        let discovered = vec![
+            found("claude-opus-5-5", "Opus 5.5"),
+            found("claude-fable-5-2", "Fable 5.2"),
+            found("claude-fable-5-1", "Fable 5.1"),
+            found("claude-opus-4-8", "Opus 4.8"),
+        ];
+        let merged = merge_discovered("anthropic", curated, discovered, &claude_brand());
+        let keys: Vec<&str> = merged.iter().map(|m| m.key.as_deref().unwrap()).collect();
+        // Claude Code's order first, the 1M sibling travelling with its
+        // model, and the row Claude Code didn't mention kept at the end.
+        assert_eq!(
+            keys,
+            vec!["opus-5-5", "fable-5-2", "fable-5-1", "opus-4-8-1m", "opus-4-8", "sonnet-4-6"]
+        );
+        // The model the catalog never had arrives NEW, under Claude Code's
+        // own label and the Claude mark.
+        let fresh = &merged[1];
+        assert_eq!(fresh.id, "claude-fable-5-2");
+        assert_eq!(fresh.label, "Fable 5.2");
+        assert_eq!(fresh.is_new, Some(true));
+        assert_eq!(fresh.brand.as_deref(), Some("claude"));
+        // Known rows keep the catalog's hand-written metadata.
+        assert_eq!(merged[0].is_new, None);
+        assert_eq!(merged[3].long_context, Some(true));
+    }
+
+    #[test]
+    fn a_bare_alias_lands_on_the_catalog_row_with_its_name() {
+        let curated = vec![
+            claude_row("sonnet-5-5", "claude-sonnet-5-5", "Sonnet 5.5", false),
+            claude_row("opus-5-5", "claude-opus-5-5", "Opus 5.5", false),
+        ];
+        let merged = merge_discovered(
+            "anthropic",
+            curated,
+            vec![found("opus", "Opus 5.5"), found("haiku", "Haiku 9")],
+            &claude_brand(),
+        );
+        let ids: Vec<&str> = merged.iter().map(|m| m.id.as_str()).collect();
+        // `opus` is the catalog's Opus 5.5, not a second row; an alias with
+        // no catalog twin still runs (`claude --model haiku`), so it stays.
+        assert_eq!(ids, vec!["claude-opus-5-5", "haiku", "claude-sonnet-5-5"]);
+    }
+
+    #[test]
+    fn a_new_claude_row_is_keyed_like_the_written_ones() {
+        assert_eq!(derive_key("anthropic", "claude-fable-5-2"), "fable-5-2");
+        assert_eq!(derive_key("antigravity", "gemini-3.6-flash"), "agy-gemini-3-6-flash");
     }
 
     /// The whole catalog path, against whatever is really installed here.

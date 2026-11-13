@@ -32,6 +32,7 @@ import { useMemo } from "react";
 import type { BlockEnvelope } from "../../../lib/api";
 import { visibleUserText } from "../../../lib/injectedContext";
 import { LinkifiedText } from "../normalized/TaskChip";
+import "../../ui/chat-markdown.css";
 
 /** One exchange: what was sent, and what came back. `output` is null while the
  *  agent has been asked something but hasn't written anything yet, which is how
@@ -158,17 +159,9 @@ function ExchangeRow({
             style={{ color: failed ? "var(--color-red)" : "var(--color-text-2)" }}
           >
             {body}
-            {/* The same pulsing block the brain's markdown body ends on while
+            {/* The library's caret, the one a markdown answer ends on while
                 it streams, so a live turn reads identically in both chats. */}
-            {live && (
-              <span
-                className="inline-block w-1.5 h-3 ml-0.5 align-text-bottom animate-pulse"
-                style={{
-                  background: "color-mix(in srgb, var(--color-text-2) 60%, transparent)",
-                }}
-                aria-hidden
-              />
-            )}
+            {live && <span className="ui-markdown-cursor" aria-hidden />}
           </pre>
         </div>
       )}

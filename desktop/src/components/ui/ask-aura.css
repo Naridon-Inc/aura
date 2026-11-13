@@ -1,0 +1,102 @@
+/* Ask Aura: a short chat about the repository. The question and answer are
+   the shared chat messages; the sources under an answer sit in the same
+   bordered list box as the other redesigned dialogs. */
+.ui-ask-aura-keys {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 auto 0 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-ask-aura-thread {
+  max-height: 56vh;
+  overflow-y: auto;
+}
+.ui-ask-aura-empty > strong {
+  color: var(--ui-fg);
+  font-size: 15px;
+  font-weight: 500;
+}
+.ui-ask-aura-empty > p {
+  max-width: 440px;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: center;
+}
+.ui-ask-aura-examples {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.ui-ask-aura-turn + .ui-ask-aura-turn {
+  margin-top: 8px;
+}
+.ui-ask-aura-turn > .ui-message:first-child {
+  margin-top: 0;
+}
+.ui-ask-aura-muted {
+  color: var(--ui-muted-fg);
+}
+.ui-ask-aura-label {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.ui-ask-aura-label + p {
+  margin-top: 4px;
+}
+.ui-ask-aura-sources > h4 {
+  margin: 0 0 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ui-ask-aura-sources > ul {
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+.ui-ask-aura-source {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ui-fg);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: left;
+}
+button.ui-ask-aura-source {
+  cursor: pointer;
+}
+button.ui-ask-aura-source:hover {
+  background: var(--ui-accent);
+}
+button.ui-ask-aura-source:focus-visible {
+  outline: 2px solid var(--ui-ring);
+  outline-offset: -2px;
+}
+.ui-ask-aura-source > small {
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+}
+.ui-ask-aura-source em {
+  font-style: normal;
+  color: var(--ui-fg);
+}
+.ui-ask-aura-input {
+  margin-top: 12px;
+  resize: none;
+}

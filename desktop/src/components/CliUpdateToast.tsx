@@ -2,7 +2,7 @@
 // desktop app: on launch it checks the on-PATH CLI version, and when the
 // shipped release bundles a newer matching binary, it installs that binary
 // in place (atomic, signature-preserving — see `cmd_doctor_cli.rs`) and
-// surfaces a small, auto-dismissing toast. Zero-click: the CLI is "tagged"
+// narrates it in the shared toast stack. Zero-click: the CLI is "tagged"
 // to whatever desktop version the user just updated to.
 //
 // Degrades to nothing in dev: the backend only bundles/installs from a
@@ -11,8 +11,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, type AuraCliCheck } from "../lib/api";
-import { AsciiSpinner } from "./ui/ascii-spinner";
-import { ToastActionButton, ToastCard, ToastStack, type ToastTone } from "./ui/toast";
+import { LiveToast } from "./LiveToast";
+
+const TOAST_ID = "cli-update";
+/** The "updated" note leaves on its own after this long (its close ring
+ *  fills over the same time and pauses while the pointer is on the stack). */
+const DONE_MS = 6000;
 
 /** What the version check / install returns. */
 type CliCheck = AuraCliCheck;
@@ -143,13 +147,27 @@ export function CliUpdateToast({
   const dismissedRef = useRef(false);
   // The version this toast is acting on — so dismiss can stamp the guard.
   const targetRef = useRef<string>("");
+  // The caller's callback, read at call time. App passes a fresh arrow on
+  // every render; keying the launch effect on it re-ran the effect, and the
+  // re-run's cleanup cancelled the one check that was actually in flight.
+  const onInstalledRef = useRef(onInstalled);
+  onInstalledRef.current = onInstalled;
+  // Mounted, not "this effect run is current". The launch check is started
+  // once and must outlive the re-renders that happen while `aura --version`
+  // runs; only an unmount stops it narrating.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
 
-    let cancelled = false;
-    const live = () => !cancelled && !dismissedRef.current;
+    const live = () => mountedRef.current && !dismissedRef.current;
     (async () => {
       let check: CliCheck;
       try {
@@ -157,21 +175,25 @@ export function CliUpdateToast({
       } catch {
         return; // version check failed — stay silent, chip handles its own state
       }
-      if (!live() || check.status === "ok" || check.status === "unknown") {
-        // "unknown" means a binary exists but didn't parse — don't clobber it.
-        //
-        // "ok" now includes the case where an older `aura` sits ahead on PATH
-        // (`check.shadowing`) and the app is stepping over it. Deliberately
-        // silent: nothing is broken for the app, and replacing that copy means
-        // a macOS admin-password prompt. Asking for one unprompted at launch,
-        // to fix something that isn't stopping anything, is the nag this
-        // toast exists to avoid. The footer chip carries it instead.
-        return;
-      }
-      targetRef.current = check.expected;
+      if (!live() || check.status === "unknown") return;
+      // "unknown" means a binary exists but didn't parse — don't clobber it.
+
+      // "ok" includes an older `aura` ahead on PATH (`check.shadowing`) that
+      // the app steps over. When its folder is the user's own (~/.cargo/bin,
+      // ~/.local/bin) replacing it needs no password, so do it here: that
+      // copy is what the user's terminal runs, and leaving it old after every
+      // update is the bug. A root-owned folder would mean a password prompt
+      // at launch for something that isn't stopping the app — that stays
+      // with the footer chip.
+      const shadow = check.status === "ok" ? check.shadowing : null;
+      if (check.status === "ok" && !shadow?.writable) return;
+      // A shadow is settled per copy, not per version: replacing one copy
+      // doesn't speak for another found later.
+      const guardKey = shadow ? `${check.expected}|${shadow.path}` : check.expected;
+      targetRef.current = guardKey;
       // Already settled this exact version (done / recently dismissed or
       // failed)? Stay silent so we don't re-pin the pill every launch.
-      if (shouldSkipAuto(check.expected)) return;
+      if (shouldSkipAuto(guardKey)) return;
 
       // Never downgrade. If the on-PATH CLI is already the same or newer
       // than what this build bundles, do nothing — installing would either
@@ -179,6 +201,8 @@ export function CliUpdateToast({
       // next version check would read the (still-newer) installed version
       // as a mismatch again, pinning the "Updating…" pill in a loop. The
       // backend now classifies this as "ok"; this guards a stale backend.
+      // (A shadow is older by definition; this compare reads only
+      // major.minor, so it must not judge one.)
       if (
         check.status === "outdated" &&
         installedIsAtLeast(check.installed, check.expected)
@@ -188,7 +212,7 @@ export function CliUpdateToast({
 
       // Outdated or missing → install the bundled binary. Race against a
       // timeout so a hung invoke can't spin the pill forever.
-      writeGuard(check.expected, "attempting");
+      writeGuard(guardKey, "attempting");
       setPhase({ kind: "updating", to: check.expected });
       const TIMEOUT = Symbol("install-timeout");
       try {
@@ -201,7 +225,7 @@ export function CliUpdateToast({
         if (!live()) return;
         if (res === TIMEOUT) {
           // Don't keep retrying a hung install on the next launch.
-          writeGuard(check.expected, "failed");
+          writeGuard(guardKey, "failed");
           setPhase({
             kind: "failed",
             message:
@@ -209,18 +233,16 @@ export function CliUpdateToast({
           });
           return;
         }
-        onInstalled?.(res);
-        if (res.status === "ok") {
-          writeGuard(res.installed ?? res.expected, "done");
+        onInstalledRef.current?.(res);
+        if (res.status === "ok" && !(shadow && res.shadowing)) {
+          writeGuard(shadow ? guardKey : (res.installed ?? res.expected), "done");
           setPhase({ kind: "done", version: res.installed ?? res.expected });
-          window.setTimeout(() => {
-            if (live()) setPhase(null);
-          }, 6000);
         } else {
           // Installed, but the on-PATH resolver still doesn't see it — most
           // likely the install dir (~/.local/bin) isn't on PATH. Mark failed
-          // so we don't re-attempt the same no-op every launch.
-          writeGuard(check.expected, "failed");
+          // so we don't re-attempt the same no-op every launch. (Or, for a
+          // shadow, the old copy is still the one PATH finds.)
+          writeGuard(guardKey, "failed");
           setPhase({
             kind: "failed",
             message:
@@ -239,15 +261,11 @@ export function CliUpdateToast({
           setPhase({ kind: "needs-auth", to: check.expected });
           return;
         }
-        writeGuard(check.expected, "failed");
+        writeGuard(guardKey, "failed");
         setPhase({ kind: "failed", message: String(err) });
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [onInstalled]);
+  }, []);
 
   // User dismissed the toast. Suppress any late async re-pop and remember the
   // choice per-version so it doesn't auto-reappear next launch. The install
@@ -271,9 +289,6 @@ export function CliUpdateToast({
       if (res.status === "ok") {
         writeGuard(res.installed ?? res.expected, "done");
         setPhase({ kind: "done", version: res.installed ?? res.expected });
-        window.setTimeout(() => {
-          if (!dismissedRef.current) setPhase(null);
-        }, 6000);
       } else {
         writeGuard(to, "failed");
         setPhase({
@@ -290,56 +305,60 @@ export function CliUpdateToast({
 
   if (!phase) return null;
 
-  const tone: ToastTone =
-    phase.kind === "done"
-      ? "success"
-      : phase.kind === "failed" || phase.kind === "needs-auth"
-        ? "warning"
-        : "info";
-
+  // One toast id for every phase, so each step replaces the last in place.
+  if (phase.kind === "updating") {
+    return (
+      <LiveToast
+        id={TOAST_ID}
+        tone="loading"
+        title={`Updating the Aura command line tool to ${phase.to}…`}
+        dismissible
+        dismissLabel="Dismiss. The update keeps running in the background"
+        onDismiss={dismiss}
+      />
+    );
+  }
+  if (phase.kind === "done") {
+    return (
+      <LiveToast
+        id={TOAST_ID}
+        tone="success"
+        title={`Aura command line tool updated to ${phase.version}`}
+        durationMs={DONE_MS}
+        onDismiss={dismiss}
+        onAutoClose={() => setPhase(null)}
+      />
+    );
+  }
+  if (phase.kind === "needs-auth") {
+    return (
+      <LiveToast
+        id={TOAST_ID}
+        tone="warning"
+        title="One more step to finish the update"
+        message={`Aura command line tool ${phase.to} is ready, but the folder it installs into needs your administrator password.`}
+        onDismiss={dismiss}
+        actions={[
+          { label: "Later", variant: "default", onClick: dismiss },
+          {
+            label: "Enter password",
+            variant: "primary",
+            // The same toast narrates the install, so the click mustn't close it.
+            keepOpen: true,
+            onClick: () => void authorize(),
+          },
+        ]}
+      />
+    );
+  }
   return (
-    <ToastStack zIndex={9998}>
-      {phase.kind === "updating" && (
-        <ToastCard
-          tone={tone}
-          icon={<AsciiSpinner className="mt-px shrink-0 text-sm leading-none" />}
-          title={`Updating the Aura command line tool to ${phase.to}…`}
-          onDismiss={dismiss}
-          dismissTitle="Dismiss. The update keeps running in the background"
-        />
-      )}
-      {phase.kind === "done" && (
-        <ToastCard
-          tone={tone}
-          title={`Aura command line tool updated to ${phase.version}`}
-          onDismiss={dismiss}
-        />
-      )}
-      {phase.kind === "needs-auth" && (
-        <ToastCard
-          tone={tone}
-          title="One more step to finish the update"
-          message={`Aura command line tool ${phase.to} is ready, but the folder it installs into needs your administrator password.`}
-          onDismiss={dismiss}
-          actions={
-            <>
-              <ToastActionButton onClick={dismiss}>Later</ToastActionButton>
-              <ToastActionButton variant="primary" onClick={() => void authorize()}>
-                Enter password
-              </ToastActionButton>
-            </>
-          }
-        />
-      )}
-      {phase.kind === "failed" && (
-        <ToastCard
-          tone={tone}
-          role="alert"
-          title="The Aura command line tool didn't update"
-          message={phase.message}
-          onDismiss={dismiss}
-        />
-      )}
-    </ToastStack>
+    <LiveToast
+      id={TOAST_ID}
+      tone="warning"
+      title="The Aura command line tool didn't update"
+      message={phase.message}
+      durationMs={null}
+      onDismiss={dismiss}
+    />
   );
 }

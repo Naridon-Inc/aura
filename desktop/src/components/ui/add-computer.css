@@ -1,0 +1,101 @@
+/* Adding a computer: the cloud setup's page rules (make-place.css), the three
+   ways as one bordered list of rows, then one step under it. No cards. */
+
+.ui-add-computer .ui-make-place-size small {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.ui-add-computer-step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+.ui-add-computer-step > p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+}
+.ui-add-computer-step small {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 16px;
+}
+.ui-add-computer-step small[data-tone="error"] {
+  color: var(--ui-red);
+}
+.ui-add-computer-step code {
+  font-family: var(--font-mono);
+}
+
+/* The one line to paste: selectable, never wrapped mid-word into nonsense. */
+.ui-add-computer-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-muted);
+}
+.ui-add-computer-line > code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  user-select: all;
+}
+.ui-add-computer-line > button {
+  flex-shrink: 0;
+}
+
+.ui-add-computer-wait {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.ui-add-computer-done {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  color: var(--ui-fg);
+}
+.ui-add-computer-done svg {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--color-accent-green, #4dc1a4);
+}
+.ui-add-computer-done [aria-hidden] {
+  color: var(--color-accent-green, #4dc1a4);
+}
+
+.ui-add-computer-share {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.ui-add-computer-notes {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 16px;
+}

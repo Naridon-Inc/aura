@@ -1,0 +1,144 @@
+/* Sections you made, between "Pinned" and "My workspaces". */
+
+.ui-roster-custom-section {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-radius: 6px;
+}
+.ui-roster-custom-section[data-dragging],
+.ui-navigation-section[data-kind="repository"][data-dragging] {
+  opacity: 0.5;
+}
+.ui-roster-custom-section[data-drop-over],
+.ui-roster-drop-zone[data-drop-over] {
+  background: var(--ui-sidebar-accent, var(--ui-hover));
+}
+.ui-section-drop-line {
+  pointer-events: none;
+  position: absolute;
+  inset-inline: 0;
+  z-index: 10;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--ui-ring);
+}
+
+.ui-section-header {
+  position: relative;
+}
+.ui-section-header-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px;
+  border-radius: 6px;
+  text-align: left;
+  color: color-mix(in srgb, var(--ui-muted-fg) 70%, transparent);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ui-section-header-button:hover {
+  background: var(--ui-hover);
+}
+.ui-section-emoji {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  font-size: 12px;
+  line-height: 1;
+}
+.ui-section-emoji:empty {
+  display: none;
+}
+.ui-section-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ui-section-count {
+  font: 11px var(--font-mono);
+  opacity: 0;
+}
+.ui-section-header:hover .ui-section-count {
+  opacity: 0.7;
+}
+.ui-section-spacer {
+  flex: 1;
+  min-width: 24px;
+}
+.ui-section-fold {
+  flex: none;
+}
+.ui-section-fold[data-hover-only] {
+  opacity: 0;
+}
+.ui-section-header:hover .ui-section-fold[data-hover-only] {
+  opacity: 1;
+}
+.ui-section-actions {
+  position: absolute;
+  top: 50%;
+  right: 26px;
+  transform: translateY(-50%);
+  opacity: 0;
+}
+.ui-section-header:is(:hover, :focus-within) .ui-section-actions,
+.ui-section-actions:has([data-state="open"]) {
+  opacity: 1;
+}
+
+.ui-section-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 5px 0 6px;
+  border-radius: 6px;
+  font-size: 14px;
+  color: color-mix(in srgb, var(--ui-muted-fg) 50%, transparent);
+}
+
+.ui-roster-drop-zone {
+  border-radius: 6px;
+}
+.ui-roster-drop-zone[data-carrying] {
+  min-height: 96px;
+  padding-bottom: 12px;
+}
+
+.ui-section-menu-glyph {
+  display: inline-flex;
+  justify-content: center;
+  width: 14px;
+  font-size: 12px;
+}
+
+.ui-section-dialog {
+  width: min(384px, calc(100vw - 32px));
+}
+.ui-section-dialog-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-section-dialog-row > .ui-input {
+  flex: 1;
+}
+.ui-section-dialog-emoji {
+  flex: none;
+  font-size: 16px;
+}
+.ui-popover.ui-section-emoji-picker {
+  width: 360px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px;
+}

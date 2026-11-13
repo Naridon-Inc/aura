@@ -42,6 +42,8 @@ const GUARDED: Record<string, string> = {
   listDir: "dirListCache",
   teamLoad: "teamCache",
   cloudBillingUsageByMember: "billingCache",
+  agentsList: "agentsListCache",
+  agentsReload: "agentsListCache",
 };
 
 /** Callers allowed to reach past the cache, and why. A `reason` is not a

@@ -1,644 +1,27 @@
-// TeamActivityFeed — the team-wide accountability feed for the Trace surface.
+// Team activity — "what did everyone's agents change, and does any of it
+// land on my work?". The shared intent log, the same record that travels to
+// every teammate on pull, told on the story column: who, what they asked for
+// in their own words, and one line of facts under it. A change that touches a
+// file you have uncommitted edits in says so; that is read from git status
+// and simply doesn't show when it can't be read.
 //
-// This is the surface that answers the team-wide question the rest of Trace
-// only answered for one session at a time: "what has everyone's AI done to
-// our project, can I trust it, and does any of it touch the work I'm in the
-// middle of?" It reads the SHARED intent log (`api.auraIntentRecent`) — the
-// same git-tracked record that travels to every teammate on pull — and lays
-// each AI change out as a plain accountability card:
-//
-//   <agent> changed <file>  ·  why, in their own words  ·  ✓ sealed  ·  2h
-//   ⚠ touches a file you're editing
-//
-// HONESTY RULE (inherited from OverviewPane / SessionsPane): every line is a
-// real, observed signal. The "sealed" badge keys off `signed_block_id` (in
-// the shared log) and can be CHECKED in place: clicking it runs
-// `aura attest verify --no-rekor` on this machine and the chip becomes a
-// verdict — "Genuine record" (naming the teammate when it verified against
-// the team key registry) or "Couldn't verify the seal" with the real error.
-// A signed-but-unchecked chip never claims more than "a signed block
-// exists". "Touches a file you're editing" keys off the live git-dirty set
-// (best-effort — if git status can't be read, the tag simply doesn't show,
-// it is never faked). When the log is empty we render a calm empty state,
-// never invented rows.
-//
-// Clicking a card opens the same SessionDetailPane drill the Sessions list
-// uses, so the feed is the breadth lens and the detail is the depth lens —
-// one model, two zooms.
+// When the feed is really only you, because sign-in or live sync is off, one
+// sentence says so above the days, with the action that fixes it.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
-import {
-  api,
-  type ClaudeSession,
-  type IntentRow,
-  type TeamMember,
-} from "../../lib/api";
+import { Users } from "lucide-react";
+import { api, type ClaudeSession, type IntentRow, type TeamMember } from "../../lib/api";
 import { fetchSessions } from "../../lib/sessionsCache";
 import { fetchIntentRows } from "../../lib/intentCache";
-import { agentDisplayLabel, isAutomationIdentity } from "../../lib/agentIdentity";
-import { invalidateCache, peekCache, writeCache } from "../../lib/resourceCache";
-import { intentTypeChip } from "@shared/intentTypeLabels";
-import { AgentIcon } from "../agent/AgentIcon";
-import { Button } from "../ui/button";
-import { ErrorState, LoadingState } from "../ui/state";
-import {
-  deriveTeamSyncState,
-  teamEmptyCopy,
-  type TeamSyncState,
-} from "../../lib/teamFeedState";
-import { initialsOf, relTimeFromTs } from "./usageProviders";
-import {
-  collapseAutoStubSessions,
-  type SessionDisplayRow,
-} from "../../lib/sessionMeta";
+import { deriveTeamSyncState, teamEmptyCopy, type TeamSyncState } from "../../lib/teamFeedState";
 import { fetchTeam } from "../../lib/teamCache";
-
-const DAY_MS = 86_400_000;
-
-/** Last path segment — "src/foo/bar.rs" → "bar.rs". */
-function baseName(path: string): string {
-  const p = (path ?? "").replace(/[/\\]+$/, "");
-  if (!p) return "";
-  const parts = p.split(/[/\\]+/);
-  return parts[parts.length - 1] || p;
-}
-
-/** Collapse an intent to one tidy line, truncated so a long backfill summary
- *  doesn't blow out the card. */
-function oneLine(s: string, max = 140): string {
-  const t = (s ?? "").replace(/\s+/g, " ").trim();
-  if (t.length <= max) return t;
-  return `${t.slice(0, max - 1).trimEnd()}…`;
-}
-
-/** A stable local-day key (YYYY-MM-DD) for bucketing. */
-function dayKey(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-const WEEKDAYS = [
-  "Sunday",
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
-];
-const MONTHS = [
-  "Jan",
-  "Feb",
-  "Mar",
-  "Apr",
-  "May",
-  "Jun",
-  "Jul",
-  "Aug",
-  "Sep",
-  "Oct",
-  "Nov",
-  "Dec",
-];
-
-/** A friendly day heading — "Today" / "Yesterday" / "Tuesday" / "12 Jun". */
-function dayLabel(d: Date, nowMs: number): string {
-  const today = new Date(nowMs);
-  today.setHours(0, 0, 0, 0);
-  const that = new Date(d);
-  that.setHours(0, 0, 0, 0);
-  const diffDays = Math.round((today.getTime() - that.getTime()) / DAY_MS);
-  if (diffDays <= 0) return "Today";
-  if (diffDays === 1) return "Yesterday";
-  if (diffDays < 7) return WEEKDAYS[that.getDay()];
-  return `${that.getDate()} ${MONTHS[that.getMonth()]}`;
-}
-
-/** Normalize a changeset/git path to a comparable key (trailing slashes off,
- *  back-slashes folded). Lets the dirty-set intersection ignore separator and
- *  trailing-slash noise. */
-function pathKey(p: string): string {
-  return (p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
-}
-
-type DayGroup = { key: string; label: string; rows: SessionDisplayRow[] };
-
-function RefreshIcon() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M23 4v6h-6" />
-      <path d="M1 20v-6h6" />
-      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10" />
-      <path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-    </svg>
-  );
-}
-
-/** A small green tick-in-shield — the "genuine record" seal, matching the
- *  language the Session story already uses. */
-function SealIcon() {
-  return (
-    <svg
-      width="11"
-      height="11"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M12 2 4 5v6c0 5 8 11 8 11s8-6 8-11V5Z" />
-      <path d="m9 12 2 2 4-4" />
-    </svg>
-  );
-}
-
-/** Minimal shape of `aura attest verify --json` this feed reads — the verdict
- *  plus who/how it verified. SessionAttestation parses the full payload; both
- *  surfaces share one cache entry per block, so a check made on either
- *  pre-paints the other. */
-type SealVerifyResult = {
-  signature_verified?: boolean;
-  /** "local" | "team-registry" | "rotation-chain" — how the key was trusted. */
-  verified_via?: string;
-  /** Present when the block verified against a TEAMMATE's registered key —
-   *  the cross-machine case, with the human identity the registry carries. */
-  verified_via_team?: {
-    display_name?: string | null;
-    github_login?: string | null;
-    human_id?: string | null;
-  };
-};
-
-type SealCheck =
-  | { kind: "idle" }
-  | { kind: "checking" }
-  | { kind: "verified"; via: string; teamName: string | null }
-  | { kind: "failed"; message: string };
-
-function sealVerdict(parsed: SealVerifyResult): SealCheck {
-  const team = parsed.verified_via_team;
-  return {
-    kind: "verified",
-    via: parsed.verified_via || "local",
-    teamName:
-      team?.display_name || team?.github_login || team?.human_id || null,
-  };
-}
-
-/** The plain sentence behind a verified chip — says HOW the seal was trusted,
- *  because "verified with my own key" and "verified against a teammate's
- *  registered key on my machine" are different claims. */
-function sealVerifiedTitle(check: Extract<SealCheck, { kind: "verified" }>): string {
-  if (check.via === "team-registry") {
-    return check.teamName
-      ? `Genuine record — sealed by ${check.teamName} and verified on your machine against your team's key registry.`
-      : "Genuine record — verified on your machine against your team's key registry.";
-  }
-  if (check.via === "rotation-chain") {
-    return "Genuine record — verified through your key-rotation history.";
-  }
-  return "Genuine record — the seal verifies with your own key on this machine.";
-}
-
-/** The seal chip, upgraded from a static claim to a checkable one. Three
- *  honest states:
- *    · signed (unchecked) — the shared log says a signed block exists; the
- *      chip claims nothing more. Click runs `aura attest verify --no-rekor`
- *      right here, offline-safe.
- *    · Genuine record — the signature verified. When it verified against the
- *      team key registry the chip names the teammate: their key, your
- *      machine — the cross-machine proof, not a local echo.
- *    · Couldn't verify — the real error, never softened; click retries.
- *  Lazy by design: nothing verifies until asked, so a 200-row feed never
- *  shells 200 CLI calls. Without a repoRoot (preview harness) it stays the
- *  static chip. */
-function SealBadge({
-  repoRoot,
-  blockId,
-  showSignedChip,
-}: {
-  repoRoot?: string;
-  blockId: string;
-  showSignedChip: boolean;
-}) {
-  const cacheKey = `attest:verify:${repoRoot ?? ""}:${blockId}`;
-  const [check, setCheck] = useState<SealCheck>(() => {
-    if (!repoRoot) return { kind: "idle" };
-    const cached = peekCache<SealVerifyResult>(cacheKey);
-    return cached?.signature_verified ? sealVerdict(cached) : { kind: "idle" };
-  });
-
-  const runCheck = useCallback(
-    async (e: { stopPropagation(): void; preventDefault(): void }) => {
-      // The whole card is a button that opens the session — the seal check
-      // must not also open it.
-      e.stopPropagation();
-      e.preventDefault();
-      if (!repoRoot || check.kind === "checking" || check.kind === "verified") return;
-      setCheck({ kind: "checking" });
-      try {
-        const res = await api.auraCli(repoRoot, [
-          "attest",
-          "verify",
-          blockId,
-          "--no-rekor",
-          "--json",
-        ]);
-        const trimmed = res.stdout.trim();
-        if (res.status !== 0 || !trimmed) {
-          invalidateCache(cacheKey);
-          setCheck({
-            kind: "failed",
-            message: (res.stderr || trimmed || `exit ${res.status}`).trim(),
-          });
-          return;
-        }
-        const parsed = JSON.parse(trimmed) as SealVerifyResult;
-        if (parsed.signature_verified) {
-          writeCache(cacheKey, parsed);
-          setCheck(sealVerdict(parsed));
-        } else {
-          invalidateCache(cacheKey);
-          setCheck({ kind: "failed", message: "The signature did not verify." });
-        }
-      } catch (err) {
-        invalidateCache(cacheKey);
-        setCheck({
-          kind: "failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    },
-    [repoRoot, blockId, cacheKey, check.kind],
-  );
-
-  const onKey = (e: ReactKeyboardEvent) => {
-    if (e.key === "Enter" || e.key === " ") void runCheck(e);
-  };
-
-  // Preview harness / no project: the pre-upgrade static chip, no fake action.
-  if (!repoRoot) {
-    if (!showSignedChip) return null;
-    return (
-      <span
-        className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-2xs text-accent-green"
-        style={{
-          background: "color-mix(in srgb, var(--color-accent-green) 12%, transparent)",
-        }}
-        title="Aura sealed exactly what the AI changed and why. This record can't be altered."
-      >
-        <SealIcon />
-        Signed
-      </span>
-    );
-  }
-
-  if (check.kind === "checking") {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full border border-line-soft px-1.5 py-px text-2xs text-text-4">
-        Checking the seal…
-      </span>
-    );
-  }
-
-  if (check.kind === "verified") {
-    return (
-      <span
-        className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-2xs text-accent-green"
-        style={{
-          background: "color-mix(in srgb, var(--color-accent-green) 12%, transparent)",
-        }}
-        title={sealVerifiedTitle(check)}
-      >
-        <SealIcon />
-        {check.via === "team-registry" && check.teamName
-          ? `Genuine — ${check.teamName}`
-          : "Genuine record"}
-      </span>
-    );
-  }
-
-  if (check.kind === "failed") {
-    return (
-      <span
-        role="button"
-        tabIndex={0}
-        onClick={(e) => void runCheck(e)}
-        onKeyDown={onKey}
-        className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-2xs text-red"
-        style={{ background: "color-mix(in srgb, currentColor 10%, transparent)" }}
-        title={`Aura couldn't confirm this record is intact: ${check.message || "the check failed"}. Click to try again.`}
-      >
-        Couldn't verify the seal
-      </span>
-    );
-  }
-
-  // Idle. On a mixed feed the green "Signed" pill earns its place; on an
-  // all-signed feed the header carries the claim once and each row keeps only
-  // a quiet, text-free affordance — an ACTION (check this seal), not the
-  // repeated pill the design pass removed.
-  return showSignedChip ? (
-    <span
-      role="button"
-      tabIndex={0}
-      onClick={(e) => void runCheck(e)}
-      onKeyDown={onKey}
-      className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-2xs text-accent-green"
-      style={{
-        background: "color-mix(in srgb, var(--color-accent-green) 12%, transparent)",
-      }}
-      title="Aura sealed exactly what the AI changed and why. Click to check the seal on this machine."
-    >
-      <SealIcon />
-      Signed
-    </span>
-  ) : (
-    <span
-      role="button"
-      tabIndex={0}
-      onClick={(e) => void runCheck(e)}
-      onKeyDown={onKey}
-      className="inline-flex items-center text-text-4 hover:text-accent-green"
-      title="Signed by Aura. Click to check the seal on this machine."
-      aria-label="Check this change's seal"
-    >
-      <SealIcon />
-    </span>
-  );
-}
-
-/** A small overlap glyph for the "touches a file you're editing" warning. */
-function OverlapIcon() {
-  return (
-    <svg
-      width="11"
-      height="11"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <rect x="3" y="3" width="13" height="13" rx="2" />
-      <path d="M8 8h13v13H8z" />
-    </svg>
-  );
-}
-
-/** One AI change, laid out as an accountability card. When a run's `[auto]`
- *  stubs collapse into a single entry, `display` aggregates the whole session:
- *  `paths` is every file it touched and `editCount` how many edits folded in. */
-function ActivityCard({
-  display,
-  nowSecs,
-  dirty,
-  onOpen,
-  showSignedChip,
-  repoRoot,
-}: {
-  display: SessionDisplayRow;
-  nowSecs: number;
-  /** Normalized set of files the user has uncommitted right now. */
-  dirty: Set<string>;
-  onOpen: (row: IntentRow) => void;
-  /** Whether the green "Signed" chip earns its place on THIS feed. When every
-   *  change in view is signed, the header says so once and the chip is 178
-   *  identical green pills that distinguish nothing. The "Not signed"
-   *  exception always shows — that one is the actionable half. */
-  showSignedChip: boolean;
-  /** Enables the in-place seal check (absent in the preview harness). */
-  repoRoot?: string;
-}) {
-  const { row, editCount } = display;
-  const label = agentDisplayLabel(row.agent_id || "unknown");
-  // The human this change is attributed to — resolved backend-side from the
-  // row's signing key. `agent_id` is *which AI* typed it; this is *whose work*
-  // it was. Null when no registered key matches (honest, never guessed).
-  const personName = row.developer || null;
-  // Aggregated across a collapsed session (raw row churn for a single entry).
-  const churn = {
-    files: display.files,
-    adds: display.adds,
-    dels: display.dels,
-    hasChurn: display.hasChurn,
-  };
-  // The de-duplicated union of every file the entry touched — across the whole
-  // collapsed run, not just the representative stub.
-  const paths = display.paths;
-  const leadFile = paths.length > 0 ? baseName(paths[0]) : null;
-  const moreFiles = paths.length > 1 ? paths.length - 1 : 0;
-  const sealed = !!row.signed_block_id;
-  const rel = relTimeFromTs(row.timestamp, nowSecs);
-
-  // "Touches a file you're editing" — the change overlaps the user's live
-  // git-dirty set. The one team-wide signal a vibe-coder most needs: someone
-  // else's AI just rewrote a file I have open changes in. Best-effort: empty
-  // dirty set (or unreadable git) → no tag, never a false alarm.
-  const overlaps = useMemo(() => {
-    if (dirty.size === 0 || paths.length === 0) return false;
-    return paths.some((p) => dirty.has(pathKey(p)));
-  }, [dirty, paths]);
-
-  return (
-    <button
-      type="button"
-      onClick={() => onOpen(row)}
-      className="group flex w-full items-start gap-2.5 px-3 py-2.5 text-left hover:bg-state-hover"
-    >
-      {/* Person avatar — compact. The human teammate this change is attributed
-          to (resolved from the signing key), not the AI that typed it. Falls
-          back to a neutral mark when we can't yet name the teammate. */}
-      <span className="mt-px shrink-0">
-        <span
-          className="flex h-[18px] w-[18px] items-center justify-center rounded-full border border-line-soft text-2xs font-semibold"
-          style={{
-            background: "var(--color-bg-2)",
-            color: personName ? "var(--color-text-3)" : "var(--color-text-4)",
-          }}
-          title={personName ?? "We don't yet know which teammate sealed this change"}
-          aria-hidden="true"
-        >
-          {personName ? initialsOf(personName) : "?"}
-        </span>
-      </span>
-
-      <span className="min-w-0 flex-1">
-        {/* Attribution — quiet + compact: who, via which AI, what file. The
-            person still leads, but small; the change message below is the lead. */}
-        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-snug text-text-4">
-          <span className="font-medium text-text-2">
-            {personName ?? "Unknown teammate"}
-          </span>
-          <span className="inline-flex items-center gap-1">
-            via
-            <AgentIcon agentId={row.agent_id || "unknown"} label={label} size={12} />
-            {label}
-          </span>
-          {/* Which file, when we know it. When we don't, the line simply ends
-              at the agent: this used to fall through to "· logged a change",
-              which printed on every row of a feed whose own subtitle already
-              says these are changes — and on THIS project that is every row,
-              because the shared log carries no changeset files. The intent
-              underneath is the change; naming it twice said nothing. */}
-          {leadFile ? (
-            <>
-              <span>· changed</span>
-              <span className="truncate font-mono text-text-3">
-                {leadFile}
-                {moreFiles > 0 ? (
-                  <span className="ml-1 font-sans">+{moreFiles} more</span>
-                ) : null}
-              </span>
-            </>
-          ) : null}
-        </span>
-
-        {/* The WHY — the author's own words, promoted to the visual lead. */}
-        {row.intent ? (
-          <span className="mt-1 block truncate text-base font-medium leading-snug text-text-1">
-            {oneLine(row.intent)}
-          </span>
-        ) : null}
-
-        {/* Meta row: time · churn · seal · overlap · type. */}
-        <span className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-4">
-          <span>{rel}</span>
-          {churn.files > 0 ? (
-            <>
-              <span>·</span>
-              <span>
-                {churn.files} {churn.files === 1 ? "file" : "files"}
-              </span>
-              {churn.hasChurn ? (
-                <span className="font-mono text-2xs">
-                  <span className="text-accent-green">+{churn.adds}</span>
-                  <span className="text-text-4"> / </span>
-                  <span className="text-text-3">−{churn.dels}</span>
-                </span>
-              ) : null}
-            </>
-          ) : null}
-
-          {/* Collapsed-session marker — N file edits folded under one entry. */}
-          {editCount > 1 ? (
-            <>
-              <span>·</span>
-              <span title={`${editCount} file edits in this session were grouped together`}>
-                {editCount} edits
-              </span>
-            </>
-          ) : null}
-
-          {/* Genuine-record seal. "Not signed" is always shown — it is the
-              exception, and the one a reader needs to act on. A signed row
-              gets the checkable SealBadge: loud green pill only when the feed
-              is MIXED (on a healthy project every row is signed and the
-              header carries that claim once), quiet icon-only affordance
-              otherwise — either way, clicking verifies the seal in place. */}
-          {sealed ? (
-            <SealBadge
-              repoRoot={repoRoot}
-              blockId={row.signed_block_id as string}
-              showSignedChip={showSignedChip}
-            />
-          ) : (
-            <span
-              className="rounded-full border border-line-soft px-1.5 py-px text-2xs text-text-4"
-              title="Aura hasn't sealed this change yet, so there's no tamper-proof record of what it did."
-            >
-              Not signed
-            </span>
-          )}
-
-          {/* Overlap warning — someone's AI touched a file you have open. */}
-          {overlaps ? (
-            <span
-              className="inline-flex items-center gap-1 rounded-full px-1.5 py-px text-2xs"
-              style={{
-                color: "var(--color-accent)",
-                background: "color-mix(in srgb, var(--color-accent) 12%, transparent)",
-              }}
-              title="This change touches a file you have uncommitted edits in. Review before you save over it."
-            >
-              <OverlapIcon />
-              Touches your work
-            </span>
-          ) : null}
-
-          {/* What kind of change it was, in words. The raw value is a CamelCase
-              enum ("FeatureAdd"), which is not English and never belongs on a
-              surface written for people who did not write the code. */}
-          {row.intent_type ? (
-            <span className="rounded border border-line-soft px-1.5 py-px text-2xs text-text-4">
-              {intentTypeChip(row.intent_type)}
-            </span>
-          ) : null}
-        </span>
-      </span>
-    </button>
-  );
-}
-
-/** A thin stack of roster faces in the feed header — "who's on this project".
- *  Identity only, no live detail: the live "what is everyone doing right now"
- *  card lives in exactly one place, the Trace Overview. Caps at five faces
- *  with a "+N" overflow; renders nothing for a solo project. */
-function RosterStrip({ roster }: { roster: TeamMember[] }) {
-  // People only. Aura's own agent (ai@aura.vcs) and the checkpointer commit
-  // under real git identities, so they were sitting in a strip captioned "who's
-  // on this project" and inflating its count — this repo showed six faces for
-  // four humans.
-  const people = roster.filter((m) => !isAutomationIdentity(m.name, m.email));
-  if (people.length <= 1) return null;
-  const MAX = 5;
-  const shown = people.slice(0, MAX);
-  const overflow = people.length - shown.length;
-  return (
-    <div
-      className="flex items-center"
-      title={`${people.length} on this project`}
-    >
-      <div className="flex -space-x-1.5">
-        {shown.map((m) => {
-          const name = m.name || m.handle || m.email || "?";
-          return (
-            <span
-              key={m.handle || m.email || name}
-              className="flex h-[22px] w-[22px] items-center justify-center rounded-full border border-bg-content text-2xs font-semibold text-text-2"
-              style={{ background: "var(--color-bg-2)" }}
-              title={name}
-              aria-hidden="true"
-            >
-              {initialsOf(name)}
-            </span>
-          );
-        })}
-      </div>
-      {overflow > 0 ? (
-        <span className="ml-1.5 text-xs text-text-4">+{overflow}</span>
-      ) : null}
-    </div>
-  );
-}
+import { Button } from "../ui/button";
+import { EmptyState, ErrorState, LoadingState } from "../ui/state";
+import { TraceStory, TraceStoryHead, TraceStoryIntro } from "../ui/trace-story";
+import { StoryDays, useMomentKeys } from "../trace/story/StoryDays";
+import { formatCount } from "../trace/story/storyFormat";
+import { pathKey, teamDays } from "../trace/story/teamDays";
+import { useRefreshOnReturn } from "../trace/story/useRefreshOnReturn";
 
 /** The self-explaining empty state. Instead of a blank "no activity" it names
  *  WHY the feed is empty and offers the one action that fixes it — sign in, or
@@ -676,32 +59,18 @@ function TeamActivityEmptyState({
         : null;
 
   return (
-    <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-      <span className="text-base text-text-2">{copy.title}</span>
-      <span className="mt-1.5 max-w-[24rem] text-sm leading-relaxed text-text-4">
-        {copy.body}
-      </span>
-      {cta ? (
-        <Button
-          type="button"
-          variant="default"
-          size="sm"
-          className="mt-3.5"
-          onClick={cta.onClick}
-          disabled={cta.busy}
-        >
-          {cta.label}
-        </Button>
-      ) : null}
-    </div>
+    <EmptyState
+      icon={Users}
+      title={copy.title}
+      body={copy.body}
+      action={cta ? { label: cta.label, onClick: cta.onClick, disabled: cta.busy } : undefined}
+      size="sm"
+    />
   );
 }
 
-/** A thin, non-blocking band shown ABOVE a populated feed when it's only
- *  showing the local developer because sync isn't on — so a feed that's
- *  technically non-empty but really just "you" reads honestly instead of
- *  looking like the whole team. Only renders for the two actionable states. */
-function SyncNotice({
+/** One sentence above the days when the feed is only you. */
+function SyncLine({
   state,
   onSignIn,
   onEnableSync,
@@ -715,214 +84,126 @@ function SyncNotice({
   if (state !== "signed_out" && state !== "sync_off") return null;
   const signedOut = state === "signed_out";
   return (
-    <div className="flex items-center justify-between gap-3 border-b border-line-soft bg-bg-1 px-4 py-2">
-      <span className="min-w-0 text-sm leading-snug text-text-3">
-        {signedOut
-          ? "You're seeing only your own activity. Sign in so your team's changes sync here."
-          : "Live sync is off, so only your activity shows. Turn it on to see your team."}
-      </span>
-      <Button
-        type="button"
-        variant="outline"
-        size="xs"
-        className="shrink-0"
-        onClick={signedOut ? onSignIn : onEnableSync}
-        disabled={enabling}
-      >
-        {signedOut ? "Sign in" : enabling ? "Turning on…" : "Turn on"}
+    <TraceStoryIntro>
+      {signedOut
+        ? "You're seeing only your own activity. Sign in so your team's changes sync here. "
+        : "Live sync is off, so only your activity shows. Turn it on to see your team. "}
+      <Button variant="link" size="xs" onClick={signedOut ? onSignIn : onEnableSync} disabled={enabling}>
+        {signedOut ? "Sign in" : enabling ? "Turning on…" : "Turn on live sync"}
       </Button>
-    </div>
+    </TraceStoryIntro>
   );
 }
 
-/** Presentational feed — all the rendering, none of the fetching. Exported so
- *  a preview harness (and any future host that already holds the rows) can
- *  render the exact production markup against supplied data. The live pane is
- *  the `TeamActivityFeed` container below. */
-export function TeamActivityFeedView({
+function TeamStory({
   rows,
   sessions,
-  roster,
   dirty,
-  nowMs,
   loading,
   error,
   syncState,
+  activeKey,
   onSignIn,
   onEnableSync,
   enabling,
   onRefresh,
   onOpenSession,
-  repoRoot,
 }: {
   rows: IntentRow[];
-  /** Claude Code sessions — used to fold a run's `[auto]` stub spam into one
-   *  entry per session. Best-effort; an empty list just means no collapsing. */
-  sessions?: ClaudeSession[];
-  roster: TeamMember[];
+  sessions: ClaudeSession[];
+  /** Files the reader has uncommitted right now, as `pathKey`s. */
   dirty: Set<string>;
-  nowMs: number;
   loading: boolean;
   error: string | null;
-  /** Why the feed looks the way it does — drives the smart empty state +
-   *  notice. Derived from real sign-in / sync / distinct-developer signals. */
   syncState: TeamSyncState;
+  activeKey?: string | null;
   onSignIn: () => void;
   onEnableSync: () => void;
   enabling: boolean;
   onRefresh: () => void;
   onOpenSession: (row: IntentRow) => void;
-  /** Enables the in-place seal check on signed rows. Optional so the preview
-   *  harness (no project, no CLI) renders the static chips instead. */
-  repoRoot?: string;
 }) {
-  const nowSecs = Math.floor(nowMs / 1000);
-
-  // Collapse a run's auto-stub spam into one entry per session, then group by
-  // local day (newest day first, newest entry first within a day).
-  const groups = useMemo<DayGroup[]>(() => {
-    const sorted = [...rows].sort((a, b) => b.timestamp - a.timestamp);
-    const display = collapseAutoStubSessions(sorted, sessions ?? []);
-    const byDay = new Map<string, DayGroup>();
-    for (const d of display) {
-      const date = new Date(d.row.timestamp * 1000);
-      const key = dayKey(date);
-      let g = byDay.get(key);
-      if (!g) {
-        g = { key, label: dayLabel(date, nowMs), rows: [] };
-        byDay.set(key, g);
+  const groups = useMemo(() => teamDays(rows, sessions), [rows, sessions]);
+  const { total, unsealed } = useMemo(() => {
+    let total = 0;
+    let unsealed = 0;
+    for (const g of groups) {
+      for (const r of g.rows) {
+        total += 1;
+        if (r.kind === "intent" && !r.display.row.signed_block_id) unsealed += 1;
       }
-      g.rows.push(d);
     }
-    return [...byDay.values()];
-  }, [rows, sessions, nowMs]);
-
-  // Count and seal-count what the feed actually shows (post-collapse), so the
-  // header matches the cards rather than the inflated raw intent-log length.
-  const total = useMemo(
-    () => groups.reduce((n, g) => n + g.rows.length, 0),
-    [groups],
+    return { total, unsealed };
+  }, [groups]);
+  const touches = useCallback(
+    (paths: string[]) => dirty.size > 0 && paths.some((p) => dirty.has(pathKey(p))),
+    [dirty],
   );
-  const sealedCount = useMemo(
-    () =>
-      groups.reduce(
-        (n, g) => n + g.rows.reduce((m, d) => m + (d.row.signed_block_id ? 1 : 0), 0),
-        0,
-      ),
-    [groups],
-  );
+  const onKeyDown = useMomentKeys();
+  const nowSecs = Math.floor(Date.now() / 1000);
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-bg-content">
-      {/* Header */}
-      <div className="flex shrink-0 items-center justify-between border-b border-line-soft px-4 py-2.5">
-        {/* The count and the trust claim — stated once, here, rather than as a
-            chip on every row. When everything is signed the old line printed
-            the same number twice ("178 changes · 178 sealed"), which is the
-            normal case and taught nothing; when some aren't, the SHORTFALL is
-            what a reader needs, not the tally of what's fine.
-
-            It used to sit under "Team activity" in 14px — the words on the tab
-            you clicked and on the sidebar row above it, a third time. Only the
-            line that says something survives. */}
-        <span className="text-xs leading-none text-text-4">
-          {total === 0
-            ? "Who on your team changed what, and why"
-            : `${total} ${total === 1 ? "change" : "changes"} · ${
-                sealedCount === total
-                  ? "all signed by Aura"
-                  : `${total - sealedCount} not signed`
-              }`}
-        </span>
-        <div className="flex items-center gap-2.5">
-          {/* Who's on this project — a thin presence strip. The live "Right
-              now / what they're doing" detail lives once, on the Overview;
-              here we just anchor the feed with the roster faces. */}
-          <RosterStrip roster={roster} />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            onClick={onRefresh}
-            disabled={loading}
-            className="text-text-3 hover:text-text-1"
-            title="Refresh team activity"
-            aria-label="Refresh team activity"
-          >
-            <RefreshIcon />
-          </Button>
-        </div>
-      </div>
-
-      {/* Body */}
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {error ? (
-          // Both of these were hand-rolled — a bare "Loading…" with no block
-          // loader, and the raw error text in mono under a sentence with no
-          // way to retry. They now use the same two primitives every other
-          // surface uses, so a stall and a failure look the same everywhere.
-          <ErrorState
-            title="Couldn’t load team activity"
-            message={error}
-            onRetry={onRefresh}
-          />
-        ) : loading && rows.length === 0 ? (
-          <LoadingState label="Gathering what your team changed…" />
-        ) : total === 0 ? (
-          <TeamActivityEmptyState
-            state={syncState}
-            onSignIn={onSignIn}
-            onEnableSync={onEnableSync}
-            enabling={enabling}
-          />
+    <TraceStory label="Team activity">
+      <TraceStoryHead icon={<Users aria-hidden />}>
+        {total === 0 ? (
+          "Who on your team changed what, and why"
         ) : (
-          <div className="pb-6">
-            {/* Honest framing when the feed is really just "you": only its own
-                activity is showing because sync isn't on. Quiet, dismissible by
-                acting on it — never blocks the rows below. */}
-            <SyncNotice
-              state={syncState}
-              onSignIn={onSignIn}
-              onEnableSync={onEnableSync}
-              enabling={enabling}
-            />
-            {groups.map((g) => (
-              <div key={g.key}>
-                <div className="sticky top-0 z-[1] flex items-baseline gap-2 border-b border-line-soft bg-bg-content/95 px-4 py-1.5 backdrop-blur">
-                  <span className="section-label">
-                    {g.label}
-                  </span>
-                  <span className="text-xs text-text-4">
-                    {g.rows.length}
-                  </span>
-                </div>
-                <div className="divide-y divide-line-soft/60">
-                  {g.rows.map((display, i) => (
-                    <ActivityCard
-                      key={`${display.row.timestamp}-${display.row.agent_id}-${i}`}
-                      display={display}
-                      nowSecs={nowSecs}
-                      dirty={dirty}
-                      onOpen={onOpenSession}
-                      showSignedChip={sealedCount < total}
-                      repoRoot={repoRoot}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
+          <>
+            <strong>{formatCount(total)}</strong> {total === 1 ? "change" : "changes"} ·{" "}
+            {unsealed === 0 ? (
+              "all sealed"
+            ) : (
+              <>
+                <strong>{formatCount(unsealed)}</strong> not sealed
+              </>
+            )}
+          </>
         )}
-      </div>
-    </div>
+      </TraceStoryHead>
+      <TraceStoryIntro>
+        What everyone&apos;s agents changed here, newest first. A change that lands on a file
+        you&apos;re editing says so.
+      </TraceStoryIntro>
+      {error ? (
+        <ErrorState title="Couldn’t load team activity" message={error} onRetry={onRefresh} size="sm" />
+      ) : loading && rows.length === 0 ? (
+        <LoadingState label="Gathering what your team changed…" />
+      ) : total === 0 ? (
+        <TeamActivityEmptyState
+          state={syncState}
+          onSignIn={onSignIn}
+          onEnableSync={onEnableSync}
+          enabling={enabling}
+        />
+      ) : (
+        <>
+          <SyncLine state={syncState} onSignIn={onSignIn} onEnableSync={onEnableSync} enabling={enabling} />
+          <div className="ui-trace-story-days" onKeyDown={onKeyDown}>
+            <StoryDays
+              groups={groups}
+              sessions={sessions}
+              nowSecs={nowSecs}
+              currentBranch={null}
+              activeKey={activeKey}
+              whoOf={(row) => row.developer || undefined}
+              touches={touches}
+              onOpen={onOpenSession}
+            />
+          </div>
+        </>
+      )}
+    </TraceStory>
   );
 }
 
 export function TeamActivityFeed({
   repoRoot,
+  activeKey,
   onOpenSession,
 }: {
   repoRoot: string;
+  /** The session last opened, kept marked when the reader comes Back. */
+  activeKey?: string | null;
   onOpenSession: (row: IntentRow) => void;
 }) {
   const [rows, setRows] = useState<IntentRow[]>([]);
@@ -931,7 +212,6 @@ export function TeamActivityFeed({
   const [claudeSessions, setClaudeSessions] = useState<ClaudeSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const [roster, setRoster] = useState<TeamMember[]>([]);
   // The user's live uncommitted file set, normalized — drives the "touches
   // your work" tag. Best-effort and non-blocking; failure leaves it empty.
@@ -964,7 +244,6 @@ export function TeamActivityFeed({
       if (!aliveRef.current) return;
       setRows(Array.isArray(data) ? data : []);
       setClaudeSessions(Array.isArray(sessions) ? sessions : []);
-      setNowMs(Date.now());
     } catch (e) {
       if (!aliveRef.current) return;
       setError(e instanceof Error ? e.message : String(e));
@@ -1021,6 +300,8 @@ export function TeamActivityFeed({
       aliveRef.current = false;
     };
   }, [load]);
+
+  useRefreshOnReturn(load);
 
   // Sign in is always safe + global; open the same sign-in flow the titlebar
   // avatar and Settings use.
@@ -1091,21 +372,19 @@ export function TeamActivityFeed({
   });
 
   return (
-    <TeamActivityFeedView
+    <TeamStory
       rows={resolvedRows}
       sessions={claudeSessions}
-      roster={roster}
       dirty={dirty}
-      nowMs={nowMs}
       loading={loading}
       error={error}
       syncState={syncState}
+      activeKey={activeKey}
       onSignIn={onSignIn}
       onEnableSync={() => void onEnableSync()}
       enabling={enabling}
       onRefresh={() => void load()}
       onOpenSession={onOpenSession}
-      repoRoot={repoRoot}
     />
   );
 }

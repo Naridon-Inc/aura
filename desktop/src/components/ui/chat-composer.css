@@ -1,0 +1,20 @@
+/* Aura's additions to the shared composer box (`.ui-composer`). The box, its
+   field, footer and controls are the shared rules; this file holds only what
+   the conversation adds around them. */
+
+/* Fused under a docked question or plan card: the card supplies the top edge. */
+.ui-composer-wrap.composer-docked > .ui-composer {
+  border-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+/* The Chat / CLI switch rides beside the model control at its own size; the
+   model name is what gives way. */
+.ui-composer-footer .chat-view-switch {
+  flex-shrink: 0;
+  gap: 2px;
+}
+.ui-composer-footer .chat-view-switch svg {
+  width: 14px;
+  height: 14px;
+}

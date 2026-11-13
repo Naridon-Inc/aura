@@ -1,0 +1,27 @@
+/* All files: the scroll body under the tab strip, a row's inline name field,
+   a folder lit as the place a drag will land, and the line under the rows
+   when something didn't work. */
+.ui-details-files {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.ui-details-files .ui-details-file-name {
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font: inherit;
+}
+.ui-details-files .ui-file-tree-row[data-drop-target] {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+.ui-details-files-problem {
+  padding: 8px;
+  color: var(--ui-red);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

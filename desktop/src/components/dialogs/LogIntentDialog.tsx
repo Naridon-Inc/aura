@@ -9,10 +9,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Dialog } from "../Dialog";
-import { Button } from "../ui/button";
+import { Alert, AlertDescription } from "../ui/alert";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
+import { Textarea } from "../ui/textarea";
+import "../ui/log-note.css";
 import { api, type GitStatusEntry, type IntentChangesetFile } from "../../lib/api";
-import { basename } from "../../lib/paths";
+import { basename, dirname } from "../../lib/paths";
 
 type LogIntentDialogProps = {
   open: boolean;
@@ -31,10 +35,6 @@ type LogIntentDialogProps = {
   /** Optional agent block id this intent originated from (option 2 path). */
   blockId?: string;
 };
-function dirNameOf(p: string): string {
-  const i = p.lastIndexOf("/");
-  return i > 0 ? p.slice(0, i) : "";
-}
 
 export function LogIntentDialog({
   open,
@@ -130,118 +130,99 @@ export function LogIntentDialog({
       title="Add a note"
       footer={
         <>
-          <Button variant="ghost" size="xs" onClick={onClose}>
+          <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button
-            variant="default"
-            size="xs"
-            onClick={save}
-            disabled={busy || !text.trim() || done}
-          >
+          <Button onClick={save} disabled={busy || !text.trim() || done}>
             {done
-              ? "saved ✓"
+              ? "Saved"
               : busy
-                ? "saving…"
+                ? "Saving…"
                 : `Add note${picked.size ? ` · ${picked.size} file${picked.size === 1 ? "" : "s"}` : ""}`}
           </Button>
         </>
       }
     >
-      <div className="space-y-3 text-sm">
-        <div>
-          <div className="section-label mb-1">
-            What changed, and why?
-          </div>
-          <textarea
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="Added a dark-mode toggle to the settings page so it's easier on the eyes at night"
-            disabled={busy || done}
-            rows={4}
-            autoFocus
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) save();
-            }}
-            className="w-full bg-bg-1 border border-line rounded px-2 py-1.5 text-text-1 text-sm outline-none focus:border-text-4 resize-y leading-relaxed"
-            style={{ minHeight: 96 }}
-          />
-        </div>
+      <label className="ui-form-field">
+        What changed, and why?
+        <Textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Added a dark-mode toggle to the settings page so it's easier on the eyes at night"
+          disabled={busy || done}
+          rows={4}
+          autoFocus
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) save();
+          }}
+        />
+      </label>
 
-        <div>
-          <div className="flex items-center mb-1">
-            <span className="section-label">
-              Files this note covers · {picked.size} of {dirty.length}
-            </span>
-            <div className="ml-auto flex items-center gap-1">
-              <button
-                type="button"
-                onClick={pickAll}
-                disabled={dirty.length === 0 || busy || done}
-                className="text-xs text-text-3 hover:text-text-1 disabled:opacity-40"
-              >
-                all
-              </button>
-              <span className="text-text-5">·</span>
-              <button
-                type="button"
-                onClick={pickNone}
-                disabled={dirty.length === 0 || busy || done}
-                className="text-xs text-text-3 hover:text-text-1 disabled:opacity-40"
-              >
-                none
-              </button>
-            </div>
-          </div>
-          <div className="border border-line-soft rounded bg-bg-0 max-h-[180px] overflow-y-auto">
-            {loadingDirty ? (
-              <div className="flex items-center gap-1.5 px-2 py-3 text-text-4 text-xs" role="status">
-                <AsciiSpinner className="text-xs leading-none" />
-                Looking for changes…
-              </div>
-            ) : dirty.length === 0 ? (
-              <div className="px-2 py-3 text-text-4 text-xs">no changes to cover right now</div>
-            ) : (
-              dirty.map((e) => {
-                const checked = picked.has(e.path);
-                const tag = (e.index || e.worktree || " ").trim() || "•";
-                return (
-                  <label
-                    key={e.path}
-                    className={`flex items-center gap-2 px-2 py-1 text-sm cursor-pointer hover:bg-state-hover ${
-                      checked ? "" : "opacity-55"
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
+      <section className="ui-log-note-files" aria-label="Files this note covers">
+        <div className="ui-log-note-files-head">
+          <span>Files this note covers</span>
+          <span className="ui-log-note-count">
+            {picked.size} of {dirty.length}
+          </span>
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={pickAll}
+            disabled={dirty.length === 0 || busy || done}
+          >
+            All
+          </Button>
+          <Button
+            variant="ghost"
+            size="xs"
+            onClick={pickNone}
+            disabled={dirty.length === 0 || busy || done}
+          >
+            None
+          </Button>
+        </div>
+        <ul className="ui-log-note-list">
+          {loadingDirty ? (
+            <li className="ui-log-note-state" role="status">
+              <AsciiSpinner />
+              Looking for changes…
+            </li>
+          ) : dirty.length === 0 ? (
+            <li className="ui-log-note-state">No changes to cover right now.</li>
+          ) : (
+            dirty.map((e) => {
+              const checked = picked.has(e.path);
+              const tag = (e.index || e.worktree || " ").trim() || "•";
+              return (
+                <li key={e.path}>
+                  <label className="ui-check-label" data-unpicked={checked ? undefined : ""}>
+                    <Checkbox
                       checked={checked}
-                      onChange={() => toggle(e.path)}
+                      onCheckedChange={() => toggle(e.path)}
                       disabled={busy || done}
-                      className="accent-accent-green"
                     />
-                    <span className="w-3 text-2xs font-mono text-text-4">{tag}</span>
-                    <span className="text-text-1 truncate" title={e.path}>
+                    <span className="ui-log-note-tag">{tag}</span>
+                    <span className="ui-log-note-name" title={e.path}>
                       {basename(e.path)}
                     </span>
-                    <span className="ml-auto text-text-5 text-xs font-mono truncate">
-                      {dirNameOf(e.path)}
-                    </span>
+                    <span className="ui-log-note-dir">{dirname(e.path)}</span>
                   </label>
-                );
-              })
-            )}
-          </div>
-          <div className="text-text-5 text-xs mt-1">
-            The files you tick are the ones this note covers. Saving a version needs every changed
-            file to have a note.
-          </div>
-        </div>
+                </li>
+              );
+            })
+          )}
+        </ul>
+        <p className="ui-log-note-help">
+          The files you tick are the ones this note covers. Saving a version needs every changed
+          file to have a note. Press ⌘↵ to save.
+        </p>
+      </section>
 
-        <div className="text-text-5 text-xs">
-          Press ⌘↵ to save this note
-        </div>
-        {err && <div role="alert" className="text-red text-xs">{err}</div>}
-      </div>
+      {err && (
+        <Alert variant="destructive">
+          <AlertDescription>{err}</AlertDescription>
+        </Alert>
+      )}
     </Dialog>
   );
 }

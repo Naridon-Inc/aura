@@ -1,0 +1,148 @@
+/* A Trace page read as a story: the column, the count line with its one
+   control, the sentence under it, and the shared timeline. These are the
+   sealed-records chain's own measures, given to every Trace view. */
+
+.ui-trace-story {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ui-trace-story-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-trace-story-head > svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-trace-story-head > svg[data-tone="good"] {
+  color: var(--ui-green);
+}
+.ui-trace-story-head strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.ui-trace-story-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.ui-trace-story-intro {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.ui-trace-story .ui-trace-timeline {
+  margin: 0 -8px;
+}
+
+/* Days: the caption sits on the column's edge, its moments under it. */
+.ui-trace-story-days {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ui-trace-story-day {
+  display: flex;
+  flex-direction: column;
+}
+.ui-trace-story-day > .ui-trace-caption,
+.ui-trace-story-chapter > .ui-trace-caption {
+  padding: 8px 0 0;
+}
+
+/* A moment's facts, and a detail's, on one muted line. */
+.ui-trace-story-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-trace-story-meta svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+.ui-trace-story-meta [data-sealed] {
+  color: var(--ui-green);
+}
+.ui-trace-story-meta code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* A detail: back, headline, then its chapters. */
+.ui-trace-story-back {
+  align-self: flex-start;
+  margin-left: -8px;
+  color: var(--ui-muted-fg);
+}
+.ui-trace-story-back:hover {
+  color: var(--ui-fg);
+}
+.ui-trace-story-backbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+.ui-trace-story-backbar > .ui-trace-story-back {
+  align-self: center;
+}
+.ui-trace-story-title {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ui-trace-story-title h2 {
+  margin: 0;
+  color: var(--ui-fg);
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+}
+.ui-trace-story-chapter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ui-trace-story-chapter .ui-trace-fact {
+  padding-inline: 0;
+}
+.ui-trace-story-text {
+  color: var(--ui-fg);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ui-trace-story-text[data-muted] {
+  color: var(--ui-muted-fg);
+}
+.ui-trace-story-meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* The quiet ways onward at the foot of a list. */
+.ui-trace-story-links {
+  display: flex;
+  gap: 4px;
+  margin: 12px 0 0 -8px;
+}
+.ui-trace-story-chapter > .ui-trace-story-links,
+.ui-trace-story-day > .ui-trace-story-links {
+  margin-top: 2px;
+}

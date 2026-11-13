@@ -1,0 +1,47 @@
+/* The new-task dialog: the new-workspace frame (header, field, context row,
+   footer) with the dialog's name in the header and a one-line title over the
+   description. */
+.ui-tasks-create-heading {
+  margin: 0;
+  padding-inline: 8px;
+  color: var(--ui-fg);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+}
+.ui-tasks-create-name {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 16px 16px 4px;
+  background: none;
+  border: 0;
+  outline: none;
+  color: var(--ui-fg);
+  font: 500 16px/24px var(--font-sans);
+}
+.ui-tasks-create-name::placeholder {
+  color: var(--ui-muted-fg);
+}
+.ui-tasks-create-name:disabled {
+  opacity: 0.6;
+}
+/* The description sits right under the title, so it drops the frame's top
+   inset and starts shorter than a workspace prompt. */
+.ui-workspaces-create.ui-tasks-create textarea {
+  min-height: 96px;
+  padding-top: 4px;
+}
+/* The footer's pickers carry a long name (several owners) without pushing
+   Create off the row. */
+.ui-tasks-create footer > button:not([type="submit"]) {
+  min-width: 0;
+  max-width: 220px;
+  margin-left: 0;
+  font-weight: 400;
+}
+.ui-tasks-create footer > button:not([type="submit"]) > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

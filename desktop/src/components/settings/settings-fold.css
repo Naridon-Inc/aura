@@ -1,0 +1,20 @@
+/* A part of a settings page that used to be a page of its own. It keeps its
+   name as a section heading so a deep link has somewhere to land, and the
+   sections it brought with it read as its sub-sections: the same heading,
+   one step quieter. */
+.ui-settings-fold {
+  scroll-margin-top: 24px;
+}
+.ui-settings-fold > .ui-settings-section {
+  padding-top: 8px;
+}
+.ui-settings-fold .ui-settings-section .ui-settings-section {
+  margin-bottom: 24px;
+}
+.ui-settings-fold .ui-settings-section .ui-settings-section > h2 {
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-settings-fold .ui-settings-section .ui-settings-section:last-child {
+  margin-bottom: 0;
+}

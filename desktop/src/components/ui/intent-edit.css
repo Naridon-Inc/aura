@@ -1,0 +1,96 @@
+/* Edit reason: the original reason in a bordered box, a Split / Merge
+   toggle group, then either the Add a note file list (files to move, plus
+   the new reason) or the same list box holding the reasons to merge with,
+   one of which is chosen. */
+.ui-intent-edit-original {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+.ui-intent-edit-original > h3 {
+  margin: 0 0 2px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ui-intent-edit-original > p {
+  margin: 0;
+  color: var(--ui-fg);
+  font-size: 14px;
+  line-height: 1.4;
+}
+.ui-intent-edit-original > small {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-intent-edit-mode {
+  margin-top: 16px;
+}
+.ui-intent-edit-field {
+  margin-top: 16px;
+}
+.ui-intent-edit-targets {
+  max-height: 220px;
+}
+.ui-intent-edit-target {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ui-fg);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.ui-intent-edit-target:hover,
+.ui-intent-edit-target[aria-checked="true"] {
+  background: var(--ui-accent);
+}
+.ui-intent-edit-target:focus-visible {
+  outline: 2px solid var(--ui-ring);
+  outline-offset: -2px;
+}
+.ui-intent-edit-target:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.ui-intent-edit-target > svg {
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  flex-shrink: 0;
+  visibility: hidden;
+  color: var(--ui-fg);
+}
+.ui-intent-edit-target[aria-checked="true"] > svg {
+  visibility: visible;
+}
+.ui-intent-edit-target > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ui-intent-edit-target strong {
+  overflow: hidden;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-intent-edit-target small {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-intent-edit-alert {
+  margin-top: 16px;
+}

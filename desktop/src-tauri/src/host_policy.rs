@@ -100,6 +100,16 @@ impl HostPolicy for TauriHostPolicy {
     ///
     /// A standing yes is still available — it is `allow` in `[authority]`,
     /// which lands in a commit with someone's name on it.
+    /// Forms and links go up as the same cards the chat shows, on this
+    /// agent's channel.
+    fn can_elicit(&self) -> bool {
+        true
+    }
+
+    async fn elicit(&self, params: &Value) -> Result<Value, aura_acp::RpcError> {
+        crate::cmd_agent_stream::elicit_for_brain(self.app.clone(), self.channel.clone(), params).await
+    }
+
     async fn ask_capability(&self, cap: Capability, detail: &str) -> GateDecision {
         let prompt = PendingPrompt {
             prompt_id: uuid::Uuid::new_v4().to_string(),

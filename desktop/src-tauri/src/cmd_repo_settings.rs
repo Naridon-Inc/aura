@@ -76,6 +76,12 @@ pub fn gh_host_for(repo_root: &str) -> Option<String> {
     parse(&text).gh_host
 }
 
+/// The repo's worktree settings, read straight off disk for Rust callers
+/// (defaults when the file is absent or unreadable, like the command).
+pub(crate) fn load_settings(repo_root: &Path) -> RepoWorktreeSettings {
+    parse(&std::fs::read_to_string(settings_path(repo_root)).unwrap_or_default())
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct NamedScript {
@@ -105,17 +111,21 @@ pub async fn repo_worktree_settings_set(
     repo_root: String,
     settings: RepoWorktreeSettings,
 ) -> Result<(), String> {
-    crate::blocking::run(move || {
-        let path = settings_path(Path::new(&repo_root));
-        let existing = std::fs::read_to_string(&path).unwrap_or_default();
-        let rendered = render(&existing, &settings)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("couldn't create {}: {e}", parent.display()))?;
-        }
-        std::fs::write(&path, rendered).map_err(|e| format!("couldn't write {}: {e}", path.display()))
-    })
-    .await
+    crate::blocking::run(move || save_settings(Path::new(&repo_root), &settings)).await
+}
+
+/// Write `settings` into the repo's `.aura/settings.toml`, keeping every
+/// unrelated table, key and comment already there. The command above and the
+/// importer (which brings another app's setup/run scripts in) both land here.
+pub(crate) fn save_settings(repo_root: &Path, settings: &RepoWorktreeSettings) -> Result<(), String> {
+    let path = settings_path(repo_root);
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let rendered = render(&existing, settings)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("couldn't create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&path, rendered).map_err(|e| format!("couldn't write {}: {e}", path.display()))
 }
 
 // ─── internals ──────────────────────────────────────────────────────────────-

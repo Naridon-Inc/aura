@@ -1,0 +1,99 @@
+/* The commit box at the foot of the details panel's Changes tab: message,
+   one split button, and the notices a commit can raise. Same spacing as the
+   panel's rows (8px gutters) and the same hairline as its toolbar. */
+.ui-details-commit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--ui-border);
+  flex-shrink: 0;
+  min-width: 0;
+}
+.ui-details-commit-live {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-details-commit-live::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--ui-green);
+}
+.ui-details-commit-live > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-details-commit .ui-textarea {
+  min-height: 56px;
+  font-size: 13px;
+}
+.ui-details-commit-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-details-commit-actions > .ui-git-action-group {
+  flex: 1;
+  min-width: 0;
+}
+.ui-details-commit-actions > .ui-git-action-group > .ui-button:first-child {
+  flex: 1;
+  min-width: 0;
+  justify-content: center;
+}
+.ui-details-commit-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-details-commit-actions .ui-details-commit-label {
+  flex: 0 1 auto;
+}
+.ui-details-commit-count {
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-details-commit-radar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-details-commit-radar > li {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-details-commit-radar > li > i {
+  width: 6px;
+  height: 6px;
+  margin-top: 5px;
+  flex-shrink: 0;
+  border-radius: 999px;
+}
+.ui-details-commit-radar strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-details-commit-radar code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-details-commit-radar-more {
+  color: var(--ui-muted-fg);
+}

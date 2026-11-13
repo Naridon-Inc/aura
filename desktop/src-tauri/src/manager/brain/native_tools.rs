@@ -11,7 +11,7 @@
 //! into a compact JSON the model can read.
 //!
 //! Wired into `cmd_brain_chat::stream_one_brain` — when the active brain
-//! is Anthropic-shaped (`aura_pro` / `anthropic_native`) and the caller
+//! is Anthropic-shaped (`anthropic_native`) and the caller
 //! didn't supply its own tool set, these schemas are injected and the
 //! server-side loop executes any `tool_use` the model emits, feeding the
 //! results back as `tool_result` blocks until the model stops calling
@@ -27,12 +27,10 @@ use crate::cmd_tasks::{CreateTaskInput, Task, UpdateTaskInput};
 use crate::cmd_tasks_relations::TaskRelation;
 use crate::manager::QuestionKind;
 
-/// Provider ids of the two Anthropic-shaped brains. Kept as literals (not
-/// `aura_pro::PROVIDER_ID` / the private `anthropic_native` const) so this
-/// module stays compilable regardless of which `brain_*` cargo features
-/// are enabled — the tool loop simply never fires for a provider that
-/// isn't built in.
-const AURA_PRO_ID: &str = "aura_pro";
+/// Provider id of the Anthropic-shaped brain. Kept as a literal (not the
+/// private `anthropic_native` const) so this module stays compilable
+/// regardless of which `brain_*` cargo features are enabled — the tool loop
+/// simply never fires for a provider that isn't built in.
 const ANTHROPIC_NATIVE_ID: &str = "anthropic_native";
 /// The Gemini (Generative Language API) native brain. It doesn't speak the
 /// Anthropic wire shape, but its `Brain` impl translates this module's
@@ -73,9 +71,9 @@ pub const TOOL_NAMES: [&str; 10] = [
     "aura_ask",
 ];
 
-/// Whether a brain can drive the native tool loop. The two Anthropic-shaped
-/// brains (`aura_pro` proxies to Anthropic; `anthropic_native` is direct)
-/// take this module's tool schemas verbatim. The Gemini native brain
+/// Whether a brain can drive the native tool loop. The Anthropic-shaped
+/// brain (`anthropic_native`) takes this module's tool schemas verbatim.
+/// The Gemini native brain
 /// (`gemini_native`) also qualifies: it doesn't speak the Anthropic wire
 /// shape, but its `Brain` impl translates the same Anthropic-format `tools`
 /// into Gemini `functionDeclarations` and maps `functionCall` /
@@ -86,9 +84,7 @@ pub const TOOL_NAMES: [&str; 10] = [
 /// Everything else (OpenAI, CLI wrappers, OpenAI-compat) keeps its existing
 /// no-tool behaviour so the request stays byte-identical for those providers.
 pub fn supports(provider_id: &str) -> bool {
-    provider_id == AURA_PRO_ID
-        || provider_id == ANTHROPIC_NATIVE_ID
-        || provider_id == GEMINI_NATIVE_ID
+    provider_id == ANTHROPIC_NATIVE_ID || provider_id == GEMINI_NATIVE_ID
 }
 
 /// True when `name` is one of the built-in server-executed tools — this
@@ -106,6 +102,7 @@ pub fn supports(provider_id: &str) -> bool {
 pub fn is_board_tool(name: &str) -> bool {
     TOOL_NAMES.contains(&name)
         || super::control_plane::is_control_tool(name)
+        || super::project_plane::is_project_tool(name)
         || super::cloud_plane::is_cloud_tool(name)
         || super::local_plane::is_local_tool(name)
         || super::web_tools::is_web_tool(name)
@@ -116,7 +113,9 @@ pub fn is_board_tool(name: &str) -> bool {
 /// structs (`status`, `priority`, `assignee`, `scope`, `bucket`, `body`,
 /// …) so the executor is a thin `from_value` + call.
 pub fn board_tool_schemas() -> Vec<Value> {
-    vec![
+    // Every one of these reads or writes a project's own store, so every one
+    // takes the `project` it acts on (see `project_plane`).
+    let schemas = vec![
         json!({
             "name": "aura_tasks_list",
             "description": "List tasks from this project's Tasks board — the same board the user sees in the app. Optionally filter by status and cap the count.",
@@ -277,7 +276,11 @@ pub fn board_tool_schemas() -> Vec<Value> {
                 "required": ["question"]
             }
         }),
-    ]
+    ];
+    schemas
+        .into_iter()
+        .map(super::project_plane::with_project_arg)
+        .collect()
 }
 
 // ── interactive tools (ask_user / propose_plan) ─────────────────────────
@@ -425,6 +428,7 @@ pub fn interactive_tool_schemas() -> Vec<Value> {
 pub fn all_tool_schemas() -> Vec<Value> {
     let mut v = board_tool_schemas();
     v.extend(super::control_plane::tool_schemas());
+    v.extend(super::project_plane::tool_schemas());
     v.extend(super::cloud_plane::tool_schemas());
     v.extend(super::local_plane::tool_schemas());
     v.extend(super::web_tools::schemas());
@@ -857,8 +861,19 @@ you changed.";
 /// the caller cache the system+tools prefix (see the brains' `cache_control`
 /// markers).
 pub fn augment_system(existing: Option<&str>, repo_root: &str) -> String {
+    augment_system_for(existing, repo_root, 1)
+}
+
+/// [`augment_system`] for a chat bound to `bound_projects` projects. One
+/// project (or none) is the workspace chat it has always been. Several is
+/// Aura's own conversation: it gets the fleet paragraph, and it does NOT
+/// inherit the anchor project's binding constraints — those are one
+/// project's rules, and the anchor is only where this chat's process runs.
+pub fn augment_system_for(existing: Option<&str>, repo_root: &str, bound_projects: usize) -> String {
     let mut addendum = String::from(TOOLS_BLURB);
-    if let Some(rules) = binding_constraints_block(repo_root) {
+    if bound_projects > 1 {
+        addendum.push_str(&super::project_plane::fleet_blurb(bound_projects));
+    } else if let Some(rules) = binding_constraints_block(repo_root) {
         addendum.push_str(&rules);
     }
     match existing {
@@ -1040,7 +1055,12 @@ async fn guard_dispatch(
         session_id
     };
     let policy = super::gate::for_agent(channel);
-    let rules = super::authority::Rules::load(std::path::Path::new(repo_root));
+    // The rules are the TARGET project's — the one whose work is leaving —
+    // not the anchor's. In a conversation spanning several projects the
+    // anchor is only where this chat's process runs. A project that doesn't
+    // resolve can't be sent anyway; say why here, before anyone is asked.
+    let target = super::control_plane::resolve_one(repo_root, input)?;
+    let rules = super::authority::Rules::load(std::path::Path::new(&target.root));
 
     // Name the *work*, not the destination: `aura_cloud_send` picks the
     // machine itself, so the only thing the person answering can actually
@@ -1095,8 +1115,32 @@ pub async fn execute_board_tool_with_app(
     // saved (vs the brain reading the underlying files itself); the board
     // tools touch no source, so they save nothing.
     let (text, is_error, saved) = match name {
-        "aura_atlas" => tool_atlas(repo_root, input).await,
-        "aura_ask" => tool_ask(repo_root, input).await,
+        // The board, the Pages and the atlas are a PROJECT's own stores, so the
+        // call runs against the project it names — resolved here, once, with
+        // the same resolver every other plane uses — and the answer is stamped
+        // with where it came from. In a chat bound to one project an omitted
+        // `project` still means that one; in one bound to several,
+        // `repo_root` arrives empty (see `project_plane::resolution_root`) and
+        // the resolver asks back instead of guessing.
+        n if TOOL_NAMES.contains(&n) => {
+            match super::control_plane::resolve_one(repo_root, input) {
+                Ok(target) => {
+                    let (text, is_error, saved) =
+                        run_project_store_tool(&target.root, n, input, author).await;
+                    let text = if is_error {
+                        text
+                    } else {
+                        super::project_plane::stamp_target(text, &target)
+                    };
+                    (text, is_error, saved)
+                }
+                Err(e) => (e, true, 0u32),
+            }
+        }
+        n if super::project_plane::is_project_tool(n) => {
+            let (text, is_error) = super::project_plane::execute(repo_root, n, input).await;
+            (text, is_error, 0u32)
+        }
         // The control plane reads the app's own surfaces (registry, git,
         // transcripts, `gh`) rather than project files, so it saves no
         // file-read tokens to credit.
@@ -1136,22 +1180,60 @@ pub async fn execute_board_tool_with_app(
             let (text, is_error) = super::web_tools::execute(n, input).await;
             (text, is_error, 0u32)
         }
+        other => (format!("unknown tool: {other}"), true, 0u32),
+    };
+    // A placement or control call that named its project says which one it
+    // acted on, the same way the store tools do, so the chat can link it.
+    let text = if !is_error
+        && !TOOL_NAMES.contains(&name)
+        && !super::project_plane::is_project_tool(name)
+        && names_a_project(input)
+    {
+        match super::control_plane::resolve_one(repo_root, input) {
+            Ok(target) => super::project_plane::stamp_target(text, &target),
+            Err(_) => text,
+        }
+    } else {
+        text
+    };
+    (truncate(&text, MAX_RESULT_CHARS), is_error, saved)
+}
+
+/// Whether the call named a project explicitly (not "current"/"this").
+fn names_a_project(input: &Value) -> bool {
+    input
+        .get("project")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|p| !p.is_empty() && p != "current" && p != "this")
+}
+
+/// Run one of this module's own tools against `root` — a project already
+/// resolved by the caller. Returns `(text, is_error, saved_tokens)`.
+async fn run_project_store_tool(
+    root: &str,
+    name: &str,
+    input: &Value,
+    author: &str,
+) -> (String, bool, u32) {
+    match name {
+        "aura_atlas" => tool_atlas(root, input).await,
+        "aura_ask" => tool_ask(root, input).await,
         _ => {
             let (text, is_error) = match name {
-                "aura_tasks_list" => tool_tasks_list(repo_root, input).await,
-                "aura_tasks_ready" => tool_tasks_ready(repo_root, input).await,
-                "aura_task_get" => tool_task_get(repo_root, input).await,
-                "aura_task_create" => tool_task_create(repo_root, input).await,
-                "aura_task_update" => tool_task_update(repo_root, input).await,
-                "aura_pages_list" => tool_pages_list(repo_root, input).await,
-                "aura_page_read" => tool_page_read(repo_root, input).await,
-                "aura_page_write" => tool_page_write(repo_root, input, author).await,
+                "aura_tasks_list" => tool_tasks_list(root, input).await,
+                "aura_tasks_ready" => tool_tasks_ready(root, input).await,
+                "aura_task_get" => tool_task_get(root, input).await,
+                "aura_task_create" => tool_task_create(root, input).await,
+                "aura_task_update" => tool_task_update(root, input).await,
+                "aura_pages_list" => tool_pages_list(root, input).await,
+                "aura_page_read" => tool_page_read(root, input).await,
+                "aura_page_write" => tool_page_write(root, input, author).await,
                 other => (format!("unknown tool: {other}"), true),
             };
             (text, is_error, 0u32)
         }
-    };
-    (truncate(&text, MAX_RESULT_CHARS), is_error, saved)
+    }
 }
 
 // ── code-understanding tools (grep replacements) ───────────────────────
@@ -1934,6 +2016,7 @@ mod tests {
             all.len(),
             board_tool_schemas().len()
                 + super::super::control_plane::tool_schemas().len()
+                + super::super::project_plane::tool_schemas().len()
                 + super::super::cloud_plane::tool_schemas().len()
                 + super::super::local_plane::tool_schemas().len()
                 + super::super::web_tools::schemas().len()
@@ -2096,9 +2179,10 @@ mod tests {
 
     #[test]
     fn supports_anthropic_shaped_and_gemini() {
-        // The two Anthropic-shaped brains take the schemas verbatim.
-        assert!(supports("aura_pro"));
+        // The Anthropic-shaped brain takes the schemas verbatim.
         assert!(supports("anthropic_native"));
+        // The retired managed brain is gone; nothing routes a turn to it.
+        assert!(!supports("aura_pro"));
         // Gemini native now qualifies too — its Brain impl translates the
         // same Anthropic-format tools into Gemini functionDeclarations and
         // maps functionCall/functionResponse back onto the loop's contract,

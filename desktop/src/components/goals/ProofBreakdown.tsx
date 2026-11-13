@@ -11,7 +11,7 @@
 // only inside the collapsed mechanism.
 
 import { useState } from "react";
-
+import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
 import {
   capabilityPhrase,
   plainCheckLine,
@@ -21,18 +21,22 @@ import {
   finishAllInstruction,
   type ProveOutcome,
 } from "../../lib/prove";
+import { Button } from "../ui/button";
+import { TraceMark } from "../ui/trace-list";
+import { TraceItem, TraceItems, TraceLine, TraceStatusGlyph } from "../ui/trace-report";
+import "./goals.css";
 
-// Shared uppercase count label above a group of checks.
 function GroupLabel({ title, count }: { title: string; count: number }) {
   return (
-    <div className="section-label">
+    <h3 className="ui-goal-part-title">
       {title}
-      <span className="ml-1.5 tabular-nums normal-case tracking-normal">{count}</span>
-    </div>
+      <small>{count}</small>
+    </h3>
   );
 }
 
-// The "in place" side — a plain ticked list (the reasons, not the AST names).
+/** A settled list of checks — what is in place, or what isn't. The engine's
+ *  own reason rides on the line as its tooltip. */
 export function ProofGroup({
   title,
   tone,
@@ -42,34 +46,20 @@ export function ProofGroup({
   tone: "good" | "bad";
   checks: ProveOutcome["checks"];
 }) {
-  const color = tone === "good" ? "var(--color-accent-green)" : "var(--color-red)";
   return (
-    <section>
+    <section className="ui-goal-part">
       <GroupLabel title={title} count={checks.length} />
-      <ul className="mt-2 space-y-1">
+      <TraceItems>
         {checks.map((c, i) => (
-          <li
-            key={i}
-            className="flex items-start gap-2.5 text-sm px-2.5 py-1.5 rounded-md border border-line-soft bg-bg-1"
-          >
-            <span className="shrink-0 mt-px text-xs" style={{ color }} aria-hidden>
-              {tone === "good" ? "✓" : "✗"}
-            </span>
-            <span className="flex-1 min-w-0 text-text-1" title={c.reason}>
-              {plainCheckLine(c)}
-            </span>
-          </li>
+          <TraceItem key={i} tone={tone} title={<span title={c.reason}>{plainCheckLine(c)}</span>} />
         ))}
-      </ul>
+      </TraceItems>
     </section>
   );
 }
 
-// The "still missing" side — the part the user acts on. Compact rows (one
-// capability per line + a two-word status), grouped by cause so the "why it
-// matters" note is said ONCE, not repeated identically on every row. Each row
-// carries a one-tap fix to hand an agent; the group closes with a single
-// "finish all of these" prompt. Arctic-blue = the thing to click.
+/** What's still missing, grouped by why it matters, each with the instruction
+ *  that would finish it ready to copy to an agent. */
 export function MissingList({ outcome }: { outcome: ProveOutcome }) {
   const missing = outcome.checks.filter((c) => !c.passed);
   if (missing.length === 0) return null;
@@ -81,36 +71,26 @@ export function MissingList({ outcome }: { outcome: ProveOutcome }) {
     else groups.push({ note, items: [c] });
   }
   return (
-    <section className="flex flex-col gap-2.5">
+    <section className="ui-goal-part">
       <GroupLabel title="Still missing" count={missing.length} />
       {groups.map((g, gi) => (
-        <div key={gi} className="flex flex-col gap-1.5">
-          <ul className="flex flex-col gap-1">
+        <div key={gi} className="ui-goal-missing-group">
+          <TraceItems>
             {g.items.map((c, i) => (
-              <li
+              <TraceItem
                 key={i}
-                className="flex items-center gap-2.5 rounded-md border border-line-soft bg-bg-1 px-2.5 py-1.5"
-              >
-                <span className="shrink-0 text-xs text-red" aria-hidden>
-                  ✗
-                </span>
-                <span
-                  className="flex-1 min-w-0 truncate text-sm text-text-1"
-                  title={c.reason}
-                >
-                  {capabilityPhrase(c)}
-                </span>
-                <span className="section-label shrink-0">
-                  {statusTag(c)}
-                </span>
-                <CopyFix text={finishInstruction(c, outcome.goal)} />
-              </li>
+                tone="bad"
+                title={<span title={c.reason}>{capabilityPhrase(c)}</span>}
+                marks={
+                  <>
+                    <TraceMark>{statusTag(c)}</TraceMark>
+                    <CopyFix text={finishInstruction(c, outcome.goal)} />
+                  </>
+                }
+              />
             ))}
-          </ul>
-          <p className="text-xs leading-snug text-text-4">
-            <span className="text-text-3">Why it matters. </span>
-            {g.note}
-          </p>
+          </TraceItems>
+          <TraceLine tone="note">Why it matters: {g.note}</TraceLine>
         </div>
       ))}
       <FinishTheRest outcome={outcome} />
@@ -118,96 +98,71 @@ export function MissingList({ outcome }: { outcome: ProveOutcome }) {
   );
 }
 
-// A compact per-row fix — copies a ready instruction so the fix drops straight
-// into a coding session, closing the loop the Aura way (build → wire → prove).
-function CopyFix({ text }: { text: string }) {
+function useCopied(ms: number) {
   const [copied, setCopied] = useState(false);
+  const copy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), ms);
+    } catch {
+      /* clipboard blocked — the title still carries the instruction */
+    }
+  };
+  return { copied, copy };
+}
+
+function CopyFix({ text }: { text: string }) {
+  const { copied, copy } = useCopied(1600);
   return (
-    <button
+    <Button
       type="button"
+      variant="ghost"
+      size="xs"
+      className="ui-goal-copy-fix"
       title={text}
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text);
-          setCopied(true);
-          window.setTimeout(() => setCopied(false), 1600);
-        } catch {
-          /* clipboard blocked — the title still carries the instruction */
-        }
-      }}
-      className="shrink-0 text-xs font-medium transition-opacity hover:opacity-80"
-      style={{ color: copied ? "var(--color-accent-green)" : "var(--color-blue)" }}
+      onClick={() => void copy(text)}
     >
-      {copied ? "✓ copied" : "Fix →"}
-    </button>
+      {copied ? <Check aria-hidden /> : <Copy aria-hidden />}
+      {copied ? "Copied" : "Copy the fix"}
+    </Button>
   );
 }
 
-// One prompt covering every missing part, ready to paste to an agent. The
-// primary affordance here — soft arctic-blue fill.
 function FinishTheRest({ outcome }: { outcome: ProveOutcome }) {
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopied(1800);
   const prompt = finishAllInstruction(outcome);
   if (!prompt) return null;
   const n = outcome.checks.filter((c) => !c.passed).length;
   return (
-    <button
-      type="button"
-      title={prompt}
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(prompt);
-          setCopied(true);
-          window.setTimeout(() => setCopied(false), 1800);
-        } catch {
-          /* clipboard blocked */
-        }
-      }}
-      className="self-start inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors"
-      style={{
-        background: copied
-          ? "color-mix(in oklab, var(--color-accent-green) 14%, transparent)"
-          : "color-mix(in oklab, var(--color-blue) 14%, transparent)",
-        color: copied ? "var(--color-accent-green)" : "var(--color-blue)",
-      }}
-    >
-      <span aria-hidden>{copied ? "✓" : "↪"}</span>
-      {copied ? "Copied. Paste it to your agent" : `Ask your agent to finish ${n === 1 ? "this" : `all ${n}`}`}
-    </button>
+    <div className="ui-goal-finish">
+      <Button type="button" variant="secondary" size="sm" title={prompt} onClick={() => void copy(prompt)}>
+        {copied ? <Check aria-hidden /> : <Copy aria-hidden />}
+        {copied ? "Copied. Paste it to your agent" : `Ask your agent to finish ${n === 1 ? "this" : `all ${n}`}`}
+      </Button>
+    </div>
   );
 }
 
-// The mechanism, on demand only — the AST node names behind each plain reason.
+/** The mechanism, on demand: the actual code each check inspected. */
 export function HowYouKnow({ outcome }: { outcome: ProveOutcome }) {
   const [open, setOpen] = useState(false);
   return (
-    <section className="border-t border-line-soft pt-3">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-2 text-xs text-text-3 hover:text-text-1 transition-colors"
-      >
-        <Caret open={open} />
-        <span>Show how you know ({outcome.checks.length} checks)</span>
-      </button>
+    <section className="ui-goal-part">
+      <Button type="button" variant="ghost" size="sm" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        {open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}
+        Show how you know ({outcome.checks.length} checks)
+      </Button>
       {open && (
-        <ul className="mt-2.5 space-y-0.5">
+        <ul className="ui-goal-how">
           {outcome.checks.map((c, i) => (
-            <li
-              key={i}
-              className={`flex items-start gap-2 px-2 py-1 rounded text-sm font-mono ${
-                i % 2 === 0 ? "bg-bg-1/30" : ""
-              }`}
-            >
-              <span className={`shrink-0 mt-0.5 text-xs ${c.passed ? "text-green" : "text-red"}`}>
-                {c.passed ? "✓" : "✗"}
-              </span>
-              <span className="flex-1 min-w-0 truncate" title={c.reason}>
-                <span className="text-text-4">{c.node_type}</span>{" "}
-                <span className="text-text-1">{c.node_name}</span>
-                {c.must_call ? <span className="text-text-4"> → calls {c.must_call}</span> : null}
-                {c.is_stub ? <span className="text-amber"> · placeholder</span> : null}
-              </span>
+            <li key={i} title={c.reason}>
+              <TraceStatusGlyph tone={c.passed ? "good" : "bad"} />
+              <code>
+                <span>{c.node_type}</span> {c.node_name}
+                {c.must_call ? <span> → calls {c.must_call}</span> : null}
+                {c.is_stub ? <span data-tone="warn"> · placeholder</span> : null}
+              </code>
             </li>
           ))}
         </ul>
@@ -216,56 +171,34 @@ export function HowYouKnow({ outcome }: { outcome: ProveOutcome }) {
   );
 }
 
-// One plain sentence on *how* the proof was arrived at — so "Reached" reads as
-// a method, not a claim. No AST jargon here; that's what HowYouKnow is for.
 function ProofHow() {
   return (
-    <p className="text-sm leading-relaxed text-text-4">
-      Aura split this goal into the parts the code needs, then read the real code
-      to confirm each part is there, isn&apos;t an empty placeholder, and connects
-      to what it should. Each line below is one of those checks.
-    </p>
+    <TraceLine>
+      Aura split this goal into the parts the code needs, then read the real code to confirm
+      each part is there, isn&apos;t an empty placeholder, and connects to what it should. Each
+      line below is one of those checks.
+    </TraceLine>
   );
 }
 
-/** The full breakdown behind a goal verdict: how it was checked, what's in
- *  place, what's missing, and (on demand) the code each check inspected.
- *  Renders nothing when the outcome carries no checks. */
+/** The whole breakdown: what's missing first (the actionable part), then
+ *  what's in place, then the mechanism on demand. */
 export function ProofBreakdown({
   outcome,
   explainer = true,
 }: {
   outcome: ProveOutcome;
-  /** Lead with the one-line "how this was checked". On by default; drop it
-   *  where the surrounding surface already explains the method. */
   explainer?: boolean;
 }) {
   if (!outcome.checks || outcome.checks.length === 0) return null;
   const built = outcome.checks.filter((c) => c.passed);
   const missing = outcome.checks.filter((c) => !c.passed);
   return (
-    <div className="flex flex-col gap-3">
+    <div className="ui-goal-proof">
       {explainer ? <ProofHow /> : null}
-      {/* Lead with what's still missing — that's the actionable part — then the
-          settled "in place" list, then the mechanism on demand. */}
       {missing.length > 0 ? <MissingList outcome={outcome} /> : null}
       {built.length > 0 ? <ProofGroup title="In place" tone="good" checks={built} /> : null}
       <HowYouKnow outcome={outcome} />
     </div>
-  );
-}
-
-function Caret({ open }: { open: boolean }) {
-  return (
-    <svg
-      width="9"
-      height="9"
-      viewBox="0 0 10 10"
-      className="shrink-0 transition-transform"
-      style={{ transform: open ? "rotate(90deg)" : "rotate(0deg)" }}
-      aria-hidden
-    >
-      <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
   );
 }

@@ -930,6 +930,9 @@ fn parse_batch_lines(
     wanted: &[String],
 ) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
+    if reply_is_cli_error(reply) {
+        return out;
+    }
     for raw in reply.lines() {
         // Strip list furniture the prompt asked for and the model added anyway.
         let line = raw
@@ -1645,7 +1648,14 @@ fn count_changes(diff: &str) -> (usize, usize) {
 /// piece's plain-language description and shown to the reader verbatim. Every
 /// caller treats an empty return as "no model output" and falls back, so
 /// dropping the line here is all that's needed.
+///
+/// A CLI or hook error fails the whole reply rather than one line: skipping
+/// just its first line would promote the next one ("- blocked: …") to the
+/// answer.
 fn sanitize(s: &str) -> String {
+    if reply_is_cli_error(s) {
+        return String::new();
+    }
     s.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -1656,6 +1666,28 @@ fn sanitize(s: &str) -> String {
         .find(|l| !l.is_empty() && !reads_as_meta(l))
         .map(|l| l.chars().take(160).collect())
         .unwrap_or_default()
+}
+
+/// Is this reply the agent CLI (or a hook in its settings) reporting a failure
+/// instead of the model answering? "UserPromptSubmit operation blocked by
+/// hook:" was once cached as a file's plain-language explanation.
+fn reply_is_cli_error(reply: &str) -> bool {
+    use crate::aurawatch_agentcli::{hook_refused, looks_like_cli_error};
+    hook_refused(reply)
+        || reply
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .is_some_and(looks_like_cli_error)
+}
+
+/// Can a cached line be served as-is? Fallback lines are retried rather than
+/// served (see `cache_lookup`). So are lines an older build cached before it
+/// learned to reject CLI errors and replies about the prompt. Treating them as
+/// a miss heals the cache on read: the next answer is appended after them and
+/// the user's file is never rewritten.
+fn cached_line_is_usable(rec: &CacheRecord) -> bool {
+    rec.source != "fallback" && !reply_is_cli_error(&rec.summary) && !reads_as_meta(&rec.summary)
 }
 
 /// Does this sentence describe the *prompt* rather than the code? These
@@ -1794,7 +1826,8 @@ fn cache_path(cwd: &Path) -> PathBuf {
 /// wrote when no model was reachable at that moment (a cold start, a timeout, a
 /// transient failure); if we served it back forever the change would be stuck
 /// on filler even after the model came back. Skipping it means the next open
-/// retries the model and, on success, caches the real words over it.
+/// retries the model and, on success, caches the real words over it. Lines that
+/// are a CLI error or a reply about the prompt are skipped the same way.
 async fn cache_lookup(
     cwd: &Path,
     rel: &str,
@@ -1813,7 +1846,7 @@ async fn cache_lookup(
             if rec.path == rel
                 && rec.diff_hash == diff_hash
                 && rec.task == task
-                && rec.source != "fallback"
+                && cached_line_is_usable(&rec)
             {
                 hit = Some(rec);
             }
@@ -2118,5 +2151,73 @@ It sends emails and retries the ones that fail.";
             task: InferTask::SymbolBatch,
         };
         assert!(many.user_prompt().len() > one.user_prompt().len() + 3000);
+    }
+
+    // Verbatim from the editor: a UserPromptSubmit hook refused the prompt and
+    // the CLI's notice was cached and shown as "what changed".
+    const HOOK_BLOCKED: &str = "UserPromptSubmit operation blocked by hook:\n\
+- blocked: Aura change-summary narration is disabled on this machine";
+
+    #[test]
+    fn a_hook_refusal_is_never_an_explanation() {
+        assert_eq!(sanitize(HOOK_BLOCKED), "");
+        // Its second line must not be promoted to the answer either.
+        assert_eq!(
+            sanitize("- blocked: Aura change-summary narration is disabled"),
+            ""
+        );
+        assert!(parse_batch_lines(HOOK_BLOCKED, &["blocked".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn cli_errors_are_never_an_explanation() {
+        for s in [
+            "Error: Invalid API key · Please run /login",
+            "Usage: claude [options] [command] [prompt]",
+            "API Error: 529 overloaded",
+        ] {
+            assert_eq!(sanitize(s), "", "should have rejected: {s}");
+        }
+        assert_eq!(
+            sanitize("Shows an error when the upload fails."),
+            "Shows an error when the upload fails."
+        );
+    }
+
+    #[tokio::test]
+    async fn junk_cached_by_an_older_build_reads_as_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let rec = |summary: &str, source: &str| CacheRecord {
+            path: ".aura/team/team.json".into(),
+            diff_hash: "h1".into(),
+            task: "what".into(),
+            summary: summary.into(),
+            source: source.into(),
+            ts: 1,
+        };
+        // Exactly what the bad build wrote: the CLI notice, labelled as model.
+        cache_store(cwd, &rec("UserPromptSubmit operation blocked by hook:", "model"))
+            .await
+            .unwrap();
+        assert!(cache_lookup(cwd, ".aura/team/team.json", "h1", "what").await.is_none());
+
+        // A real answer written after it is served; the bad line stays in the
+        // file, untouched, and is simply never read back.
+        cache_store(cwd, &rec("Adds a new teammate and drops an old one.", "model"))
+            .await
+            .unwrap();
+        let hit = cache_lookup(cwd, ".aura/team/team.json", "h1", "what").await.unwrap();
+        assert_eq!(hit.summary, "Adds a new teammate and drops an old one.");
+
+        // A later bad line does not shadow the good one.
+        cache_store(cwd, &rec("Error: Invalid API key · Please run /login", "model"))
+            .await
+            .unwrap();
+        let hit = cache_lookup(cwd, ".aura/team/team.json", "h1", "what").await.unwrap();
+        assert_eq!(hit.summary, "Adds a new teammate and drops an old one.");
+
+        let raw = std::fs::read_to_string(cache_path(cwd)).unwrap();
+        assert_eq!(raw.lines().count(), 3);
     }
 }

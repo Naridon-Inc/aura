@@ -24,13 +24,22 @@
 //! dies mid-flight resolves to `Err` carrying that stderr tail rather than
 //! hanging until a timeout, because "opencode exited: command not found"
 //! is a bug report and a 60-second stall is not.
+//!
+//! A child started with [`SpawnExtras::reattach`] is a pipe to an agent
+//! that lives somewhere else (an attach over ssh to an agent on a cloud
+//! box). When that pipe drops, the agent is still running, so instead of
+//! failing everything in flight the reader brings a fresh pipe up at the
+//! byte offset it had reached. Requests still waiting on an answer keep
+//! waiting; the answer arrives on the new pipe.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio::process::{ChildStderr, ChildStdout};
+use tokio::sync::{Mutex, broadcast, oneshot, watch};
 
 /// How many stderr lines to keep for diagnostics. Enough to carry a stack
 /// trace or a "no API key" paragraph; bounded so a chatty agent can't grow
@@ -41,6 +50,31 @@ const STDERR_TAIL_LINES: usize = 40;
 /// deltas while nobody is subscribed simply drops them — `chat()`
 /// subscribes *before* it prompts, so the window that matters is covered.
 const EVENT_CHANNEL_CAP: usize = 1024;
+
+/// How many times in a row a dropped pipe is brought back before giving
+/// up. Reset by every line that arrives, so a link that flaps once an hour
+/// never runs out.
+const REATTACH_ATTEMPTS: u32 = 5;
+
+/// How long a write waits for a dropped pipe to come back before failing.
+const REATTACH_WAIT: Duration = Duration::from_secs(15);
+
+/// Sees every event line (anything that is not an answer to us) with the
+/// byte offset of the agent's output stream it started at, in arrival
+/// order, before it is broadcast.
+pub type Observer = Arc<dyn Fn(u64, &Value) + Send + Sync>;
+
+/// Builds the command that streams the agent's output from a byte offset.
+pub type Reattach = Arc<dyn Fn(u64) -> tokio::process::Command + Send + Sync>;
+
+/// Optional extras for [`JsonlChild::spawn_with`].
+#[derive(Clone, Default)]
+pub struct SpawnExtras {
+    pub observer: Option<Observer>,
+    /// Bring a dropped pipe back instead of ending the child. Only for a
+    /// pipe to an agent that outlives it.
+    pub reattach: Option<Reattach>,
+}
 
 /// What an inbound line turned out to be.
 #[derive(Debug, Clone, PartialEq)]
@@ -136,9 +170,154 @@ pub struct JsonlChild {
     /// Declared before `_child` so it runs first: `kill_on_drop` reaches only
     /// the agent itself, and by the time that has fired the group leader is
     /// gone and its children can no longer be found from here.
-    _tree: crate::child_reaper::TreeGuard,
+    _tree: StdMutex<crate::child_reaper::TreeGuard>,
     /// Kept so dropping the handle kills the process (`kill_on_drop`).
     _child: Mutex<tokio::process::Child>,
+    /// Bumped each time a dropped pipe is replaced. A write that hit the
+    /// dead pipe waits on this for the new one.
+    attached: watch::Sender<u64>,
+    resumable: bool,
+}
+
+/// Spawn `cmd` with the three pipes this transport owns.
+fn launch(cmd: &mut tokio::process::Command, bin: &str) -> Result<tokio::process::Child, TransportError> {
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    // Its own process group: a persistent agent session runs tool calls,
+    // and those are children of the agent, not of us.
+    crate::child_reaper::own_process_group(cmd);
+    cmd.spawn().map_err(|source| TransportError::Spawn {
+        bin: bin.to_string(),
+        source,
+    })
+}
+
+fn pump_stderr(tail: Arc<Mutex<VecDeque<String>>>, stderr: ChildStderr) {
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let mut tail = tail.lock().await;
+            if tail.len() == STDERR_TAIL_LINES {
+                tail.pop_front();
+            }
+            tail.push_back(line);
+        }
+    });
+}
+
+/// Everything the stdout reader needs, without holding the child alive:
+/// dropping the last [`JsonlChild`] handle still kills the agent.
+struct Reader {
+    this: Weak<JsonlChild>,
+    bin: String,
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
+    events: broadcast::Sender<Value>,
+    classify: Classifier,
+    extras: SpawnExtras,
+}
+
+impl Reader {
+    async fn run(self, stdout: ChildStdout) {
+        let mut stdout = stdout;
+        // Bytes of the agent's output consumed so far. A reattached pipe is
+        // asked to start exactly here.
+        let mut seen_end: u64 = 0;
+        let mut attempts = 0u32;
+        loop {
+            let mut reader = BufReader::new(stdout);
+            let mut pos = seen_end;
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                let n = match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n as u64,
+                };
+                let start = pos;
+                pos += n;
+                seen_end = pos;
+                attempts = 0;
+                self.line(start, &buf).await;
+            }
+            let Some(next) = self.reattach(seen_end, &mut attempts).await else {
+                break;
+            };
+            stdout = next;
+        }
+        // stdout closed for good: the child is done talking. Everyone still
+        // waiting gets woken by their oneshot sender dropping.
+        self.pending.lock().await.clear();
+    }
+
+    async fn line(&self, offset: u64, raw: &[u8]) {
+        let text = String::from_utf8_lossy(raw);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        // Agents print human noise on stdout sometimes (a banner, a
+        // warning). A line that isn't JSON is not a protocol error — it's
+        // someone else's println.
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            tracing::debug!(target: "brain::jsonl", line = %truncate(trimmed), "non-JSON stdout line");
+            return;
+        };
+        match (self.classify)(&value) {
+            Inbound::Response { id, body } => {
+                if let Some(tx) = self.pending.lock().await.remove(&id) {
+                    let _ = tx.send(body);
+                } else {
+                    // Late answer to a cancelled request.
+                    tracing::debug!(target: "brain::jsonl", %id, "unmatched response");
+                }
+            }
+            Inbound::Event(v) => {
+                if let Some(observe) = &self.extras.observer {
+                    observe(offset, &v);
+                }
+                let _ = self.events.send(v);
+            }
+        }
+    }
+
+    /// Bring a dropped pipe back at `offset`, or `None` when this child
+    /// doesn't reattach, its handle is gone, or every attempt failed.
+    async fn reattach(&self, offset: u64, attempts: &mut u32) -> Option<ChildStdout> {
+        let factory = self.extras.reattach.as_ref()?;
+        while *attempts < REATTACH_ATTEMPTS {
+            let delay = Duration::from_millis(250u64 << (*attempts).min(4));
+            *attempts += 1;
+            tokio::time::sleep(delay).await;
+            // Upgraded after the wait, never across it: a handle dropped
+            // meanwhile means the conversation is over.
+            let this = self.this.upgrade()?;
+            let mut cmd = factory(offset);
+            match launch(&mut cmd, &self.bin) {
+                Ok(mut child) => {
+                    let Some(stdout) = child.stdout.take() else {
+                        continue;
+                    };
+                    if let Some(stderr) = child.stderr.take() {
+                        pump_stderr(this.stderr_tail.clone(), stderr);
+                    }
+                    *this.stdin.lock().await = child.stdin.take();
+                    if let Ok(mut tree) = this._tree.lock() {
+                        *tree = crate::child_reaper::TreeGuard::named(child.id(), &self.bin);
+                    }
+                    *this._child.lock().await = child;
+                    this.attached.send_modify(|g| *g += 1);
+                    tracing::info!(target: "brain::jsonl", bin = %self.bin, offset, "reattached");
+                    return Some(stdout);
+                }
+                Err(e) => {
+                    tracing::warn!(target: "brain::jsonl", bin = %self.bin, error = %e, "reattach failed");
+                }
+            }
+        }
+        None
+    }
 }
 
 impl JsonlChild {
@@ -146,23 +325,24 @@ impl JsonlChild {
     /// caller (args, cwd, env); stdio is overridden here because the whole
     /// point of this type is owning those three pipes.
     pub fn spawn(
-        mut cmd: tokio::process::Command,
+        cmd: tokio::process::Command,
         bin: impl Into<String>,
         classify: Classifier,
     ) -> Result<Arc<Self>, TransportError> {
-        let bin = bin.into();
-        cmd.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        // Its own process group: a persistent agent session runs tool calls,
-        // and those are children of the agent, not of us.
-        crate::child_reaper::own_process_group(&mut cmd);
+        Self::spawn_with(cmd, bin, classify, SpawnExtras::default())
+    }
 
-        let mut child = cmd.spawn().map_err(|source| TransportError::Spawn {
-            bin: bin.clone(),
-            source,
-        })?;
+    /// [`spawn`](Self::spawn), plus an observer of every event line and,
+    /// for a pipe to an agent running elsewhere, a way to bring the pipe
+    /// back when it drops.
+    pub fn spawn_with(
+        mut cmd: tokio::process::Command,
+        bin: impl Into<String>,
+        classify: Classifier,
+        extras: SpawnExtras,
+    ) -> Result<Arc<Self>, TransportError> {
+        let bin = bin.into();
+        let mut child = launch(&mut cmd, &bin)?;
 
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
@@ -176,59 +356,26 @@ impl JsonlChild {
             events,
             stderr_tail: Arc::new(Mutex::new(VecDeque::new())),
             next_id: std::sync::atomic::AtomicU64::new(1),
-            _tree: crate::child_reaper::TreeGuard::named(child.id(), &bin),
+            _tree: StdMutex::new(crate::child_reaper::TreeGuard::named(child.id(), &bin)),
             _child: Mutex::new(child),
+            attached: watch::channel(0).0,
+            resumable: extras.reattach.is_some(),
         });
 
         if let Some(stderr) = stderr {
-            let tail = this.stderr_tail.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let mut tail = tail.lock().await;
-                    if tail.len() == STDERR_TAIL_LINES {
-                        tail.pop_front();
-                    }
-                    tail.push_back(line);
-                }
-            });
+            pump_stderr(this.stderr_tail.clone(), stderr);
         }
 
         if let Some(stdout) = stdout {
-            let pending = this.pending.clone();
-            let events = this.events.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    // Agents print human noise on stdout sometimes (a
-                    // banner, a warning). A line that isn't JSON is not a
-                    // protocol error — it's someone else's println.
-                    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-                        tracing::debug!(target: "brain::jsonl", line = %truncate(trimmed), "non-JSON stdout line");
-                        continue;
-                    };
-                    match classify(&value) {
-                        Inbound::Response { id, body } => {
-                            if let Some(tx) = pending.lock().await.remove(&id) {
-                                let _ = tx.send(body);
-                            } else {
-                                // Late answer to a cancelled request.
-                                tracing::debug!(target: "brain::jsonl", %id, "unmatched response");
-                            }
-                        }
-                        Inbound::Event(v) => {
-                            let _ = events.send(v);
-                        }
-                    }
-                }
-                // stdout closed: the child is done talking. Everyone still
-                // waiting gets woken by their oneshot sender dropping.
-                pending.lock().await.clear();
-            });
+            let reader = Reader {
+                this: Arc::downgrade(&this),
+                bin,
+                pending: this.pending.clone(),
+                events: this.events.clone(),
+                classify,
+                extras,
+            };
+            tokio::spawn(reader.run(stdout));
         }
 
         Ok(this)
@@ -261,16 +408,41 @@ impl JsonlChild {
 
     /// Write one JSON object as a line. Used for notifications and for
     /// answering the agent's own requests.
+    ///
+    /// On a reattaching child a write that hits the dropped pipe waits for
+    /// the new one and goes out on that, rather than failing a turn over a
+    /// blip the reader is already repairing.
     pub async fn send_line(&self, value: &Value) -> Result<(), TransportError> {
         let mut buf = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
         buf.push(b'\n');
+        let mut attached = self.attached.subscribe();
+        let before = *attached.borrow_and_update();
+        match self.write(&buf).await {
+            Err(e) if self.resumable => {
+                // The watch guard is not `Send`; only whether it came back
+                // may live past this await.
+                let back = matches!(
+                    tokio::time::timeout(REATTACH_WAIT, attached.wait_for(|g| *g > before)).await,
+                    Ok(Ok(_))
+                );
+                if back {
+                    self.write(&buf).await
+                } else {
+                    Err(e)
+                }
+            }
+            other => other,
+        }
+    }
+
+    async fn write(&self, buf: &[u8]) -> Result<(), TransportError> {
         let mut guard = self.stdin.lock().await;
         let stdin = guard.as_mut().ok_or_else(|| TransportError::Write {
             bin: self.bin.clone(),
             source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin closed"),
         })?;
         stdin
-            .write_all(&buf)
+            .write_all(buf)
             .await
             .map_err(|source| TransportError::Write {
                 bin: self.bin.clone(),
@@ -452,6 +624,85 @@ mod tests {
     fn numeric_and_string_ids_agree() {
         assert_eq!(id_to_string(&json!(12)), "12");
         assert_eq!(id_to_string(&json!("12")), "12");
+    }
+
+    fn sh(script: &str) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(script);
+        cmd
+    }
+
+    fn recorder() -> (Observer, Arc<StdMutex<Vec<(u64, String)>>>) {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let sink = seen.clone();
+        let observe: Observer = Arc::new(move |offset, v: &Value| {
+            let m = v["method"].as_str().unwrap_or_default().to_string();
+            sink.lock().unwrap().push((offset, m));
+        });
+        (observe, seen)
+    }
+
+    async fn settle(seen: &Arc<StdMutex<Vec<(u64, String)>>>, want: usize) {
+        for _ in 0..200 {
+            if seen.lock().unwrap().len() >= want {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    const A: &str = r#"{"jsonrpc":"2.0","method":"a"}"#;
+    const B: &str = r#"{"jsonrpc":"2.0","method":"b"}"#;
+    const C: &str = r#"{"jsonrpc":"2.0","method":"c"}"#;
+
+    #[tokio::test]
+    async fn observer_sees_each_event_at_its_byte_offset() {
+        let (observer, seen) = recorder();
+        let script = format!("printf '%s\\n%s\\n' '{A}' '{B}'; sleep 5");
+        let extras = SpawnExtras { observer: Some(observer), reattach: None };
+        let _child = JsonlChild::spawn_with(sh(&script), "sh", classify_jsonrpc, extras).unwrap();
+        settle(&seen, 2).await;
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got, vec![(0, "a".into()), (A.len() as u64 + 1, "b".into())]);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_pipe_comes_back_at_the_offset_it_reached() {
+        // The agent's output, as a log the attach streams from. The first
+        // pipe carries one line and drops; the reattach is asked for the
+        // byte it got to and carries the rest.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("agent.out");
+        std::fs::write(&log, format!("{A}\n{B}\n{C}\n")).unwrap();
+        let log_s = log.to_string_lossy().into_owned();
+
+        let asked = Arc::new(StdMutex::new(Vec::new()));
+        let asked_in = asked.clone();
+        let path = log_s.clone();
+        let reattach: Reattach = Arc::new(move |offset| {
+            asked_in.lock().unwrap().push(offset);
+            sh(&format!("tail -c +{} '{path}'; sleep 5", offset + 1))
+        });
+        let (observer, seen) = recorder();
+        let extras = SpawnExtras { observer: Some(observer), reattach: Some(reattach) };
+        let first = sh(&format!("head -n 1 '{log_s}'"));
+        let _child = JsonlChild::spawn_with(first, "sh", classify_jsonrpc, extras).unwrap();
+        settle(&seen, 3).await;
+
+        let line = A.len() as u64 + 1;
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec![(0, "a".into()), (line, "b".into()), (2 * line, "c".into())]
+        );
+        assert_eq!(asked.lock().unwrap().clone(), vec![line]);
+    }
+
+    #[tokio::test]
+    async fn a_child_without_reattach_ends_when_its_pipe_does() {
+        let child = JsonlChild::spawn(sh("exit 0"), "sh", classify_jsonrpc).unwrap();
+        let line = jsonrpc_request("1", "x", json!({}));
+        let out = tokio::time::timeout(Duration::from_secs(5), child.request("1".into(), line)).await;
+        assert!(matches!(out, Ok(Err(_))), "a request to a gone child fails fast");
     }
 
     #[test]

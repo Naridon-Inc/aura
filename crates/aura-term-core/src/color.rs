@@ -89,6 +89,12 @@ pub struct Palette {
     /// Fill drawn behind selected cells. Translucent so the glyphs underneath
     /// still read — the renderer alpha-blends it over the cell background.
     pub selection: Rgba,
+    /// Fill behind a find hit that is not the current one.
+    pub search_match: Rgba,
+    /// Fill behind the hit the viewport has been moved to. Distinct from
+    /// `search_match` because "3 of 12" is only legible if you can see which
+    /// of the twelve is the third.
+    pub search_active: Rgba,
     pub ansi: [Rgba; 16],
 }
 
@@ -101,6 +107,21 @@ impl Default for Palette {
             cursor: Rgba::rgb8(0x6a, 0xa5, 0xff),
             // Same arctic blue at low opacity for the selection wash.
             selection: Rgba::new(0x6a as f32 / 255.0, 0xa5 as f32 / 255.0, 1.0, 0.35),
+            // Aura green (#4dc1a4) for find hits — a different hue from the
+            // selection wash so a hit inside a selection is still visible.
+            // The current hit is near-solid, the others are a faint trace.
+            search_match: Rgba::new(
+                0x4d as f32 / 255.0,
+                0xc1 as f32 / 255.0,
+                0xa4 as f32 / 255.0,
+                0.28,
+            ),
+            search_active: Rgba::new(
+                0x4d as f32 / 255.0,
+                0xc1 as f32 / 255.0,
+                0xa4 as f32 / 255.0,
+                0.72,
+            ),
             ansi: ANSI_16,
         }
     }

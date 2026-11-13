@@ -1,0 +1,22 @@
+/* One key cap. It paints from the theme's own key-cap pair, so it follows
+   whichever theme pack is in scope; a context that wants a quieter cap (the
+   shortcut sheet, the model menu's footer) restyles `kbd` under its own
+   class and wins on specificity. */
+
+.ui-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: var(--radius);
+  background: var(--color-kbd-bg);
+  color: var(--color-kbd-fg);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+}

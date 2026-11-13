@@ -39,6 +39,7 @@ pub mod method {
     pub const TERMINAL_KILL: &str = "terminal/kill";
     pub const TERMINAL_RELEASE: &str = "terminal/release";
     pub const TERMINAL_WAIT_FOR_EXIT: &str = "terminal/wait_for_exit";
+    pub const ELICITATION_CREATE: &str = "elicitation/create";
 }
 
 /// The protocol revision we implement.
@@ -57,6 +58,25 @@ pub fn client_capabilities() -> Value {
         "fs": { "readTextFile": true, "writeTextFile": true },
         "terminal": true,
     })
+}
+
+/// What an agent on another machine is told. Its files and its shell are
+/// over there; serving `fs/*` or `terminal/*` here would read, write and
+/// run on this laptop instead. So both are refused at the handshake and
+/// the agent uses its own, and only what needs the person — permission
+/// prompts — comes back to this client.
+pub fn remote_client_capabilities() -> Value {
+    json!({
+        "fs": { "readTextFile": false, "writeTextFile": false },
+        "terminal": false,
+    })
+}
+
+/// `caps` plus the promise that the agent may ask the person for a form or
+/// a link. Only made by a host that has someone to ask.
+pub fn with_elicitation(mut caps: Value) -> Value {
+    caps["elicitation"] = json!({ "form": {}, "url": {} });
+    caps
 }
 
 /// A model/mode choice the agent advertises for a session. OpenCode
@@ -127,6 +147,19 @@ impl SessionInfo {
             session_id,
             config_options,
         })
+    }
+
+    /// A session brought back by `session/load`, whose reply carries the
+    /// session's options but not its id — the caller already knows it.
+    pub fn loaded(session_id: impl Into<String>, result: &Value) -> Self {
+        let config_options = result
+            .get("configOptions")
+            .and_then(|v| serde_json::from_value::<Vec<ConfigOption>>(v.clone()).ok())
+            .unwrap_or_default();
+        Self {
+            session_id: session_id.into(),
+            config_options,
+        }
     }
 
     /// The `model` config option, if the agent exposes one. This is the

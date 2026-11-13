@@ -1,30 +1,31 @@
-// TraceTabs — Trace's own strip, on the surface, above the view it switches.
+// TraceTabs — Trace's page header and the view strip under it.
 //
-// Trace used to be reached only through a 232px rail: click "Trace" in the nav
-// and a second column appeared listing ten rows, of which one was showing. That
-// column cost a seventh of the window to draw a menu that never changed, on a
-// page whose content is wide tables and timelines. Workspaces and Mission
-// Control already put their view switch ON the surface; Trace is the last page
-// that made you keep a column open to change tabs.
+// The header is the 40px bar every top-level page wears: the page's name on
+// the left, its verbs on the right. The strip beneath it is the underline tab
+// list the Dashboard uses to switch what the board shows. Every view is a tab
+// with its name spelled out.
 //
-// The split down the middle of this bar is the honest part. Seven of Trace's
-// entries are PLACES — click and this area shows that. Two of them, Goals and
-// Safety check, are not: they hand a question to Aura and the answer arrives in
-// the chat, with nothing new rendering here at all. As rows in a menu that was
-// merely vague. As tabs it would be a lie — a tab promises the area beneath it
-// changes. So the places are tabs, on the left, in the app's tab control
-// (`ui/tabs`, the same strip Tasks wears); the two questions are buttons, on
-// the right, where every other verb in this app lives. Both read off the same
-// TRACE_DESTINATIONS list the rail reads, so the two entrances can never drift
-// apart.
+// The split between the two rows is the honest part. Most of Trace's entries
+// are PLACES — click and this area shows that — so they are tabs, Goals among
+// them (the list of what you asked for, each with its own Prove). Safety check
+// is not: it hands a question to Aura and the answer arrives in the chat, with
+// nothing new rendering here at all. A tab promises the area beneath it
+// changes, so that one is a button in the header, where every other verb in
+// this app lives. Both rows read off the same TRACE_DESTINATIONS list, so the
+// two can never drift apart.
 
-import type { JSX, ReactNode } from "react";
+import type { JSX } from "react";
+import { Folder } from "lucide-react";
 
-import { ViewTabs, type ViewTabOption } from "../ui/tabs";
-import { SurfaceHeader } from "../ui/SurfaceHeader";
+import { Button } from "../ui/button";
 import { AsciiSpinner } from "../ui/ascii-spinner";
-import { Select, type SelectOption } from "../ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import {
+  TraceFilterMenu,
+  TraceHeader,
+  TraceStrip,
+  type TraceStripOption,
+} from "../ui/trace-page";
 import {
   placeRootOf,
   projectNameFromRoot,
@@ -40,31 +41,10 @@ import {
   type TraceKey,
 } from "./traceDestinations";
 
-/** The strip's icon wrapper — the same 24-viewbox, 1.7-stroke line art the
- *  rail draws, so a destination wears one mark wherever you meet it. Sized by
- *  the cell (`[&_svg]:size-3`) rather than here. */
-function TabGlyph({ children }: { children: ReactNode }): JSX.Element {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      {children}
-    </svg>
-  );
-}
-
-/** One of the two questions, as a button. Deliberately NOT shaped like a tab:
- *  it doesn't change what the area below shows, so it shouldn't be able to look
- *  like the thing that does. A quiet 22px button, centred on the bar, is what
- *  every other verb in this app wears — and it now reads as a different kind of
- *  control at a glance, which is the honest answer, where before it borrowed an
- *  inactive Segment cell's shape and blurred the line the bar exists to draw. */
+/** A question to Aura, as a quiet header button. It doesn't change what
+ *  the area below shows, so it must not look like the thing that does. While
+ *  Aura is answering, the button holds the spinner and refuses a second click
+ *  — a second click would buy a second agent turn. */
 function AskButton({
   dest,
   busy,
@@ -74,20 +54,21 @@ function AskButton({
   busy: boolean;
   onRun: () => void;
 }): JSX.Element {
+  const Icon = dest.icon;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <button
-          type="button"
+        <Button
+          size="sm"
+          variant="ghost"
           aria-label={`${dest.label} · ${dest.hint}`}
           aria-busy={busy || undefined}
           disabled={busy}
           onClick={busy ? undefined : onRun}
-          className="inline-flex h-[22px] items-center gap-1 whitespace-nowrap rounded-md px-2 text-xs font-medium text-text-3 transition-colors hover:bg-state-hover hover:text-text-1 disabled:cursor-default [&_svg]:size-3"
         >
-          {busy ? <AsciiSpinner className="text-xs leading-none" /> : <TabGlyph>{dest.glyph}</TabGlyph>}
+          {busy ? <AsciiSpinner /> : <Icon />}
           {dest.label}
-        </button>
+        </Button>
       </TooltipTrigger>
       <TooltipContent side="bottom" className="max-w-[240px]">
         {dest.hint}
@@ -96,21 +77,19 @@ function AskButton({
   );
 }
 
-/** Which project Trace is reading — at the far end of the strip, opposite the
- *  views.
+/** Which project Trace is reading — at the far end of the header.
  *
- *  Trace is the surface where being on the wrong project is worst: every
- *  destination under it is a claim about history, and a timeline, an intent
- *  log or a code map from the folder you happen to have open looks exactly as
- *  authoritative as the one you meant. So the answer is named on the strip,
- *  always, and is a control wherever the surface underneath can follow it.
+ *  Trace is the surface where being on the wrong project is worst: every view
+ *  under it is a claim about history, and a timeline from the folder you
+ *  happen to have open looks exactly as authoritative as the one you meant. So
+ *  the answer is named in the header, always, and is a control wherever the
+ *  surface underneath can follow it.
  *
- *  `switchable` is what decides that, and it is opt-in per host rather than
- *  free. Trace-as-a-page reads the shared place scope, so its strip writes the
- *  scope and the page moves with it. A Trace pane inside a work surface reads
- *  the root of the window it lives in and cannot follow — there the project is
- *  named and nothing more, because a switcher whose surface ignores it is the
- *  precise bug this strip keeps being asked to fix. */
+ *  `switchable` decides that, and it is opt-in per host. Trace-as-a-page reads
+ *  the shared place scope, so its header writes the scope and the page moves
+ *  with it. A Trace pane inside a work surface reads the root of the window it
+ *  lives in and cannot follow — there the project is named and nothing more,
+ *  because a switcher whose surface ignores it is the bug this exists to fix. */
 function TraceProject({
   repoRoot,
   switchable,
@@ -128,27 +107,18 @@ function TraceProject({
   // No root at all is the one case with nothing true to say.
   if (!value) return null;
 
-  // One project is not a choice. Naming it is still worth the space; drawing a
-  // menu that can only re-pick what it already shows is not — a control that
-  // does nothing when clicked is the thing this strip should least resemble.
+  // One project is not a choice. Naming it is still worth the space; a menu
+  // that can only re-pick what it already shows is not.
   if (!switchable || known.length < 2) {
     return (
-      <span
-        className="inline-flex h-[22px] max-w-[180px] items-center gap-1.5 px-2 text-xs text-text-3"
-        title={value}
-      >
-        <FolderGlyph />
-        <span className="truncate">
-          {nameOf(value, known.find((k) => k.root === value)?.label)}
-        </span>
+      <span className="ui-trace-header-project" title={value}>
+        <Folder size={14} />
+        <span>{nameOf(value, known.find((k) => k.root === value)?.label)}</span>
       </span>
     );
   }
 
-  const options: SelectOption[] = known.map((p) => ({
-    value: p.root,
-    label: nameOf(p.root, p.label),
-  }));
+  const options = known.map((p) => ({ value: p.root, label: nameOf(p.root, p.label) }));
   // The scope can point at a project the enumerator hasn't listed (a folder
   // opened directly, a registry that hasn't caught up). Carry it rather than
   // showing a blank trigger over a surface that is reading it.
@@ -157,27 +127,14 @@ function TraceProject({
   }
 
   return (
-    <Select
+    <TraceFilterMenu
+      label="Which repository Trace is reading"
+      icon={<Folder />}
       value={value}
-      onChange={setProjectScope}
       options={options}
-      aria-label="Which project Trace is reading"
+      onChange={setProjectScope}
       align="end"
-      className="h-[22px] max-w-[190px] text-xs"
     />
-  );
-}
-
-function FolderGlyph(): JSX.Element {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path
-        d="M1.75 4.25c0-.55.45-1 1-1h3.1c.3 0 .58.13.77.36l.76.9c.19.23.47.36.77.36h5.33c.55 0 1 .45 1 1v6.02c0 .55-.45 1-1 1H2.75c-.55 0-1-.45-1-1V4.25z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinejoin="round"
-      />
-    </svg>
   );
 }
 
@@ -205,65 +162,44 @@ export function TraceTabs({
   const places = visible.filter((d) => !d.asks);
   const asks = visible.filter((d) => d.asks);
 
-  const options: ViewTabOption<TraceKey>[] = places.map((d) => ({
-    value: d.key,
-    title: d.hint,
-    icon: <TabGlyph>{d.glyph}</TabGlyph>,
-    label:
-      d.key === "impacts" && impactsCount > 0 ? (
-        <span className="inline-flex items-center gap-1.5">
-          {d.label}
-          {/* Amber, like every other count in this app that is asking for you —
-              an unresolved impact is an attention state, not a place. */}
-          <span
-            className="min-w-[16px] rounded-full bg-amber px-1 text-center text-2xs font-semibold tabular-nums text-bg-1"
-            aria-label={`${impactsCount} ${impactsCount === 1 ? "impact" : "impacts"}`}
-          >
-            {impactsCount > 99 ? "99+" : impactsCount}
-          </span>
-        </span>
-      ) : (
-        d.label
-      ),
-  }));
+  const options: TraceStripOption<TraceKey>[] = places.map((d) => {
+    const Icon = d.icon;
+    return {
+      value: d.key,
+      label: d.label,
+      hint: d.hint,
+      icon: <Icon />,
+      // An unresolved impact is an attention state; the count says how many.
+      count: d.key === "impacts" ? impactsCount : undefined,
+    };
+  });
+  const lit = places.some((d) => d.key === activeKey) ? activeKey : null;
 
   return (
-    // `SurfaceHeader`, not a bar of its own. Trace drew its own 36px row while
-    // Tasks put the identical strip in the shared 44px one, so the same control
-    // was two heights and two left insets depending on which page you were on.
-    // The bar was already the same idea drawn twice — tabs left, verbs right,
-    // one hairline under — so this is that idea's one element.
-    <SurfaceHeader
-      tabs={
-        <ViewTabs
-          ariaLabel="Trace views"
-          // ViewTabs wants a value from its own options; the two asking keys and
-          // `null` belong to neither, and light nothing — which is correct, since
-          // nothing on this surface changed when you pressed them.
-          value={(activeKey ?? "") as TraceKey}
-          onChange={(key) => {
-            const dest = places.find((d) => d.key === key);
-            dest?.run(handlers);
-          }}
-          options={options}
-        />
-      }
-      actions={
-        <>
-          {asks.length > 0
-            ? asks.map((d) => (
-                <AskButton
-                  key={d.key}
-                  dest={d}
-                  busy={busyKey === (d.key as "goals" | "review")}
-                  onRun={() => d.run(handlers)}
-                />
-              ))
-            : null}
-          <span aria-hidden className="mx-0.5 h-4 w-px bg-line-soft" />
-          <TraceProject repoRoot={repoRoot} switchable={switchProject} />
-        </>
-      }
-    />
+    <>
+      <TraceHeader
+        title="Trace"
+        actions={
+          <>
+            {asks.map((d) => (
+              <AskButton
+                key={d.key}
+                dest={d}
+                busy={busyKey === (d.key as "goals" | "review")}
+                onRun={() => d.run(handlers)}
+              />
+            ))}
+            {asks.length > 0 && <span aria-hidden className="ui-trace-header-divider" />}
+            <TraceProject repoRoot={repoRoot} switchable={switchProject} />
+          </>
+        }
+      />
+      <TraceStrip
+        ariaLabel="Trace views"
+        value={lit}
+        options={options}
+        onChange={(key) => places.find((d) => d.key === key)?.run(handlers)}
+      />
+    </>
   );
 }

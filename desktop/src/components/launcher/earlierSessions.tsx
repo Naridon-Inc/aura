@@ -34,6 +34,7 @@ import { toast } from "../../lib/toast";
 import { truncate } from "../../lib/truncate";
 import { AgentIcon } from "../agent/AgentIcon";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Button } from "../ui/button";
 import { Group, PickRow, type Row } from "./row";
 
 /** How many transcripts the pane lists. A repo that has been worked in for
@@ -174,19 +175,17 @@ export function useEarlierSessions(
 export function EarlierBody({
   rows,
   state,
-  activeKey,
   onOpenHistory,
 }: {
   rows: Row[];
   state: EarlierSessions;
-  activeKey?: string;
   /** Omitted when the Sessions page isn't available — we never print a way out
    *  that goes nowhere. */
   onOpenHistory?: () => void;
 }) {
   if (state.loading) {
     return (
-      <div className="flex items-center gap-1.5 px-3 py-4 text-sm text-text-4">
+      <div className="ui-launcher-note" data-loading="">
         <AsciiSpinner />
         Looking for what ran here before…
       </div>
@@ -198,11 +197,9 @@ export function EarlierBody({
     // facts. Saying the first when the second is true is how a reader concludes
     // their work is gone.
     return (
-      <p className="px-3 py-4 text-xs leading-relaxed text-text-4">
+      <p className="ui-launcher-note">
         Couldn&rsquo;t read the sessions here.
-        <span className="block mt-1 font-mono text-2xs text-text-5">
-          {state.error}
-        </span>
+        <code>{state.error}</code>
       </p>
     );
   }
@@ -211,7 +208,7 @@ export function EarlierBody({
     // "here", not "in this project": the list is scoped to this checkout, and
     // a worktree with no history of its own sits inside a project with plenty.
     return (
-      <p className="px-3 py-4 text-xs leading-relaxed text-text-4">
+      <p className="ui-launcher-note">
         Nothing has run here yet. The first agent you start from &ldquo;Start
         something new&rdquo; shows up here afterwards.
       </p>
@@ -222,26 +219,22 @@ export function EarlierBody({
     <>
       <Group label="Pick up where you left off">
         {rows.map((r) => (
-          <PickRow key={r.key} row={r} active={activeKey === r.key} />
+          <PickRow key={r.key} row={r} />
         ))}
       </Group>
       {/* A cap the reader can't see is a cap that reads as "that's all of
           them". Say the number and point at the surface that holds the rest. */}
       {(state.total > rows.length || onOpenHistory) && (
-        <div className="flex items-center gap-2 px-3 pb-3 pt-1 text-xs text-text-5">
+        <div className="ui-launcher-more">
           {state.total > rows.length && (
             <span>
               Showing the {rows.length} most recent of {state.total}.
             </span>
           )}
           {onOpenHistory && (
-            <button
-              type="button"
-              onClick={onOpenHistory}
-              className="text-text-4 hover:text-text-1 hover:underline transition-colors"
-            >
+            <Button variant="link" size="xs" onClick={onOpenHistory}>
               Open the full history
-            </button>
+            </Button>
           )}
         </div>
       )}

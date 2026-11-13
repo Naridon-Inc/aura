@@ -1,0 +1,192 @@
+/* A workspace on another machine. The tab row is the cloud workspace's tab
+   row and the machine's details are the cloud details popover, opened from
+   the workspace title in the header; added here are how the machine's own
+   pieces sit inside them: the title in the work header, the join panel
+   opening under ＋ at the right, the folder line, and the screen for a
+   workspace with no machine to open. */
+
+.ui-remote-strip {
+  position: relative;
+  flex-shrink: 0;
+}
+.ui-remote-tab-mark {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+}
+/* The machine as the workspace title, sat in the work header the way the
+   cloud workspace's title sits in its own. */
+.ui-remote-machine-trigger {
+  display: inline-flex;
+  flex-shrink: 1;
+  align-items: center;
+  gap: 7px;
+  min-width: 60px;
+  max-width: 420px;
+  padding: 0 6px;
+  color: var(--ui-fg);
+}
+.ui-remote-machine-trigger > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The join panel lives under ＋, which sits at the strip's right end. */
+.ui-remote-strip > .ui-cloud-details.ui-box-panel.aura-menu-surface {
+  left: auto;
+  right: 8px;
+}
+.ui-remote-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+/* ── the machine's details ─────────────────────────────────────────── */
+
+.ui-remote-mono {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-cloud-details .ui-cloud-resource-table dd > input.ui-cloud-details-name {
+  width: 100%;
+  text-align: right;
+}
+.ui-remote-error {
+  margin: 8px 0 0;
+  color: var(--ui-red);
+  font-size: 12px;
+}
+.ui-remote-machine-row {
+  align-items: flex-start;
+  width: 100%;
+  height: auto;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  text-align: left;
+}
+.ui-remote-machine-row > svg {
+  margin-top: 3px;
+}
+.ui-remote-machine-row > span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ui-remote-machine-row small {
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── body ──────────────────────────────────────────────────────────── */
+
+.ui-remote-workspace {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--ui-bg);
+}
+.ui-remote-body {
+  flex: 1;
+  min-height: 0;
+}
+.ui-remote-empty {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 0 32px;
+  overflow: auto;
+}
+.ui-remote-empty-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  max-width: 420px;
+}
+.ui-remote-alternatives {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+.ui-remote-alternatives > .ui-log-note-files-head {
+  margin-bottom: 4px;
+}
+
+/* ── the bar over a session on the machine ───────────────────────────── */
+
+/* The library terminal toolbar, led by the cloud terminal's header line:
+   the terminal mark, the session's name, and what is running in it. */
+.ui-remote-terminal-bar {
+  height: 32px;
+  padding-inline: 10px 4px;
+  gap: 8px;
+  background: var(--ui-bg);
+}
+.ui-remote-terminal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-remote-terminal-title > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-remote-terminal-title > span:first-of-type {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-remote-terminal-bar > .ui-badge {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+/* A tab whose content is taller than the body — a commit read from the
+   machine — scrolls inside it, as a file tab does. */
+.ui-remote-scroll {
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* The machine's ＋ menu: the stock width, grown just enough that "Join a
+   running session…" stays on one line. */
+.ui-menu-panel.ui-remote-new-menu {
+  width: max-content;
+}
+
+/* The details' footer row naming the folder the chat reads: the label stays
+   on one line and a long path gives way, ending in an ellipsis. */
+.ui-remote-chat-folder {
+  gap: 8px;
+}
+.ui-remote-chat-folder > span {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.ui-remote-chat-folder > button {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.ui-remote-chat-folder > button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

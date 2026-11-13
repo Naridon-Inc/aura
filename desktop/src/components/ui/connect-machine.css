@@ -1,0 +1,103 @@
+/* Connecting a machine: the shared step flow beside the machine's own
+   terminal. The step list and the pages are the cloud setup's rules and the
+   terminal strip is the workspace's; this only sets the two side by side and
+   covers the status lines a step reports. */
+
+.ui-connect-machine {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.ui-connect-machine > .ui-cloud-setup {
+  flex: 0 1 720px;
+  min-width: 520px;
+  border-right: 1px solid var(--ui-border);
+}
+
+/* ── the pages ─────────────────────────────────────────────────────────── */
+
+.ui-connect-machine-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+.ui-connect-machine-form .ui-cloud-segments {
+  margin-bottom: 0;
+}
+/* A field's help line: the page's body size is for sentences, not hints. */
+.ui-connect-machine-form p:not([role="alert"]) {
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.ui-connect-machine-mono {
+  font-family: var(--font-mono);
+}
+.ui-connect-machine-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+/* One fact the machine reported. */
+.ui-connect-machine-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--ui-fg);
+  font-size: 14px;
+  line-height: 20px;
+}
+.ui-connect-machine-status > svg,
+.ui-connect-machine-status > .ui-activity-loader {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+.ui-connect-machine-status[data-tone="ok"] > svg {
+  color: var(--ui-green);
+}
+.ui-connect-machine-status[data-tone="alert"] {
+  color: var(--ui-yellow);
+}
+.ui-connect-machine .ui-cloud-logs {
+  width: 100%;
+  min-height: 0;
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+}
+.ui-connect-machine-error {
+  width: 100%;
+}
+
+/* ── the terminal ──────────────────────────────────────────────────────── */
+
+.ui-details-terminal.ui-connect-machine-terminal {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  border-top: 0;
+}
+.ui-connect-machine-terminal > .ui-details-terminal-toolbar {
+  gap: 8px;
+  padding-inline: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-connect-machine-terminal-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.ui-connect-machine-terminal-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.ui-connect-machine-terminal-body > .ui-state {
+  flex: 1;
+  justify-content: center;
+}

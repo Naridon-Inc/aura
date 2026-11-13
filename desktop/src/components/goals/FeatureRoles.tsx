@@ -12,6 +12,9 @@
 import type { GoalRun } from "../../lib/goalStore";
 import { VERDICT } from "../../lib/goalVerdict";
 import { relativeAge } from "../../lib/relativeTime";
+import { TraceItem, TraceItems, TraceLine } from "../ui/trace-report";
+import { VERDICT_TONE } from "./verdictTone";
+import "./goals.css";
 import { describeFeature } from "../../lib/featureSignals";
 
 function joinDot(parts: string[]): string {
@@ -36,28 +39,24 @@ export function FeatureRoles({ runs, className }: { runs: GoalRun[]; className?:
   if (p.commits > 0) facts.push(`${p.commits} commit${p.commits === 1 ? "" : "s"}`);
 
   return (
-    <section className={className}>
-      <div className="section-label mb-1.5">
-        Who worked it
-      </div>
-      <ul className="flex flex-col gap-0.5">
+    <section className={className ? `ui-goal-part ${className}` : "ui-goal-part"}>
+      <h3 className="ui-goal-part-title">Who worked it</h3>
+      <TraceItems>
         {p.contributors.map((c) => (
-          <li key={c.who} className="flex items-center gap-2">
-            <span
-              aria-hidden
-              className="h-1.5 w-1.5 shrink-0 rounded-full"
-              style={{ background: VERDICT[c.lastVerdict].color }}
-              title={`${c.who} ${VERDICT[c.lastVerdict].past}`}
-            />
-            <span className="min-w-0 flex-1 truncate text-sm text-text-2">{c.who}</span>
-            <span className="text-2xs text-text-4 tabular-nums">
-              {c.checks} check{c.checks === 1 ? "" : "s"}
-            </span>
-            <span className="text-2xs text-text-5">{relativeAge(c.lastAt)}</span>
-          </li>
+          <TraceItem
+            key={c.who}
+            tone={VERDICT_TONE[c.lastVerdict]}
+            title={c.who}
+            marks={
+              <span className="ui-goal-meta">
+                {c.checks} check{c.checks === 1 ? "" : "s"} · {relativeAge(c.lastAt)} ·{" "}
+                {VERDICT[c.lastVerdict].past}
+              </span>
+            }
+          />
         ))}
-      </ul>
-      <div className="mt-2 text-xs text-text-5">{joinDot(facts)}</div>
+      </TraceItems>
+      <TraceLine tone="note">{joinDot(facts)}</TraceLine>
     </section>
   );
 }

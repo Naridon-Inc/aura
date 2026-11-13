@@ -36,7 +36,7 @@ import {
   type IntentProvenance,
 } from "../src/lib/sessionMeta";
 import type { ClaudeSession, IntentRow } from "../src/lib/api";
-import { stripComments } from "./support/code";
+import { srcTree, stripComments, strippedSrcTree } from "./support/code";
 
 const SRC = `${import.meta.dir}/../src`;
 const GUARD_RS = `${import.meta.dir}/../src-tauri/src/agent_mutation_guard.rs`;
@@ -93,8 +93,7 @@ describe("the engine and the screen agree on where a why came from", () => {
     // nothing reads is a tag that renders as whatever the default arm says.
     const rust = await rustSources();
     const seen = new Set<string>();
-    for await (const rel of new Bun.Glob("**/*.{ts,tsx}").scan({ cwd: SRC })) {
-      const src = await Bun.file(`${SRC}/${rel}`).text();
+    for (const [, src] of await srcTree()) {
       for (const tag of rust) if (src.includes(tag)) seen.add(tag);
     }
     expect([...rust].filter((t) => !seen.has(t))).toEqual([]);
@@ -214,9 +213,8 @@ describe("the scan-list marker marks one thing", () => {
     const EXEMPT = ["components/workpanes/TeamActivityNow.tsx"];
     expect(EXEMPT.length).toBe(1);
     const missing: string[] = [];
-    for await (const rel of new Bun.Glob("**/*.{ts,tsx}").scan({ cwd: SRC })) {
+    for (const [rel, src] of await strippedSrcTree()) {
       if (rel === "lib/sessionMeta.ts" || EXEMPT.includes(rel)) continue;
-      const src = stripComments(await Bun.file(`${SRC}/${rel}`).text());
       if (!src.includes("sessionDisplayTitle(")) continue;
       if (!/titleProvenance\(|displayedProvenance\(/.test(src)) missing.push(rel);
     }
@@ -229,7 +227,7 @@ describe("the seal doesn't promise more than it holds", () => {
     // The strongest claim any label in this app makes. It was printed over all
     // four origins, including "Agent edited 3 files".
     const src = stripComments(
-      await Bun.file(`${SRC}/components/workpanes/TimeMachinePane.tsx`).text(),
+      await Bun.file(`${SRC}/components/trace/TimeMachineMoment.tsx`).text(),
     );
     expect(src).toContain("Why this happened"); // ANCHOR: the card's label
     // Unquoted. The first version of this test matched `"Why this happened"`

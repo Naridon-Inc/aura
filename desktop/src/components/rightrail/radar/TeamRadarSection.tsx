@@ -14,6 +14,11 @@
 // list above is still whole for a solo developer.
 
 import { useEffect, useState } from "react";
+import { Plus } from "lucide-react";
+import { Button } from "../../ui/button";
+import { Checkbox } from "../../ui/checkbox";
+import { DetailsCaption } from "../../ui/details-panel";
+import "../../ui/details-radar.css";
 import { useTeamRadar } from "./useTeamRadar";
 import { CollisionsSection } from "./CollisionsSection";
 import { ActivitySection } from "./ActivitySection";
@@ -71,42 +76,25 @@ export function TeamRadarSection({
   }
 
   return (
-    <div className="border-b border-line-soft">
-      <div className="flex items-center gap-2 h-7 px-3 bg-bg-1/40">
-        <span className="section-label">
-          Team Radar
-        </span>
-        {radar.conflicts.length > 0 && (
-          <span className="text-2xs text-text-4 tabular-nums">
-            {radar.conflicts.length} clash
-            {radar.conflicts.length === 1 ? "" : "es"}
-          </span>
-        )}
-        <button
-          type="button"
-          onClick={() => setClaimOpen((v) => !v)}
-          className={`ml-auto h-5 px-1.5 rounded text-2xs transition-colors ${
-            claimOpen
-              ? "text-text-1 bg-bg-2"
-              : "text-text-4 hover:text-text-1 hover:bg-state-hover"
-          }`}
-          title="Claim a zone. Announce (or lock) the files you're working in"
-        >
-          + zone
-        </button>
+    <div className="ui-details-radar">
+      <div className="ui-details-group-caption">
+        <DetailsCaption>
+          <span title={RADAR_HINT}>Team Radar</span>
+          {radar.conflicts.length > 0 &&
+            ` · ${radar.conflicts.length} clash${radar.conflicts.length === 1 ? "" : "es"}`}
+        </DetailsCaption>
         <label
-          className="flex items-center gap-1 text-2xs text-text-4 cursor-pointer select-none"
+          className="ui-details-radar-ripple"
           title="Also show which other files a teammate's edit could touch"
         >
-          <input
-            type="checkbox"
+          <Checkbox
             checked={radar.showRipples}
-            onChange={(e) => radar.setShowRipples(e.target.checked)}
-            className="w-3 h-3"
-            style={{ accentColor: "var(--color-accent)" }}
+            onCheckedChange={(v) => radar.setShowRipples(v === true)}
+            aria-label="Ripple effects"
           />
-          ripple effects
+          Ripple effects
         </label>
+        <ClaimZoneButton pressed={claimOpen} onClick={() => setClaimOpen((v) => !v)} />
       </div>
 
       <CollisionsSection
@@ -135,9 +123,9 @@ export function TeamRadarSection({
 }
 
 // The collapsed state: the band's own title plus one plain line, and that's
-// all. `shrink-0` with no flex-grow, so it costs a fixed ~46px and the file
-// list above keeps everything else — an idle radar must never look like it's
-// holding space hostage.
+// all. It never grows (`flex-shrink: 0`, no flex-grow), so it costs one
+// caption and one line and the file list above keeps everything else — an
+// idle radar must never look like it's holding space hostage.
 //
 // The line does the explaining the old blank did not: "this project" says the
 // feed is per-project, "in the last day" says it's a live window, and together
@@ -145,32 +133,40 @@ export function TeamRadarSection({
 // disappeared. Same words, voice and treatment as ActivitySection's empty line;
 // there is one empty-state style here, not two.
 //
-// Keeps the "+ zone" button, because claiming the files you're working in is
+// Keeps the Zone button, because claiming the files you're working in is
 // exactly the thing you'd want to do BEFORE anyone else shows up — hiding it
 // while the radar is quiet would put it behind the one condition that makes it
 // useful. Pressing it opens the composer, which flips the band back to full.
 function QuietRadarRow({ onClaimZone }: { onClaimZone: () => void }) {
   return (
-    <div className="shrink-0 border-t border-line-soft">
-      <div className="flex items-center gap-2 h-7 px-3 bg-bg-1/40">
-        <span
-          className="section-label"
-          title="Shows who else is working in this project right now. The last day of activity, this project only."
-        >
-          Team Radar
-        </span>
-        <button
-          type="button"
-          onClick={onClaimZone}
-          className="ml-auto h-5 px-1.5 rounded text-2xs text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
-          title="Claim a zone. Announce (or lock) the files you're working in"
-        >
-          + zone
-        </button>
+    <div className="ui-details-radar">
+      <div className="ui-details-group-caption">
+        <DetailsCaption>
+          <span title={RADAR_HINT}>Team Radar</span>
+        </DetailsCaption>
+        <ClaimZoneButton pressed={false} onClick={onClaimZone} />
       </div>
-      <div className="px-3 pb-1.5 text-xs leading-snug text-text-4">
-        Quiet. Nobody has touched this project in the last day.
-      </div>
+      <p className="ui-details-radar-quiet">
+        Quiet. Nobody has touched this repository in the last day.
+      </p>
     </div>
+  );
+}
+
+const RADAR_HINT =
+  "Shows who else is working in this repository right now. The last day of activity, this repository only.";
+
+function ClaimZoneButton({ pressed, onClick }: { pressed: boolean; onClick: () => void }) {
+  return (
+    <Button
+      size="xs"
+      variant="ghost"
+      aria-pressed={pressed}
+      onClick={onClick}
+      title="Claim a zone. Announce (or lock) the files you're working in"
+    >
+      <Plus size={12} />
+      Zone
+    </Button>
   );
 }

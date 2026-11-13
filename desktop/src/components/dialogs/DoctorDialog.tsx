@@ -9,10 +9,17 @@
 // plain-language item; the few that have detail (old sessions, leftover
 // workspaces) tuck it behind a "Show" disclosure, capped so the DOM never
 // explodes. Read-only — no repairs are performed here.
+//
+// Drawn as the shared check-run list: one row per probe with its mark, its
+// title and one quiet line under it, in a single bordered box. "Needs a look"
+// is the one state the list did not have, so it adds a yellow mark beside the
+// green tick; nothing else about the row changes.
 
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { AlertTriangle, Check, Circle } from "lucide-react";
 import { Dialog } from "../Dialog";
 import { Button } from "../ui/button";
+import "../ui/check-report.css";
 import { ErrorState, LoadingState } from "../ui/state";
 import { api, type DoctorReport } from "../../lib/api";
 import {
@@ -88,7 +95,7 @@ export function DoctorDialog({ open, repoRoot, onClose, inline }: DoctorDialogPr
       open={open}
       inline={inline}
       onClose={onClose}
-      title="Project health"
+      title="Repository health"
       width={720}
       footer={
         // Inline, this is a TAB, and the tab strip already owns closing it. A
@@ -97,16 +104,16 @@ export function DoctorDialog({ open, repoRoot, onClose, inline }: DoctorDialogPr
         // come back to do — sat quiet beside it. So inline gets the re-check
         // alone, promoted; the real modal keeps both.
         inline ? (
-          <Button variant="outline" size="xs" onClick={run} disabled={loading}>
+          <Button onClick={run} disabled={loading}>
             {loading ? "Checking…" : "Check again"}
           </Button>
         ) : (
           <>
-            <Button variant="ghost" size="xs" onClick={run} disabled={loading}>
-              {loading ? "Checking…" : "Check again"}
-            </Button>
-            <Button variant="default" size="xs" onClick={onClose}>
+            <Button variant="outline" onClick={onClose}>
               Close
+            </Button>
+            <Button onClick={run} disabled={loading}>
+              {loading ? "Checking…" : "Check again"}
             </Button>
           </>
         )
@@ -117,20 +124,20 @@ export function DoctorDialog({ open, repoRoot, onClose, inline }: DoctorDialogPr
         // did not write the code; the shared error state gives them a plain
         // heading and a retry instead of a stack-flavoured string alone.
         <ErrorState
-          title="Couldn’t check your project"
+          title="Couldn’t check your repository"
           message={error}
           onRetry={() => void run()}
         />
       ) : !items && loading ? (
-        <LoadingState label="Checking your project…" />
+        <LoadingState label="Checking your repository…" />
       ) : !items || !report ? (
-        <div className="text-text-4 text-sm">Nothing to report.</div>
+        <div className="ui-pattern-empty">Nothing to report.</div>
       ) : (
-        <div className={`flex flex-col gap-3 ${inline ? "" : "max-h-[68vh] overflow-auto"}`}>
+        <div className="ui-check-report" data-scroll={inline ? undefined : ""}>
           <HealthHeadline items={items} report={report} />
-          <div className="flex flex-col gap-2">
+          <div className="ui-check-runs ui-check-box">
             {items.map((it) => (
-              <ItemCard key={it.key} item={it} />
+              <HealthRow key={it.key} item={it} />
             ))}
           </div>
         </div>
@@ -142,12 +149,6 @@ export function DoctorDialog({ open, repoRoot, onClose, inline }: DoctorDialogPr
 // One plain-language sentence at the top, from `healthHeadline` — which is
 // where the guard lives: it refuses to go green while the engine's own count
 // of problems is larger than what the items below account for.
-const VERDICT_FG: Record<"attention" | "good" | "unknown", string> = {
-  attention: "var(--color-amber)",
-  good: "var(--color-accent-green)",
-  unknown: "var(--color-amber)",
-};
-
 function HealthHeadline({
   items,
   report,
@@ -157,75 +158,57 @@ function HealthHeadline({
 }) {
   const verdict = healthHeadline(items, report);
   return (
-    <div className="flex flex-col gap-0.5 px-0.5">
-      <div
-        className="text-base font-medium"
-        style={{ color: VERDICT_FG[verdict.tone] }}
-      >
-        {verdict.text}
-      </div>
-      <div className="text-xs text-text-3">{verdict.chips.join(" · ")}</div>
-    </div>
+    <header className="ui-verdict" data-tone={verdict.tone}>
+      <strong>{verdict.text}</strong>
+      <span>{verdict.chips.join(" · ")}</span>
+    </header>
   );
 }
 
-function ItemCard({ item }: { item: HealthItem }) {
-  const [open, setOpen] = useState(false);
-  const tone = TONES[item.severity];
-  const shown = item.rows ? item.rows.slice(0, ROW_CAP) : [];
-  const hidden = item.rows ? item.rows.length - shown.length : 0;
-  return (
-    <div
-      className="rounded-md border bg-bg-3 px-3.5 py-2.5"
-      style={{ borderColor: tone.border }}
-    >
-      <div className="flex items-start gap-2.5">
-        <span className="shrink-0 mt-[1px] text-sm" style={{ color: tone.fg }}>
-          {tone.glyph}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="text-base text-text-1 font-medium">{item.title}</div>
-          {item.detail && (
-            <div className="text-sm text-text-3 leading-relaxed mt-0.5">
-              {item.detail}
-            </div>
-          )}
-          {item.rows && item.rows.length > 0 && (
-            <div className="mt-1.5">
-              <button
-                type="button"
-                className="text-xs text-text-4 hover:text-text-2 transition-colors"
-                onClick={() => setOpen((v) => !v)}
-              >
-                {open ? "Hide details" : `Show details (${item.rows.length})`}
-              </button>
-              {open && (
-                <ul className="mt-1.5 flex flex-col gap-1 max-h-[34vh] overflow-auto pr-1">
-                  {shown.map((r, i) => (
-                    <li
-                      key={i}
-                      className="text-xs font-mono text-text-3 leading-relaxed whitespace-pre-wrap"
-                    >
-                      {r}
-                    </li>
-                  ))}
-                  {hidden > 0 && (
-                    <li className="text-xs text-text-4 italic">
-                      …and {hidden} more
-                    </li>
-                  )}
-                </ul>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const TONES: Record<Severity, { fg: string; border: string; glyph: string }> = {
-  ok: { fg: "var(--color-accent-green)", border: "var(--color-line)", glyph: "✓" },
-  attention: { fg: "var(--color-amber)", border: "var(--color-amber)", glyph: "!" },
-  info: { fg: "var(--color-text-4)", border: "var(--color-line)", glyph: "·" },
+const STATUS: Record<Severity, string> = {
+  ok: "passed",
+  attention: "attention",
+  info: "pending",
 };
+
+function HealthRow({ item }: { item: HealthItem }) {
+  const [open, setOpen] = useState(false);
+  const rows = item.rows ?? [];
+  const shown = rows.slice(0, ROW_CAP);
+  const hidden = rows.length - shown.length;
+  return (
+    <Fragment>
+      <div data-status={STATUS[item.severity]}>
+        {item.severity === "ok" ? (
+          <Check size={14} />
+        ) : item.severity === "attention" ? (
+          <AlertTriangle size={14} />
+        ) : (
+          <Circle size={14} />
+        )}
+        <span>
+          {item.title}
+          {item.detail && <small>{item.detail}</small>}
+        </span>
+        {rows.length > 0 && (
+          <Button
+            size="xs"
+            variant="ghost"
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+          >
+            {open ? "Hide" : `Show ${rows.length}`}
+          </Button>
+        )}
+      </div>
+      {open && rows.length > 0 && (
+        <ul className="ui-check-box-rows">
+          {shown.map((r, i) => (
+            <li key={i}>{r}</li>
+          ))}
+          {hidden > 0 && <li className="ui-check-box-more">…and {hidden} more</li>}
+        </ul>
+      )}
+    </Fragment>
+  );
+}

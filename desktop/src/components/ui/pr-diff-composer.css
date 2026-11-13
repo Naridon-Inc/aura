@@ -1,0 +1,99 @@
+/* A file's patch in the pull request: the editor with its anchor layer,
+   the column inline threads float in, and the review composer pinned
+   under it. The composer is the thread reply composer (pr-thread.css)
+   with a target line on top and a formatting row; this adds only that. */
+
+.ui-pr-diff-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 240px;
+  background: var(--ui-bg);
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+
+.ui-pr-diff-body {
+  position: relative;
+  width: 100%;
+}
+.ui-pr-diff-main {
+  display: flex;
+  width: 100%;
+}
+.ui-pr-diff-editor {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.ui-pr-diff-canvas {
+  position: relative;
+}
+.ui-pr-diff-anchors {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.ui-pr-diff-rail {
+  position: relative;
+  flex-shrink: 0;
+  width: 320px;
+  border-left: 1px solid var(--ui-border);
+  background: color-mix(in srgb, var(--ui-muted) 30%, transparent);
+}
+
+/* ── the review composer ───────────────────────────────────────────── */
+
+.ui-pr-thread-reply.ui-pr-diff-composer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: var(--ui-card);
+}
+.ui-pr-diff-composer-label {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ui-pr-diff-composer-error .ui-alert-description {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.ui-pr-diff-format {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+}
+.ui-pr-diff-format > .ui-separator[data-orientation="vertical"] {
+  height: 12px;
+  margin: 0 2px;
+}
+.ui-pr-diff-composer-field {
+  position: relative;
+}
+.ui-pr-diff-mention {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 4px;
+}
+.ui-pr-thread-reply .ui-textarea.ui-pr-diff-composer-input {
+  width: 100%;
+  font-family: var(--font-mono);
+  resize: vertical;
+}
+.ui-pr-thread-reply-actions > .ui-pr-diff-composer-hint {
+  flex: 1;
+  align-self: center;
+  min-width: 0;
+  color: var(--ui-faint);
+  font-size: 12px;
+}

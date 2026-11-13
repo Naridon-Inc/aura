@@ -1,0 +1,27 @@
+/* Note to a workspace: one text area, a help line under it, and a notice
+   when sending fails. After sending, one sentence on who got it. */
+.ui-note-to-workspace {
+  display: flex;
+  flex-direction: column;
+}
+.ui-note-to-workspace > * + * {
+  margin-top: 8px;
+}
+.ui-note-to-workspace > .ui-alert {
+  margin-top: 16px;
+}
+.ui-note-to-workspace .ui-textarea {
+  min-height: 96px;
+  font-size: 14px;
+}
+.ui-note-to-workspace-help {
+  margin-bottom: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-note-to-workspace-sent {
+  margin: 0;
+  color: var(--ui-fg);
+  font-size: 14px;
+  line-height: 1.5;
+}

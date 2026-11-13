@@ -1,6 +1,6 @@
 //! Per-round file-change summary, derived from a settled turn's tool calls.
 //!
-//! Antigravity (and Conductor) close each agent round with a small block at the
+//! A good agent round closes with a small block at the
 //! bottom — "1 file changed · +30 −2" with a way to review what moved. We have
 //! every datum for that already: a settled turn persists its tool calls
 //! (`ChatTurn.tool_calls`), and the edit/write/multiedit/apply_patch ones carry

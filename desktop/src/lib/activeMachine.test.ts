@@ -17,8 +17,8 @@ import {
 // where it found it.
 afterEach(() => clearMachines());
 
-const BOX = "ubuntu@18.196.118.42";
-const OTHER = "ubuntu@3.122.52.150";
+const BOX = "ubuntu@203.0.113.10";
+const OTHER = "ubuntu@198.51.100.20";
 
 describe("the machine this window is standing in", () => {
   test("nothing synced means you are on this laptop", () => {

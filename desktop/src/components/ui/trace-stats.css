@@ -1,0 +1,78 @@
+.ui-trace-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.ui-trace-stat {
+  min-width: 0;
+  padding: 2px 16px;
+}
+.ui-trace-stat:first-child {
+  padding-left: 0;
+}
+.ui-trace-stat + .ui-trace-stat {
+  border-left: 1px solid var(--ui-border);
+}
+.ui-trace-stat-value {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  height: 24px;
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 24px;
+  color: var(--ui-fg);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ui-trace-stat-value svg {
+  width: 14px;
+  height: 14px;
+  align-self: center;
+  color: var(--ui-muted-fg);
+}
+.ui-trace-stat-value small {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--ui-muted-fg);
+}
+.ui-trace-stat-label {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--ui-muted-fg);
+}
+.ui-trace-stat-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ui-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-trace-exits {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: -8px;
+}
+.ui-trace-exits > .ui-button-ghost {
+  color: var(--ui-muted-fg);
+}
+.ui-trace-exits > .ui-button-ghost:hover {
+  color: var(--ui-fg);
+}
+@media (max-width: 720px) {
+  .ui-trace-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 16px;
+  }
+  .ui-trace-stat:nth-child(3) {
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+/* Net change reads at the same size as its neighbours, still green over red. */
+.ui-trace-stat-value .ui-diff-count {
+  font: 500 20px/24px var(--font-sans);
+  gap: 8px;
+}

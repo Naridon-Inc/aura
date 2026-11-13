@@ -72,8 +72,8 @@ const {
 const PROJECT = "/Users/me/projects/naridon";
 /** A second project the same window has open. */
 const OTHER_PROJECT = "/Users/me/projects/atlas";
-const BOX = "ubuntu@18.196.118.42";
-const OTHER_BOX = "ubuntu@3.122.52.150";
+const BOX = "ubuntu@203.0.113.10";
+const OTHER_BOX = "ubuntu@198.51.100.20";
 
 afterEach(() => {
   clearMachines();
@@ -250,7 +250,7 @@ describe("every entry point names the place it runs in", () => {
       "components/cloud/MachineChat.tsx",
       "components/launcher/Launcher.tsx",
       "components/workspace/WorkspaceCreateComposer.tsx",
-      "lib/auraJob.ts",
+      "lib/gitChat.ts",
       "lib/chatSlashHandler.ts",
       "lib/focusManager.ts",
       "lib/hudPublisher.tsx",
@@ -284,7 +284,7 @@ describe("every entry point names the place it runs in", () => {
     for (const file of [
       "App.tsx",
       "components/launcher/Launcher.tsx",
-      "lib/auraJob.ts",
+      "lib/gitChat.ts",
       "lib/chatSlashHandler.ts",
     ]) {
       expect(sources[file], file).toContain("placeForNewWork(");

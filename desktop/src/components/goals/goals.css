@@ -1,0 +1,179 @@
+/* Goals as report items: a goal is a TraceItem (glyph, the goal in its own
+   words, its verdict as a mark), and what backs the verdict — the gates, the
+   checks, the thread — sits under it, indented to the title, as quiet parts
+   rather than boxes. */
+
+.ui-goal-list {
+  display: flex;
+  flex-direction: column;
+}
+.ui-goal-list > .ui-goal + .ui-goal {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-goal-meta {
+  font-size: 12px;
+  color: var(--ui-faint);
+  font-variant-numeric: tabular-nums;
+}
+code.ui-goal-meta {
+  font-family: var(--font-mono);
+}
+.ui-goal-claim {
+  font-weight: 500;
+}
+.ui-goal-wait {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Indented by the glyph's 16px plus its 8px gap, so the parts line up under
+   the goal's title. */
+.ui-goal-parts {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 0 12px 24px;
+}
+.ui-goal-parts:empty {
+  display: none;
+}
+.ui-goal-part {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+.ui-goal-part > .ui-button {
+  align-self: flex-start;
+}
+.ui-goal-part-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--ui-muted-fg);
+}
+.ui-goal-part-title small {
+  font-size: 12px;
+  color: var(--ui-faint);
+  font-variant-numeric: tabular-nums;
+}
+.ui-goal-part .ui-trace-item {
+  padding: 6px 0;
+}
+.ui-goal-part .ui-trace-item-title strong {
+  font-size: 13px;
+}
+.ui-goal-proof {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ui-goal-missing-group + .ui-goal-missing-group {
+  margin-top: 8px;
+}
+.ui-goal-finish {
+  margin-top: 8px;
+}
+
+/* The gates: three figures under the one line that answers "is it done?". */
+.ui-goal-gates {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ui-goal-gates .ui-trace-stats {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.ui-goal-gate-value[data-tone="good"],
+.ui-goal-verdict[data-tone="good"] {
+  color: var(--ui-green);
+}
+.ui-goal-gate-value[data-tone="warn"],
+.ui-goal-verdict[data-tone="warn"] {
+  color: var(--ui-yellow);
+}
+.ui-goal-gate-value[data-tone="bad"],
+.ui-goal-verdict[data-tone="bad"] {
+  color: var(--ui-destructive);
+}
+
+/* The thread: the library timeline, tightened to report spacing. */
+.ui-timeline.ui-goal-thread li {
+  padding-bottom: 10px;
+}
+.ui-goal-thread strong {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 13px;
+  font-weight: 450;
+}
+.ui-goal-thread-when {
+  margin-left: auto;
+}
+.ui-goal-thread-who {
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+
+/* The mechanism: one mono line per check. */
+.ui-goal-how {
+  display: flex;
+  flex-direction: column;
+  padding-left: 8px;
+}
+.ui-goal-how li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-goal-how code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 12px/20px var(--font-mono);
+  color: var(--ui-fg);
+}
+.ui-goal-how code span {
+  color: var(--ui-faint);
+}
+.ui-goal-how code span[data-tone="warn"] {
+  color: var(--ui-yellow);
+}
+
+/* Adding a goal: a quiet ghost line until it opens into a field. */
+.ui-goal-add {
+  align-self: flex-start;
+  margin-top: 8px;
+  color: var(--ui-muted-fg);
+}
+.ui-goal-composer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ui-goal-composer .ui-input {
+  flex: 1;
+  min-width: 0;
+}
+.ui-goal-note-input {
+  flex: 1;
+  min-width: 160px;
+}
+/* A gate's reason is a sentence; let it wrap rather than cut it mid-word. */
+.ui-goal-gates .ui-trace-stat-sub {
+  white-space: normal;
+  overflow: visible;
+}
+/* The fix sits at the end of the line it fixes. */
+.ui-goal-copy-fix {
+  margin-left: auto;
+  color: var(--ui-muted-fg);
+}

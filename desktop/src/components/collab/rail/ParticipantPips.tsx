@@ -18,6 +18,7 @@ import {
   type RailActor,
 } from "./railModel";
 import { RailAvatarDimmable } from "./RailAvatar";
+import "../../ui/people-rail.css";
 
 export type ParticipantPipsProps = {
   participants: RailActor[];
@@ -44,7 +45,7 @@ export function ParticipantPips({
   byId,
   max = 4,
   size = 14,
-  ring = "var(--color-bg-1)",
+  ring = "var(--ui-sidebar)",
 }: ParticipantPipsProps) {
   const ordered = orderPips(participants);
   // Nobody in the room is not an empty cluster to draw — it is a row with no
@@ -58,35 +59,27 @@ export function ParticipantPips({
 
   return (
     <span
-      className="inline-flex items-center"
+      className="ui-rail-pips"
       title={hover}
       aria-label={`${here} in this session`}
     >
       {shown.map((actor, i) => (
         <span
           key={actor.id}
-          className="relative inline-flex rounded-full"
+          className="ui-rail-pip"
           style={{
             marginLeft: i === 0 ? 0 : -Math.round(size * 0.3),
             // The ring is what keeps four overlapping discs from reading as
             // one smear. It is the surface colour, not a line colour, so the
             // cluster looks cut out of the rail rather than outlined on it.
             boxShadow: `0 0 0 1.5px ${ring}`,
-            borderRadius: 999,
             zIndex: shown.length - i,
           }}
         >
           <RailAvatarDimmable actor={actor} size={size} />
         </span>
       ))}
-      {more > 0 ? (
-        <span
-          className="text-2xs tabular-nums text-text-4 leading-none"
-          style={{ marginLeft: 4 }}
-        >
-          +{more}
-        </span>
-      ) : null}
+      {more > 0 ? <small>+{more}</small> : null}
     </span>
   );
 }

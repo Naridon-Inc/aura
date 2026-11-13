@@ -1,8 +1,7 @@
 // Shared file-language detection. Maps a path's extension to a human
 // display name ("TypeScript", "Rust"). Used by the PR diff surfaces'
-// per-file headers (PrFilesSection overview cards + the Files-tab diff
-// header) so the language chip reads identically across both — one
-// table, not a per-component copy.
+// per-file headers so the language chip reads identically everywhere —
+// one table, not a per-component copy.
 
 export const LANG_BY_EXT: Record<string, string> = {
   ts: "TypeScript",

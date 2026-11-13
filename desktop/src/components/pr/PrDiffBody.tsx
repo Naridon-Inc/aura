@@ -66,59 +66,31 @@ import {
 } from "react";
 import { DiffEditor, type DiffOnMount, type Monaco } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
-import ReactMarkdown from "react-markdown";
-import { monogram } from "../../lib/monogram";
-import remarkGfm from "remark-gfm";
 
 import { installMonacoEnvironment } from "../../lib/monacoEnv";
 import { languageSlugForPath } from "../../lib/monacoLanguage";
 import { configureMonacoDiagnostics } from "../../lib/monacoDiagnostics";
 import { useResolvedTheme, useThemeVariant } from "../../lib/themeStore";
 import { auraThemeName, ensureAuraThemes } from "../../lib/monacoTheme";
-import type {
-  PrComment,
-  PrCommentReaction,
-  ReactionContent,
-} from "../../lib/api";
-import {
-  prCommentPost,
-  prCommentReply,
-  prCommentResolve,
-  prReactionAdd,
-  prReactionRemove,
-} from "../../lib/prApi";
+import type { PrComment } from "../../lib/api";
+import { prCommentPost } from "../../lib/prApi";
 import { usePrThreadActive } from "./PrThreadColumn";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
-import { FixWithAgentButton } from "../agent/FixWithAgentButton";
-import { relativeAgeFromIso } from "../../lib/relativeTime";
-import { useDismiss } from "../../lib/useDismiss";
+import { Alert, AlertDescription } from "../ui/alert";
+import { Separator } from "../ui/separator";
+import { Textarea } from "../ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "../ui/toggle-group";
+import "../ui/pr-files.css";
+import "../ui/pr-thread.css";
+import "../ui/pr-diff-composer.css";
 import { mentionQueryAt } from "../collab/MentionPicker";
 import { fetchPrDetail, getPrDetailCached } from "../../lib/prDetailCache";
 import { PrFileMentionPicker, fileMentionText } from "./PrFileMentionPicker";
+import { PrThreadCard } from "./thread/PrThreadCard";
+import { groupThreads, type ThreadGroup } from "./thread/prThreads";
 
 installMonacoEnvironment();
-
-// Seed prompt for the "Fix with agent" handoff — bakes the file, line, and
-// the review-comment text into a focused instruction so the chosen agent
-// opens already knowing what to address. W4 review loop (cross-agent).
-function buildCommentFixPrompt(root: PrComment): string {
-  const where = !root.path
-    ? "this pull request"
-    : root.start_line && root.start_line !== root.line
-      ? `${root.path} (lines ${root.start_line}–${root.line})`
-      : root.line
-        ? `${root.path} (line ${root.line})`
-        : root.path;
-  return [
-    `Address this code-review comment in ${where}.`,
-    "",
-    "Comment:",
-    root.body.trim(),
-    "",
-    "Open the file, make the fix, and briefly explain what you changed. If the comment is a question or isn't actionable, reply with your answer instead of editing.",
-  ].join("\n");
-}
 
 type Props = {
   repoRoot: string;
@@ -144,12 +116,12 @@ type Props = {
    *  column. */
   onRegisterRow?: (rightLine: number, el: HTMLElement | null) => void;
   /** v0.2.12 — preferred initial render mode. Defaults to side-by-side
-   *  to match GitHub / Graphite. The header toolbar inside the editor
-   *  exposes the toggle. */
+   *  — the layout most review tools open with. The toolbar over the
+   *  patch exposes the toggle. */
   initialRenderMode?: "side-by-side" | "inline";
   /** v0.2.12 — when true, mount immediately. When false, wait for an
-   *  IntersectionObserver hit before mounting Monaco. PrFilesSection
-   *  flips this to false for the 6th+ file in a long PR. */
+   *  IntersectionObserver hit before mounting Monaco — for a caller
+   *  rendering many files at once. */
   mountEagerly?: boolean;
 };
 
@@ -166,10 +138,6 @@ type Line = {
   leftLine: number | null;
 };
 
-/** Maximum number of editors PrFilesSection mounts eagerly. Files past
- *  this index render a placeholder card that mounts on first viewport
- *  intersection. Centralised here so callers can stay numeric-free. */
-export const PR_DIFF_EAGER_MOUNT_LIMIT = 5;
 
 export function PrDiffBody({
   repoRoot,
@@ -239,7 +207,7 @@ export function PrDiffBody({
   // Composer state — anchored on a right-side line range. `start === end`
   // for a single-line click; shift-click or text selection across rows
   // extends to a range, which GitHub stores as start_line + line so the
-  // thread can highlight the whole block (Graphite parity).
+  // thread can highlight the whole block.
   const [selectedRange, setSelectedRange] = useState<{
     start: number;
     end: number;
@@ -417,7 +385,7 @@ export function PrDiffBody({
   // <div> inside `anchorLayerRef`. The div's top is updated whenever
   // Monaco re-lays-out (content, theme, mode toggle, scroll). We pass
   // each anchor up via onRegisterRow so PrThreadColumn can attach a
-  // FloatingThreadCard at the right vertical position. The actual
+  // PrThreadCard at the right vertical position. The actual
   // bubble itself lives in PrThreadColumn — we're just a positioner.
 
   const layoutAnchors = useCallback(() => {
@@ -529,9 +497,9 @@ export function PrDiffBody({
       });
 
       // Track text selection across rows so users can drag/shift-click
-      // through multiple lines and post a single ranged review comment
-      // (Graphite parity). Selection endpoints can arrive in either
-      // order, so we normalise low→high.
+      // through multiple lines and post a single ranged review comment.
+      // Selection endpoints can arrive in either order, so we normalise
+      // low→high.
       modifiedEditor.onDidChangeCursorSelection((e) => {
         const s = e.selection;
         if (!s) return;
@@ -640,9 +608,9 @@ export function PrDiffBody({
     return (
       <div
         ref={placeholderRef}
-        className="w-full h-[240px] flex items-center justify-center gap-1.5 bg-bg-content text-sm text-text-4"
+        className="ui-pr-diff-loading"
       >
-        <AsciiSpinner className="text-2xs" />
+        <AsciiSpinner size={12} />
         <span>Reading this change…</span>
       </div>
     );
@@ -662,69 +630,58 @@ export function PrDiffBody({
   );
 
   return (
-    <div className="w-full relative" data-pr-diff-body={filePath}>
-      <div className="flex w-full">
-        <div className="flex-1 min-w-0 relative">
-          {/* Per-file toolbar — render mode toggle + action bar */}
-          <div className="flex items-center gap-2 px-3 h-7 border-b border-line-soft/60 bg-bg-1/30 text-xs">
-            <span className="font-mono text-text-3 truncate">{filePath}</span>
-            {oneSidedFile ? (
-              <span className="section-label ml-auto">
-                {sides.original.length === 0 ? "new file" : "deleted"}
-              </span>
-            ) : (
-              <span className="ml-auto inline-flex items-center rounded border border-line-soft overflow-hidden">
-                <Button
-                  variant={renderSideBySide ? "secondary" : "ghost"}
-                  size="xs"
-                  onClick={() => setRenderSideBySide(true)}
-                  className="h-5 rounded-none border-0 text-xs"
-                  title="Side-by-side diff"
-                >
-                  Split
-                </Button>
-                <span className="w-px h-3 bg-line-soft" />
-                <Button
-                  variant={!renderSideBySide ? "secondary" : "ghost"}
-                  size="xs"
-                  onClick={() => setRenderSideBySide(false)}
-                  className="h-5 rounded-none border-0 text-xs"
-                  title="Unified (inline) diff"
-                >
-                  Unified
-                </Button>
-              </span>
-            )}
+    <div className="ui-pr-diff-body" data-pr-diff-body={filePath}>
+      <div className="ui-pr-diff-main">
+        <div className="ui-pr-diff-editor">
+          {/* The patch's own toolbar: what a selected range can do, and how
+              to lay the two sides out. The file's path sits in the bar above. */}
+          <div className="ui-pr-diff-toolbar">
             {selectedRange != null && !composer && (
-              <span className="inline-flex items-center gap-1 ml-2">
-                <span className="text-text-4">
+              <span className="ui-pr-diff-range">
+                <span className="ui-pr-diff-range-label">
                   {selectedRange.start === selectedRange.end
-                    ? `line ${selectedRange.start}`
-                    : `lines ${selectedRange.start}–${selectedRange.end}`}
+                    ? `Line ${selectedRange.start}`
+                    : `Lines ${selectedRange.start}–${selectedRange.end}`}
                 </span>
-                <Button
-                  variant="subtle"
-                  size="xs"
-                  onClick={startComment}
-                  className="h-5 gap-1 text-xs"
-                >
+                <Button variant="secondary" size="xs" onClick={startComment}>
                   <CommentIcon /> Comment
                 </Button>
-                <Button
-                  variant="subtle"
-                  size="xs"
-                  onClick={startSuggestion}
-                  className="h-5 gap-1 text-xs"
-                >
+                <Button variant="secondary" size="xs" onClick={startSuggestion}>
                   <SuggestIcon /> Suggest
                 </Button>
               </span>
+            )}
+            {oneSidedFile ? (
+              <span className="ui-pr-diff-side">
+                {sides.original.length === 0 ? "New file" : "Deleted"}
+              </span>
+            ) : (
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                size="sm"
+                className="ui-pr-diff-layout"
+                aria-label="Diff layout"
+                value={renderSideBySide ? "split" : "unified"}
+                // A single group reports "" when the pressed item is pressed
+                // again; the patch always has a layout.
+                onValueChange={(next) => {
+                  if (next) setRenderSideBySide(next === "split");
+                }}
+              >
+                <ToggleGroupItem value="split" title="Previous and new side by side">
+                  Split
+                </ToggleGroupItem>
+                <ToggleGroupItem value="unified" title="One column, removed lines above added">
+                  Unified
+                </ToggleGroupItem>
+              </ToggleGroup>
             )}
           </div>
 
           {/* Editor + anchor layer share the same parent so anchor
            *  coordinates can use the layer as their reference frame. */}
-          <div className="relative" style={{ height: editorHeight }}>
+          <div className="ui-pr-diff-canvas" style={{ height: editorHeight }}>
             <DiffEditor
               key={`${filePath}:${!oneSidedFile && renderSideBySide ? "split" : "unified"}`}
               original={sides.original}
@@ -759,14 +716,14 @@ export function PrDiffBody({
             />
             <div
               ref={anchorLayerRef}
-              className="absolute inset-0 pointer-events-none"
+              className="ui-pr-diff-anchors"
               aria-hidden
             />
           </div>
         </div>
 
         {hasInlineThreads && (
-          <div className="w-[320px] flex-shrink-0 relative border-l border-line-soft bg-bg-1/30">
+          <div className="ui-pr-diff-rail">
             {anchorLines.map((line) => {
               const t = threadByLine.get(line);
               if (!t) return null;
@@ -854,8 +811,8 @@ function ComposerHost({
 }) {
   const target = start === end ? `line ${start}` : `lines ${start}–${end}`;
   return (
-    <div className="border-t border-line-soft bg-bg-1 px-3 py-2.5 sticky bottom-0">
-      <div className="section-label mb-1.5">
+    <div className="ui-pr-thread-reply ui-pr-diff-composer">
+      <div className="ui-pr-diff-composer-label">
         {kind === "suggestion"
           ? `Suggest a change on ${target}`
           : `Add a review comment on ${target}`}
@@ -970,16 +927,16 @@ function ComposerBody({
     }
   };
   return (
-    <div className="space-y-1.5">
+    <>
       {error ? (
-        <div className="rounded-md border border-red/40 bg-red/10 px-2.5 py-1.5 text-xs text-red font-mono whitespace-pre-wrap break-all">
-          Post failed: {error}
-        </div>
+        <Alert variant="destructive" className="ui-pr-diff-composer-error">
+          <AlertDescription>Post failed: {error}</AlertDescription>
+        </Alert>
       ) : null}
       <Toolbar
         onWrap={(prefix, suffix) => wrap(ref.current, prefix, suffix, setText)}
       />
-      <div className="relative">
+      <div className="ui-pr-diff-composer-field">
         {mention && (
           <PrFileMentionPicker
             files={prFiles}
@@ -990,10 +947,10 @@ function ComposerBody({
               setMentionDismissed(mention.start);
               setMention(null);
             }}
-            className="absolute left-0 bottom-full mb-1"
+            className="ui-pr-diff-mention"
           />
         )}
-      <textarea
+      <Textarea
         ref={ref}
         value={text}
         onChange={(e) => {
@@ -1029,17 +986,17 @@ function ComposerBody({
             }
           }
         }}
-        className="w-full bg-bg-content border border-line-soft rounded-md p-2 text-sm text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent font-mono resize-y"
+        className="ui-pr-diff-composer-input"
       />
       </div>
-      <div className="flex items-center gap-2 text-xs text-text-4">
-        <span>⌘ + Enter to submit · markdown supported · @ mentions a file</span>
-        <div className="flex-1" />
+      <div className="ui-pr-thread-reply-actions">
+        <span className="ui-pr-diff-composer-hint">
+          ⌘ + Enter to submit · markdown supported · @ mentions a file
+        </span>
         <Button variant="ghost" size="xs" onClick={onCancel}>
           Cancel
         </Button>
         <Button
-          variant="accentSoft"
           size="xs"
           onClick={submit}
           disabled={submitting || (!text.trim() && kind === "comment")}
@@ -1051,7 +1008,7 @@ function ComposerBody({
               : "Comment"}
         </Button>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -1071,17 +1028,19 @@ function Toolbar({
     title: string;
     children: React.ReactNode;
   }) => (
-    <button
+    <Button
       type="button"
+      variant="ghost"
+      size="iconXs"
       onClick={onClick}
       title={title}
-      className="w-7 h-6 rounded text-text-3 hover:text-text-1 hover:bg-state-hover flex items-center justify-center text-sm"
+      aria-label={title}
     >
       {children}
-    </button>
+    </Button>
   );
   return (
-    <div className="inline-flex items-center gap-0.5 bg-bg-content border border-line-soft rounded-md px-1 py-0.5">
+    <div className="ui-pr-diff-format" role="toolbar" aria-label="Formatting">
       <Btn title="Bold (⌘B)" onClick={() => onWrap("**", "**")}>
         <b>B</b>
       </Btn>
@@ -1089,9 +1048,9 @@ function Toolbar({
         <i>I</i>
       </Btn>
       <Btn title="Strikethrough" onClick={() => onWrap("~~", "~~")}>
-        <span className="line-through">S</span>
+        <s>S</s>
       </Btn>
-      <span className="w-px h-3 bg-line-soft mx-0.5" />
+      <Separator orientation="vertical" />
       <Btn title="Inline code" onClick={() => onWrap("`", "`")}>
         {"‹›"}
       </Btn>
@@ -1104,7 +1063,7 @@ function Toolbar({
       <Btn title="Link" onClick={() => onWrap("[", "](url)")}>
         ↗
       </Btn>
-      <span className="w-px h-3 bg-line-soft mx-0.5" />
+      <Separator orientation="vertical" />
       <Btn title="Bulleted list" onClick={() => onWrap("\n- ", "")}>
         •
       </Btn>
@@ -1220,7 +1179,7 @@ function parseDiff(body: string): Line[] {
   return out;
 }
 
-// ── inline-mode thread card (legacy compatibility) ────────────────
+// ── threads drawn beside this diff, one under another ─────────────
 
 function InlineThreadCard({
   thread,
@@ -1234,484 +1193,8 @@ function InlineThreadCard({
   onPosted?: (c: PrComment) => void;
 }) {
   return (
-    <div className="border-b border-line-soft/60 last:border-b-0">
-      <FloatingThreadCard
-        top={0}
-        thread={thread}
-        repoRoot={repoRoot}
-        prNumber={prNumber}
-        onPosted={onPosted}
-        embed
-      />
+    <div className="ui-pr-thread-inline">
+      <PrThreadCard thread={thread} repoRoot={repoRoot} prNumber={prNumber} onPosted={onPosted} />
     </div>
   );
-}
-
-// ── floating threads (preserved exports — consumed by
-//    PrFilesSection + PrThreadColumn) ──────────────────────────────
-
-export type ThreadGroup = {
-  root: PrComment;
-  replies: PrComment[];
-};
-
-export function groupThreads(comments: PrComment[]): ThreadGroup[] {
-  const byId = new Map<number, PrComment>();
-  for (const c of comments) byId.set(c.id, c);
-  const roots: PrComment[] = [];
-  const repliesByRoot = new Map<number, PrComment[]>();
-  for (const c of comments) {
-    if (c.is_issue_comment) continue;
-    if (c.line == null) continue;
-    if (c.in_reply_to == null) {
-      roots.push(c);
-      continue;
-    }
-    let rootId = c.in_reply_to;
-    let guard = 0;
-    while (guard++ < 16) {
-      const parent = byId.get(rootId);
-      if (!parent || parent.in_reply_to == null) break;
-      rootId = parent.in_reply_to;
-    }
-    const arr = repliesByRoot.get(rootId) ?? [];
-    arr.push(c);
-    repliesByRoot.set(rootId, arr);
-  }
-  roots.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
-  return roots.map((root) => ({
-    root,
-    replies: (repliesByRoot.get(root.id) ?? []).sort((a, b) =>
-      a.created_at.localeCompare(b.created_at),
-    ),
-  }));
-}
-
-export function FloatingThreadCard({
-  top,
-  thread,
-  repoRoot,
-  prNumber,
-  onPosted,
-  embed = false,
-}: {
-  top: number;
-  thread: ThreadGroup;
-  repoRoot: string;
-  prNumber: number;
-  onPosted?: (c: PrComment) => void;
-  embed?: boolean;
-}) {
-  const [replying, setReplying] = useState(false);
-  const [replyText, setReplyText] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [resolving, setResolving] = useState(false);
-  const [resolved, setResolved] = useState(thread.root.thread_resolved);
-
-  const submitReply = async () => {
-    if (!replyText.trim()) return;
-    setSubmitting(true);
-    try {
-      const c = await prCommentReply(
-        repoRoot,
-        prNumber,
-        thread.root.id,
-        replyText,
-      );
-      onPosted?.(c);
-      setReplyText("");
-      setReplying(false);
-    } catch (e) {
-      console.error("reply failed", e);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const toggleResolve = async () => {
-    if (!thread.root.thread_node_id) return;
-    setResolving(true);
-    try {
-      await prCommentResolve(repoRoot, thread.root.thread_node_id);
-      setResolved((v) => !v);
-    } catch (e) {
-      console.error("resolve toggle failed", e);
-    } finally {
-      setResolving(false);
-    }
-  };
-
-  const quickReact = async (target: PrComment, content: ReactionContent) => {
-    const existing = target.reactions.find((r) => r.content === content);
-    try {
-      if (existing?.viewer_reacted) {
-        await prReactionRemove(repoRoot, target.node_id, content);
-      } else {
-        await prReactionAdd(repoRoot, target.node_id, content);
-      }
-      onPosted?.(thread.root);
-    } catch (e) {
-      console.error("reaction toggle failed", e);
-    }
-  };
-
-  const [repliesOpen, setRepliesOpen] = useState(false);
-  const replyCount = thread.replies.length;
-
-  const card = (
-    <div
-      className={`rounded-lg border bg-bg-1/90 backdrop-blur-sm overflow-hidden transition-opacity ${
-        resolved
-          ? "border-line-soft opacity-60"
-          : "border-line-soft hover:border-line-strong"
-      }`}
-      style={{ boxShadow: "0 1px 2px rgba(0,0,0,0.25), 0 4px 16px rgba(0,0,0,0.18)" }}
-    >
-      <ThreadComment
-        c={thread.root}
-        repoRoot={repoRoot}
-        onChanged={() => onPosted?.(thread.root)}
-        actions={
-          <div className="flex items-center gap-0.5">
-            <FixWithAgentButton
-              iconOnly
-              label="Fix with agent…"
-              prompt={buildCommentFixPrompt(thread.root)}
-            />
-            <ThreadActions
-              resolved={resolved}
-              resolving={resolving}
-              hasNode={!!thread.root.thread_node_id}
-              onResolve={toggleResolve}
-              onReply={() => setReplying(true)}
-              onReact={(content) => quickReact(thread.root, content)}
-            />
-          </div>
-        }
-      />
-      {replyCount > 0 && (
-        <button
-          type="button"
-          onClick={() => setRepliesOpen((v) => !v)}
-          className="w-full flex items-center gap-1.5 px-3 py-1 text-xs text-text-3 hover:text-text-1 hover:bg-state-hover border-t border-line-soft/60"
-        >
-          <ChevronGlyph open={repliesOpen} />
-          {repliesOpen ? "Hide" : "Show"} {replyCount}{" "}
-          {replyCount === 1 ? "reply" : "replies"}
-        </button>
-      )}
-      {repliesOpen &&
-        thread.replies.map((r) => (
-          <ThreadComment
-            key={r.id}
-            c={r}
-            repoRoot={repoRoot}
-            onChanged={() => onPosted?.(thread.root)}
-            onReact={(content) => quickReact(r, content)}
-            reply
-          />
-        ))}
-      {replying && (
-        <div className="px-3 pb-2.5 pt-2 border-t border-line-soft/60 space-y-1.5">
-          <textarea
-            autoFocus
-            value={replyText}
-            onChange={(e) => setReplyText(e.target.value)}
-            rows={3}
-            placeholder="Write a reply…"
-            onKeyDown={(e) => {
-              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                e.preventDefault();
-                void submitReply();
-              }
-            }}
-            className="w-full bg-bg-content border border-line-soft rounded p-2 text-sm text-text-1 placeholder:text-text-4 outline-none focus:ring-1 focus:ring-accent resize-y"
-          />
-          <div className="flex items-center justify-end gap-2">
-            <Button
-              variant="ghost"
-              size="xs"
-              onClick={() => {
-                setReplying(false);
-                setReplyText("");
-              }}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="accentSoft"
-              size="xs"
-              onClick={submitReply}
-              disabled={submitting || !replyText.trim()}
-            >
-              {submitting ? "…" : "Reply"}
-            </Button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-
-  if (embed) return card;
-  return (
-    <div className="absolute left-3 right-3" style={{ top: Math.max(top, 0) }}>
-      {card}
-    </div>
-  );
-}
-
-function ThreadActions({
-  resolved,
-  resolving,
-  hasNode,
-  onResolve,
-  onReply,
-  onReact,
-}: {
-  resolved: boolean;
-  resolving: boolean;
-  hasNode: boolean;
-  onResolve: () => void;
-  onReply: () => void;
-  onReact?: (content: ReactionContent) => void;
-}) {
-  return (
-    <div className="flex items-center gap-0.5 -mr-1">
-      {onReact && <ReactionPickerButton onPick={onReact} />}
-      {hasNode && (
-        <button
-          type="button"
-          onClick={onResolve}
-          disabled={resolving}
-          title={resolved ? "Unresolve thread" : "Resolve thread"}
-          className={`w-6 h-6 rounded flex items-center justify-center transition-colors disabled:opacity-40 hover:bg-state-hover ${
-            resolved ? "" : "text-text-4 hover:text-text-1"
-          }`}
-          style={resolved ? { color: "var(--color-accent-green)" } : undefined}
-        >
-          <CheckGlyph />
-        </button>
-      )}
-      <button
-        type="button"
-        onClick={onReply}
-        title="Reply"
-        className="w-6 h-6 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
-      >
-        <ReplyGlyph />
-      </button>
-    </div>
-  );
-}
-
-const REACTIONS: { content: ReactionContent; emoji: string; label: string }[] =
-  [
-    { content: "THUMBS_UP", emoji: "\u{1F44D}", label: "+1" },
-    { content: "THUMBS_DOWN", emoji: "\u{1F44E}", label: "-1" },
-    { content: "LAUGH", emoji: "\u{1F604}", label: "laugh" },
-    { content: "HOORAY", emoji: "\u{1F389}", label: "hooray" },
-    { content: "CONFUSED", emoji: "\u{1F615}", label: "confused" },
-    { content: "HEART", emoji: "\u{2764}\u{FE0F}", label: "heart" },
-    { content: "ROCKET", emoji: "\u{1F680}", label: "rocket" },
-    { content: "EYES", emoji: "\u{1F440}", label: "eyes" },
-  ];
-
-function ReactionPickerButton({
-  onPick,
-}: {
-  onPick: (content: ReactionContent) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-  useDismiss(open, () => setOpen(false), wrapRef);
-  return (
-    <div ref={wrapRef} className="relative">
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen((v) => !v);
-        }}
-        title="Add reaction"
-        className="w-6 h-6 rounded flex items-center justify-center text-text-4 hover:text-text-1 hover:bg-state-hover transition-colors"
-      >
-        <SmileyGlyph />
-      </button>
-      {open && (
-        <div
-          className="absolute right-0 top-full mt-1 z-30 flex items-center gap-0.5 px-1.5 py-1 rounded-lg border border-line-strong bg-bg-1 shadow-sm"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {REACTIONS.map((r) => (
-            <button
-              key={r.content}
-              type="button"
-              onClick={() => {
-                onPick(r.content);
-                setOpen(false);
-              }}
-              title={r.label}
-              className="w-7 h-7 rounded flex items-center justify-center text-lg hover:bg-state-hover transition-colors"
-            >
-              {r.emoji}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ReactionBar({
-  reactions,
-  onToggle,
-}: {
-  reactions: PrCommentReaction[];
-  onToggle: (content: ReactionContent) => void;
-}) {
-  const visible = reactions.filter((r) => r.count > 0);
-  if (visible.length === 0) return null;
-  return (
-    <div className="flex flex-wrap items-center gap-1 mt-1.5 pl-7">
-      {visible.map((r) => {
-        const meta = REACTIONS.find((x) => x.content === r.content);
-        return (
-          <button
-            key={r.content}
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggle(r.content);
-            }}
-            title={meta?.label ?? r.content}
-            className={`inline-flex items-center gap-1 h-5 px-1.5 rounded-full text-xs border transition-colors ${
-              r.viewer_reacted
-                ? ""
-                : "bg-bg-2 border-line-soft text-text-2 hover:border-line-strong"
-            }`}
-            style={
-              r.viewer_reacted
-                ? {
-                    background:
-                      "color-mix(in srgb, var(--color-blue) 15%, transparent)",
-                    borderColor:
-                      "color-mix(in srgb, var(--color-blue) 60%, transparent)",
-                    color: "var(--color-blue)",
-                  }
-                : undefined
-            }
-          >
-            <span className="text-sm leading-none">
-              {meta?.emoji ?? "?"}
-            </span>
-            <span className="font-medium tabular-nums">{r.count}</span>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function ThreadComment({
-  c,
-  reply,
-  actions,
-  onReact,
-}: {
-  c: PrComment;
-  reply?: boolean;
-  actions?: React.ReactNode;
-  repoRoot?: string;
-  onChanged?: () => void;
-  onReact?: (content: ReactionContent) => void;
-}) {
-  // One monogram for the whole app — see lib/monogram.
-  const initial = monogram(c.author);
-  return (
-    <div
-      className={`px-3 py-2.5 ${reply ? "border-t border-line-soft/50" : ""}`}
-    >
-      <div className="flex items-start gap-2 mb-1">
-        <span className="w-5 h-5 rounded-full bg-violet/30 text-violet flex items-center justify-center text-2xs font-bold flex-shrink-0">
-          {initial}
-        </span>
-        <div className="flex items-baseline gap-2 min-w-0 flex-1">
-          <span className="text-sm font-semibold text-text-1 truncate">
-            {c.author}
-          </span>
-          <span className="text-xs text-text-4 flex-shrink-0">
-            {relTime(c.created_at)}
-          </span>
-        </div>
-        {actions}
-      </div>
-      <div className="pl-7 text-sm text-text-2 leading-[1.55] break-words [&_p]:my-0 [&_p+p]:mt-2 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-bg-2 [&_code]:text-sm [&_pre]:my-1.5 [&_pre]:p-2 [&_pre]:rounded [&_pre]:bg-bg-2 [&_pre]:overflow-x-auto [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_strong]:text-text-1 [&_strong]:font-semibold [&_a]:text-accent [&_a:hover]:underline [&_ul]:list-disc [&_ul]:pl-4 [&_ol]:list-decimal [&_ol]:pl-4 [&_li]:my-0.5">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{c.body}</ReactMarkdown>
-      </div>
-      {onReact && <ReactionBar reactions={c.reactions} onToggle={onReact} />}
-    </div>
-  );
-}
-
-function ChevronGlyph({ open }: { open: boolean }) {
-  return (
-    <svg
-      width="9"
-      height="9"
-      viewBox="0 0 10 10"
-      className={`transition-transform ${open ? "" : "-rotate-90"}`}
-    >
-      <path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.4" fill="none" />
-    </svg>
-  );
-}
-
-function CheckGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M3 8l3 3 7-7"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ReplyGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M7 4L3 8l4 4M3 8h7a3 3 0 013 3v1"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function SmileyGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="6" cy="7" r="0.9" fill="currentColor" />
-      <circle cx="10" cy="7" r="0.9" fill="currentColor" />
-      <path
-        d="M5.5 10c.7 1 1.6 1.5 2.5 1.5S9.8 11 10.5 10"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinecap="round"
-        fill="none"
-      />
-    </svg>
-  );
-}
-
-function relTime(iso: string): string {
-  // One ladder for the whole app — see lib/relativeTime.
-  return relativeAgeFromIso(iso, { style: "compact" });
 }

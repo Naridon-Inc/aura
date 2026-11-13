@@ -204,15 +204,15 @@ describe("one picker per place", () => {
     expect(flags).not.toContain("CREW_CROSS_PROJECT");
   });
 
-  test("under All projects the crew lenses say which project they drew", async () => {
-    // The rail can count eight; a dependency graph is one project's. Silently
-    // drawing one under a rail claiming eight is the disagreement the picker
-    // exists to prevent, so the surface names it.
+  test("under All repositories the crew lenses say which repository they drew", async () => {
+    // The rail can count eight; a dependency graph is one repository's.
+    // Silently drawing one under a rail claiming eight is the disagreement the
+    // picker exists to prevent, so the surface names it.
     const src = await readSrc("components/commons/crew/CrewSurface.tsx");
     expect(src).toContain("isAllProjects");
     // The sentence has been reworded since; what has to survive is that it
-    // says "one project at a time" AND names which one.
-    expect(src).toContain("one project at a time");
+    // says "one repository at a time" AND names which one.
+    expect(src).toContain("one repository at a time");
     expect(src).toContain("{projectName}");
   });
 });
@@ -225,7 +225,7 @@ describe("the picker looks like a menu", () => {
     expect(src).toContain("ade-select-trigger");
   });
 
-  test("Medusa's up/down stepper triangles are suppressed", async () => {
+  test("the up/down stepper triangles are suppressed", async () => {
     // AURA-33: the rail's picker wore a stacked up/down pair — the glyph a
     // NUMBER STEPPER wears — so it read as something you nudge rather than
     // something you open.

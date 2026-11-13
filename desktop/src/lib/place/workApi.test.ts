@@ -44,7 +44,7 @@ mock.module("./placeWork", () =>
 
 const work = await import("./workApi");
 
-const BOX = "ubuntu@18.196.118.42";
+const BOX = "ubuntu@203.0.113.10";
 const HERE = "/Users/me/app";
 const ELSEWHERE = "/Users/me/other";
 /** The worktree a launched workspace lives in, on the box. */

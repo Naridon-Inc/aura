@@ -1,0 +1,66 @@
+/* The small marks a crew run is told in, wherever it shows: who is on a task,
+   the proof verdict, the commit it landed and the "running on" line. They are
+   the library avatar and badge; the tone lands on the word, not the box. */
+
+.ui-crew-agent {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.ui-crew-agent[data-dim] {
+  opacity: 0.6;
+}
+.ui-crew-avatar {
+  flex-shrink: 0;
+}
+.ui-crew-avatar .ui-avatar-fallback {
+  color: var(--ui-muted-fg);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.ui-crew-badge {
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+.ui-crew-badge svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-crew-badge[data-tone="green"] {
+  color: var(--ui-green);
+}
+.ui-crew-badge[data-tone="amber"] {
+  color: var(--ui-yellow);
+}
+.ui-crew-badge[data-tone="red"] {
+  color: var(--ui-red);
+}
+.ui-crew-badge[data-tone="blue"] {
+  color: var(--ui-link);
+}
+.ui-crew-badge[data-tone="neutral"] {
+  color: var(--ui-muted-fg);
+}
+
+.ui-crew-commit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ui-muted-fg);
+  font: 11px var(--font-mono);
+}
+.ui-crew-commit svg {
+  width: 12px;
+  height: 12px;
+}
+
+.ui-crew-working {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}

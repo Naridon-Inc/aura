@@ -31,11 +31,15 @@ function baseName(p: string): string {
 export function CommitFiles({
   repoRoot,
   sha,
+  files: given,
   selected,
   onSelect,
 }: {
   repoRoot: string;
   sha: string;
+  /** Rows already in hand — a version on a machine arrives with its files,
+   *  read from the same answer as its patches — so nothing is asked for. */
+  files?: GitCommitFileStat[];
   selected: string | null;
   onSelect: (path: string) => void;
 }) {
@@ -43,6 +47,11 @@ export function CommitFiles({
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
 
   useEffect(() => {
+    if (given) {
+      setFiles(given);
+      setState("ready");
+      return;
+    }
     let alive = true;
     setState("loading");
     setFiles([]);
@@ -59,7 +68,7 @@ export function CommitFiles({
     return () => {
       alive = false;
     };
-  }, [repoRoot, sha]);
+  }, [repoRoot, sha, given]);
 
   if (state === "loading") {
     return <div className="px-1 py-2 text-sm text-text-4">Reading the files…</div>;

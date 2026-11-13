@@ -1,7 +1,8 @@
-// The VS Code-style terminal panel that fills the ⌘J bottom slot. It's a
-// self-contained surface over the shared `editorStore.terminalTabs` list:
-// a toolbar on top, the active terminal GROUP (a solo terminal or a split
-// tree) filling the body, and a collapsible side-list of every group on
+// The workspace's terminal panel, the lower half of the right column (⌘J
+// collapses it to its header). It's a self-contained surface over the shared
+// `editorStore.terminalTabs` list: a header of Setup, Run and terminal tabs
+// with the Run controls, the active terminal GROUP (a solo terminal or a
+// split tree) filling the body, and an optional side-list of every group on
 // the right. The side-list is `terminalGroups` — each row owns its own
 // split tree, so adding a terminal or splitting one group never disturbs
 // another (the "groups detach" fix). Its focus (`panelActiveGroupId` /
@@ -24,7 +25,16 @@ import {
 } from "../../lib/editorStore";
 import { api, type TerminalProfile } from "../../lib/api";
 import { toast } from "../../lib/toast";
-import { TerminalPanelToolbar } from "./TerminalPanelToolbar";
+import { pickPath } from "../../lib/nativeDialog";
+import {
+  folderLabel,
+  persistFolders,
+  readFolders,
+  rememberFolder,
+} from "../../lib/terminalFolders";
+import { TerminalPanelActions } from "./TerminalPanelToolbar";
+import { DetailsTerminal } from "../ui/details-terminal";
+import { useTerminalStrip } from "./useTerminalStrip";
 import { TerminalTabsList } from "./TerminalTabsList";
 import { TerminalFindWidget } from "./TerminalFindWidget";
 import { isTerminalFocused } from "../../lib/terminalKeymap";
@@ -38,17 +48,38 @@ import {
 } from "../../lib/runPane";
 import { promptForRunCommand } from "./runPrompt";
 import { claimRunRequest, onRunRequested } from "../../lib/runRequest";
+import { RunControls, runControlsState } from "./RunControls";
+import { MAX_TERMINALS } from "./terminalStrip";
+import { openRepoScriptsSettings } from "./useTerminalStrip";
 
-const SIDE_LIST_KEY = "aura.terminal.sideListOpen";
+// The side-list starts closed now the panel sits in the narrow right column;
+// a new key so the old default-open answer doesn't carry over.
+const SIDE_LIST_KEY = "aura.terminal.sideList.v2";
+const TOGGLE_SHORTCUT = "⌘J";
+const RUN_SHORTCUT = "⌘R";
+
+/** Ask for a folder to open a shell in. A cancelled panel — and the nil-panel
+ *  degradation `nativeDialog` turns into one — reads as "no folder", which
+ *  opens nothing rather than falling back to the project root. */
+async function pickFolder(startIn: string): Promise<string | null> {
+  const picked = await pickPath({
+    directory: true,
+    title: "Open a terminal in this folder",
+    defaultPath: startIn,
+  });
+  return typeof picked === "string" && picked ? picked : null;
+}
 
 type Props = {
   repoRoot: string;
+  /** False while the panel is collapsed to its header. */
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   maximized: boolean;
   onToggleMaximize: () => void;
-  onClosePanel: () => void;
 };
 
-export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePanel }: Props) {
+export function TerminalPanel({ repoRoot, open, onOpenChange, maximized, onToggleMaximize }: Props) {
   const store = useEditorStore();
   const { terminalTabs, panelActiveTermId, panelActiveGroupId, terminalGroups } = store;
 
@@ -56,12 +87,13 @@ export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePa
   const [defaultProfileId, setDefaultProfileId] = useState<string | null>(null);
   const [sideListOpen, setSideListOpen] = useState<boolean>(() => {
     try {
-      return localStorage.getItem(SIDE_LIST_KEY) !== "0";
+      return localStorage.getItem(SIDE_LIST_KEY) === "1";
     } catch {
-      return true;
+      return false;
     }
   });
   const [findOpen, setFindOpen] = useState(false);
+  const [recentFolders, setRecentFolders] = useState<string[]>(() => readFolders());
 
   // Load the terminal profiles once (auto-seeded backend-side from
   // `/etc/shells` + `$SHELL` when the user hasn't configured any). The
@@ -114,6 +146,8 @@ export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePa
   // spawn doesn't double-fire across the store updates it triggers.
   const ensuring = useRef(false);
   useEffect(() => {
+    // A collapsed panel shows no terminal, so it opens none.
+    if (!open) return;
     const panelHasActive =
       !!panelActiveTermId &&
       terminalGroups.some((g) =>
@@ -135,7 +169,7 @@ export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePa
     // stays valid. Re-running only on the real inputs avoids per-render
     // churn.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [panelActiveTermId, terminalGroups, repoRoot]);
+  }, [open, panelActiveTermId, terminalGroups, repoRoot]);
 
   const byId = useMemo(
     () => new Map(terminalTabs.map((t) => [t.termId, t])),
@@ -153,19 +187,34 @@ export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePa
     return g?.layout ?? null;
   }, [panelActiveGroupId, terminalGroups]);
 
-  function profileName(tab: TerminalTab | null): string {
-    if (tab?.profileId) {
-      const p = profiles.find((x) => x.id === tab.profileId);
-      if (p) return p.name;
-    }
-    if (tab?.shell) return tab.shell.split("/").pop() || tab.shell;
-    const def = defaultProfileId ? profiles.find((p) => p.id === defaultProfileId) : null;
-    return def?.name ?? "Default";
-  }
-
   function handleNewTerminal(profileId?: string) {
+    if (strip.terminalCount >= MAX_TERMINALS) {
+      toast.danger(`Maximum ${MAX_TERMINALS} terminals allowed`);
+      return;
+    }
     const p = profileId ? profiles.find((x) => x.id === profileId) : undefined;
     store.openPanelTerminal(repoRoot, { profileId: p?.id, shell: p?.path });
+  }
+
+  // A shell anywhere on disk, not only in the open project. The folder comes
+  // from the native picker (or a row the user opened before), the shell from
+  // the same menu, and the tab is named after the folder — a terminal sitting
+  // in a different place has to say so, or the panel lies about where your
+  // next command will run.
+  async function handleNewTerminalInFolder(profileId?: string, folder?: string) {
+    const dir = folder ?? (await pickFolder(activeTab?.cwd ?? repoRoot));
+    if (!dir) return;
+    const p = profileId ? profiles.find((x) => x.id === profileId) : undefined;
+    store.openPanelTerminal(dir, {
+      profileId: p?.id,
+      shell: p?.path,
+      label: folderLabel(dir),
+    });
+    setRecentFolders((prev) => {
+      const next = rememberFolder(prev, dir);
+      persistFolders(next);
+      return next;
+    });
   }
 
   function handleSplit(profileId?: string, direction: "row" | "column" = "row") {
@@ -252,10 +301,22 @@ export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePa
     stopRun(repoRoot, runDeps);
   }
 
-  // ⌘R can be pressed while the panel is closed, in which case this component
-  // does not exist yet — the keypress opens the panel and *then* wants it to
-  // run. So the request is claimed on subscribe rather than delivered as an
-  // event that a not-yet-mounted panel would miss.
+  const strip = useTerminalStrip({
+    repoRoot,
+    terminalTabs,
+    terminalGroups,
+    panelActiveTermId,
+    panelActiveGroupId,
+    runDeps,
+    runTermId,
+    onRun: () => void handleRun(),
+    selectPanelTerminal: store.selectPanelTerminal,
+    selectPanelGroup: store.selectPanelGroup,
+    openPanelTerminal: store.openPanelTerminal,
+    closeTerminal: store.closeTerminal,
+    runShortcut: RUN_SHORTCUT,
+  });
+
   useEffect(() => {
     return onRunRequested(() => {
       if (claimRunRequest()) void handleRun();
@@ -267,17 +328,31 @@ export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repoRoot, runDeps]);
 
-  // Terminal-scoped shortcuts. Both gate on `isTerminalFocused()` so they
-  // never hijack the editor: ⌘F opens find (the widget then owns
-  // Esc/Enter); ⌘\ splits the active terminal in the panel.
+  // Terminal-scoped shortcuts. All gate on `isTerminalFocused()` so they never
+  // hijack the editor: ⌘F opens find (the widget then owns Esc/Enter), ⌘K
+  // clears, ⌘A selects the whole buffer, ⌘\ splits the active terminal.
+  //
+  // The letter chords take ⌘ on macOS and Ctrl+Shift elsewhere, never bare
+  // Ctrl: Ctrl+F, Ctrl+K and Ctrl+A are forward-char, kill-line and
+  // beginning-of-line in readline. Ctrl+F used to open find *and* reach the
+  // shell, because preventing the default on the pane does not stop the
+  // keydown reaching this window listener.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod || !isTerminalFocused()) return;
       const key = e.key.toLowerCase();
-      if (key === "f" && !e.shiftKey && panelActiveTermId) {
+      // ⌘<letter>, or Ctrl+Shift+<letter> on Linux/Windows.
+      const emulatorChord = e.metaKey || e.shiftKey;
+      if (key === "f" && emulatorChord && panelActiveTermId) {
         e.preventDefault();
         setFindOpen(true);
+      } else if (key === "k" && emulatorChord && panelActiveTermId) {
+        e.preventDefault();
+        clearTerminalSession(panelActiveTermId);
+      } else if (key === "a" && emulatorChord && panelActiveTermId) {
+        e.preventDefault();
+        selectAllTerminal(panelActiveTermId);
       } else if (e.key === "\\" && panelActiveTermId) {
         e.preventDefault();
         store.splitPanelTerminal("row");
@@ -301,36 +376,64 @@ export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePa
     profiles,
     defaultProfileId,
     onNewTerminal: handleNewTerminal,
+    onNewTerminalInFolder: (profileId?: string, folder?: string) =>
+      void handleNewTerminalInFolder(profileId, folder),
+    recentFolders,
     onSelectDefaultProfile: handleSelectDefaultProfile,
     onConfigureSettings: openTerminalSettings,
   };
 
   return (
-    <div className="h-full w-full flex flex-col bg-bg-content">
-      <TerminalPanelToolbar
-        activeProfileName={profileName(activeTab)}
-        hasSelection
-        maximized={maximized}
-        sideListOpen={sideListOpen}
-        hasActive={!!panelActiveTermId}
-        onSplit={(pid) => handleSplit(pid)}
-        onNewWindow={handleNewWindow}
-        onKill={killActive}
-        onClear={() => panelActiveTermId && clearTerminalSession(panelActiveTermId)}
-        onCopy={() => panelActiveTermId && copyTerminalSelection(panelActiveTermId)}
-        onPaste={() => panelActiveTermId && void pasteIntoTerminal(panelActiveTermId)}
-        onSelectAll={() => panelActiveTermId && selectAllTerminal(panelActiveTermId)}
-        onFind={() => panelActiveTermId && setFindOpen(true)}
-        onToggleMaximize={onToggleMaximize}
-        onOpenInEditor={() =>
-          panelActiveTermId && store.promoteTerminalToEditor(panelActiveTermId)
-        }
-        onToggleSideList={toggleSideList}
-        onClosePanel={onClosePanel}
-        {...sharedMenuProps}
-      />
+    <DetailsTerminal
+      tabs={strip.tabs}
+      value={strip.value}
+      onValueChange={strip.select}
+      open={open}
+      onOpenChange={onOpenChange}
+      toggleShortcut={TOGGLE_SHORTCUT}
+      onNewTerminal={() => handleNewTerminal()}
+      terminalCount={strip.terminalCount}
+      maxTerminals={MAX_TERMINALS}
+      actions={
+        <>
+        <RunControls
+          state={runControlsState(!!runTermId, strip.tasks)}
+          tasks={strip.tasks}
+          shortcut={RUN_SHORTCUT}
+          onRun={strip.runTask}
+          onStop={handleStopRun}
+          onAddAction={() => void promptForRunCommand(repoRoot)}
+          onConfigure={() => openRepoScriptsSettings(repoRoot)}
+        />
+        <TerminalPanelActions
+          hasSelection
+          maximized={maximized}
+          sideListOpen={sideListOpen}
+          hasActive={!!panelActiveTermId}
+          onSplit={() => handleSplit()}
+          onKill={killActive}
+          onClear={() => panelActiveTermId && clearTerminalSession(panelActiveTermId)}
+          onCopy={() => panelActiveTermId && void copyTerminalSelection(panelActiveTermId)}
+          onPaste={() => panelActiveTermId && void pasteIntoTerminal(panelActiveTermId)}
+          onSelectAll={() => panelActiveTermId && selectAllTerminal(panelActiveTermId)}
+          onFind={() => panelActiveTermId && setFindOpen(true)}
+          onToggleMaximize={onToggleMaximize}
+          onOpenInEditor={() =>
+            panelActiveTermId && store.promoteTerminalToEditor(panelActiveTermId)
+          }
+          onToggleSideList={toggleSideList}
+          shellMenu={{
+            ...sharedMenuProps,
+            onSplit: (pid) => handleSplit(pid),
+            onNewWindow: handleNewWindow,
+          }}
+        />
+        </>
+      }
+    >
       <div className="flex-1 min-h-0 flex">
         <div className="flex-1 min-w-0 min-h-0 relative">
+          {strip.idle ?? (
           <TerminalBody
             tabs={byId}
             layout={activeLayout}
@@ -340,6 +443,7 @@ export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePa
             onFocus={store.selectPanelTerminal}
             onSessionOpened={store.setTerminalDaemonSession}
           />
+          )}
           {findOpen && (
             <TerminalFindWidget
               termId={panelActiveTermId}
@@ -373,7 +477,7 @@ export function TerminalPanel({ repoRoot, maximized, onToggleMaximize, onClosePa
           />
         )}
       </div>
-    </div>
+    </DetailsTerminal>
   );
 }
 

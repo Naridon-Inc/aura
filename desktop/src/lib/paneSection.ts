@@ -20,10 +20,10 @@
  *  must be classified here or it silently falls through to `build`. */
 
 import type { WorkPaneRef } from "./editorStore";
-import type { AdeSection } from "../components/AdeSidebar";
+/** The two halves of the app: where work is built, and where it is traced. */
+export type AdeSection = "build" | "trace";
 
-/** The left-nav section a pane ref belongs to. Re-exports `AdeSection` so
- *  call sites can speak in pane terms without reaching into the sidebar. */
+/** The left-nav section a pane ref belongs to, in pane terms. */
 export type PaneSection = AdeSection;
 
 /** Classify a workpane ref into its owning left-nav section.

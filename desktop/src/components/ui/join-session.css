@@ -1,0 +1,39 @@
+/* Joining someone's session: the code box (the empty state, an input and its
+   button, the note under them) and, once a code is found, the session's
+   details, its roster rows, the alerts and the actions. Added here: the
+   column they stack in, the details laid out on the page instead of in a
+   popover, a session name long enough to wrap, the roster count, and the
+   caution's icon in the caution's colour. */
+
+.ui-join-session {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.ui-join-session > .ui-cloud-details {
+  width: auto;
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  overflow: visible;
+}
+.ui-join-session > .ui-cloud-details > header > strong {
+  white-space: normal;
+}
+.ui-join-session-count {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-join-session > form > .ui-input {
+  flex: 1;
+  min-width: 0;
+}
+.ui-join-session .ui-alert-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-join-session .ui-alert-title > svg {
+  flex-shrink: 0;
+  color: var(--ui-yellow);
+}

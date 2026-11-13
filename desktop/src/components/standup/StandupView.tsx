@@ -1,13 +1,15 @@
 // Standup view — per-member daily rollup sourced from
 // `.aura/intent_log.jsonl`, plus a period task summary from the Tasks
 // board (`tasks_list`). Rendered as a full workpane tab (kind: "standup")
-// and as a Settings → Team → Activity sub-pane.
+// and as a Settings → Team → Activity sub-pane, in the settings parts
+// either way.
 //
 // "Post to #standup" publishes the rollup as a markdown digest to the
 // team's `standup` channel via `chat_send` — real data, real send, no
 // placeholder.
 
 import { useEffect, useState } from "react";
+import { Check } from "lucide-react";
 import {
   api,
   type IntentEntry,
@@ -15,9 +17,14 @@ import {
   type TeamManifest,
 } from "../../lib/api";
 import { fetchTasks } from "../../lib/tasksCache";
-import { AsciiSpinner } from "../ui/ascii-spinner";
 import { fetchTeam } from "../../lib/teamCache";
 import { agentName } from "../../lib/agentNames";
+import { cn } from "../../lib/utils";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Button } from "../ui/button";
+import { SettingsEmpty, SettingsError } from "../ui/settings-blocks";
+import { SettingsRow, SettingsSection } from "../ui/settings-row";
+import "../ui/standup.css";
 
 type Props = {
   repoRoot: string;
@@ -102,127 +109,77 @@ export function StandupView({ repoRoot, embedded = false }: Props) {
     }
   };
 
-  const root = embedded
-    ? "h-full w-full flex flex-col bg-bg-content"
-    : "flex flex-col bg-bg-content rounded border border-line max-h-[80vh]";
-
   return (
-    <div className={root}>
-      <div className="px-4 py-3 border-b border-line-soft flex items-center gap-3">
-        <h2 className="text-md font-medium text-text-1">Standup</h2>
-        <span className="text-xs text-text-3">
-          Last {DAYS_BACK} days · what each person worked on
-        </span>
-        <div className="ml-auto flex items-center gap-2">
-          {postNote && (
-            // Only a failure needs the reader here; a successful post is
-            // confirmed by the text alone.
-            <span
-              className={`text-xs ${postNote.ok ? "text-text-3" : "text-red"}`}
-            >
-              {postNote.text}
-            </span>
-          )}
-          <button
-            type="button"
-            className="text-xs px-2 py-0.5 rounded bg-bg-2 hover:bg-bg-3 text-text-2 disabled:opacity-50"
+    <div className={cn("ui-standup", embedded && "ui-standup-pane")}>
+      <SettingsRow
+        title={`Last ${DAYS_BACK} days`}
+        description={`What each person and agent worked on, from the reasons they saved and the Tasks board. Post shares a written summary in #${STANDUP_CHANNEL}.`}
+        control={
+          <Button
+            size="sm"
+            variant="outline"
             disabled={posting || loading || empty}
             title={`Share this summary with the team in #${STANDUP_CHANNEL}`}
             onClick={() => void post()}
           >
             {posting ? "Posting…" : `Post to #${STANDUP_CHANNEL}`}
-          </button>
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {loading && (
-          <div className="flex items-center gap-2 text-sm text-text-4">
-            <AsciiSpinner />
-            Loading…
-          </div>
-        )}
-        {err && (
-          <div className="text-xs px-2 py-1 rounded bg-red/10 text-red">
-            {err}
-          </div>
-        )}
-        {!loading && !err && (
-          <TasksSummaryCard summary={taskSummary} days={DAYS_BACK} />
-        )}
-        {!loading && !err && empty && (
-          <div className="text-sm text-text-3 leading-snug">
-            Nothing happened in the last {DAYS_BACK} days. As soon as someone
-            saves work or moves a task, it shows up here.
-          </div>
-        )}
-        {buckets.map((b) => (
-          <DaySection
-            key={b.date}
-            bucket={b}
-            knownMembers={team?.members ?? []}
-          />
+          </Button>
+        }
+      />
+      {postNote &&
+        (postNote.ok ? (
+          <p className="ui-settings-status ui-standup-note" role="status">
+            {postNote.text}
+          </p>
+        ) : (
+          <SettingsError>{postNote.text}</SettingsError>
         ))}
-      </div>
 
-      <div className="px-4 py-2 border-t border-line-soft text-xs text-text-4">
-        Built from what your team saved and the Tasks board. Post shares a
-        written summary in #{STANDUP_CHANNEL}.
-      </div>
+      {loading && (
+        <p className="ui-settings-status ui-standup-note" role="status">
+          <AsciiSpinner /> Loading the week…
+        </p>
+      )}
+      {err && <SettingsError>{err}</SettingsError>}
+      {!loading && !err && <TasksSummary summary={taskSummary} />}
+      {!loading && !err && empty && (
+        <SettingsEmpty>
+          Nothing happened in the last {DAYS_BACK} days. As soon as someone saves work or moves a
+          task, it shows up here.
+        </SettingsEmpty>
+      )}
+      {buckets.map((b) => (
+        <DaySection key={b.date} bucket={b} knownMembers={team?.members ?? []} />
+      ))}
     </div>
   );
 }
 
 // Period task rollup: completed-this-window with titles, plus live
 // in-progress / in-review counts. Hidden entirely when there's nothing
-// to show so it never renders an empty card.
-function TasksSummaryCard({
-  summary,
-  days,
-}: {
-  summary: TaskSummary;
-  days: number;
-}) {
+// to show so it never draws an empty section.
+function TasksSummary({ summary }: { summary: TaskSummary }) {
   const { completed, inProgress, inReview } = summary;
   if (completed.length === 0 && inProgress === 0 && inReview === 0) return null;
-  const bits = [
-    `${completed.length} completed`,
-    `${inProgress} in progress`,
-  ];
+  const bits = [`${completed.length} completed`, `${inProgress} in progress`];
   if (inReview > 0) bits.push(`${inReview} in review`);
   return (
-    <section className="border border-line-soft rounded px-3 py-2">
-      <div className="flex items-center gap-2 mb-1">
-        <span className="text-sm font-medium text-text-1">Tasks</span>
-        <span className="text-xs text-text-4">
-          last {days}d · {bits.join(" · ")}
-        </span>
-      </div>
+    <SettingsSection title="Tasks" description={bits.join(" · ")}>
       {completed.length > 0 && (
-        <ul className="space-y-0.5">
+        <ul className="ui-standup-list">
           {completed.slice(0, 6).map((t) => (
-            <li
-              key={t.id}
-              className="text-sm text-text-2 truncate"
-              title={t.title}
-            >
-              <span className="text-text-4" aria-hidden>✓</span>{" "}
-              {t.sequence_id > 0 && (
-                <span className="text-text-4 tabular-nums">
-                  AURA-{t.sequence_id}{" "}
-                </span>
-              )}
-              {t.title}
+            <li key={t.id} title={t.title}>
+              <Check className="ui-standup-done" aria-label="Done" />
+              {t.sequence_id > 0 && <span className="ui-standup-handle">AURA-{t.sequence_id}</span>}
+              <span className="ui-standup-text">{t.title}</span>
             </li>
           ))}
           {completed.length > 6 && (
-            <li className="text-xs text-text-4">
-              +{completed.length - 6} more…
-            </li>
+            <li className="ui-standup-more">{completed.length - 6} more</li>
           )}
         </ul>
       )}
-    </section>
+    </SettingsSection>
   );
 }
 
@@ -250,6 +207,20 @@ function authorDisplay(
   return agentName(author, { empty: "Not recorded", unknown: "Not recorded" });
 }
 
+/** A day the way people say it: Today, Yesterday, then the weekday and
+ *  date. The bucket key is a local `YYYY-MM-DD`, so it is read as local. */
+function dayLabel(date: string): string {
+  const [y, m, d] = date.split("-").map(Number);
+  if (!y || !m || !d) return date;
+  const day = new Date(y, m - 1, d);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diff = Math.round((today.getTime() - day.getTime()) / 86_400_000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  return day.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
 function DaySection({
   bucket,
   knownMembers,
@@ -257,48 +228,32 @@ function DaySection({
   bucket: DayBucket;
   knownMembers: TeamManifest["members"];
 }) {
+  const authors = Array.from(bucket.byAuthor.entries());
+  const updates = authors.reduce((n, [, rows]) => n + rows.length, 0);
   return (
-    <section>
-      <div className="section-label mb-1.5">
-        {bucket.date}
-      </div>
-      <div className="space-y-2">
-        {Array.from(bucket.byAuthor.entries()).map(([author, rows]) => {
-          const display = authorDisplay(author, knownMembers);
-          return (
-            <div
-              key={author || "(none)"}
-              className="border border-line-soft rounded px-3 py-2"
-            >
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-sm font-medium text-text-1">
-                  {display}
-                </span>
-                <span className="text-xs text-text-4 tabular-nums">
-                  {rows.length} update{rows.length === 1 ? "" : "s"}
-                </span>
-              </div>
-              <ul className="space-y-0.5">
-                {rows.slice(0, 6).map((r) => (
-                  <li
-                    key={r.id}
-                    className="text-sm text-text-2 truncate"
-                    title={r.intent}
-                  >
-                    · {r.intent}
-                  </li>
-                ))}
-                {rows.length > 6 && (
-                  <li className="text-xs text-text-4">
-                    +{rows.length - 6} more…
-                  </li>
-                )}
-              </ul>
-            </div>
-          );
-        })}
-      </div>
-    </section>
+    <SettingsSection
+      title={dayLabel(bucket.date)}
+      description={`${updates} ${updates === 1 ? "update" : "updates"} from ${authors.length} ${authors.length === 1 ? "person or agent" : "people and agents"}`}
+    >
+      {authors.map(([author, rows]) => (
+        <div key={author || "(none)"} className="ui-standup-author">
+          <div className="ui-standup-author-head">
+            <span>{authorDisplay(author, knownMembers)}</span>
+            <small>
+              {rows.length} {rows.length === 1 ? "update" : "updates"}
+            </small>
+          </div>
+          <ul className="ui-standup-list">
+            {rows.slice(0, 6).map((r) => (
+              <li key={r.id} title={r.intent}>
+                <span className="ui-standup-text">{r.intent}</span>
+              </li>
+            ))}
+            {rows.length > 6 && <li className="ui-standup-more">{rows.length - 6} more</li>}
+          </ul>
+        </div>
+      ))}
+    </SettingsSection>
   );
 }
 

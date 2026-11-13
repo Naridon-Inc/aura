@@ -1,39 +1,32 @@
-// StoryMarkdown — one themed markdown surface for the Intent change story.
+// StoryMarkdown — the prose of the change story: the ask, what the AI said as
+// it worked, and the reason recorded against one changed piece.
 //
-// The app had five ad-hoc markdown mappings (MarkdownView, TaskMarkdown,
-// ChatMarkdown, ManagerChatView, EditViewPanel), each re-theming from
-// scratch and drifting apart. This is the single deep-green-tokened
-// renderer the Intent↔AST story uses for every prose surface it shows:
-// the originating ask, the AI's stated intents, and per-symbol rationale.
-//
-// Built on react-markdown + remark-gfm (already shipped — no new dep).
-// Code is rendered in theme mono rather than pulling a syntax highlighter;
-// the story shows signatures and short identifiers, not large code blocks,
-// so a highlighter would be weight without payoff. Only the props we
-// actually render are destructured, so no stray `node` attribute leaks
-// onto the DOM and the strict no-unused-params lint stays happy.
+// It is the chat's message typography (`ui-message-markdown`), not a theme of
+// its own, so a prompt reads the same here as it did when it was sent. Compact
+// is the same type a step smaller, for the lines that sit under a row. Links
+// open in the system browser (a plain anchor does nothing in the app's web
+// view); inline code is the library's code chip. No syntax highlighter: the
+// story shows signatures and short identifiers, not large code blocks.
 
-import ReactMarkdown from "react-markdown";
-import { onExternalAnchorClick } from "../../lib/openExternal";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { Components } from "react-markdown";
+import { onExternalAnchorClick } from "../../lib/openExternal";
 import { cn } from "../../lib/utils";
+import "../ui/chat-markdown.css";
+import "../ui/intent-story.css";
 
 type Props = {
   children: string;
   className?: string;
-  /** Dense mode for inline beats (per-symbol rationale) — tighter type. */
+  /** A step smaller, for prose under a row (a per-piece reason, a said line). */
   compact?: boolean;
 };
 
 export function StoryMarkdown({ children, className, compact }: Props) {
   return (
     <div
-      className={cn(
-        "story-md text-text-2 leading-relaxed",
-        compact ? "text-sm" : "text-base",
-        className,
-      )}
+      className={cn("ui-message-markdown ui-story-markdown", className)}
+      data-compact={compact || undefined}
     >
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={COMPONENTS}>
         {children}
@@ -43,99 +36,11 @@ export function StoryMarkdown({ children, className, compact }: Props) {
 }
 
 const COMPONENTS: Components = {
-  p({ children }) {
-    return <p className="my-2 first:mt-0 last:mb-0">{children}</p>;
-  },
-  h1({ children }) {
-    return (
-      <h1 className="text-md font-semibold text-text-1 mt-3 mb-1.5 first:mt-0">
-        {children}
-      </h1>
-    );
-  },
-  h2({ children }) {
-    return (
-      <h2 className="text-base font-semibold text-text-1 mt-3 mb-1.5 first:mt-0">
-        {children}
-      </h2>
-    );
-  },
-  h3({ children }) {
-    return (
-      <h3 className="text-base font-semibold text-text-1 mt-2 mb-1 first:mt-0">
-        {children}
-      </h3>
-    );
-  },
   a({ href, children }) {
     return (
-      <a
-        href={href}
-        target="_blank"
-        rel="noreferrer"
-        onClick={onExternalAnchorClick}
-        className="text-accent hover:underline"
-      >
+      <a href={href} target="_blank" rel="noreferrer" onClick={onExternalAnchorClick}>
         {children}
       </a>
-    );
-  },
-  ul({ children }) {
-    return (
-      <ul className="list-disc pl-5 my-2 space-y-1 marker:text-text-4">
-        {children}
-      </ul>
-    );
-  },
-  ol({ children }) {
-    return (
-      <ol className="list-decimal pl-5 my-2 space-y-1 marker:text-text-4">
-        {children}
-      </ol>
-    );
-  },
-  li({ children }) {
-    return <li className="text-text-2">{children}</li>;
-  },
-  blockquote({ children }) {
-    return (
-      <blockquote className="border-l-2 border-line-soft pl-3 my-2 text-text-3 italic">
-        {children}
-      </blockquote>
-    );
-  },
-  strong({ children }) {
-    return <strong className="font-semibold text-text-1">{children}</strong>;
-  },
-  em({ children }) {
-    return <em className="italic">{children}</em>;
-  },
-  hr() {
-    return <hr className="my-3 border-line-soft" />;
-  },
-  code({ className, children }) {
-    // react-markdown v10 drops the `inline` flag — block code carries a
-    // `language-*` class (and is wrapped in our <pre>), inline code does
-    // not. Style each accordingly.
-    const isBlock = /language-/.test(className ?? "");
-    if (isBlock) {
-      return (
-        <code className={cn("font-mono text-sm", className)}>
-          {children}
-        </code>
-      );
-    }
-    return (
-      <code className="bg-bg-2 text-text-1 px-1 py-0.5 rounded text-sm font-mono">
-        {children}
-      </code>
-    );
-  },
-  pre({ children }) {
-    return (
-      <pre className="bg-bg-2 border border-line-soft rounded-md my-2 p-2.5 overflow-x-auto text-sm">
-        {children}
-      </pre>
     );
   },
 };

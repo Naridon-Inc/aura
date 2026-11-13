@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::cloud_org::{active_org, OrgScoped};
+use crate::cloud_org::{active_org, OrgScoped, ORG_HEADER};
 use crate::cloud_session_sync::{cloud_origin, cloud_token, read_credentials};
 
 /// One machine on the user's runner board.
@@ -89,6 +89,32 @@ pub async fn cloud_runners() -> Result<Vec<CloudRunner>, String> {
     let creds = read_credentials().map_err(|e| e.to_string())?;
     let token = cloud_token(&creds).ok_or_else(|| "not signed in to Aura cloud".to_string())?;
     let origin = cloud_origin(&creds);
+    fetch(&origin, &token, None, active_org(&creds).id.as_deref()).await
+}
+
+/// The board of one named org, whichever org the app is acting as.
+///
+/// For the one surface that lists machines across every org you belong to.
+/// The registry answers for the org on the request, so asking about Naridon
+/// while acting as yourself means naming Naridon on this request rather than
+/// switching the whole app to it.
+pub(crate) async fn runners_in_org(
+    origin: &str,
+    token: &str,
+    slug: &str,
+    org_id: Option<&str>,
+) -> Result<Vec<CloudRunner>, String> {
+    fetch(origin, token, Some(slug), org_id).await
+}
+
+/// `GET /api/v2/runners` for the org named (`slug`), or the one the app is
+/// acting as when none is.
+async fn fetch(
+    origin: &str,
+    token: &str,
+    slug: Option<&str>,
+    org_id: Option<&str>,
+) -> Result<Vec<CloudRunner>, String> {
     let url = format!("{origin}/api/v2/runners");
 
     let client = reqwest::Client::builder()
@@ -96,10 +122,12 @@ pub async fn cloud_runners() -> Result<Vec<CloudRunner>, String> {
         .build()
         .map_err(|e| format!("client build: {e}"))?;
 
-    let resp = client
-        .get(&url)
-        .bearer_auth(&token)
-        .org_scoped()
+    let request = client.get(&url).bearer_auth(token);
+    let request = match slug {
+        Some(slug) => request.header(ORG_HEADER, slug),
+        None => request.org_scoped(),
+    };
+    let resp = request
         .send()
         .await
         .map_err(|e| format!("GET {url}: {e}"))?;
@@ -112,7 +140,7 @@ pub async fn cloud_runners() -> Result<Vec<CloudRunner>, String> {
 
     let mut runners: Vec<CloudRunner> =
         serde_json::from_str(&body).map_err(|e| format!("parse: {e}"))?;
-    runners = in_org(runners, active_org(&creds).id.as_deref());
+    runners = in_org(runners, org_id);
     runners.sort_by(|a, b| {
         b.online
             .cmp(&a.online)

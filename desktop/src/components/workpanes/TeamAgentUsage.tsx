@@ -15,6 +15,7 @@
 import { useMemo } from "react";
 import type { BillingMemberRow, UsageModel } from "../../lib/api";
 import { AgentIcon } from "../agent/AgentIcon";
+import { TraceSection } from "../ui/trace-report";
 import {
   providerAccent,
   providerForModel,
@@ -22,6 +23,7 @@ import {
 } from "./usageProviders";
 import { compactNumber } from "../../lib/compactNumber";
 import { formatCost } from "../../lib/money";
+import "../trace/usage.css";
 
 /** One coding agent's folded usage across the team (or this install). */
 type AgentUsage = {
@@ -113,49 +115,33 @@ export function TeamAgentUsage({
   if (agents.length === 0) return null;
 
   return (
-    <div className="rounded-lg border border-line-soft bg-bg-1 p-2.5">
-      <div className="mb-2.5 flex items-baseline justify-between">
-        <span className="section-label">
-          By coding agent
-        </span>
-        <span className="text-xs text-text-4">{scopeNote}</span>
-      </div>
-      <div className="flex flex-col gap-2.5">
+    <TraceSection
+      title="By coding agent"
+      trailing={<span className="ui-usage-scope">{scopeNote}</span>}
+    >
+      <div className="ui-usage-rows">
         {agents.map((a) => {
           const pct = grand > 0 ? (a.total / grand) * 100 : 0;
           return (
-            <div key={a.providerId} className="flex items-center gap-2.5">
-              <span
-                className="shrink-0 rounded-full p-0.5"
-                style={{ background: "var(--color-bg-content)" }}
-              >
-                <AgentIcon agentId={a.providerId} size={18} />
+            <div key={a.providerId} className="ui-usage-row ui-usage-agent">
+              <AgentIcon agentId={a.providerId} size={14} />
+              <span className="ui-usage-row-label">{providerLabel(a.providerId)}</span>
+              <span className="ui-usage-meter" aria-hidden>
+                <span
+                  style={{
+                    width: `${Math.max(pct, 2)}%`,
+                    background: providerAccent(a.providerId),
+                  }}
+                />
               </span>
-              <div className="flex min-w-0 flex-1 flex-col gap-1">
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="truncate text-base text-text-2">
-                    {providerLabel(a.providerId)}
-                  </span>
-                  <span className="shrink-0 font-mono text-xs text-text-3">
-                    {compactNumber(a.total)}
-                    <span className="text-text-4"> · {formatCost(a.costUsd)}</span>
-                  </span>
-                </div>
-                <span className="flex h-1.5 w-full overflow-hidden rounded-full bg-bg-2">
-                  <span
-                    className="block h-full rounded-full"
-                    style={{
-                      width: `${Math.max(pct, 2)}%`,
-                      background: providerAccent(a.providerId),
-                      opacity: 0.85,
-                    }}
-                  />
-                </span>
-              </div>
+              <span className="ui-usage-num">{compactNumber(a.total)}</span>
+              <span className="ui-usage-num" data-width="cost">
+                {formatCost(a.costUsd)}
+              </span>
             </div>
           );
         })}
       </div>
-    </div>
+    </TraceSection>
   );
 }

@@ -14,6 +14,7 @@
 //! the OS file association (`open` / `xdg-open` / `explorer`).
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -149,6 +150,61 @@ fn run_detached(mut cmd: Command) -> Result<(), String> {
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Editors that open a folder on another computer through their Remote-SSH
+/// extension, and the URI scheme each answers to.
+const REMOTE_EDITORS: &[(&str, &str)] = &[("vscode", "vscode"), ("cursor", "cursor")];
+
+/// Whether `editor_id` opens folders over SSH and is installed here.
+pub(crate) fn remote_capable(editor_id: &str) -> bool {
+    REMOTE_EDITORS.iter().any(|(id, _)| *id == editor_id)
+        && EDITORS.iter().any(|s| s.id == editor_id && is_available(s))
+}
+
+/// The ids [`remote_capable`] is asked about, in the order they are offered.
+pub(crate) fn remote_editor_ids() -> impl Iterator<Item = &'static str> {
+    REMOTE_EDITORS.iter().map(|(id, _)| *id)
+}
+
+/// `vscode://vscode-remote/ssh-remote+<host><folder>`, the folder escaped.
+pub(crate) fn remote_uri(scheme: &str, host: &str, folder: &str) -> Result<String, String> {
+    let mut u = url::Url::parse(&format!("{scheme}://vscode-remote/"))
+        .map_err(|e| format!("couldn't make the editor link: {e}"))?;
+    u.set_path(&format!("/ssh-remote+{host}{folder}"));
+    Ok(u.to_string())
+}
+
+/// Open `folder` on `host` — an ssh destination the editor's own ssh reaches —
+/// in a Remote-SSH window of `editor_id`: through its CLI's `--remote` when
+/// that is on PATH, else through the editor's link, handed to the OS.
+pub(crate) fn open_remote(editor_id: &str, host: &str, folder: &str) -> Result<(), String> {
+    let (_, scheme) = REMOTE_EDITORS
+        .iter()
+        .find(|(id, _)| *id == editor_id)
+        .ok_or_else(|| format!("{editor_id} can't open a folder over SSH"))?;
+    let spec = EDITORS
+        .iter()
+        .find(|s| s.id == editor_id)
+        .ok_or_else(|| format!("unknown editor: {editor_id}"))?;
+    for c in spec.cli {
+        if let Some(bin) = which(c) {
+            let mut cmd = Command::new(&bin);
+            cmd.arg("--remote").arg(format!("ssh-remote+{host}")).arg(folder);
+            return run_detached(cmd);
+        }
+    }
+    let link = remote_uri(scheme, host, folder)?;
+    #[cfg(target_os = "macos")]
+    {
+        if mac_app_path(spec.app_names).is_some() {
+            let mut cmd = Command::new("open");
+            cmd.arg(&link);
+            return run_detached(cmd);
+        }
+    }
+    let _ = link;
+    Err(format!("{} is not installed", spec.name))
+}
+
 /// List every installed editor plus the always-present system default.
 #[tauri::command]
 pub async fn editors_list() -> Result<Vec<EditorInfo>, String> {
@@ -212,6 +268,100 @@ pub async fn editor_open(path: String, editor_id: String) -> Result<(), String> 
     .await
 }
 
+/// The icon file an app bundle names in its Info.plist, with the `.icns`
+/// extension the key usually leaves off. Finder's says `Finder`, Cursor's
+/// says `Cursor.icns`; both point at a file in `Contents/Resources`.
+fn icon_file_name(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some(format!("{}.icns", name.strip_suffix(".icns").unwrap_or(name)))
+}
+
+/// Where converted app icons are kept, one PNG per app id. The same home
+/// folder the roster's avatar cache uses: machine state, never the repo's.
+fn icon_cache_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".aura").join("app-icons"))
+}
+
+/// Width the icons are converted at: the switcher draws them at 88px, so 128
+/// stays sharp on a 1.5x screen without shipping the 1024px original.
+#[cfg(target_os = "macos")]
+const ICON_WIDTH: &str = "128";
+
+/// One bundle's icon as a PNG at `out`, converted on first ask and reused
+/// after that. `None` when the bundle names no icon file or `sips` fails.
+#[cfg(target_os = "macos")]
+fn bundle_icon_png(bundle: &Path, out: &Path) -> Option<Vec<u8>> {
+    if !out.is_file() {
+        let info = bundle.join("Contents").join("Info");
+        let read = Command::new("/usr/bin/defaults")
+            .arg("read")
+            .arg(&info)
+            .arg("CFBundleIconFile")
+            .output()
+            .ok()?;
+        if !read.status.success() {
+            return None;
+        }
+        let file = icon_file_name(&String::from_utf8_lossy(&read.stdout))?;
+        let icns = bundle.join("Contents").join("Resources").join(file);
+        if !icns.is_file() {
+            return None;
+        }
+        let converted = Command::new("/usr/bin/sips")
+            .args(["-s", "format", "png"])
+            .arg(&icns)
+            .arg("--out")
+            .arg(out)
+            .args(["--resampleWidth", ICON_WIDTH])
+            .output()
+            .ok()?;
+        if !converted.status.success() {
+            return None;
+        }
+    }
+    std::fs::read(out).ok().filter(|b| !b.is_empty())
+}
+
+/// Each installed editor's own app icon, plus Finder's, as PNG data URLs keyed
+/// by editor id (`"finder"` for Finder). macOS reads them out of the app
+/// bundles; elsewhere, and for an editor found only as a CLI shim, the id is
+/// absent and the UI draws its own mark.
+#[tauri::command]
+pub async fn editors_icons() -> Result<HashMap<String, String>, String> {
+    Ok(crate::blocking::run(collect_icons).await)
+}
+
+#[cfg(target_os = "macos")]
+fn collect_icons() -> HashMap<String, String> {
+    use base64::Engine;
+    let mut out = HashMap::new();
+    let Some(cache) = icon_cache_dir() else { return out };
+    if std::fs::create_dir_all(&cache).is_err() {
+        return out;
+    }
+    let mut bundles: Vec<(String, PathBuf)> = EDITORS
+        .iter()
+        .filter_map(|s| mac_app_path(s.app_names).map(|p| (s.id.to_string(), p)))
+        .collect();
+    bundles.push(("finder".to_string(), PathBuf::from("/System/Library/CoreServices/Finder.app")));
+    for (id, bundle) in bundles {
+        if let Some(png) = bundle_icon_png(&bundle, &cache.join(format!("{id}.png"))) {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+            out.insert(id, format!("data:image/png;base64,{b64}"));
+        }
+    }
+    out
+}
+
+#[cfg(not(target_os = "macos"))]
+fn collect_icons() -> HashMap<String, String> {
+    let _ = icon_cache_dir;
+    HashMap::new()
+}
+
 /// Open a path in the OS-associated application.
 fn open_with_os_default(target: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -233,5 +383,22 @@ fn open_with_os_default(target: &Path) -> Result<(), String> {
         let mut cmd = Command::new("xdg-open");
         cmd.arg(target);
         run_detached(cmd)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::icon_file_name;
+
+    #[test]
+    fn the_plist_icon_name_gets_its_extension() {
+        assert_eq!(icon_file_name("Finder\n").as_deref(), Some("Finder.icns"));
+        assert_eq!(icon_file_name("Cursor.icns").as_deref(), Some("Cursor.icns"));
+    }
+
+    #[test]
+    fn a_blank_or_pathlike_name_is_no_icon() {
+        assert_eq!(icon_file_name("  \n"), None);
+        assert_eq!(icon_file_name("../../etc/x"), None);
     }
 }

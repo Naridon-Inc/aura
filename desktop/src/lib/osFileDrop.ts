@@ -13,8 +13,8 @@
 //                   terminal does — the agent, e.g. Claude Code, then reads it)
 //   • the composer → hand the paths to the chat composer, which reads each
 //                    image's bytes and attaches it inline
-// In-app HTML5 drags (the clips tray, file-tree reordering, tab dragging) are
-// unaffected — `dragDropEnabled` governs only EXTERNAL OS file drops.
+// In-app drags of Files rows come through here too: see "In-app (HTML5) file
+// drags" below, which also lands a row dropped on one of the tree's folders.
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -46,23 +46,94 @@ type DragDropPayload = {
 // So we stash the dragged paths in a module ref at dragstart (the source of
 // truth) and route the drop from a single window-level CAPTURE listener that
 // hit-tests `[data-os-drop]` zones — the same zones the OS-drop router uses.
-const inAppDrag: { active: boolean; paths: string[] } = {
+//
+// A row can also be dropped on one of the Files tree's own folders, which
+// moves it there. Under wry that drop never reaches the folder either, so the
+// tree marks each folder row with `data-file-move-dir` and the same router
+// lands the move from wherever the release is reported: the DOM `drop`, the
+// native `drop` and its position, or the `dragend` release point.
+
+/** What the tree does with a drag released on one of its folders. */
+export interface InAppFileMove {
+  /** Whether the dragged entries can move into this folder. */
+  accepts: (dir: string) => boolean;
+  /** Move the dragged entries into this folder. */
+  into: (dir: string) => void;
+  /** The folder the drag is over now, or null, for the tree to highlight. */
+  hover: (dir: string | null) => void;
+}
+
+const inAppDrag: { active: boolean; paths: string[]; move: InAppFileMove | null } = {
   active: false,
   paths: [],
+  move: null,
 };
 
-/** Call from a Files-sidebar row's `onDragStart` with the dragged path(s).
+/** The move of the drag that just ended, kept for a moment: under wry the
+ *  source's `dragend` can reach the page before the native `drop` that says
+ *  where the drag was released. */
+let endedMove: { move: InAppFileMove; at: number } | null = null;
+const ENDED_MOVE_MS = 1000;
+
+/** Call from a Files-sidebar row's `onDragStart` with the dragged path(s), and
+ *  what to do when they are released on one of the tree's folders.
  *  Records the payload so the window-level router can recover it even when
  *  the webview strips the dataTransfer contents mid-drag. */
-export function beginInAppFileDrag(paths: string[]): void {
+export function beginInAppFileDrag(paths: string[], move?: InAppFileMove): void {
   inAppDrag.active = true;
   inAppDrag.paths = paths.filter(Boolean);
+  inAppDrag.move = move ?? null;
+  endedMove = null;
 }
 
 /** Call from the same row's `onDragEnd` to clear the in-app drag payload. */
 export function endInAppFileDrag(): void {
+  const move = inAppDrag.move;
+  if (inAppDrag.active && move) {
+    move.hover(null);
+    endedMove = { move, at: Date.now() };
+  }
   inAppDrag.active = false;
   inAppDrag.paths = [];
+  inAppDrag.move = null;
+}
+
+/** An element and its ancestors, as far as the move hit-test reads them. */
+export interface MoveNode {
+  dataset?: DOMStringMap;
+  parentElement: MoveNode | null;
+}
+
+/** The folder a drag released over `node` moves into: the nearest row marked
+ *  `data-file-move-dir`, when it takes the drag. Null over anything else, or
+ *  over a folder that refuses it (the folder itself, one inside it, or the
+ *  one it is already in). */
+export function moveDirFrom(node: MoveNode | null, accepts: (dir: string) => boolean): string | null {
+  for (let at = node; at; at = at.parentElement) {
+    const dir = at.dataset?.fileMoveDir;
+    if (dir !== undefined) return accepts(dir) ? dir : null;
+  }
+  return null;
+}
+
+/** The folder the live in-app drag would move into from this element. */
+function moveDirAt(el: Element | null): string | null {
+  const move = inAppDrag.active ? inAppDrag.move : null;
+  return move ? moveDirFrom(el as HTMLElement | null, move.accepts) : null;
+}
+
+/** Land a release over `el` on a Files-tree folder, if it is one that takes
+ *  the drag. True when the release belongs to the move, so the caller does not
+ *  also hand the paths to a terminal or the chat box. `move` defaults to the
+ *  live drag's. */
+function landMove(el: Element | null, move: InAppFileMove | null = inAppDrag.active ? inAppDrag.move : null): boolean {
+  const dir = move ? moveDirFrom(el as HTMLElement | null, move.accepts) : null;
+  if (!move || dir === null) return false;
+  if (inAppDrag.move === move) endInAppFileDrag();
+  endedMove = null;
+  move.hover(null);
+  if (claimInAppDrop()) move.into(dir);
+  return true;
 }
 
 // Under wry (`dragDropEnabled`) on macOS an in-app drag can surface on BOTH
@@ -124,6 +195,13 @@ function zoneAt(position: { x: number; y: number } | undefined): {
   if (kind === "terminal")
     return { zone: "terminal", ptyId: ptyId || null, agentSession: agentSession || null, composerId: null };
   return miss;
+}
+
+/** The element under a native drag position, if any. */
+function elementAtNative(position: { x: number; y: number } | undefined): Element | null {
+  if (!position) return null;
+  const { x, y } = osDropPositionToClient(position);
+  return document.elementFromPoint(x, y);
 }
 
 /** Shell-quote a path only when it contains whitespace, matching the existing
@@ -269,6 +347,13 @@ export function installInAppFileDropRouter(): () => void {
   const onDragOver = (e: DragEvent) => {
     const dt = e.dataTransfer;
     if (!isOwnedFileDrag(dt)) return;
+    const dir = moveDirAt(e.target as Element | null);
+    inAppDrag.move?.hover(dir);
+    if (dir !== null) {
+      e.preventDefault();
+      if (dt) dt.dropEffect = "move";
+      return;
+    }
     if (!zoneAtEvent(e).zone) return;
     // Accepting the dragover is what stops the browser rejecting the drop
     // (and animating the row back to the sidebar — the "disappears" bug).
@@ -278,6 +363,12 @@ export function installInAppFileDropRouter(): () => void {
   const onDrop = (e: DragEvent) => {
     const dt = e.dataTransfer;
     if (!isOwnedFileDrag(dt)) return;
+    if (moveDirAt(e.target as Element | null) !== null) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      landMove(e.target as Element | null);
+      return;
+    }
     const { zone, ptyId, agentSession, composerId } = zoneAtEvent(e);
     if (!zone) return;
     e.preventDefault();
@@ -292,9 +383,15 @@ export function installInAppFileDropRouter(): () => void {
   // swallowed the actual drop (so neither the DOM `drop` above nor the native
   // channel ran). Its coordinates are the release point — hit-test them and
   // route from the dragstart path ref. `claimInAppDrop` keeps this from
-  // double-writing when a real drop already landed.
+  // double-writing when a real drop already landed. Like a move into a
+  // folder, a path lands here only when the drag ended in a drop: a drag
+  // cancelled with Escape still reports where the pointer was, and typing the
+  // path into the terminal or chat box under it would undo the cancel.
   const onDragEnd = (e: DragEvent) => {
-    if (inAppDrag.active && inAppDrag.paths.length && (e.clientX || e.clientY)) {
+    const dropped = e.dataTransfer?.dropEffect !== "none";
+    const released = e.clientX || e.clientY ? document.elementFromPoint(e.clientX, e.clientY) : null;
+    if (dropped && released && landMove(released)) return;
+    if (dropped && inAppDrag.active && inAppDrag.paths.length && (e.clientX || e.clientY)) {
       const { zone, ptyId, agentSession, composerId } = zoneAtPoint(e.clientX, e.clientY);
       if (zone && claimInAppDrop()) {
         writeInAppDrop(zone, ptyId, agentSession, composerId, inAppDrag.paths.slice());
@@ -327,6 +424,7 @@ export function installOsFileDropRouter(): () => void {
         const kind = payload?.type;
 
         if (kind === "over" || kind === "enter" || kind === "drag") {
+          inAppDrag.move?.hover(moveDirAt(elementAtNative(payload.position)));
           const { zone, composerId } = zoneAt(payload.position);
           window.dispatchEvent(
             new CustomEvent(OS_FILE_DRAG, {
@@ -336,6 +434,7 @@ export function installOsFileDropRouter(): () => void {
           return;
         }
         if (kind === "leave" || kind === "cancel") {
+          inAppDrag.move?.hover(null);
           window.dispatchEvent(
             new CustomEvent(OS_FILE_DRAG, { detail: { kind: null } }),
           );
@@ -354,6 +453,13 @@ export function installOsFileDropRouter(): () => void {
         // dragged paths from the dragstart ref so Files → terminal / composer
         // still lands, and claim the drop so the DOM router (if it also fires)
         // doesn't write it twice.
+        // A Files row released on one of the tree's folders moves there,
+        // whether or not the row's `dragend` has already cleared the drag.
+        if (nativePaths.length === 0) {
+          const recent = endedMove && Date.now() - endedMove.at < ENDED_MOVE_MS ? endedMove.move : null;
+          const move = inAppDrag.active ? inAppDrag.move : recent;
+          if (landMove(elementAtNative(payload.position), move)) return;
+        }
         const fromInApp = nativePaths.length === 0 && inAppDrag.active;
         const paths = nativePaths.length ? nativePaths : inAppDrag.paths.slice();
         if (fromInApp) {

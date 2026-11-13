@@ -468,6 +468,8 @@ describe("what you can do to a strip", () => {
 
 const body = await readSrc("components/cloud/RemoteWorkspace.tsx");
 const hook = await readSrc("components/cloud/useRemoteTabs.ts");
+// The machine's details are the workspace title in the header, which owns that key.
+const headerTitle = await readSrc("components/cloud/RemoteHeaderTitle.tsx");
 
 describe("the workspace is wired to the slot, not to its own lifetime", () => {
   test("the tabs come from the slot", () => {
@@ -487,7 +489,9 @@ describe("the workspace is wired to the slot, not to its own lifetime", () => {
     expect(body).not.toContain('key={machine?.id ?? "no-machine"}\n        entry');
     expect(body).toContain("<RemoteWorkspaceBody\n        entry={entry}");
     // The one thing that still resets per machine is the draft OF that machine.
-    expect(body).toContain('key={machine?.id ?? "no-machine"}\n        machine={machine}');
+    // The details are the workspace title in the header now, so the reset
+    // lives where they are drawn.
+    expect(headerTitle).toContain('<MachineDetails key={header.machine?.id ?? "no-machine"} {...header} />');
   });
 
   test("the slot is both halves, so one mount serves several projects", () => {

@@ -5,7 +5,7 @@
 //
 //     const attention = items.filter((i) => i.severity === "attention").length;
 //     attention > 0 ? "A couple of things to set up"
-//                   : "Your project's in good shape"
+//                   : "Your repository's in good shape"
 //
 // …where `items` came from a fold that read four of the report's ten fields.
 // The engine counts SEVEN separate sources into `issues_found`: stuck
@@ -15,7 +15,7 @@
 // happened. The dialog's amber arm read two of those. `shadow`,
 // `cloud_rotation`, `plugins_loaded` and `issues_found` itself were never read
 // at all — so a diverged record chain, or a signing probe that came back with
-// an unrecognised status, produced a green "Your project's in good shape" and
+// an unrecognised status, produced a green "Your repository's in good shape" and
 // the words "Nothing needs your attention", with the engine's own count of
 // real problems sitting unread in the same object.
 //
@@ -92,7 +92,7 @@ export function buildHealthItems(r: DoctorReport): HealthItem[] {
     attention.push({
       key: "capture",
       severity: "attention",
-      title: "Aura isn't watching this project yet",
+      title: "Aura isn't watching this repository yet",
       // "as you work" — no. The line directly above this one gets it right:
       // it's every COMMIT. Capture is a set of git hooks, so the off-state
       // description and the on-state description of one feature disagreed
@@ -247,7 +247,7 @@ export function buildHealthItems(r: DoctorReport): HealthItem[] {
       severity: "ok",
       title: `${r.shadow.checkpoints} restore point${r.shadow.checkpoints === 1 ? "" : "s"} saved`,
       detail:
-        "Points in this project's history Aura can put a file, or the whole project, back to.",
+        "Points in this repository's history Aura can put a file, or the whole repository, back to.",
       counts: 0,
     });
   }
@@ -272,7 +272,7 @@ export function buildHealthItems(r: DoctorReport): HealthItem[] {
     attention.push({
       key: "skill-unreadable",
       severity: "attention",
-      title: "Aura can't read what it's learned about your project",
+      title: "Aura can't read what it's learned about your repository",
       detail:
         "The file is there but Aura can't make sense of it, so suggestions won't improve from your past work until it's rebuilt.",
       counts: 0,
@@ -342,7 +342,7 @@ export function healthHeadline(
     return { text: "A couple of things need a look", tone: "attention", chips };
   }
   return {
-    text: "Your project's in good shape",
+    text: "Your repository's in good shape",
     tone: "good",
     chips: chips.length ? chips : ["Nothing needs your attention"],
   };

@@ -4,16 +4,17 @@
 // Same idea as the collab composer's people picker: the "@word" the caret is
 // in becomes a query, arrow keys move, Enter/Tab picks, Esc closes. That
 // picker's rows are people (face, presence, hand-over), so a file row needs
-// its own list — but the caret/query logic (`mentionQueryAt`) and the menu
-// surface are the shared ones, imported, not copied. Picking a file inserts
-// the path in backticks so it reads as code on GitHub.
+// its own list — but the caret/query logic (`mentionQueryAt`) and the
+// composer's suggestions panel are the shared ones, imported, not copied.
+// Picking a file inserts the path in backticks so it reads as code on GitHub.
 
 import { useEffect, useMemo, useState } from "react";
 import type { JSX } from "react";
-import { FileText } from "lucide-react";
 
-import { AsciiSpinner } from "../ui/ascii-spinner";
-import { MENU_LABEL, MENU_PANEL, MENU_ROW, MENU_SEP } from "../ui/menuSurface";
+import { cn } from "../../lib/utils";
+import { MENU_LABEL } from "../ui/menuSurface";
+import { LoadingState } from "../ui/state";
+import "../ui/file-mentions.css";
 
 /** Rank the PR's files against what was typed after the "@". Basename hits
  *  first (that is what people remember), then any path substring; no query
@@ -95,15 +96,15 @@ export function PrFileMentionPicker({
     <div
       role="listbox"
       aria-label="Mention a file this pull request changed"
-      className={`${MENU_PANEL} w-[320px] max-h-[260px] overflow-y-auto ${className ?? ""}`}
+      className={cn("ui-composer-suggestions ui-file-mentions", className)}
     >
       {loading && files.length === 0 ? (
-        <div className="flex items-center gap-2 px-2 py-2 text-xs text-text-3">
-          <AsciiSpinner size={12} />
-          <span>Loading the files this pull request changed…</span>
-        </div>
+        <LoadingState
+          label="Loading the files this pull request changed…"
+          className="ui-file-mentions-state"
+        />
       ) : matches.length === 0 ? (
-        <div className="px-2 py-2 text-xs text-text-4">
+        <div className="ui-file-mentions-state">
           {files.length === 0
             ? "This pull request has no changed files to mention."
             : `No changed file matches “${query}”.`}
@@ -111,33 +112,30 @@ export function PrFileMentionPicker({
       ) : (
         <>
           <div className={MENU_LABEL}>Files in this pull request</div>
-          {matches.map((f, i) => (
-            <div
-              key={f}
-              role="option"
-              aria-selected={i === active}
-              tabIndex={-1}
-              data-highlighted={i === active ? "" : undefined}
-              onMouseEnter={() => setActive(i)}
-              onMouseDown={(e) => {
-                // Keep the textarea focused so the insert lands at the caret.
-                e.preventDefault();
-                onPick(f);
-              }}
-              className={`${MENU_ROW} cursor-pointer`}
-            >
-              <FileText aria-hidden />
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-text-1">
-                {f}
-              </span>
-            </div>
-          ))}
+          {matches.map((f, i) => {
+            const cut = f.lastIndexOf("/");
+            return (
+              <button
+                key={f}
+                type="button"
+                role="option"
+                aria-selected={i === active}
+                tabIndex={-1}
+                onMouseEnter={() => setActive(i)}
+                onMouseDown={(e) => {
+                  // Keep the textarea focused so the insert lands at the caret.
+                  e.preventDefault();
+                  onPick(f);
+                }}
+              >
+                <span>{f.slice(cut + 1)}</span>
+                {cut > 0 && <small>{f.slice(0, cut)}</small>}
+              </button>
+            );
+          })}
         </>
       )}
-      <div className={MENU_SEP} />
-      <div className="px-2 py-1 text-2xs text-text-5">
-        Enter to insert the path · Esc to close
-      </div>
+      <div className="ui-file-mentions-hint">Enter to insert the path · Esc to close</div>
     </div>
   );
 }

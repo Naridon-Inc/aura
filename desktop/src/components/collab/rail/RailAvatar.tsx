@@ -15,6 +15,7 @@ import { Avatar } from "../../team/presentation/Avatar";
 import { AgentIcon } from "../../agent/AgentIcon";
 import { PresenceDot } from "./PresenceDot";
 import { isPresent, presenceTitle, type RailActor } from "./railModel";
+import "../../ui/people-rail.css";
 
 export type RailAvatarProps = {
   actor: RailActor;
@@ -39,16 +40,12 @@ export function RailAvatar({
   actor,
   size = 22,
   showPresence = false,
-  ring = "var(--color-bg-1)",
+  ring = "var(--ui-sidebar)",
   title,
 }: RailAvatarProps) {
   const hover = title ?? presenceTitle(actor.name, actor.state);
   return (
-    <span
-      className="relative inline-flex flex-shrink-0 leading-none"
-      style={{ width: size, height: size }}
-      title={hover}
-    >
+    <span className="ui-rail-avatar" style={{ width: size, height: size }} title={hover}>
       {actor.kind === "agent" ? (
         <AgentIcon
           agentId={actor.agentKind ?? actor.name.toLowerCase()}
@@ -86,7 +83,7 @@ export function RailAvatar({
 export function RailAvatarDimmable(props: RailAvatarProps) {
   const away = !isPresent(props.actor.state);
   return (
-    <span style={away ? { opacity: 0.45 } : undefined}>
+    <span className="ui-rail-avatar-dim" data-away={away || undefined}>
       <RailAvatar {...props} />
     </span>
   );

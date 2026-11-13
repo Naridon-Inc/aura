@@ -10,10 +10,10 @@
 // happen when it lands.
 
 import type { JSX } from "react";
-import { ChevronDown, Users } from "lucide-react";
+import { Check, ChevronDown, Users } from "lucide-react";
 
 import type { MsgIntent, Participant } from "../../lib/sessionLive";
-import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Button } from "../ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -22,6 +22,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import { LoadingState } from "../ui/state";
 import { ParticipantFace } from "./ParticipantsStrip";
 import {
   ownerOf,
@@ -29,6 +30,7 @@ import {
   participantName,
   sortParticipants,
 } from "./collabPresence";
+import "../ui/composer-addressing.css";
 
 /** The intent list, in the order it reads as a ladder from quiet to loud. */
 const INTENTS: { value: MsgIntent; label: string; blurb: string }[] = [
@@ -100,16 +102,21 @@ export function ComposerAddressingBar({
   loading = false,
   error = null,
 }: ComposerAddressingBarProps): JSX.Element {
+  // The bar is the composer's context line: the row above the input that says
+  // what the next message is about. Here it says who it is for.
   if (error) {
     return (
-      <div className="flex items-center h-6 px-2 text-2xs text-red truncate">{error}</div>
+      <div className="ui-composer-context ui-composer-addressing" role="alert">
+        <span className="ui-composer-addressing-error" title={error}>
+          {error}
+        </span>
+      </div>
     );
   }
   if (loading) {
     return (
-      <div className="flex items-center gap-1.5 h-6 px-2 text-2xs text-text-4">
-        <AsciiSpinner size={11} />
-        <span>Working out who's in this session…</span>
+      <div className="ui-composer-context ui-composer-addressing">
+        <LoadingState label="Working out who's in this session…" />
       </div>
     );
   }
@@ -119,33 +126,44 @@ export function ComposerAddressingBar({
   const agents = ordered.filter((p) => p.kind === "agent");
   const toLabel = to ? participantLabel(to, participants, youId) : "everyone";
   const intentEntry = INTENTS.find((i) => i.value === intent) ?? INTENTS[0];
+  const sentence = deliverySentence(to, intent, participants, youId);
 
   return (
-    <div className="flex items-center gap-1.5 h-6 px-2 min-w-0 text-2xs">
-      <span className="text-text-4 flex-shrink-0">to</span>
+    <div className="ui-composer-context ui-composer-addressing">
+      <span>to</span>
 
       <DropdownMenu>
-        <DropdownMenuTrigger asChild disabled={disabled}>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 max-w-[190px] px-1.5 h-[18px] rounded border border-line-soft bg-bg-2 text-text-1 hover:border-line disabled:opacity-50"
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ui-model-trigger"
+            disabled={disabled}
             title="Change who this message goes to"
+            aria-label={`Send to ${toLabel} — change who this message goes to`}
           >
             {to ? (
-              <ParticipantFace p={to} size={13} />
+              <span className="ui-composer-addressing-face">
+                <ParticipantFace p={to} size={13} />
+              </span>
             ) : (
-              <Users size={11} className="text-text-3" />
+              <Users />
             )}
-            <span className="truncate">{toLabel}</span>
-            <ChevronDown size={10} className="text-text-4 flex-shrink-0" />
-          </button>
+            <span>{toLabel}</span>
+            <ChevronDown />
+          </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" side="top" className="w-[280px]">
+        <DropdownMenuContent
+          className="ui-composer-addressing-menu"
+          side="top"
+          align="start"
+          sideOffset={6}
+        >
           <DropdownMenuLabel>Send to</DropdownMenuLabel>
           <DropdownMenuItem onSelect={() => onChange(null, coerceIntent(null, intent))}>
-            <Users size={14} className="text-text-3" />
-            <span className="flex-1">Everyone in this session</span>
-            {!to && <span className="text-accent">●</span>}
+            <Users />
+            <span className="ui-composer-addressing-name">Everyone in this session</span>
+            {!to && <Check size={12} />}
           </DropdownMenuItem>
           {people.length > 0 && <DropdownMenuSeparator />}
           {people.length > 0 && <DropdownMenuLabel>People</DropdownMenuLabel>}
@@ -175,17 +193,25 @@ export function ComposerAddressingBar({
       </DropdownMenu>
 
       <DropdownMenu>
-        <DropdownMenuTrigger asChild disabled={disabled}>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 px-1.5 h-[18px] rounded border border-line-soft bg-bg-2 text-text-2 hover:border-line disabled:opacity-50"
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ui-model-trigger"
+            disabled={disabled}
             title="Change what kind of message this is"
+            aria-label={`${intentEntry.label} — change what kind of message this is`}
           >
-            <span className="truncate">{intentEntry.label}</span>
-            <ChevronDown size={10} className="text-text-4 flex-shrink-0" />
-          </button>
+            <span>{intentEntry.label}</span>
+            <ChevronDown />
+          </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" side="top" className="w-[240px]">
+        <DropdownMenuContent
+          className="ui-composer-addressing-menu"
+          side="top"
+          align="start"
+          sideOffset={6}
+        >
           <DropdownMenuLabel>What kind of message</DropdownMenuLabel>
           {INTENTS.map((i) => (
             <DropdownMenuItem
@@ -193,22 +219,25 @@ export function ComposerAddressingBar({
               disabled={!intentAllowed(i.value, to)}
               onSelect={() => onChange(to, i.value)}
             >
-              <span className="min-w-0 flex-1 leading-tight">
-                <span className="block truncate text-text-1">{i.label}</span>
-                <span className="block truncate text-2xs text-text-4">{i.blurb}</span>
+              <span className="ui-commit-scope-item">
+                <span>{i.label}</span>
+                <small>{i.blurb}</small>
               </span>
-              {i.value === intent && <span className="text-accent">●</span>}
+              {i.value === intent && <Check size={12} />}
             </DropdownMenuItem>
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <span className="text-text-4 truncate min-w-0">
-        {deliverySentence(to, intent, participants, youId)}
+      <span className="ui-composer-addressing-sentence" title={sentence}>
+        {sentence}
       </span>
 
       {!hostOnline && (
-        <span className="ml-auto flex-shrink-0 text-amber" title="Nobody's desktop is running the agent right now">
+        <span
+          className="ui-composer-addressing-waiting"
+          title="Nobody's desktop is running the agent right now"
+        >
           waiting for the machine
         </span>
       )}
@@ -232,10 +261,10 @@ function RecipientRow({
   return (
     <DropdownMenuItem onSelect={onSelect}>
       <ParticipantFace p={p} size={18} />
-      <span className="min-w-0 flex-1 truncate">
+      <span className="ui-composer-addressing-name">
         {participantLabel(p, participants, youId)}
       </span>
-      {selected && <span className="text-accent">●</span>}
+      {selected && <Check size={12} />}
     </DropdownMenuItem>
   );
 }

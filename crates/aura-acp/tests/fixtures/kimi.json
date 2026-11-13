@@ -1,0 +1,140 @@
+{
+ "initialize": [
+  {
+   "jsonrpc": "2.0",
+   "id": 0,
+   "result": {
+    "protocolVersion": 1,
+    "agentCapabilities": {
+     "loadSession": true,
+     "promptCapabilities": {
+      "image": true,
+      "audio": false,
+      "embeddedContext": true
+     },
+     "mcpCapabilities": {
+      "http": true,
+      "sse": true
+     },
+     "sessionCapabilities": {
+      "list": {},
+      "resume": {}
+     }
+    },
+    "authMethods": [
+     {
+      "id": "login",
+      "type": "terminal",
+      "name": "Login with Kimi account",
+      "description": "Open the device-code login flow in a terminal.",
+      "args": [
+       "--login"
+      ],
+      "env": {},
+      "_meta": {
+       "terminal-auth": {
+        "type": "terminal",
+        "label": "Login with Kimi account",
+        "command": "kimi",
+        "args": [
+         "login"
+        ],
+        "env": {}
+       }
+      }
+     }
+    ],
+    "agentInfo": {
+     "name": "Kimi Code CLI",
+     "version": "0.31.1"
+    }
+   }
+  }
+ ],
+ "session_new": [
+  {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "result": {
+    "sessionId": "session_c97ab598-4f9d-4eaa-a5ef-b7a152479249",
+    "configOptions": [
+     {
+      "type": "select",
+      "id": "model",
+      "name": "Model",
+      "category": "model",
+      "currentValue": "kimi-code/k3",
+      "options": [
+       {
+        "value": "kimi-code/kimi-for-coding",
+        "name": "K2.7 Coding"
+       },
+       {
+        "value": "kimi-code/kimi-for-coding-highspeed",
+        "name": "K2.7 Coding Highspeed"
+       },
+       {
+        "value": "kimi-code/k3",
+        "name": "K3"
+       },
+       {
+        "value": "kimi-code/k3-256k",
+        "name": "K3-256k"
+       }
+      ]
+     },
+     {
+      "type": "select",
+      "id": "thinking",
+      "name": "Thinking",
+      "category": "thought_level",
+      "currentValue": "high",
+      "options": [
+       {
+        "value": "low",
+        "name": "Low"
+       },
+       {
+        "value": "high",
+        "name": "High"
+       },
+       {
+        "value": "max",
+        "name": "Max"
+       }
+      ]
+     },
+     {
+      "type": "select",
+      "id": "mode",
+      "name": "Mode",
+      "category": "mode",
+      "currentValue": "default",
+      "options": [
+       {
+        "value": "default",
+        "name": "Default",
+        "description": "Manual approvals; tools execute normally."
+       },
+       {
+        "value": "plan",
+        "name": "Plan",
+        "description": "Read-only planning; no tool execution."
+       },
+       {
+        "value": "auto",
+        "name": "Auto",
+        "description": "Fully autonomous \u2014 agent decides everything without asking."
+       },
+       {
+        "value": "yolo",
+        "name": "YOLO",
+        "description": "Auto-approve tool actions, but the agent may still ask questions."
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

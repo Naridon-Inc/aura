@@ -1,6 +1,5 @@
-// In-app browser as a first-class WORKPANE TAB (superset's browser pane, in
-// Aura's Tauri stack). Distinct from the rail's Arc-style mobile browser
-// (rightrail/RailBrowser): this is a desktop-chrome browser you open as a
+// In-app browser as a first-class WORKPANE TAB — the only place the browser
+// lives (the panel browser is gone). A desktop-chrome browser you open as a
 // content tab — a top address bar (back / forward / reload + url), the native
 // webview below, and a New-tab / close affordance — so you can preview a
 // running service or browse alongside your code, and open as many as you want.
@@ -15,7 +14,10 @@
 // `browserClose`s a webview — when its tab is actually gone.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, Globe, RotateCw, Search, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Globe, Plus, RotateCw, Search, X } from "lucide-react";
+import { Button } from "../ui/button";
+import { AsciiSpinner } from "../ui/ascii-spinner";
+import "../ui/browser-tab.css";
 
 import {
   browserBack,
@@ -31,6 +33,7 @@ import {
   onBrowserState,
   type BrowserRect,
 } from "../../lib/browserEngine";
+import { isWithheld } from "../../lib/nativeSurfacePlacement";
 import {
   clearBrowserTabMeta,
   setBrowserTabMeta,
@@ -79,6 +82,10 @@ export function reapBrowserTabs(activeIds: Set<string>): void {
  *  instead of leaving it floating over other content. */
 function visibleRect(el: HTMLDivElement | null): BrowserRect | null {
   if (!el) return null;
+  // A page drawn over the work surface leaves the hole full size, and the
+  // native view would go on painting over the page; the shell marks the
+  // covered part `inert` (see `isWithheld`).
+  if (isWithheld(el)) return null;
   const r = el.getBoundingClientRect();
   if (r.width < 2 || r.height < 2) return null;
   return { x: r.left, y: r.top, width: r.width, height: r.height };
@@ -203,30 +210,30 @@ export function BrowserTab({
   };
 
   return (
-    <div className="h-full w-full flex flex-col bg-bg-content min-h-0 min-w-0">
+    <div className="ui-browser-tab">
       {/* Address bar — back / forward / reload, the url field, new-tab + close. */}
-      <div className="flex items-center gap-1 h-9 px-2 flex-shrink-0 border-b border-line-soft bg-bg-1">
+      <div className="ui-browser-bar">
         <ChromeBtn title="Back" disabled={!created} onClick={() => browserBack(tabId)}>
-          <ArrowLeft className="h-3.5 w-3.5" />
+          <ArrowLeft />
         </ChromeBtn>
         <ChromeBtn title="Forward" disabled={!created} onClick={() => browserForward(tabId)}>
-          <ArrowRight className="h-3.5 w-3.5" />
+          <ArrowRight />
         </ChromeBtn>
         <ChromeBtn
           title={loading ? "Stop" : "Reload"}
           disabled={!created}
           onClick={() => browserReload(tabId)}
         >
-          <RotateCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+          {loading ? <AsciiSpinner size={14} /> : <RotateCw />}
         </ChromeBtn>
 
-        <div className="flex-1 min-w-0 flex items-center gap-2 h-6 px-2.5 rounded-full bg-bg-2 border border-line-soft focus-within:border-accent">
+        <div className="ui-browser-address">
           {loading ? (
-            <RotateCw className="h-3 w-3 flex-shrink-0 text-text-4 animate-spin" />
+            <AsciiSpinner size={12} />
           ) : url ? (
-            <Globe className="h-3 w-3 flex-shrink-0 text-text-4" />
+            <Globe />
           ) : (
-            <Search className="h-3 w-3 flex-shrink-0 text-text-4" />
+            <Search />
           )}
           <input
             ref={inputRef}
@@ -248,18 +255,18 @@ export function BrowserTab({
                 inputRef.current?.blur();
               }
             }}
-            className="flex-1 min-w-0 bg-transparent outline-none text-base text-text-1 placeholder:text-text-4"
+            className="ui-browser-input"
           />
         </div>
 
         {onNewTab && (
           <ChromeBtn title="New browser tab" onClick={onNewTab}>
-            <span className="text-lg leading-none">+</span>
+            <Plus />
           </ChromeBtn>
         )}
         {onClose && (
           <ChromeBtn title="Close tab" onClick={onClose}>
-            <X className="h-3.5 w-3.5" />
+            <X />
           </ChromeBtn>
         )}
       </div>
@@ -269,15 +276,15 @@ export function BrowserTab({
           the hole element, and thus its measured rect, exists from mount
           onward. That keeps the native bounds stable from the very first
           navigation and stops a url→no-url flip from remounting the hole. */}
-      <div ref={holeRef} className="flex-1 min-h-0 min-w-0 relative">
+      <div ref={holeRef} className="ui-browser-hole">
         {!url && (
           <button
             type="button"
             onClick={() => inputRef.current?.focus()}
-            className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-text-4 select-none"
+            className="ui-browser-start"
           >
-            <Globe className="h-7 w-7 opacity-40" />
-            <span className="text-base">Enter an address to start browsing</span>
+            <Globe />
+            <span>Enter an address to start browsing</span>
           </button>
         )}
       </div>
@@ -285,7 +292,7 @@ export function BrowserTab({
   );
 }
 
-// Compact chrome button — matches the sidebar-header / topbar icon language.
+// The bar's icon buttons are the shared ghost button at the small icon size.
 function ChromeBtn({
   children,
   title,
@@ -298,15 +305,16 @@ function ChromeBtn({
   onClick?: () => void;
 }) {
   return (
-    <button
+    <Button
       type="button"
+      variant="ghost"
+      size="icon-sm"
       aria-label={title}
       title={title}
       disabled={disabled}
       onClick={onClick}
-      className="w-[22px] h-[22px] rounded flex items-center justify-center text-text-3 transition-colors disabled:opacity-30 disabled:pointer-events-none hover:bg-state-hover hover:text-text-1"
     >
       {children}
-    </button>
+    </Button>
   );
 }

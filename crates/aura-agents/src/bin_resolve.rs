@@ -14,7 +14,7 @@
 //! bare name to `Command::new` would re-run the same PATH search that just
 //! failed.
 //!
-//! Results are cached per candidate list for the process lifetime —
+//! Results are cached per candidate list until [`forget`] —
 //! availability is read on every picker open, and this is a `fork`/`exec`.
 //!
 //! If an install lives somewhere not probed here, `~/.aura/agents.toml`
@@ -50,9 +50,22 @@ fn extended_dirs() -> Vec<PathBuf> {
 /// thing for a picker to act on, and the reason this returns an `Option`
 /// rather than falling back to the bare name and letting the spawn fail
 /// later with a confusing error.
-pub fn resolve(candidates: &[&str]) -> Option<String> {
+fn cache() -> &'static Mutex<HashMap<String, Option<String>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Forget every answer, so the next question probes again. "Look again" calls
+/// this: without it, an agent installed after the app started stays "not
+/// installed" until a restart, whatever the user clicks.
+pub fn forget() {
+    if let Ok(mut map) = cache().lock() {
+        map.clear();
+    }
+}
+
+pub fn resolve(candidates: &[&str]) -> Option<String> {
+    let cache = cache();
     let key = candidates.join("\u{0}");
 
     if let Ok(map) = cache.lock() {

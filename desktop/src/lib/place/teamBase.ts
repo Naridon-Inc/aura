@@ -164,10 +164,18 @@ export type BaseBuild = {
  *  account that belongs to nobody, making it if it is not there yet. Asking is
  *  safe — the only thing it can create is an empty account with no key in it. */
 export function askTeamBase(place: Place): Promise<TeamBase> {
-  return api.placeTeamBase({
+  return api.placeTeamBase(teamBaseAt(place));
+}
+
+/** The checkout a team-base command reads for `place`. A box is read at the
+ *  folder the place names on it, which is its book row's own folder unless the
+ *  place was pointed at another repository the box holds. */
+function teamBaseAt(place: Place) {
+  return {
     root: place.project.root,
     machineId: place.machineId,
-  });
+    repoPath: place.machineId ? place.project.path : null,
+  };
 }
 
 /** Build the team's environment once, and start this member from it.
@@ -184,11 +192,7 @@ export function warmStart(
   login?: string,
   force = false,
 ): Promise<BaseBuild> {
-  return api.placeTeamBaseWarm(
-    { root: place.project.root, machineId: place.machineId },
-    login,
-    force,
-  );
+  return api.placeTeamBaseWarm(teamBaseAt(place), login, force);
 }
 
 /** May a member be started from this base?
@@ -252,8 +256,8 @@ export function warmSentence(build: BaseBuild): string {
       : `${base.place} was already built to this spec, and ${start.member} already had everything it holds.`;
   }
   return came > 0
-    ? `${base.place} was brought to the project's spec in the team's environment, and ${countOf(came, "thing")} came across into ${start.member}'s home — ${listOf(start.seeded)}. The next person to join pays none of that.`
-    : `${base.place} was brought to the project's spec in the team's environment. The next person to join starts from it instead of building it again.`;
+    ? `${base.place} was brought to the repository's spec in the team's environment, and ${countOf(came, "thing")} came across into ${start.member}'s home — ${listOf(start.seeded)}. The next person to join pays none of that.`
+    : `${base.place} was brought to the repository's spec in the team's environment. The next person to join starts from it instead of building it again.`;
 }
 
 /** Anything a member should know went wrong while they were being started, or

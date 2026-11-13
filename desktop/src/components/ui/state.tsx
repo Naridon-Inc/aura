@@ -69,19 +69,10 @@ import type { LucideIcon } from "lucide-react";
 import { AlertTriangle, RefreshCw, SearchX } from "lucide-react";
 
 import { cn } from "../../lib/utils";
+import { Alert } from "./alert";
 import { AsciiSpinner } from "./ascii-spinner";
 import { Button } from "./button";
-
-/** Shared outer stack. `sm` is for a rail, a lane or a detail section, where
- *  page spacing would push the surrounding content off screen; `md` owns a
- *  whole surface. Same anatomy either way, never a different design. */
-function stack(size: "sm" | "md"): string {
-  return size === "sm"
-    ? // One 10px gap between every element.
-      "flex w-full flex-col items-center gap-2.5 px-4 py-6 text-center"
-    : // 20px between blocks, 20px/40px padding, centred both axes.
-      "flex w-full flex-col items-center gap-5 px-5 py-10 text-center";
-}
+import "./state.css";
 
 /**
  * In-flight. `label` names what is being fetched — "Loading your team…", not a
@@ -90,28 +81,44 @@ function stack(size: "sm" | "md"): string {
  * `size="sm"` is the inline row a section header or a settings pane wants;
  * `size="md"` is the centred column that matches `EmptyState` on a surface
  * that will render one of the two.
+ *
+ * A wait that has run long can offer a way out (`action`) and say why it is
+ * taking a while (`footnote`), in the same slot `EmptyState` uses, so a slow
+ * load and an empty one never look like different kinds of screen. The `md`
+ * size only: an inline row has no room for a button.
  */
 export function LoadingState({
   label,
   size = "sm",
+  action,
+  footnote,
   className,
 }: {
   label: string;
   size?: "sm" | "md";
+  action?: { label: string; onClick: () => void };
+  footnote?: ReactNode;
   className?: string;
 }): JSX.Element {
   return size === "sm" ? (
-    <div
-      role="status"
-      className={cn("flex items-center gap-2 px-3 py-6 text-sm text-text-3", className)}
-    >
-      <AsciiSpinner className="text-sm leading-none" />
+    <div role="status" className={cn("ui-state-row", className)}>
+      <AsciiSpinner />
       {label}
     </div>
   ) : (
-    <div role="status" className={cn(stack("md"), "text-text-3", className)}>
-      <AsciiSpinner className="text-base leading-none" />
-      <p className="text-base">{label}</p>
+    <div role="status" className={cn("ui-state", className)} data-size="md">
+      <AsciiSpinner size={14} />
+      <p>{label}</p>
+      {(action || footnote) && (
+        <div className="ui-state-action">
+          {action && (
+            <Button variant="outline" size="sm" onClick={action.onClick}>
+              {action.label}
+            </Button>
+          )}
+          {footnote && <small>{footnote}</small>}
+        </div>
+      )}
     </div>
   );
 }
@@ -134,8 +141,8 @@ export function EmptyState({
   /** One line, plain language, says what this place is for. Omit it and the
    *  heading quiets down to match — a title-only empty state is a caption. */
   body?: ReactNode;
-  /** At most one primary action. Arctic-blue accent: it's the only affordance
-   *  on an otherwise empty screen, so it must be unambiguously the next move. */
+  /** At most one action. It's the only affordance on an otherwise empty
+   *  screen, so it must read as a button, unambiguously the next move. */
   action?: { label: string; onClick: () => void; icon?: LucideIcon; disabled?: boolean };
   /** A quieter line under the action — a shortcut, an error note, or a second
    *  route for people who'd rather not press the button. */
@@ -144,52 +151,28 @@ export function EmptyState({
   className?: string;
 }): JSX.Element {
   const ActionIcon = action?.icon;
-  const sm = size === "sm";
 
   return (
-    <div className={cn(stack(size), className)}>
-      <Icon
-        className={`${sm ? "h-6 w-6" : "h-8 w-8"} text-text-5`}
-        strokeWidth={1.25}
-        aria-hidden
-      />
+    <div className={cn("ui-state", className)} data-size={size}>
+      <Icon className="ui-state-icon" strokeWidth={1.25} aria-hidden />
 
-      {/* 6px between heading and body on the page size; on the small size the
-          single 10px gap governs, so this stack keeps the same rhythm. */}
-      <div className={`flex flex-col ${sm ? "gap-2.5" : "gap-1.5"}`}>
-        <p
-          className={
-            body
-              ? // With something to say underneath, the heading steps back and
-                // lets the sentence carry the meaning.
-                sm
-                ? "text-lg font-medium text-text-3"
-                : "text-lg font-semibold text-text-1"
-              : // Alone, it shrinks and fades into a caption.
-                "text-base font-medium text-text-4"
-          }
-        >
-          {title}
-        </p>
-        {body && (
-          // Measure-capped: centred copy past roughly 60 characters a line
-          // stops being readable at a glance, which is this line's only job.
-          <p
-            className={`max-w-[420px] ${
-              sm ? "text-md font-medium text-text-4" : "text-base text-text-3"
-            }`}
-          >
-            {body}
-          </p>
-        )}
+      <div className="ui-state-copy">
+        {/* With a sentence underneath, the heading leads and the sentence
+            carries the meaning. Alone, it shrinks and fades into a caption. */}
+        <strong data-alone={body ? undefined : ""}>{title}</strong>
+        {/* Measure-capped: centred copy past roughly 60 characters a line
+            stops being readable at a glance, which is this line's only job. */}
+        {body && <p>{body}</p>}
       </div>
 
       {(action || footnote) && (
-        <div className="flex flex-col items-center gap-2">
+        <div className="ui-state-action">
           {action && (
+            // Outline, as the library's own empty pattern draws it: the one
+            // affordance on the screen reads as a button.
             <Button
-              variant="accentSoft"
-              size={sm ? "xs" : "sm"}
+              variant="outline"
+              size={size === "sm" ? "xs" : "sm"}
               onClick={action.onClick}
               disabled={action.disabled}
             >
@@ -197,7 +180,7 @@ export function EmptyState({
               {action.label}
             </Button>
           )}
-          {footnote && <p className="text-xs text-text-5">{footnote}</p>}
+          {footnote && <small>{footnote}</small>}
         </div>
       )}
     </div>
@@ -254,40 +237,54 @@ export function ErrorState({
   title = "That didn’t load",
   message,
   onRetry,
+  retrying = false,
+  action,
+  footnote,
   size = "md",
   className,
 }: {
   title?: string;
   message: ReactNode;
   onRetry?: () => void;
+  /** The retry is in flight: Try again holds still and says so, so a second
+   *  press can't stack a second attempt on the first. */
+  retrying?: boolean;
+  /** A second way out beside Try again, for when trying again isn't the only
+   *  sensible move — closing the thing that broke, say. */
+  action?: { label: string; onClick: () => void };
+  /** A quieter line under the buttons: the raw reason, for whoever has to
+   *  fix it, kept out of the sentence written for the reader. */
+  footnote?: ReactNode;
   size?: "sm" | "md";
   className?: string;
 }): JSX.Element {
-  const sm = size === "sm";
+  const controlSize = size === "sm" ? "xs" : "sm";
   return (
-    <div role="alert" className={cn(stack(size), className)}>
-      <AlertTriangle
-        className={`${sm ? "h-6 w-6" : "h-8 w-8"} text-amber`}
-        strokeWidth={1.25}
-        aria-hidden
-      />
-      <div className={`flex flex-col ${sm ? "gap-2.5" : "gap-1.5"}`}>
-        <p className={sm ? "text-lg font-medium text-text-3" : "text-lg font-semibold text-text-1"}>
-          {title}
-        </p>
-        <p
-          className={`max-w-[420px] ${
-            sm ? "text-md font-medium text-text-4" : "text-base text-text-3"
-          }`}
-        >
-          {message}
-        </p>
+    <div role="alert" className={cn("ui-state", className)} data-size={size} data-tone="error">
+      <AlertTriangle className="ui-state-icon" strokeWidth={1.25} aria-hidden />
+      <div className="ui-state-copy">
+        <strong>{title}</strong>
+        <p>{message}</p>
       </div>
-      {onRetry && (
-        <Button variant="subtle" size={sm ? "xs" : "sm"} onClick={onRetry} className="gap-1.5">
-          <RefreshCw size={sm ? 12 : 13} strokeWidth={2} aria-hidden />
-          Try again
-        </Button>
+      {(onRetry || action || footnote) && (
+        <div className="ui-state-action">
+          {(onRetry || action) && (
+            <div className="ui-state-buttons">
+              {onRetry && (
+                <Button variant="outline" size={controlSize} onClick={onRetry} disabled={retrying}>
+                  <RefreshCw strokeWidth={2} aria-hidden />
+                  {retrying ? "Trying…" : "Try again"}
+                </Button>
+              )}
+              {action && (
+                <Button variant="ghost" size={controlSize} onClick={action.onClick}>
+                  {action.label}
+                </Button>
+              )}
+            </div>
+          )}
+          {footnote && <small>{footnote}</small>}
+        </div>
       )}
     </div>
   );
@@ -306,14 +303,8 @@ export function ErrorNote({
   className?: string;
 }): JSX.Element {
   return (
-    <div
-      role="alert"
-      className={cn(
-        "rounded border border-red/30 bg-red/10 px-3 py-2 text-sm text-red",
-        className,
-      )}
-    >
+    <Alert variant="destructive" className={cn("ui-error-note", className)}>
       {children}
-    </div>
+    </Alert>
   );
 }

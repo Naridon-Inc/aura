@@ -1,22 +1,30 @@
-// Pair-phone overlay. Shows a QR the Aura mobile companion scans to sign in —
-// no code typing on the phone. This desktop is already signed in to Aura
-// Cloud, so `cloud_pair_create` starts a device-code request and approves it
-// on our behalf; the QR carries the cloud URL + the now-approved device_code,
-// and the phone only has to poll once to collect its token.
+// Pair phone. Shows a QR the Aura mobile companion scans to sign in, with no
+// code typing on the phone. This desktop is already signed in to Aura Cloud,
+// so `cloud_pair_create` starts a device-code request and approves it on our
+// behalf; the QR carries the cloud URL + the now-approved device_code, and the
+// phone only has to poll once to collect its token.
 //
-// Presented full-screen over a dimmed backdrop (not a small dialog card) so the
-// QR is large and scans in one pass from across a desk. Showing the QR is the
-// grant (same model as WhatsApp Web / Discord scan-to-login): only paint it for
+// The shared dialog is the frame, with the QR as large as the window allows
+// so it scans in one pass from across a desk. Showing the QR is the grant
+// (same model as scan-to-login on a messaging web app): only paint it for
 // your own phone. The code expires in ~10 minutes and is single-use, so a
 // scanned QR is inert afterward.
 
 import { useCallback, useEffect, useState } from "react";
-import { IconButton } from "@medusajs/ui";
-import { XMark } from "@medusajs/icons";
-import { Button } from "../ui/button";
+import { Alert, AlertDescription } from "../ui/alert";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog";
 import { api, type CloudPairResp } from "../../lib/api";
 import { useQr } from "../../lib/qr";
+import "../ui/pair-phone.css";
 
 type PairPhoneDialogProps = {
   open: boolean;
@@ -38,7 +46,7 @@ export function PairPhoneDialog({ open, onClose }: PairPhoneDialogProps) {
     try {
       const resp = await api.cloudPairCreate();
       setPair(resp);
-      setRemaining(resp.expires_in);
+      setRemaining(Number.isFinite(resp.expires_in) ? resp.expires_in : null);
     } catch (e) {
       setPair(null);
       setRemaining(null);
@@ -69,88 +77,37 @@ export function PairPhoneDialog({ open, onClose }: PairPhoneDialogProps) {
     return () => clearInterval(id);
   }, [open, remaining === null]);
 
-  // Esc closes the overlay.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
   const expired = remaining !== null && remaining <= 0;
 
-  if (!open) return null;
+  const expiry = expired
+    ? "This code is no longer valid."
+    : remaining !== null
+      ? `Expires in ${formatRemaining(remaining)}`
+      : "";
 
   return (
-    <div
-      className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Pair phone"
-      onClick={onClose}
-    >
-      <IconButton
-        type="button"
-        size="large"
-        variant="transparent"
-        onClick={onClose}
-        aria-label="Close"
-        title="Close (esc)"
-        className="absolute right-6 top-6 text-white/70 hover:text-white"
-      >
-        <XMark aria-hidden />
-      </IconButton>
-
-      {/* Stop backdrop clicks from bubbling so tapping the content never closes. */}
-      <div
-        className="flex flex-col items-center gap-6 px-6"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex max-w-[420px] flex-col items-center gap-2 text-center">
-          <h2 className="text-lg font-medium text-white">Pair phone</h2>
-          <p className="text-base leading-relaxed text-white/60">
-            Open the Aura app on your phone, tap{" "}
-            <span className="font-medium text-white/90">Scan QR code</span>, and
-            point it at this screen. Your phone signs in to the same account. 
-            nothing to type.
-          </p>
-        </div>
+    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
+      <DialogContent className="ui-pair-phone">
+        <DialogHeader>
+          <DialogTitle>Pair phone</DialogTitle>
+          <DialogDescription>
+            Open the Aura app on your phone, tap Scan QR code, and point it at
+            this screen. Your phone signs in to the same account, with nothing
+            to type.
+          </DialogDescription>
+        </DialogHeader>
 
         {error ? (
-          <div className="flex flex-col items-center gap-4">
-            <div role="alert" className="max-w-[380px] text-center text-base text-red">
-              {error}
-            </div>
-            <Button
-              variant="default"
-              size="lg"
-              onClick={create}
-              disabled={busy}
-            >
-              {busy ? "Retrying…" : "Try again"}
-            </Button>
-          </div>
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         ) : (
-          <>
-            {/* Large white QR panel — sized to fill most of the viewport's
-                shorter side so it reads from a distance, capped for big screens. */}
-            <div
-              className="relative flex items-center justify-center rounded-2xl bg-white p-5 shadow-2xl"
-              style={{
-                width: "min(70vmin, 460px)",
-                height: "min(70vmin, 460px)",
-              }}
-            >
+          <div className="ui-pair-phone-code">
+            <div className="ui-pair-phone-qr">
               {qr && !expired ? (
-                <img
-                  src={qr}
-                  alt="Pairing QR code"
-                  className="h-full w-full"
-                />
+                <img src={qr} alt="Pairing QR code" />
               ) : (
-                <div className="flex items-center gap-2 text-md text-neutral-500">
+                <span>
                   {expired ? (
                     "Code expired"
                   ) : (
@@ -158,47 +115,36 @@ export function PairPhoneDialog({ open, onClose }: PairPhoneDialogProps) {
                       <AsciiSpinner /> Generating…
                     </>
                   )}
-                </div>
+                </span>
               )}
             </div>
-
             {pair && (
-              <div className="flex flex-col items-center gap-1">
-                <div className="section-label text-white/40">
-                  Or enter this code
-                </div>
-                <div className="font-mono text-xl tracking-[0.22em] text-white/90">
-                  {pair.user_code}
-                </div>
-              </div>
+              <p className="ui-pair-phone-typed">
+                Or enter this code <code>{pair.user_code}</code>
+              </p>
             )}
-
-            <div className="flex items-center gap-4">
-              <div className="text-sm text-white/45">
-                {expired
-                  ? "This code is no longer valid."
-                  : remaining !== null
-                    ? `Expires in ${formatRemaining(remaining)}`
-                    : ""}
-              </div>
-              <Button
-                variant="secondary"
-                size="default"
-                onClick={create}
-                disabled={busy}
-              >
-                {busy ? "Refreshing…" : "Refresh code"}
-              </Button>
-            </div>
-          </>
+          </div>
         )}
 
-        <div className="max-w-[380px] text-center text-sm leading-relaxed text-white/35">
+        <p className="ui-pair-phone-note">
           Only scan this with your own phone. The code grants access to your
           account, expires in about 10 minutes, and works once.
-        </div>
-      </div>
-    </div>
+        </p>
+
+        <DialogFooter>
+          {!error && <span className="ui-pair-phone-expiry">{expiry}</span>}
+          <Button variant="outline" size="sm" onClick={create} disabled={busy}>
+            {error
+              ? busy
+                ? "Retrying…"
+                : "Try again"
+              : busy
+                ? "Refreshing…"
+                : "Refresh code"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

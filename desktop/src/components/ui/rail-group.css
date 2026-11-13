@@ -1,0 +1,43 @@
+/* A collapsible group in a side panel — the Changes panel's radar and sync
+   groups. It is the details panel's group caption (the title and its count as
+   one caption, the caption the toggle) over the group's rows. Added here: the
+   rule between groups, the caption's controls showing on hover, and the
+   sentence a group says when it could not find out. */
+
+.ui-rail-group {
+  min-width: 0;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-rail-group:last-child {
+  border-bottom: 0;
+}
+.ui-rail-group-caption > .ui-details-group-toggle {
+  cursor: pointer;
+}
+.ui-rail-group-caption > .ui-details-group-toggle:hover .ui-details-caption {
+  color: var(--ui-fg);
+}
+.ui-rail-group-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+}
+.ui-rail-group-caption:hover .ui-rail-group-actions,
+.ui-rail-group-actions:focus-within {
+  opacity: 1;
+}
+.ui-rail-group-body {
+  min-width: 0;
+}
+/* The rows' own rule closes each row; the group's rule closes the group. */
+.ui-rail-group-body > .ui-details-pull:last-child {
+  border-bottom: 0;
+}
+.ui-rail-group-empty {
+  padding: 0 8px 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 1.4;
+}

@@ -1,0 +1,115 @@
+/* "Resume this chat elsewhere" is the shared dialog. Added here: the body's
+   rhythm, one bordered row per agent (its mark, name, turn count and action,
+   then the saved command once it lands), and that command with a copy button
+   beside it. */
+
+.ui-dialog-content.ui-resume-elsewhere {
+  width: min(480px, calc(100vw - 32px));
+}
+.ui-resume-body {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+.ui-resume-lead {
+  margin: 0;
+  color: var(--ui-secondary-fg);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.ui-resume-lead strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-resume-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-resume-target {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+}
+.ui-resume-target[data-hero] {
+  background: var(--ui-muted);
+}
+.ui-resume-target-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ui-resume-target-name {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+}
+.ui-resume-target-name > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-resume-target-name > small,
+.ui-resume-why,
+.ui-resume-path {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 400;
+}
+.ui-resume-why {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+}
+.ui-resume-why[data-tone="green"] {
+  color: var(--ui-green);
+}
+.ui-resume-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+}
+.ui-resume-error {
+  margin: 0;
+  color: var(--ui-red);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.ui-resume-done {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.ui-resume-path {
+  overflow-wrap: anywhere;
+}
+.ui-resume-command {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  gap: 4px;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-muted);
+}
+.ui-resume-command > code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-fg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

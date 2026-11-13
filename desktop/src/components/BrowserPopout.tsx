@@ -1,17 +1,20 @@
 // A single in-app browser tab popped out into its own OS window. The native
-// WebKit webview is the SAME one the rail was hosting — `browserReparent` moves
+// WebKit webview is the SAME one the tab was hosting — `browserReparent` moves
 // it under this popout window with its live page intact (scroll, login session,
-// media all preserved). The rail has already forgotten the tab (`detachTab`),
-// so only this window drives it now.
+// media all preserved), so only this window drives it now. The panel browser
+// that used to pop tabs out is gone; this window opens for a popout spec of
+// kind "browser" (lib/popout.ts).
 //
-// Mirrors RailBrowser's "hole + reconcile" approach but for one tab: render the
-// chrome (a back/forward/reload + address toolbar) and a transparent hole, then
-// keep the native webview pinned over the hole. The first reconcile reparents;
+// Mirrors the workspace browser tab's (workpanes/BrowserTab) "hole +
+// reconcile" approach: render the chrome (a back/forward/reload + address
+// toolbar) and a transparent hole, then keep the native webview pinned over
+// the hole. The first reconcile reparents;
 // later ones just track the hole's rect.
 
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ArrowLeft, ArrowRight, RotateCw } from "lucide-react";
+import { AsciiSpinner } from "./ui/ascii-spinner";
 
 import {
   browserBack,
@@ -137,7 +140,7 @@ export function BrowserPopout({ tabId, initialUrl }: { tabId: string; initialUrl
           <ArrowRight className="h-3.5 w-3.5" />
         </NavBtn>
         <NavBtn label="Reload" onClick={() => void browserReload(tabId)}>
-          <RotateCw className={`h-3.5 w-3.5${loading ? " animate-spin" : ""}`} />
+          {loading ? <AsciiSpinner size={14} /> : <RotateCw className="h-3.5 w-3.5" />}
         </NavBtn>
         <div className="relative flex-1 min-w-0">
           <input

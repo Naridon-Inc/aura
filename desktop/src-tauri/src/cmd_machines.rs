@@ -22,14 +22,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::cloud_session_sync::aura_dir;
 
+mod ids;
+#[cfg(test)]
+mod moves;
+
 /// One machine you can open a workspace on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Machine {
-    /// Stable key for this cloud copy — a login, a box and the directory the
-    /// project sits in — so re-running the wizard against the same box and the
-    /// same repo updates this entry rather than laying a second one beside it,
-    /// while a second project on that box gets a row of its own.
+    /// This cloud copy's own name — `m-` and sixteen hex digits, with no
+    /// address in it. Everything on this laptop that points at a machine holds
+    /// this, so it is fixed for the life of the row: a box that comes back on a
+    /// new address, or a login that changes, is an edit underneath it rather
+    /// than a different machine. See [`ids`] for how it is chosen.
     pub id: String,
+    /// The ids this row answered to before — the `user@host:/repo` key it was
+    /// written under before rows had names of their own, or the id of a machine
+    /// it was reconnected as after the book lost it. A saved chat or a tab strip
+    /// that still holds one of these finds this row through it.
+    ///
+    /// Empty for almost every row, and then left out of the file entirely, so a
+    /// book with nothing to remember reads exactly as it did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     /// What it is called on the cloud board — how a runner row is matched back
     /// to an address.
     pub name: String,
@@ -152,20 +166,44 @@ pub struct Machine {
     pub last_used_at: i64,
 }
 
-/// What the frontend sends to record a machine. `id` is derived, not given, and
-/// the timestamps are ours to stamp.
+/// What the frontend sends to record a machine. The timestamps are ours to stamp.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MachineInput {
+    /// The row this save corrects, when the caller is holding one: the
+    /// directory editor inside a workspace, or the wizard reconnecting a machine
+    /// a workspace still names. Either may be changing the address, so the
+    /// address cannot be what finds the row — matching on it is how a box that
+    /// moved used to come back as a second machine under a second id.
+    ///
+    /// Omitted for a box connected from scratch, which is matched on its
+    /// address the way it always was.
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     pub host: String,
     pub user: String,
     pub key_path: String,
     pub box_kind: String,
-    pub repo_path: Option<String>,
+    /// Where the project lives on the box. Left out, the row keeps the folder
+    /// it has — the wizard has no idea, and reconnecting a machine at a new
+    /// address must not forget where its project is. `null` says there is no
+    /// folder, which is what clearing it in the directory editor means.
+    #[serde(default, deserialize_with = "present")]
+    pub repo_path: Option<Option<String>>,
     /// Omitted by callers that have no opinion — the directory editor inside a
     /// workspace, for one. Omission MEANS "leave it alone", never "clear it".
     #[serde(default)]
     pub project_root: Option<String>,
+}
+
+/// A field that may be left out, kept apart from one sent as `null`: `None`
+/// when it is absent, `Some(None)` when it is null.
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 fn now_secs() -> i64 {
@@ -179,18 +217,16 @@ fn book_path() -> Result<PathBuf, String> {
     Ok(aura_dir()?.join("machines.json"))
 }
 
-/// The key for one cloud copy of one project.
+/// The ADDRESS key for one cloud copy of one project — what a row was called
+/// before rows had names of their own, and what a new row's name is derived
+/// from (see [`ids`]). Not a row id any more: an address moves, and an id that
+/// moved with it orphaned everything holding the old one.
 ///
 /// `user@host` names a box, and for a long time that was the whole key — one
 /// entry per machine. But a box is not what you open; a *project on* a box is.
-/// One runner can hold clones of several repos, and with the box as the key
-/// they could not both be recorded: connecting the second silently overwrote
-/// the first, and the sidebar, which files a machine under its project, had
-/// nowhere to put it.
-///
-/// So the directory joins the key when we know it. A box with no repo path
-/// keeps the bare `user@host` form, which is also what every entry written
-/// before this looked like — see `machine_save` for why that matters.
+/// One runner can hold clones of several repos, so the directory joins the key
+/// when we know it. A box with no repo path keeps the bare `user@host` form,
+/// which is also what every entry written before that looked like.
 pub fn machine_id(user: &str, host: &str, repo_path: Option<&str>) -> String {
     let base = format!("{}@{}", user.trim(), host.trim()).to_lowercase();
     match repo_path.map(str::trim).filter(|p| !p.is_empty()) {
@@ -211,7 +247,22 @@ fn read_book() -> Vec<Machine> {
     // A book we can't parse is a book we don't have. Refusing to list machines
     // because one hand-edit went wrong would take the whole surface down with
     // it; the next save rewrites the file cleanly.
-    serde_json::from_str::<Vec<Machine>>(&raw).unwrap_or_default()
+    let mut book = serde_json::from_str::<Vec<Machine>>(&raw).unwrap_or_default();
+    // Rows still called by their address are renamed on the first read after
+    // the upgrade, and written straight back so every later read sees the same
+    // names. The rename is derived rather than random, so if this write is lost
+    // the next read comes out the same and nothing has been told a name that
+    // then changes.
+    if ids::migrate(&mut book) {
+        let _ = write_book(&book);
+    }
+    book
+}
+
+/// The row `id` names in `book` — by its id, or by one it used to carry.
+pub(crate) fn pick(book: Vec<Machine>, id: &str) -> Option<Machine> {
+    let at = ids::locate(&book, id)?;
+    book.into_iter().nth(at)
 }
 
 /// One machine, by id. The book is the only place an address lives, so
@@ -219,9 +270,13 @@ fn read_book() -> Vec<Machine> {
 /// host and a key by whatever surface happened to call it — a caller that
 /// carries its own copy of an address is a caller that will one day dial a box
 /// the user removed.
+///
+/// An id this row used to carry finds it too. Sessions are saved with the
+/// machine they run on and outlive any rename of it, and a background turn that
+/// could no longer reach the box it was started on would fail for a machine
+/// that is sitting right there.
 pub fn find_machine(id: &str) -> Option<Machine> {
-    let id = id.trim();
-    read_book().into_iter().find(|m| m.id == id)
+    pick(read_book(), id)
 }
 
 /// Every row in the book, whatever hat you happen to be wearing.
@@ -243,7 +298,19 @@ fn write_book(machines: &[Machine]) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
     let body = serde_json::to_string_pretty(machines).map_err(|e| e.to_string())?;
-    std::fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
+    // Written beside the book and renamed over it, never truncated in place. A
+    // write cut off halfway leaves a file `read_book` cannot parse, and a book
+    // it cannot parse reads as empty — every machine gone at once, and the
+    // rename on upgrade rewrites every row in one go. The scratch file is made
+    // owner-only before a byte lands in it.
+    let dir = path.parent().ok_or_else(|| format!("{} has no folder", path.display()))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    harden(tmp.path());
+    std::io::Write::write_all(&mut tmp, body.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    tmp.persist(&path)
+        .map_err(|e| format!("write {}: {}", path.display(), e.error))?;
     harden(&path);
     Ok(())
 }
@@ -357,14 +424,16 @@ pub(crate) fn file_machines_by_org(by_repo: &std::collections::HashMap<String, S
     }
 }
 
-/// Record a cloud copy, or update the one already recorded for that login, box
-/// and directory.
+/// Record a cloud copy, or update the one already recorded — the row the
+/// caller names, or else the one for that login, box and directory.
 ///
 /// Re-connecting keeps the entry's `added_at` — when you first reached this box
 /// is history the wizard shouldn't rewrite — and refreshes everything a second
-/// run can legitimately change: its board name, its key, and whether it's
-/// shared. Pointing the wizard at a DIFFERENT directory on the same box is not
-/// a correction, it is a second project, and it gets its own entry.
+/// run can legitimately change: its address, its board name, its key, and
+/// whether it's shared. Whatever changes, the id does not: it is what every
+/// workspace and chat on this laptop holds. Pointing the wizard at a DIFFERENT
+/// directory on the same box from scratch is not a correction, it is a second
+/// project, and it gets its own entry.
 #[tauri::command]
 pub async fn machine_save(machine: MachineInput) -> Result<Machine, String> {
     let host = machine.host.trim().to_string();
@@ -374,27 +443,51 @@ pub async fn machine_save(machine: MachineInput) -> Result<Machine, String> {
         return Err("A machine needs a host, a login and a key.".into());
     }
 
-    let repo_path = machine
+    // `None` when the caller left it out, `Some(None)` when it said "none".
+    let said_path = machine
         .repo_path
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty());
+        .map(|p| p.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()));
+    let repo_path = said_path.clone().flatten();
+
+    let asked = machine
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
 
     let now = now_secs();
     let mut all = read_book();
-    // Match on what the entry IS — this login, on this box, in this directory —
-    // rather than on the id we would compute for it. Entries written when the
-    // key was just `user@host` carry that shorter id, and recomputing would not
-    // find them: re-running the wizard against a box you already had would lay
-    // a second row beside the first. Found, we keep its id, so an id already
-    // referenced by an open workspace never changes underneath it.
-    let prior = all.iter().find(|m| {
-        m.user.trim().eq_ignore_ascii_case(&user)
-            && m.host.trim().eq_ignore_ascii_case(&host)
-            && m.repo_path.as_deref().map(str::trim) == repo_path.as_deref()
+    // Which row this is. The one the caller names comes first, because a
+    // caller that names one is correcting it — and may be correcting the very
+    // address we would otherwise match on. Then what the entry IS: this login,
+    // on this box, in this directory, so re-running the wizard against a box you
+    // already have updates it rather than laying a second row beside it.
+    let at = asked.as_deref().and_then(|id| ids::locate(&all, id)).or_else(|| {
+        all.iter().position(|m| {
+            m.user.trim().eq_ignore_ascii_case(&user)
+                && m.host.trim().eq_ignore_ascii_case(&host)
+                && m.repo_path.as_deref().map(str::trim) == repo_path.as_deref()
+        })
     });
-    let id = prior
-        .map(|m| m.id.clone())
-        .unwrap_or_else(|| machine_id(&user, &host, repo_path.as_deref()));
+    let prior = at.map(|i| all[i].clone());
+    let prior = prior.as_ref();
+    let (id, mut aliases) = match prior {
+        Some(m) => (m.id.clone(), m.aliases.clone()),
+        None => ids::claim(&all, asked.as_deref(), &user, &host, repo_path.as_deref()),
+    };
+    let repo_path = match said_path {
+        Some(said) => said,
+        None => prior.and_then(|m| m.repo_path.clone()),
+    };
+    // Reconnecting a machine the book had lost, at an address a row already
+    // holds: that row is the machine, so it takes the lost id with it and what
+    // was still pointing there finds it again.
+    if let Some(asked) = asked.as_deref() {
+        if asked != id && !aliases.iter().any(|a| a == asked) && ids::locate(&all, asked).is_none() {
+            aliases.push(asked.to_string());
+        }
+    }
     let added_at = prior.map(|m| m.added_at).unwrap_or(now);
     // A caller that doesn't mention the project isn't asking to forget it. The
     // directory editor inside a workspace re-saves the whole record to change
@@ -408,6 +501,7 @@ pub async fn machine_save(machine: MachineInput) -> Result<Machine, String> {
 
     let saved = Machine {
         id: id.clone(),
+        aliases,
         name: machine.name.trim().to_string(),
         host,
         user,
@@ -455,9 +549,21 @@ pub async fn machine_save(machine: MachineInput) -> Result<Machine, String> {
         last_used_at: now,
     };
 
-    all.retain(|m| m.id != id);
-    all.push(saved.clone());
+    // A port still forwarded from where the box USED to be is a child dialling
+    // an address nothing answers at — and it is filed under this id, so the next
+    // ask for that port would be handed the dead one instead of a new forward.
+    let moved = prior.is_some_and(|m| {
+        !m.host.trim().eq_ignore_ascii_case(&saved.host)
+            || !m.user.trim().eq_ignore_ascii_case(&saved.user)
+    });
+    match at {
+        Some(i) => all[i] = saved.clone(),
+        None => all.push(saved.clone()),
+    }
     write_book(&all)?;
+    if moved {
+        crate::manager::brain::place_ports::forward::release_all(&id);
+    }
     Ok(saved)
 }
 
@@ -466,6 +572,7 @@ pub async fn machine_save(machine: MachineInput) -> Result<Machine, String> {
 #[tauri::command]
 pub async fn machine_touch(id: String) -> Result<(), String> {
     let mut all = read_book();
+    let id = ids::canonical(&all, &id);
     let mut hit = false;
     for m in all.iter_mut() {
         if m.id == id {
@@ -495,6 +602,7 @@ pub async fn machine_set_project(id: String, project_root: Option<String>) -> Re
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty());
     let mut all = read_book();
+    let id = ids::canonical(&all, &id);
     let mut changed = false;
     for m in all.iter_mut() {
         if m.id == id && m.project_root != root {
@@ -529,6 +637,7 @@ pub async fn machine_set_branch(id: String, branch: Option<String>) -> Result<()
         .map(|b| b.trim().to_string())
         .filter(|b| !b.is_empty() && b != "HEAD");
     let mut all = read_book();
+    let id = ids::canonical(&all, &id);
     let mut changed = false;
     for m in all.iter_mut() {
         if m.id == id && m.repo_branch != branch {
@@ -556,8 +665,8 @@ pub async fn machine_set_branch(id: String, branch: Option<String>) -> Result<()
 /// Answers whether anything changed, so the caller can skip the work that
 /// follows a change without re-reading the book to find out.
 pub(crate) fn set_forward_agent(id: &str, on: bool) -> Result<bool, String> {
-    let id = id.trim();
     let mut all = read_book();
+    let id = ids::canonical(&all, id);
     let mut changed = false;
     for m in all.iter_mut() {
         if m.id == id && m.forward_agent != on {
@@ -584,8 +693,8 @@ pub(crate) fn set_forward_agent(id: &str, on: bool) -> Result<bool, String> {
 ///
 /// `at` is unix seconds, or `0` for awake.
 pub(crate) fn set_asleep_since(id: &str, at: i64) -> Result<bool, String> {
-    let id = id.trim();
     let mut all = read_book();
+    let id = ids::canonical(&all, id);
     let mut changed = false;
     for m in all.iter_mut() {
         if m.id == id && m.asleep_since != at {
@@ -620,7 +729,6 @@ pub(crate) fn set_asleep_since(id: &str, at: i64) -> Result<bool, String> {
 /// which proves the account can actually be reached and finds the machine's real
 /// handle before anything is written down. This is only the writing-down.
 pub(crate) fn set_granted_handle(id: &str, handle: Option<&str>) -> Result<bool, String> {
-    let id = id.trim();
     let handle = handle.map(str::trim).filter(|h| !h.is_empty());
     if let Some(h) = handle {
         if !crate::provisioner::granted_handle(h) {
@@ -632,6 +740,7 @@ pub(crate) fn set_granted_handle(id: &str, handle: Option<&str>) -> Result<bool,
     let handle = handle.map(str::to_string);
 
     let mut all = read_book();
+    let id = ids::canonical(&all, id);
     let mut changed = false;
     for m in all.iter_mut() {
         if m.id != id {
@@ -673,19 +782,17 @@ fn grant_may_replace(current: Option<&str>) -> bool {
 /// it starts, so waking one without writing this leaves a place that is up,
 /// billed, and dialling yesterday's host.
 ///
-/// What it does NOT touch is the row's `id`. The id is derived from the address
-/// — `user@host:/repo` — but it is also the book's KEY, and every workspace,
-/// every open tab and every session on this laptop holds it. Re-deriving it here
-/// because the host moved would orphan all of them at once, to fix a string
-/// nothing reads for its parts. So the key stays put and the address underneath
-/// it is corrected, which is what the key was always standing for.
+/// What it does NOT touch is the row's `id`. Every workspace, every open tab
+/// and every session on this laptop holds it, and none of them care where the
+/// box is today. So the key stays put and the address underneath it is
+/// corrected, which is what the key was always standing for.
 pub(crate) fn set_host(id: &str, host: &str) -> Result<bool, String> {
-    let id = id.trim();
     let host = host.trim();
     if host.is_empty() {
         return Err("A machine with no address isn't one this laptop can reach.".to_string());
     }
     let mut all = read_book();
+    let id = ids::canonical(&all, id);
     let mut changed = false;
     for m in all.iter_mut() {
         if m.id == id && m.host != host {
@@ -729,7 +836,7 @@ pub(crate) fn record_made_machine(
     repo_path: Option<&str>,
     instance_id: &str,
 ) -> Result<Machine, String> {
-    let saved = made_machine(
+    let mut saved = made_machine(
         name,
         host,
         ssh_user,
@@ -743,8 +850,24 @@ pub(crate) fn record_made_machine(
     )?;
 
     let mut all = read_book();
-    all.retain(|m| m.id != saved.id);
-    all.push(saved.clone());
+    match ids::locate(&all, &saved.id) {
+        // The same machine written down twice — the substrate handle says so.
+        // It keeps the row it already has, and every name that row answers to.
+        Some(at) if all[at].instance_id == saved.instance_id => {
+            saved.id = all[at].id.clone();
+            saved.aliases = std::mem::take(&mut all[at].aliases);
+            all[at] = saved.clone();
+        }
+        // A different machine already answers to this name — one that has
+        // since moved off the address this one landed on. Overwriting it would
+        // throw away its handle and leave it billing with nothing able to stop
+        // it, so this one is given a name of its own instead.
+        Some(_) => {
+            saved.id = ids::fresh(&all);
+            all.push(saved.clone());
+        }
+        None => all.push(saved.clone()),
+    }
     write_book(&all)?;
     Ok(saved)
 }
@@ -791,7 +914,10 @@ pub(crate) fn made_machine(
         .map(str::to_string);
 
     Ok(Machine {
-        id: machine_id(user, host, repo_path.as_deref()),
+        // Named after where it landed, the same way a box you brought is;
+        // `record_made_machine` settles the rare case where that name is taken.
+        id: ids::from_address(user, host, repo_path.as_deref()),
+        aliases: Vec::new(),
         name: name.to_string(),
         host: host.to_string(),
         user: user.to_string(),
@@ -826,14 +952,16 @@ pub(crate) fn made_machine(
 #[tauri::command]
 pub async fn machine_forget(id: String) -> Result<(), String> {
     let mut all = read_book();
-    let before = all.len();
-    all.retain(|m| m.id != id);
-    if all.len() == before {
+    let Some(at) = ids::locate(&all, &id) else {
         return Ok(());
-    }
+    };
+    let gone = all.remove(at);
     // AURA-1294 — a port still forwarded from an address the book no longer
-    // holds is a child nothing can stop. Let it go with the row.
-    crate::manager::brain::place_ports::forward::release_all(&id);
+    // holds is a child nothing can stop. Let it go with the row, under every
+    // name it was opened by.
+    for held in std::iter::once(&gone.id).chain(gone.aliases.iter()) {
+        crate::manager::brain::place_ports::forward::release_all(held);
+    }
     // end AURA-1294
     write_book(&all)
 }
@@ -928,6 +1056,7 @@ mod tests {
     fn boxed(org: Option<&str>) -> Machine {
         Machine {
             id: "ubuntu@box.example:/srv/app".into(),
+            aliases: Vec::new(),
             name: "aura-runner".into(),
             host: "box.example".into(),
             user: "ubuntu".into(),

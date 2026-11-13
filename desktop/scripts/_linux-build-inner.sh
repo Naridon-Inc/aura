@@ -25,19 +25,32 @@ echo "── inner: arch=$ARCH mode=$MODE  rustc=$(rustc --version)  bun=$(bun -
 # where tauri could not read 68 of 149 assets mid-compile — the host build was
 # emptying dist underneath it.
 #
-# One stat call tells us which we have. A live volume is a different device from
-# the bind mount; the host's own dist directory is the same device.
+# What is actually being asserted is that dist is still its OWN mount. Comparing
+# st_dev against /work was a proxy for that, and it only held while /work was a
+# bind mount of the host: a volume and a virtiofs mount are different devices, so
+# "same device" meant the nested mount had fallen away.
+#
+# That proxy broke the moment /work stopped being a bind mount. The engine on
+# this machine is colima, whose VM shares only ~, so 0.19.59's Linux legs stream
+# the repo into a named volume and mount that at /work — and then /work and the
+# dist volume are both volumes on the VM's one filesystem, same st_dev, with a
+# perfectly live nested mount. The guard failed the build at startup with a
+# message about corrupting a host checkout that this topology does not even have.
+#
+# /proc/self/mountinfo answers the real question directly and is right under both
+# topologies: it lists the mount points this container sees, so dist appearing in
+# it IS the nested mount being live, whatever device either side is on.
 assert_dist_is_the_volume() {
-  local when="$1" dev_dist dev_work
-  dev_dist="$(stat -c %d /work/aura-shell/dist 2>/dev/null || echo x)"
-  dev_work="$(stat -c %d /work/aura-shell 2>/dev/null || echo y)"
-  if [ "$dev_dist" = "$dev_work" ]; then
-    echo "✗ $when: /work/aura-shell/dist is not the aura-linux-dist volume —"
-    echo "  it resolves to the host's own dist directory (same device as /work)."
-    echo "  Writing there corrupts the host checkout and leaves the volume stale."
-    echo "  Cause: something on the host rewrote aura-shell/dist while this"
-    echo "  container was running. Do not run a macOS and a Linux build of the"
-    echo "  same checkout at the same time — they share that directory."
+  local when="$1"
+  if ! grep -q ' /work/aura-shell/dist ' /proc/self/mountinfo; then
+    echo "✗ $when: /work/aura-shell/dist is not a mount —"
+    echo "  the aura-linux-dist volume is not covering that path, so it resolves"
+    echo "  to whatever /work itself holds there. Writing to it corrupts a"
+    echo "  bind-mounted host checkout and leaves the volume stale either way."
+    echo "  Cause: either the volume was not passed to this container, or"
+    echo "  something on the host rewrote aura-shell/dist while it was running."
+    echo "  Do not run a macOS and a Linux build of the same bind-mounted"
+    echo "  checkout at the same time — they share that directory."
     exit 5
   fi
 }

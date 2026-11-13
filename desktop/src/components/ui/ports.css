@@ -1,0 +1,28 @@
+/* The Ports popover in the work header: the cloud details popover holding
+   the library's port-forwarding block. Added here: the anchor the popover
+   hangs from, the first row sitting flush under the header, the spinner that
+   stands in for a row's verbs while one runs, and a forward whose port went
+   quiet over there reading dimmer. */
+
+.ui-ports-anchor {
+  display: inline-flex;
+}
+.ui-ports > header {
+  gap: 8px;
+}
+.ui-ports .ui-cloud-ports {
+  padding-top: 0;
+}
+.ui-ports .ui-cloud-ports > p {
+  margin-top: 0;
+}
+.ui-port-row[data-listening="false"] code {
+  color: var(--ui-muted-fg);
+}
+.ui-port-busy {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--ui-muted-fg);
+}

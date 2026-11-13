@@ -1,0 +1,319 @@
+/* Review comments on the lines of a diff: the ＋ that opens one from the
+   gutter, the editor and the card that sit under the commented lines, the
+   suggested-change box inside a comment, and the Viewed toggle in the diff
+   header. Built from the library's tokens; the boxes follow the comment card
+   the library diff draws. */
+
+/* ── the ＋ in the gutter ────────────────────────────────────────────── */
+
+/* Monaco's glyph margin, on the hovered line. */
+.ui-diff-review-add {
+  cursor: pointer;
+}
+.ui-diff-review-add::before {
+  content: "+";
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0 1px;
+  border-radius: 4px;
+  background: var(--ui-primary);
+  color: var(--ui-primary-foreground);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 16px;
+}
+/* Lines being picked by a drag down the gutter. */
+.ui-diff-review-picked {
+  background: color-mix(in oklab, var(--ui-primary) 14%, transparent);
+}
+
+/* The unified table's own ＋, in the new-line-number cell. */
+.ui-diff-review-num {
+  position: relative;
+}
+.ui-diff-review-plus {
+  position: absolute;
+  top: 1px;
+  left: 2px;
+  display: none;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: var(--ui-primary);
+  color: var(--ui-primary-foreground);
+  cursor: pointer;
+}
+.ui-diff-review-row:hover .ui-diff-review-plus,
+.ui-diff-review-plus:focus-visible {
+  display: grid;
+}
+.ui-diff-review-row[data-picked="true"] {
+  box-shadow: inset 0 0 0 9999px color-mix(in oklab, var(--ui-primary) 14%, transparent);
+}
+/* Comments under a unified row, and the zone box in a Monaco diff: set off
+   from the code by a rule above and below. */
+.ui-diff-review-unified,
+.ui-diff-review-zone-inner {
+  border-block: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+
+/* ── a comment under its lines ──────────────────────────────────────── */
+
+/* A Monaco view zone: the editor sizes the zone, the inner box sizes itself
+   and reports its height back. */
+.ui-diff-review-zone {
+  z-index: 5;
+}
+.ui-diff-review-zone-inner {
+  font-family: var(--font-sans);
+  white-space: normal;
+}
+.ui-diff-review-comment {
+  max-width: 48rem;
+  padding: 12px 12px 16px;
+  color: var(--ui-fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+.ui-diff-review-box {
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-bg);
+}
+.ui-diff-review-box > .ui-diff-review-comment {
+  max-width: none;
+}
+.ui-diff-review-range {
+  margin-bottom: 8px;
+  color: var(--ui-muted-fg);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.ui-diff-review-input {
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--ui-bg);
+}
+.ui-diff-review-input > textarea {
+  width: 100%;
+  min-height: 64px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 13px;
+  resize: vertical;
+}
+.ui-diff-review-input > textarea:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.ui-diff-review-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ui-diff-review-buttons .ui-kbd {
+  margin-left: 4px;
+}
+.ui-diff-review-body {
+  font-size: 13px;
+  line-height: 1.5;
+}
+.ui-diff-review-body .ui-file-markdown {
+  padding: 0;
+}
+/* The card sits inside the diff, whose `.ui-file-diff code` rule draws a
+   whole diff line (a flex row, 20px gutter spans). The prose's own code takes
+   its markdown look back; a suggested change's diff keeps the line rule. */
+.ui-diff-review-body .ui-message-markdown :not(pre) > code {
+  display: inline;
+  white-space: normal;
+  padding: 2px 4px;
+}
+.ui-diff-review-body .ui-message-markdown pre > code {
+  display: block;
+  padding-right: 0;
+}
+.ui-diff-review-body .ui-message-markdown code > span {
+  width: auto;
+  text-align: inherit;
+}
+
+/* ── a suggested change inside a comment ────────────────────────────── */
+
+.ui-diff-review-suggestion {
+  margin: 8px 0;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+}
+.ui-diff-review-suggestion-head {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-muted);
+  color: var(--ui-muted-fg);
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+
+/* ── the Viewed toggle in the diff header ───────────────────────────── */
+
+.ui-diff-viewed {
+  flex-shrink: 0;
+  gap: 6px;
+  width: 96px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ui-diff-viewed[aria-pressed="true"] {
+  color: var(--ui-fg);
+}
+.ui-diff-viewed-box {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--ui-muted-fg);
+  border-radius: 3px;
+}
+.ui-diff-viewed[aria-pressed="true"] .ui-diff-viewed-box {
+  border-color: var(--ui-fg);
+  background: var(--ui-fg);
+  color: var(--ui-bg);
+}
+
+/* ── the changed-files list ─────────────────────────────────────────── */
+
+/* Viewed files sit faded under their own caption; the caption stays clear. */
+.ui-changes-viewed .ui-file-tree-row {
+  opacity: 0.5;
+}
+/* A row is its path, then a repository tag and a comment count when it has
+   them: the folder gives way first, then the name; the tags stay. */
+.ui-details-change-list .ui-file-tree-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-changes-path {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ui-changes-path-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ui-faint);
+}
+.ui-changes-path-name {
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ui-fg);
+}
+.ui-changes-repo-tag {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 3px;
+  max-width: 32%;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--ui-muted);
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  line-height: 16px;
+}
+.ui-changes-repo-tag-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-changes-comment-count {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── previous / next comment ─────────────────────────────────────────── */
+
+/* Floating over the diff, centred: one at the top, one at the bottom (above
+   the composer when it overlays the pane). Only the button takes clicks. */
+.ui-diff-view-body {
+  position: relative;
+}
+.ui-diff-review-nav {
+  pointer-events: none;
+  position: absolute;
+  inset-inline: 0;
+  z-index: 10;
+  display: flex;
+  justify-content: center;
+}
+.ui-diff-review-nav[data-at="top"] {
+  top: 8px;
+}
+.ui-diff-review-nav[data-at="bottom"] {
+  bottom: calc(8px + var(--composer-overlay-height, 0px));
+}
+.ui-diff-review-nav > .ui-button-outline {
+  pointer-events: auto;
+  background: var(--ui-bg);
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+}
+.ui-diff-review-nav-count {
+  color: var(--ui-muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+.ui-diff-review-nav-keys {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  padding-left: 4px;
+}
+
+/* ── who left a comment ─────────────────────────────────────────────── */
+
+.ui-diff-review-author {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-diff-review-avatar {
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+}
+.ui-diff-review-avatar[data-mark] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ui-muted);
+}

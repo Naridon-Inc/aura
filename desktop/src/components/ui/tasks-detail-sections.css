@@ -1,0 +1,126 @@
+/* Task detail sections that hold rows of other work: sub-tasks and the
+   crew's view of this task. */
+/* Sub-tasks: a progress bar over a compact table of descendants. */
+.ui-tasks-subtasks-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 8px;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-tasks-subtasks-progress > .ui-progress {
+  flex: 1;
+  height: 4px;
+}
+.ui-tasks-subtasks-progress > span {
+  flex-shrink: 0;
+}
+.ui-tasks-subtasks .ui-table {
+  table-layout: fixed;
+  font-size: 13px;
+}
+.ui-tasks-subtasks .ui-table-head {
+  height: 28px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.ui-tasks-subtasks .ui-table-cell {
+  height: 36px;
+  padding: 4px 8px;
+}
+.ui-tasks-subtasks .ui-table-head:nth-child(2) {
+  width: 110px;
+}
+.ui-tasks-subtasks .ui-table-head:nth-child(3) {
+  width: 130px;
+}
+.ui-tasks-subtasks .ui-table-head:nth-child(4) {
+  width: 72px;
+}
+.ui-tasks-subtask-work {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-tasks-subtask-title {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ui-fg);
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ui-tasks-subtask-title:hover {
+  text-decoration: underline;
+}
+.ui-tasks-subtask-title:focus-visible {
+  outline: 2px solid var(--ui-ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.ui-tasks-subtask-work > :not(.ui-tasks-subtask-title) {
+  flex-shrink: 0;
+}
+.ui-tasks-subtask-tree {
+  flex-shrink: 0;
+  color: var(--ui-faint);
+}
+.ui-tasks-subtask-priority {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-tasks-subtask-none {
+  color: var(--ui-faint);
+  font-size: 12px;
+}
+.ui-tasks-subtask-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.ui-tasks-subtask-add > .ui-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Agents on this: the crew state as property rows, then what it waits on. */
+.ui-tasks-crew-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-tasks-crew-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ui-tasks-crew-failed > p {
+  margin: 0;
+  color: var(--ui-red);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
+}
+.ui-tasks-crew-deps {
+  margin-top: 12px;
+}
+.ui-tasks-crew-deps > h5 {
+  margin: 0 0 4px;
+  color: var(--ui-muted-fg);
+  font-size: 11px;
+  font-weight: 500;
+}

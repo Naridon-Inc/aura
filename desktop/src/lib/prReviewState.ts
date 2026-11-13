@@ -170,7 +170,7 @@ export function prReviewState(input: PrReviewInput): PrReviewState {
     if (reviewError) {
       return {
         kind: "failed",
-        title: "Aura couldn’t read this project’s reviews",
+        title: "Aura couldn’t read this repository’s reviews",
         message: reviewError,
       };
     }

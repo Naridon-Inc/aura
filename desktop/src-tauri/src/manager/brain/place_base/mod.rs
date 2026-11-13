@@ -428,16 +428,51 @@ fn installing_only(plan: Plan) -> Plan {
     }
 }
 
+/// The place a team-base command acts on: the machine's own folder, unless
+/// the caller named another folder on the same box.
+///
+/// This laptop's book keeps one row per repository it connected a box for, but
+/// a box holds whatever was cloned onto it — by a teammate, from the machine's
+/// page, or by the runner for cloud work — and none of those has a row here.
+/// They sit behind the same login and key, so the row is borrowed and only the
+/// folder over there changes. On this laptop the override means nothing:
+/// `root` already is the folder, and a path written for a box is never read as
+/// one on this disk.
+fn team_base_place(
+    root: Option<String>,
+    machine_id: Option<&str>,
+    repo_path: Option<String>,
+) -> Place {
+    in_folder(Place::resolve(root.unwrap_or_default(), machine_id), repo_path)
+}
+
+/// `place`, pointed at `repo_path` when it is a box and one was named.
+fn in_folder(place: Place, repo_path: Option<String>) -> Place {
+    let there = repo_path
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    match (place, there) {
+        (Place::Box { machine, here, .. }, Some(root)) => Place::Box {
+            machine,
+            root,
+            here,
+        },
+        (place, _) => place,
+    }
+}
+
 /// Where the team's environment is on a place, and what it holds.
 ///
 /// `machine_id` absent means this laptop — the same command answers for both
-/// modes, which is the only way the two can be kept honest.
+/// modes, which is the only way the two can be kept honest. `repo_path` is a
+/// folder on the box other than the one its book row names.
 #[tauri::command]
 pub async fn place_team_base(
     root: Option<String>,
     machine_id: Option<String>,
+    repo_path: Option<String>,
 ) -> Result<TeamBase, String> {
-    Place::resolve(root.unwrap_or_default(), machine_id.as_deref())
+    team_base_place(root, machine_id.as_deref(), repo_path)
         .team_base()
         .await
 }
@@ -447,10 +482,11 @@ pub async fn place_team_base(
 pub async fn place_team_base_warm(
     root: Option<String>,
     machine_id: Option<String>,
+    repo_path: Option<String>,
     login: Option<String>,
     force: bool,
 ) -> Result<BaseBuild, String> {
-    Place::resolve(root.unwrap_or_default(), machine_id.as_deref())
+    team_base_place(root, machine_id.as_deref(), repo_path)
         .warm_team_base(login.as_deref(), force)
         .await
 }
@@ -470,6 +506,7 @@ mod tests {
         Place::Box {
             machine: Box::new(crate::cmd_machines::Machine {
                 id: "ubuntu@10.0.0.4:/srv/alpha".into(),
+                aliases: Vec::new(),
                 name: "aura-runner".into(),
                 host: "10.0.0.4".into(),
                 user: "ubuntu".into(),
@@ -647,5 +684,21 @@ mod tests {
         let odd = Held::of(".something-new");
         assert_eq!(odd.under, ".something-new");
         assert!(odd.tool.is_empty());
+    }
+
+    #[test]
+    fn a_named_folder_moves_a_box_and_never_this_laptop() {
+        // A repository the book has no row for, on a box it does: same login,
+        // the folder the box said it holds.
+        let moved = in_folder(a_box(), Some(" /home/ubuntu/aura-workspaces/acme__api ".into()));
+        assert_eq!(moved.root(), "/home/ubuntu/aura-workspaces/acme__api");
+        assert_eq!(moved.here(), "/Users/me/alpha");
+        assert_eq!(moved.machine_name(), Some("aura-runner"));
+        // Nothing named, or only blanks, is the row's own folder.
+        assert_eq!(in_folder(a_box(), None).root(), "/srv/alpha");
+        assert_eq!(in_folder(a_box(), Some("  ".into())).root(), "/srv/alpha");
+        // On this laptop the root already is the folder, and a path meant for
+        // a box is not one on this disk.
+        assert_eq!(in_folder(here(), Some("/srv/beta".into())).root(), "/Users/me/alpha");
     }
 }

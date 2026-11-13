@@ -123,7 +123,7 @@ describe("what an action would touch", () => {
 
   it("says the comparison needs a saved version before it can happen", () => {
     expect(actionTarget("match", { ...SCOPE, revision: null }, HERE)).toContain(
-      "saved to the project's history first",
+      "saved to the repository's history first",
     );
     expect(actionTarget("match", SCOPE, HERE)).toContain("a1b2c3d");
   });

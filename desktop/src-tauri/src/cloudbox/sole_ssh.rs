@@ -87,7 +87,7 @@ use std::path::{Path, PathBuf};
 /// a version that found its own machine would hand that permission to a box
 /// nobody checked was the one on screen — which is the same blast radius as
 /// sleeping, granted rather than spent.
-const MACHINE_COMMANDS: [(&str, &str); 63] = [
+const MACHINE_COMMANDS: [(&str, &str); 66] = [
     (THE_DOOR, "box_sessions"),
     (THE_DOOR, "box_projects"),
     (THE_DOOR, "place_capabilities"),
@@ -126,6 +126,11 @@ const MACHINE_COMMANDS: [(&str, &str); 63] = [
     // version that found its own machine would show one box's transcript
     // under another box's name.
     (THE_SCRIBE, "place_session_capture"),
+    // A chat kept at a place: started, asked about and stopped there, so a
+    // managed machine keeps its conversations exactly as a box you brought does.
+    (THE_KEEPER, "place_chat_start"),
+    (THE_KEEPER, "place_chat_status"),
+    (THE_KEEPER, "place_chat_stop"),
     // AURA-1306 — the file tree, the editor and the git panel of a workspace
     // whose checkout is on the box. The widest family yet: every one of these
     // reads or writes the user's code, and one that found its own machine
@@ -233,6 +238,9 @@ const THE_PORTER: &str = "aura-shell/src-tauri/src/manager/brain/place_ports/mod
 /// Where what a session printed while nobody was watching is read back.
 const THE_SCRIBE: &str = "aura-shell/src-tauri/src/manager/brain/place_capture.rs";
 // end AURA-1308
+
+/// Where a conversation with an agent is kept at a place, past the laptop.
+const THE_KEEPER: &str = "aura-shell/src-tauri/src/manager/brain/place_chat.rs";
 
 // AURA-1306
 /// Where the files of a workspace at a place are listed, read and saved.

@@ -24,7 +24,9 @@
 
 import { useState, type ReactNode } from "react";
 
+import { DetailsCaption } from "../ui/details-panel";
 import { Select, type SelectOption } from "../ui/select";
+import "../ui/rail-group.css";
 import { ALL_PROJECTS, projectNameFromRoot } from "../../lib/projectRoots";
 import { humanizeWorkspaceName } from "../../lib/workspaceLabel";
 import { cn } from "../../lib/utils";
@@ -89,7 +91,7 @@ export function PlaceRailScope({
   value: string;
   onChange: (next: string) => void;
   projects: Array<{ root: string; label?: string }>;
-  /** Offer "All projects". Only pass this when the surface reads them all. */
+  /** Offer "All repositories". Only pass this when the surface reads them all. */
   all?: boolean;
   disabled?: boolean;
 }) {
@@ -98,7 +100,7 @@ export function PlaceRailScope({
       ? [
           {
             value: ALL_PROJECTS,
-            label: `All projects · ${projects.length}`,
+            label: `All repositories · ${projects.length}`,
           },
         ]
       : []),
@@ -115,9 +117,9 @@ export function PlaceRailScope({
       value={value}
       onChange={onChange}
       options={options}
-      placeholder="Pick a project"
+      placeholder="Pick a repository"
       disabled={disabled || options.length === 0}
-      aria-label="Project"
+      aria-label="Repository"
       className="h-7 text-xs"
     />
   );
@@ -159,58 +161,31 @@ export function PlaceRailGroup({
 
   if (count === 0 && !empty) return null;
 
+  // The details panel's group caption, the same one the changed-file groups
+  // wear: the title and its count as one caption, the whole caption the
+  // toggle, and what the group makes on the right, showing on hover.
   return (
-    <div className="min-w-0 overflow-hidden border-b border-line-soft last:border-b-0">
-      <div className="group flex min-w-0 items-center transition-colors hover:bg-state-hover">
+    <section className="ui-rail-group" data-open={isOpen}>
+      <div className="ui-details-group-caption ui-rail-group-caption">
         <button
           type="button"
-          onClick={toggle}
+          className="ui-details-group-toggle"
           aria-expanded={isOpen}
-          className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left"
+          onClick={toggle}
         >
-          <svg
-            width="10"
-            height="10"
-            viewBox="0 0 16 16"
-            fill="none"
-            className={cn(
-              "shrink-0 text-text-3 transition-transform duration-150",
-              isOpen && "rotate-90",
-            )}
-            aria-hidden
-          >
-            <path
-              d="M6 4l4 4-4 4"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-          <span className="section-label truncate">
-            {title}
-          </span>
-          {count > 0 && (
-            <span className="shrink-0 text-xs font-medium tabular-nums text-text-3">
-              {count}
-            </span>
-          )}
+          <DetailsCaption>{count > 0 ? `${title} ${count}` : title}</DetailsCaption>
         </button>
-        {actions && (
-          <div className="flex shrink-0 items-center gap-0.5 pr-2 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-            {actions}
-          </div>
-        )}
+        {actions && <div className="ui-rail-group-actions">{actions}</div>}
       </div>
       {isOpen && (
-        <div className="min-w-0 overflow-hidden px-1 pb-1.5">
+        <div className="ui-rail-group-body">
           {children}
           {count === 0 && empty && (
-            <div className="text-xs leading-relaxed text-text-5">{empty}</div>
+            <div className="ui-rail-group-empty">{empty}</div>
           )}
         </div>
       )}
-    </div>
+    </section>
   );
 }
 

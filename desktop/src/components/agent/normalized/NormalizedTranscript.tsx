@@ -1,6 +1,7 @@
 import { QuestionFlow } from "../../chat/QuestionFlow";
-import { ChatHeader } from "../../chat/ChatHeader";
-import { PlanPreview } from "../../chat/PlanPreview";
+import { PermissionRequest, PlanReview } from "../../ui/chat-decisions";
+import { QuestionRecord } from "../../chat/QuestionRecord";
+import { Button } from "../../ui/button";
 //! The engine-agnostic agent transcript.
 //!
 //! ONE renderer for every coding agent. It reads the tab's raw stream from the
@@ -21,28 +22,26 @@ import { PlanPreview } from "../../chat/PlanPreview";
 //! offers a jump back to the terminal to answer.
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { writeClipboardText } from "../../../lib/clipboard";
 import { ImageLightbox } from "../../media/ImageLightbox";
+import { ArrowDown, Search, Check, X } from "lucide-react";
 import {
-  ArrowUp,
-  ArrowDown,
-  Search,
-  Copy,
-  Check,
-  Square,
-  X,
-} from "lucide-react";
+  TimelineMenuItems,
+  TimelineToolsContext,
+  TimelineViewSwitch,
+} from "./timelineTools";
 import "../chatView.css";
-import {
-  ComposerFrame,
-  ComposerToolbar,
-  ChatModePicker,
-  promptForChatMode,
-  type ChatMode,
-} from "../../chat/ChatComposer";
-import {
-  TiptapComposer,
-  type TiptapComposerHandle,
-} from "../../manager/TiptapComposer";
+import "../../chat/ChatComposer.css";
+import "../../ui/chat-composer.css";
+import "../../ui/transcript-chips.css";
+import { promptForChatMode, type ChatMode } from "../../chat/composer/chatMode";
+import { useComposerSuggestions, type SlashItem } from "../../chat/composer/useComposerSuggestions";
+import { ComposerTurnMenu } from "../../chat/composer/ComposerTurnMenu";
+import { Composer } from "../../ui/composer";
+import { ComposerAddMenu } from "../../ui/composer-tools";
+import { ChatNotice } from "../../ui/chat-surface";
+import { ChatStatus, Message, MessageActions, MessageBody } from "../../ui/message";
+import { UnsupportedMessage } from "../../ui/transcript-content";
 import { manifestFor } from "../../../lib/agentProtocol";
 
 import { api } from "../../../lib/api";
@@ -51,7 +50,10 @@ import { useAgentRecord } from "../../../lib/agentRecordStore";
 import { AgentBlockTranscript } from "../chat/AgentBlockTranscript";
 import { AgentChatComposer } from "../chat/AgentChatComposer";
 import { buildTurnCost } from "../../../lib/turnCost";
-import { TurnCostTip } from "../../TurnCostTip";
+import { turnUsage } from "../../manager/chat/turnUsage";
+import { formatDuration } from "../../../lib/duration";
+import { TurnFooter } from "../../ui/transcript-patterns";
+import { CompactionSummary } from "../../ui/chat-recovery";
 import { useAgentStream } from "../../../lib/agentStreamStore";
 import { useAgentEvent } from "../../../lib/agentEventStore";
 import { normalizeStream } from "../../../lib/agentProtocol";
@@ -72,6 +74,7 @@ import { splitSettledTurn } from "./turnSplit";
 import { ThinkingLine } from "../../manager/chat/StatusLine";
 import { MarkdownBody } from "../../manager/chat/Markdown";
 
+import { useComposerOverlayHeight } from "../../chat/composerOverlay";
 import { toTranscriptGroups, type GroupUsage } from "./blockMap";
 import { LinkifiedText } from "./TaskChip";
 
@@ -87,7 +90,9 @@ export function NormalizedTranscript({
   modelControl,
   composerOptions,
   composerDocked = false,
+  agentCommands,
   viewSwitcher,
+  overlay = false,
 }: {
   channel: string;
   agentId: string;
@@ -100,7 +105,15 @@ export function NormalizedTranscript({
   modelControl?: ReactNode;
   composerOptions?: ReactNode;
   composerDocked?: boolean;
+  /** Slash commands the running agent published (ACP `available_commands`). */
+  agentCommands?: SlashItem[];
   viewSwitcher?: ReactNode;
+  /** The pane is showing a content surface — its terminal — and this
+   *  transcript is mounted behind it so the composer survives the flip. The
+   *  conversation itself goes invisible (keeping its scroll position, which
+   *  unmounting or `display: none` would both throw away) and the dock stays
+   *  as a strip over the content. See `composerCollapse`. */
+  overlay?: boolean;
 }) {
   const { events, sessionId, running } = useAgentStream(channel);
   const sid = sessionId ?? ptySessionId;
@@ -172,6 +185,7 @@ export function NormalizedTranscript({
   return (
     <ChatTimeline
       viewSwitcher={viewSwitcher}
+      overlay={overlay}
       groups={visibleGroups}
       running={busy}
       runningSince={cliWorking ? turn.startedAt : null}
@@ -199,6 +213,7 @@ export function NormalizedTranscript({
             modelControl={modelControl}
             options={composerOptions}
             docked={composerDocked}
+            agentCommands={agentCommands}
           />
         ) : (
           <AgentChatComposer
@@ -208,6 +223,7 @@ export function NormalizedTranscript({
             running={busy}
             onSwitchToTerminal={onRespondInTerminal}
             docked={questionDock != null}
+            overlay={overlay}
           />
         )
       }
@@ -228,9 +244,13 @@ export function ChatTimeline({
   onRespondInTerminal,
   composer,
   controls,
+  overlay = false,
 }: {
   fallback?: ReactNode;
   viewSwitcher?: ReactNode;
+  /** Mounted behind a content surface: the conversation goes invisible and the
+   *  dock becomes a strip floating over whatever is showing. */
+  overlay?: boolean;
   groups: ReturnType<typeof toTranscriptGroups>;
   running: boolean;
   /** When the running turn began, if the source knows. The working line counts
@@ -250,7 +270,11 @@ export function ChatTimeline({
   const [copyError, setCopyError] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
   const stuck = useRef(true);
+  // The dock is what a content surface underneath has to clear, so the dock is
+  // what reports its height — padding included, card excluded from nothing.
+  useComposerOverlayHeight(dockRef, { active: overlay });
   const matches = useMemo(
     () =>
       query.trim()
@@ -317,174 +341,179 @@ export function ChatTimeline({
         return JSON.stringify(g);
       })
       .join("\n\n");
-    try {
-      await navigator.clipboard.writeText(text);
+    // Through Rust: this button's click gesture is spent by the time the
+    // webview would be asked, and WebKit refuses a write without one.
+    if (await writeClipboardText(text)) {
       setCopied(true);
       setCopyError("");
       setTimeout(() => setCopied(false), 2000);
-    } catch {
+    } else {
       setCopyError("Could not copy. Select the text and copy it manually.");
     }
   }
   return (
-    <section
-      className="aura-chat chat-workspace"
-      aria-label={`${agentId === "aura-manager" ? "Aura" : manifestFor(agentId).label} conversation`}
-      onKeyDown={(e) => {
-        if ((e.metaKey || e.ctrlKey) && e.key === "f") {
-          e.preventDefault();
-          setSearchOpen(true);
-        }
-        if (e.key === "Escape" && searchOpen) {
-          setSearchOpen(false);
-          setQuery("");
-        }
+    <TimelineToolsContext.Provider
+      value={{
+        switcher: viewSwitcher,
+        overlay,
+        searchOpen,
+        onToggleSearch: () => {
+          if (searchOpen) setQuery("");
+          setSearchOpen((v) => !v);
+        },
+        canCopy: groups.length > 0,
+        copied,
+        onCopy: () => void copy(),
       }}
     >
-      <ChatHeader title={agentLabel} workspace={repoRoot} status={running ? "Working" : undefined} switcher={viewSwitcher} actions={<>
-          <button
-            className="chat-heading-search"
-            type="button"
-            aria-label="Search conversation"
-            aria-expanded={searchOpen}
-            title="Search conversation (⌘F / Ctrl+F)"
-            onClick={() => setSearchOpen((v) => !v)}
-          >
-            <Search size={15} />
-            <span className="chat-heading-action-label">Search</span>
-          </button>
-          <button
-            className="chat-icon-button"
-            type="button"
-            aria-label={copied ? "Copied conversation" : "Copy conversation"}
-            disabled={!groups.length}
-            onClick={() => void copy()}
-          >
-            {copied ? <Check size={16} /> : <Copy size={16} />}
-          </button>
-</>} />
-      {searchOpen && (
-        <div className="chat-search">
-          <Search size={15} />
-          <input
-            ref={searchRef}
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setVisibleCount(100);
-            }}
-            placeholder="Find messages, files or tools…"
-            aria-label="Search messages"
-          />
-          <span aria-live="polite">
-            {query ? `${matches.length} matches` : ""}
-          </span>
-          <button
-            type="button"
-            className="chat-icon-button"
-            aria-label="Close search"
-            onClick={() => {
-              setSearchOpen(false);
-              setQuery("");
-            }}
-          >
-            <X size={15} />
-          </button>
-        </div>
-      )}
-      {copyError && (
-        <p role="alert" className="chat-notice">
-          {copyError}
-        </p>
-      )}
-      <div
-        className="chat-scroll"
-        ref={scrollRef}
-        onScroll={() => {
-          const el = scrollRef.current;
-          if (el) {
-            stuck.current =
-              el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-            setAtBottom(stuck.current);
+      <section
+        className="aura-chat chat-workspace"
+        // Everything this flag moves is in the stylesheet: the conversation goes
+        // invisible, the dock becomes a bottom strip, and the pane behind takes
+        // the clicks the strip does not want. One attribute rather than six
+        // conditional class names.
+        data-chat-overlay={overlay || undefined}
+        aria-label={`${agentLabel} conversation`}
+        // Click-focusable, not tabbable. Clicking in the transcript to read or
+        // select otherwise leaves focus on `body`, and a key pressed there never
+        // reaches this surface at all: ⌘F worked only until you touched the
+        // page, and ⌘V had nothing to catch it (see AgentChatComposer).
+        tabIndex={-1}
+        onKeyDown={(e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+            e.preventDefault();
+            setSearchOpen(true);
+          }
+          if (e.key === "Escape" && searchOpen) {
+            setSearchOpen(false);
+            setQuery("");
           }
         }}
       >
-        {fallback ??
-          (groups.length === 0 && !running ? (
-            <div className="chat-empty">
-              <h2>New conversation</h2>
-              <p>
-                Send a message to{" "}
-                {agentId === "aura-manager"
-                  ? "Aura"
-                  : manifestFor(agentId).label}
-                .
-              </p>
-            </div>
-          ) : (
-            <div className="chat-reading-column">
-              {matches.length > visibleCount && (
-                <button
-                  className="chat-history-button"
-                  type="button"
-                  onClick={() => {
-                    stuck.current = false;
-                    const el = scrollRef.current;
-                    const height = el?.scrollHeight ?? 0;
-                    const top = el?.scrollTop ?? 0;
-                    setVisibleCount((n) => n + 100);
-                    requestAnimationFrame(() => {
-                      if (el) el.scrollTop = top + el.scrollHeight - height;
-                    });
-                  }}
-                >
-                  Show earlier activity · {matches.length - visibleCount} more
-                </button>
-              )}
-              {matches.length === 0 && query && (
-                <p className="chat-no-results">
-                  No matches for “{query}”. Try a different word.
+        {searchOpen && (
+          <div className="chat-search">
+            <Search size={15} />
+            <input
+              ref={searchRef}
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setVisibleCount(100);
+              }}
+              placeholder="Find messages, files or tools…"
+              aria-label="Search messages"
+            />
+            <span aria-live="polite">
+              {query ? `${matches.length} matches` : ""}
+            </span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="iconXs"
+              aria-label="Close search"
+              onClick={() => {
+                setSearchOpen(false);
+                setQuery("");
+              }}
+            >
+              <X />
+            </Button>
+          </div>
+        )}
+        {copyError && (
+          <p role="alert" className="chat-notice">
+            {copyError}
+          </p>
+        )}
+        <div
+          className="chat-scroll"
+          ref={scrollRef}
+          onScroll={() => {
+            const el = scrollRef.current;
+            if (el) {
+              stuck.current =
+                el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+              setAtBottom(stuck.current);
+            }
+          }}
+        >
+          {fallback ??
+            (groups.length === 0 && !running ? (
+              <div className="chat-empty">
+                <h2>New conversation</h2>
+                <p>
+                  Send a message to{" "}
+                  {agentId === "aura-manager"
+                    ? "Aura"
+                    : manifestFor(agentId).label}
+                  .
                 </p>
-              )}
-              <TranscriptRows
-                groups={
-                  query
-                    ? visible
-                    : visible.filter((group) => group.kind !== "init")
-                }
-                running={running && !query}
-                repoRoot={repoRoot}
-                onRespondInTerminal={onRespondInTerminal}
-              />
-              {/* The CLI keeps "Hatching… (22s)" under the conversation for
-                  the whole turn — between replies, through a long command,
-                  before the first word lands. This is that line. Keyed on the
-                  start so a turn that opens while the line is up restarts its
-                  count instead of carrying the last one's. */}
-              {running && !query && (
-                <ThinkingLine
-                  key={runningSince ?? "live"}
-                  label="Working…"
-                  startedAt={runningSince}
+              </div>
+            ) : (
+              <div className="chat-reading-column">
+                {matches.length > visibleCount && (
+                  <button
+                    className="chat-history-button"
+                    type="button"
+                    onClick={() => {
+                      stuck.current = false;
+                      const el = scrollRef.current;
+                      const height = el?.scrollHeight ?? 0;
+                      const top = el?.scrollTop ?? 0;
+                      setVisibleCount((n) => n + 100);
+                      requestAnimationFrame(() => {
+                        if (el) el.scrollTop = top + el.scrollHeight - height;
+                      });
+                    }}
+                  >
+                    Show earlier activity · {matches.length - visibleCount} more
+                  </button>
+                )}
+                {matches.length === 0 && query && (
+                  <p className="chat-no-results">
+                    No matches for “{query}”. Try a different word.
+                  </p>
+                )}
+                <TranscriptRows
+                  groups={
+                    query
+                      ? visible
+                      : visible.filter((group) => group.kind !== "init")
+                  }
+                  running={running && !query}
+                  repoRoot={repoRoot}
+                  onRespondInTerminal={onRespondInTerminal}
                 />
-              )}
-            </div>
-          ))}
-      </div>
-      {!atBottom && !query && (
-        <button type="button" className="chat-jump" onClick={jumpLatest}>
-          <ArrowDown size={14} />
-          {running ? "Follow live response" : "Jump to latest"}
-        </button>
-      )}
-      {/* The dock shares the transcript's reading column and its ground — no
-          band of its own. Usage, docked cards and the composer all sit in it. */}
-      <div className="chat-dock">
-        {usage && <SessionUsageStrip usage={usage} />}
-        {controls}
-        {composer}
-      </div>
-    </section>
+                {/* The CLI keeps "Hatching… (22s)" under the conversation for
+                    the whole turn — between replies, through a long command,
+                    before the first word lands. This is that line. Keyed on the
+                    start so a turn that opens while the line is up restarts its
+                    count instead of carrying the last one's. */}
+                {running && !query && (
+                  <ThinkingLine
+                    key={runningSince ?? "live"}
+                    label="Working…"
+                    startedAt={runningSince}
+                  />
+                )}
+              </div>
+            ))}
+        </div>
+        {!atBottom && !query && (
+          <button type="button" className="chat-jump" onClick={jumpLatest}>
+            <ArrowDown size={14} />
+            {running ? "Follow live response" : "Jump to latest"}
+          </button>
+        )}
+        {/* The dock shares the transcript's reading column and its ground — no
+            band of its own. Usage, docked cards and the composer all sit in it. */}
+        <div className="chat-dock" ref={dockRef}>
+          {usage && <SessionUsageStrip usage={usage} />}
+          {controls}
+          {composer}
+        </div>
+      </section>
+    </TimelineToolsContext.Provider>
   );
 }
 
@@ -505,6 +534,7 @@ export function AgentComposer({
   modelControl,
   options,
   docked = false,
+  agentCommands,
 }: {
   ptySessionId: string;
   repoRoot?: string | null;
@@ -514,6 +544,7 @@ export function AgentComposer({
   modelControl?: ReactNode;
   options?: ReactNode;
   docked?: boolean;
+  agentCommands?: SlashItem[];
 }) {
   const draftKey = `aura.chat.draft.${ptySessionId}`;
   const [text, setText] = useState(() => {
@@ -541,8 +572,21 @@ export function AgentComposer({
       /* storage unavailable */
     }
   }, [draftKey, text]);
-  const taRef = useRef<TiptapComposerHandle | null>(null);
-  const canSend = text.trim().length > 0 && !sending && !(onSend && running);
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const caret = taRef.current?.selectionStart ?? text.length;
+  const { suggestions, resolvePick } = useComposerSuggestions({
+    repoRoot,
+    before: text.slice(0, caret),
+    agentRows: agentCommands,
+  });
+  const chooseMode = (value: ChatMode) => {
+    setMode(value);
+    try {
+      sessionStorage.setItem(`${draftKey}.mode`, value);
+    } catch {
+      /* storage unavailable */
+    }
+  };
 
   async function send() {
     const t = text.trim();
@@ -560,95 +604,79 @@ export function AgentComposer({
       } catch {
         /* storage unavailable */
       }
-      taRef.current?.clear();
     } catch (e) {
       setError(`Message was not sent. Your draft is saved. ${String(e)}`);
     } finally {
       sendLock.current = false;
       setSending(false);
-      taRef.current?.focus();
+      requestAnimationFrame(() => taRef.current?.focus());
     }
   }
 
   return (
-    <div className="chat-composer">
-      <div>
-        <ComposerFrame className={docked ? "composer-docked" : ""}>
-          <TiptapComposer
-            key={ptySessionId}
-            ref={taRef}
-            repoRoot={repoRoot}
-            initialMarkdown={text}
-            busy={sending}
-            ariaLabel="Message the agent"
-            onChange={setText}
-            onSubmit={() => void send()}
-            onEscapeWhileBusy={() => {
-              if (onStop) void onStop().catch((e) => setError(String(e)));
-            }}
-            placeholder={
-              running
-                ? "Write a follow-up…"
-                : "Ask to make changes, @mention files, run /commands"
-            }
-          />
-          <ComposerToolbar
-            mode={
-              <ChatModePicker
-                value={mode}
-                modes={["build", "plan", "ask"]}
-                disabled={running}
-                onChange={(value) => {
-                  setMode(value);
-                  try {
-                    sessionStorage.setItem(`${draftKey}.mode`, value);
-                  } catch {}
-                }}
-              />
-            }
-            model={modelControl}
-            options={options}
-            actions={
-              <>
-                {running && onStop && (
-                  <button
-                    type="button"
-                    className="chat-stop"
-                    aria-label="Stop response"
-                    onClick={() =>
-                      void onStop().catch((e) => setError(String(e)))
-                    }
-                  >
-                    <Square size={14} /> Stop
-                  </button>
-                )}
-                <button
-                  aria-label="Send message"
-                  type="button"
-                  className="chat-send"
-                  disabled={!canSend}
-                  onClick={() => void send()}
-                  title="Send (↵)"
-                >
-                  <ArrowUp size={16} aria-hidden />
-                </button>
-              </>
-            }
-          />
-        </ComposerFrame>
-        {error && (
-          <div role="alert" className="mt-2 text-[12px] text-red-400">
-            {error}
-          </div>
+    <div className="agent-chat-composer">
+      <Composer
+        className={docked ? "composer-docked" : ""}
+        value={text}
+        onChange={setText}
+        onSend={() => void send()}
+        onStop={onStop ? () => void onStop().catch((e) => setError(String(e))) : undefined}
+        running={running}
+        disabled={sending}
+        // Drafting the next message while a turn runs is allowed; sending it
+        // waits for the turn to end, so the send control steps aside.
+        sendDisabled={!!onSend && running}
+        context={
+          running ? (
+            <span>
+              {onSend
+                ? "You can draft your next message while this runs."
+                : "Messages queue in this session."}
+            </span>
+          ) : undefined
+        }
+        ariaLabel="Message the agent"
+        placeholder={
+          running
+            ? "Write a follow-up…"
+            : "Ask to make changes, @mention files, run /commands"
+        }
+        suggestions={suggestions}
+        onSuggestionSelect={(pick) => setText((prev) => resolvePick(pick, prev) ?? prev)}
+        planMode={mode === "plan"}
+        onPlanModeChange={running ? undefined : (on) => chooseMode(on ? "plan" : "build")}
+        textareaRef={taRef}
+        onKeyDown={(e) => {
+          if (e.key === "Escape" && running && onStop) {
+            e.preventDefault();
+            void onStop().catch((err) => setError(String(err)));
+          }
+        }}
+        // This composer sends text only, so the add menu holds the turn's
+        // mode and the conversation's own tools rather than attachments.
+        renderAddMenu={() => (
+          <ComposerAddMenu
+            onPlan={running ? undefined : () => chooseMode(mode === "plan" ? "build" : "plan")}
+            planMode={mode === "plan"}
+          >
+            <ComposerTurnMenu
+              mode={mode}
+              modes={["build", "plan", "ask"]}
+              modeDisabled={running}
+              onModeChange={chooseMode}
+            />
+            <TimelineMenuItems />
+            {options}
+          </ComposerAddMenu>
         )}
-        <div className="chat-compose-hint">
-          {running
-            ? onSend
-              ? "You can draft your next message while this runs."
-              : "Messages queue in this session."
-            : "Enter to send · Shift+Enter for a new line"}
-        </div>
-      </div>
+        footer={
+          <>
+            {modelControl}
+            <TimelineViewSwitch />
+          </>
+        }
+      />
+      {error && <ChatNotice onDismiss={() => setError(null)}>{error}</ChatNotice>}
     </div>
   );
 }
@@ -657,11 +685,14 @@ export function AgentComposer({
 
 function UserRow({ text, repoRoot }: { text: string; repoRoot: string }) {
   return (
-    <div className="self-end min-w-0 max-w-[88%] break-words">
-      <div className="chat-user-message whitespace-pre-wrap break-words">
-        <LinkifiedText text={text} repoRoot={repoRoot} />
+    <Message role="user">
+      <div className="ui-chat-user-stack">
+        <MessageBody tone="user">
+          <LinkifiedText text={text} repoRoot={repoRoot} />
+        </MessageBody>
+        <MessageActions text={text} />
       </div>
-    </div>
+    </Message>
   );
 }
 
@@ -678,72 +709,24 @@ function UserRow({ text, repoRoot }: { text: string; repoRoot: string }) {
  *  no visible turn describes. So it is a rule across the column, and the
  *  summary is one click away for anyone who wants to know what was kept. */
 function CompactionSeam({ summary }: { summary: string }) {
-  const [open, setOpen] = useState(false);
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex items-center gap-2 text-[11px] text-text-3">
-        <span className="h-px flex-1 bg-line-soft" />
-        {summary ? (
-          <button
-            type="button"
-            className="hover:text-text-2"
-            onClick={() => setOpen((v) => !v)}
-          >
-            Earlier conversation summarised · {open ? "hide" : "read it"}
-          </button>
-        ) : (
-          <span>Earlier conversation summarised</span>
-        )}
-        <span className="h-px flex-1 bg-line-soft" />
-      </div>
-      {open && (
-        <div className="whitespace-pre-wrap text-[12px] leading-relaxed text-text-3">
-          {summary}
-        </div>
-      )}
-    </div>
+    <CompactionSummary>
+      {summary ? <p className="whitespace-pre-wrap break-words">{summary}</p> : null}
+    </CompactionSummary>
   );
 }
 
 function InitChip({ ev }: { ev: SessionInitEvent }) {
   const tools = ev.tools?.length ?? 0;
   return (
-    <div className="flex items-center gap-2 text-[11px] text-text-3">
-      <span className="font-medium">{ev.model ?? "session"}</span>
-      {tools > 0 && <span>· {tools} tools</span>}
+    <div className="ui-turn-footer ui-transcript-facts">
+      <span className="ui-turn-fact">{ev.model ?? "session"}</span>
+      {tools > 0 && <span className="ui-turn-fact">{tools} tools</span>}
     </div>
   );
 }
 
-// ── Structured-prompt scaffold ──────────────────────────────────────────────
-
-/** Shared shell for the question / plan / permission cards — a calm bordered
- *  card with a header and an optional "answer in the terminal" jump. */
-function PromptCard({
-  label,
-  children,
-  onRespondInTerminal,
-}: {
-  label: string;
-  children: ReactNode;
-  onRespondInTerminal?: () => void;
-}) {
-  return (
-    <div className="chat-record">
-      <div className="chat-record-label">{label}</div>
-      <div>{children}</div>
-      {onRespondInTerminal && (
-        <button
-          type="button"
-          onClick={onRespondInTerminal}
-          className="chat-record-action"
-        >
-          Answer in Terminal
-        </button>
-      )}
-    </div>
-  );
-}
+// ── Structured prompts ──────────────────────────────────────────────────────
 
 function QuestionSetCard({
   ev,
@@ -754,56 +737,33 @@ function QuestionSetCard({
 }) {
   const resolved = ev.partial === false || ev.answer != null;
   return (
-    <PromptCard
-      label={
+    <QuestionRecord
+      title={
         resolved
           ? "Question closed"
           : ev.questions.length > 1
             ? `${ev.questions.length} questions`
             : "Question"
       }
-      onRespondInTerminal={resolved ? undefined : onRespondInTerminal}
-    >
-      <div className="flex flex-col gap-3">
-        {ev.questions.map((q, index) => (
-          <div key={`${q.id}:${index}`}>
-            <div className="text-[13px] font-medium text-text-1">
-              {q.prompt}
-            </div>
-            {!resolved && q.multiSelect && (
-              <p className="text-[11px] text-text-3">
-                Multiple selections allowed
-              </p>
-            )}
-            <ul className="chat-question-options">
-              {q.options?.map((o, i) => (
-                <li key={`${o.optionId}:${i}`}>
-                  {o.label}
-                  {o.description && (
-                    <span className="text-text-3"> — {o.description}</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-            {!resolved && q.freeText && (
-              <p className="text-[11px] text-text-3">
-                You can also write an answer.
-              </p>
-            )}
-          </div>
-        ))}
-        {(ev.resolution?.text || ev.answer) && (
-          <div className="whitespace-pre-wrap text-[12px] text-text-3">
-            {ev.resolution?.text ?? ev.answer}
-          </div>
-        )}
-        {!resolved && (
-          <p className="text-[11.5px] text-text-3">
-            Select your answers in Terminal.
-          </p>
-        )}
-      </div>
-    </PromptCard>
+      questions={ev.questions.map((q) => ({
+        id: q.id,
+        prompt: q.prompt,
+        multiple: q.multiSelect,
+        options: (q.options ?? []).map((o, i) => ({
+          id: `${o.optionId}:${i}`,
+          label: o.label,
+          description: o.description,
+        })),
+      }))}
+      answer={ev.resolution?.text ?? ev.answer}
+      actions={
+        !resolved && onRespondInTerminal ? (
+          <Button type="button" variant="outline" size="sm" onClick={onRespondInTerminal}>
+            Answer in Terminal
+          </Button>
+        ) : undefined
+      }
+    />
   );
 }
 
@@ -817,7 +777,9 @@ function PlanCard({
   const heading =
     ev.markdown?.match(/^#{1,2}\s+(.+)$/m)?.[1] ?? "Implementation plan";
   return (
-    <PlanPreview
+    <PlanReview
+      className="chat-plan-review"
+      collapsible
       title={heading}
       status={ev.awaitingApproval ? "Ready for review" : ev.decision === "approved" ? "Approved" : ev.decision === "rejected" ? "Declined" : "Plan"}
       meta={
@@ -827,13 +789,14 @@ function PlanCard({
       }
       actions={
         ev.awaitingApproval && onRespondInTerminal ? (
-          <button
+          <Button
             type="button"
-            className="chat-plan-secondary"
+            variant="outline"
+            size="xs"
             onClick={onRespondInTerminal}
           >
             Review in Terminal
-          </button>
+          </Button>
         ) : undefined
       }
     >
@@ -849,39 +812,31 @@ function PlanCard({
           ))}
         </ol>
       )}
-    </PlanPreview>
+    </PlanReview>
   );
 }
 
 function TodoCard({ ev }: { ev: TodoEvent }) {
+  const done = ev.todos.filter((t) => t.status === "completed").length;
   return (
-    <div className="chat-record">
-      <div className="chat-record-label">Checklist</div>
-      <div className="flex flex-col gap-1">
+    <PlanReview
+      className="chat-plan-review"
+      title="Checklist"
+      status={`${done} of ${ev.todos.length} done`}
+    >
+      <ol className="chat-plan-tasks">
         {ev.todos.map((t, i) => (
-          <div
-            key={t.id ?? i}
-            className="flex items-center gap-2 text-[12.5px]"
-          >
+          <li key={t.id ?? i} data-status={t.status}>
             <TodoMark status={t.status} />
-            <span
-              style={{
-                color:
-                  t.status === "completed"
-                    ? "var(--color-text-3)"
-                    : "var(--color-text-1)",
-                textDecoration:
-                  t.status === "completed" ? "line-through" : undefined,
-              }}
-            >
+            <span>
               {t.status === "in_progress" && t.activeForm
                 ? t.activeForm
                 : t.content}
             </span>
-          </div>
+          </li>
         ))}
-      </div>
-    </div>
+      </ol>
+    </PlanReview>
   );
 }
 
@@ -912,6 +867,9 @@ function TodoMark({
   );
 }
 
+/** A permission the agent asked for in Terminal, drawn as the shared
+ *  permission request. Its answers live in Terminal, so the one choice here
+ *  is the way there; once closed it keeps the request and offers nothing. */
 function PermissionCard({
   ev,
   onRespondInTerminal,
@@ -919,25 +877,19 @@ function PermissionCard({
   ev: PermissionRequestEvent;
   onRespondInTerminal?: () => void;
 }) {
+  const open = ev.partial !== false;
   return (
-    <PromptCard
-      label={
-        ev.partial === false ? "Permission request closed" : "Asking permission"
+    <PermissionRequest
+      title={ev.title}
+      agent={open ? "Asking permission" : "Permission request closed"}
+      command={ev.toolName}
+      choices={
+        open && onRespondInTerminal
+          ? [{ id: "terminal", label: "Answer in Terminal", primary: true }]
+          : []
       }
-      onRespondInTerminal={
-        ev.partial === false ? undefined : onRespondInTerminal
-      }
-    >
-      <div className="text-[13px] font-medium text-text-1">{ev.title}</div>
-      <div className="mt-1 text-[12px] text-text-3 font-mono break-all">
-        {ev.toolName}
-      </div>
-      {ev.partial !== false && (
-        <div className="mt-2 text-[11.5px] leading-relaxed text-text-3">
-          Review and answer the permission request in Terminal.
-        </div>
-      )}
-    </PromptCard>
+      onChoose={() => onRespondInTerminal?.()}
+    />
   );
 }
 
@@ -960,10 +912,14 @@ function UsageFooter({ usage }: { usage: GroupUsage }) {
   if (bits.length === 0) return null;
   return (
     <div
-      className="self-start pl-0.5 text-[10.5px] text-text-4 select-text"
+      className="ui-turn-footer ui-transcript-facts"
       title="Context fed to the model for this response, and the tokens it wrote back."
     >
-      {bits.join(" · ")}
+      {bits.map((bit) => (
+        <span key={bit} className="ui-turn-fact">
+          {bit}
+        </span>
+      ))}
     </div>
   );
 }
@@ -979,47 +935,46 @@ function SessionUsageStrip({
 }) {
   return (
     <div
-      className="chat-usage"
+      className="ui-turn-footer ui-transcript-facts ui-session-usage"
       title="Current context and total output tokens for this conversation."
     >
-      <span>{compactTokens(usage.context)} context</span>
-      <span>·</span>
-      <span>{compactTokens(usage.tokens)} output tokens</span>
+      <span className="ui-turn-fact">{compactTokens(usage.context)} context</span>
+      <span className="ui-turn-fact">{compactTokens(usage.tokens)} output tokens</span>
     </div>
   );
 }
 
+/** How the run ended, as the shared turn footer: how long it took (which
+ *  opens the tokens and cost it reported), copy, and the outcome. A closing
+ *  message is the agent's answer; errors are error rows. */
 function ResultFooter({ ev }: { ev: ResultEvent }) {
   const cost = buildTurnCost({model: null, agent: null, startMs: ev.durationMs != null ? ev.ts - ev.durationMs : null, endMs: ev.ts, inputTokens: ev.usage?.inputTokens, outputTokens: ev.usage?.outputTokens, cacheRead: ev.usage?.cacheRead, cacheWrite: ev.usage?.cacheWrite, sessionCostUsd: ev.costUsd, sessionIsRunTotal: true});
-  const ok = ev.subtype === "success";
-  const cancelled = ev.subtype === "cancelled";
-  const bits: string[] = [];
-  if (ev.durationMs != null && ev.durationMs > 0)
-    bits.push(`${(ev.durationMs / 1000).toFixed(1)}s`);
-  if (ev.usage?.outputTokens != null)
-    bits.push(`${ev.usage.outputTokens.toLocaleString()} output tokens`);
-  if (ev.totalTokens != null)
-    bits.push(`${ev.totalTokens.toLocaleString()} total tokens`);
-  if (ev.costUsd != null) bits.push(`$${ev.costUsd.toFixed(3)}`);
+  const { usage, usageNote } = turnUsage(cost);
+  if (ev.totalTokens != null) usage.push({ label: "Total tokens", value: ev.totalTokens.toLocaleString() });
+  const outcome = ev.subtype === "success" ? "Done" : ev.subtype === "cancelled" ? "Cancelled" : "Ended with an error";
   return (
-    <div className="text-[11px] text-text-3 pt-1">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="font-medium">
-          {ok ? "Done" : cancelled ? "Cancelled" : "Ended with an error"}
-        </span>
-        {bits.length > 0 && <TurnCostTip cost={cost}><span>· {bits.join(" · ")}</span></TurnCostTip>}
-      </div>
+    <div className="flex flex-col">
       {ev.text && (
-        <div className="mt-2">
-          <MarkdownBody source={ev.text} />
-        </div>
+        <Message role="assistant">
+          <MessageBody className="ui-chat-answer">
+            <MarkdownBody source={ev.text} />
+          </MessageBody>
+        </Message>
       )}
       {ev.errors?.map((error, i) => (
-        <div key={i} role="alert" className="mt-1 whitespace-pre-wrap break-words">
+        <ChatStatus key={i} state="error">
           {error}
-        </div>
+        </ChatStatus>
       ))}
-      {ev.stopReason && <div className="mt-1">{ev.stopReason}</div>}
+      <TurnFooter
+        duration={ev.durationMs != null && ev.durationMs > 0 ? formatDuration(ev.durationMs / 1000) : null}
+        text={ev.text ?? ""}
+        usage={usage}
+        usageNote={usageNote}
+      >
+        <span className="ui-turn-fact">{outcome}</span>
+        {ev.stopReason && <span className="ui-turn-fact">{ev.stopReason}</span>}
+      </TurnFooter>
     </div>
   );
 }
@@ -1057,28 +1012,14 @@ function ImageBubble({ ev }: { ev: ImageEvent }) {
         src={src}
         alt={mine ? "Attached image" : "Image from the agent"}
         onError={() => setFailed(true)}
-        className="block max-h-[360px] w-auto max-w-full rounded-lg object-contain bg-bg-2"
-        style={{ border: "1px solid var(--color-line-soft)" }}
+        className="chat-media"
       />
     </div>
   );
 }
 
 function ErrorRow({ ev }: { ev: ErrorEvent }) {
-  return (
-    <div
-      className="rounded-lg px-3 py-2 text-[12.5px]"
-      style={{
-        background:
-          "color-mix(in srgb, var(--color-negative, #dc2626) 8%, transparent)",
-        color: "var(--color-negative, #dc2626)",
-        border:
-          "1px solid color-mix(in srgb, var(--color-negative, #dc2626) 28%, transparent)",
-      }}
-    >
-      {ev.message}
-    </div>
-  );
+  return <ChatStatus state="error">{ev.message}</ChatStatus>;
 }
 
 /** Unknown content stays available as inert text; no payload is executed. */
@@ -1095,23 +1036,13 @@ function RawPayloadCard({ ev }: { ev: RawEvent }) {
   }
   const limit = 12_000;
   return (
-    <details className="rounded-lg border border-line-soft px-3 py-2 text-[12px] text-text-3">
-      <summary className="cursor-pointer">
-        {ev.label} · additional content
-      </summary>
-      <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-all select-text">
-        {all ? text : text.slice(0, limit)}
-      </pre>
+    <UnsupportedMessage type={ev.label} raw={all ? text : text.slice(0, limit)}>
       {!all && text.length > limit && (
-        <button
-          type="button"
-          className="mt-2 underline"
-          onClick={() => setAll(true)}
-        >
+        <Button type="button" variant="ghost" size="xs" onClick={() => setAll(true)}>
           Show all {text.length.toLocaleString()} characters
-        </button>
+        </Button>
       )}
-    </details>
+    </UnsupportedMessage>
   );
 }
 
@@ -1195,7 +1126,7 @@ export function TranscriptRows({
             return <RawPayloadCard key={g.id} ev={g.ev} />;
           case "status":
             return (
-              <div key={g.id} role="status" className="text-[12px] text-text-3">
+              <ChatStatus key={g.id} state={g.ev.state === "idle" ? "empty" : "working"}>
                 {g.ev.message ??
                   (g.ev.state === "retry"
                     ? "Retrying"
@@ -1203,7 +1134,7 @@ export function TranscriptRows({
                       ? "Working"
                       : "Idle")}
                 {g.ev.attempt != null && ` · attempt ${g.ev.attempt}`}
-              </div>
+              </ChatStatus>
             );
           default:
             return null;

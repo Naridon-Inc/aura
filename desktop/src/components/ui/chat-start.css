@@ -1,0 +1,213 @@
+/* An empty conversation, before its first message: where you are, what you
+   can attach, and the starters above the composer of a first chat. */
+
+.ui-chat-start {
+  width: 100%;
+  min-width: 0;
+  max-width: 896px;
+  margin: 0 auto;
+  padding: 16px 28px 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  user-select: text;
+}
+.ui-chat-start > .ui-chat-empty-place {
+  margin-top: 12px;
+}
+.ui-chat-start-mono {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+/* The first chat in a copy of the repository. */
+.ui-chat-start-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.ui-chat-start-copy-head {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--ui-muted);
+}
+.ui-chat-start-copy-head h3 {
+  min-width: 0;
+  margin: 0;
+  color: var(--ui-fg);
+  font-size: 13px;
+  font-weight: 500;
+  overflow-wrap: break-word;
+}
+.ui-chat-start-copy .ui-timeline strong:empty {
+  display: none;
+}
+.ui-chat-start-copy .ui-timeline-marker:has(> svg) {
+  display: grid;
+  place-items: center;
+}
+.ui-chat-start-copy .ui-timeline-marker > svg {
+  width: 14px;
+  height: 14px;
+  color: var(--ui-muted-fg);
+}
+.ui-chat-start-copy .ui-timeline li > div > div {
+  color: var(--ui-fg);
+}
+
+/* A later chat: the folder, then earlier chats and plans to attach. */
+.ui-chat-start-history {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  margin-bottom: 8px;
+}
+.ui-chat-start-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-chat-start-label {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-chat-start-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ui-chat-start-slot,
+.ui-chat-start-hover {
+  display: inline-flex;
+  min-width: 0;
+}
+.ui-chat-start-chip > svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+.ui-chat-start-chip > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-chat-start-chat > span {
+  max-width: 150px;
+}
+.ui-chat-start-plan {
+  max-width: 220px;
+}
+.ui-chat-start-chip[data-selected] {
+  border-color: var(--ui-primary);
+  background: var(--ui-primary);
+  color: var(--ui-primary-fg);
+}
+.ui-chat-start-chip[data-importing] {
+  opacity: 0.5;
+}
+.ui-popover.ui-chat-start-more {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 256px;
+  max-height: 288px;
+  padding: 8px;
+  overflow-y: auto;
+}
+.ui-popover.ui-chat-start-more .ui-chat-start-chip {
+  max-width: 100%;
+}
+.ui-popover.ui-chat-start-preview {
+  width: 28rem;
+  max-width: calc(100vw - 2rem);
+  padding: 0;
+  overflow: hidden;
+}
+.ui-chat-start-preview-state {
+  display: grid;
+  place-items: center;
+  min-height: 64px;
+  padding: 12px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-chat-start-preview-body {
+  max-height: 320px;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+/* A first chat's starters, above the composer. */
+.ui-chat-starters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ui-button.ui-chat-starter {
+  border: 1px dashed color-mix(in srgb, var(--ui-muted-fg) 30%, transparent);
+  background: var(--ui-bg);
+}
+.ui-chat-starter-out {
+  width: 12px;
+  height: 12px;
+  margin-left: 4px;
+}
+.ui-chat-start-copy .ui-timeline {
+  margin: 0;
+  padding: 0;
+}
+
+/* The setup line: what the setup script is doing in this copy. */
+.ui-chat-start-copy .ui-timeline-marker:has(> svg[data-mark="failed"]) > svg {
+  color: var(--ui-red);
+}
+.ui-chat-start-copy .ui-timeline-marker > .ui-activity-loader {
+  font-size: 12px;
+}
+.ui-chat-setup-line {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.ui-chat-setup-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ui-chat-setup-stack > small {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-chat-setup-link,
+.ui-chat-setup-failed {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+.ui-chat-setup-link {
+  color: var(--ui-muted-fg);
+}
+.ui-chat-setup-link:hover {
+  color: var(--ui-fg);
+}
+.ui-chat-setup-link > svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-chat-setup-failed {
+  color: var(--ui-red);
+}
+.ui-chat-setup-failed:hover {
+  color: color-mix(in srgb, var(--ui-red) 80%, transparent);
+}

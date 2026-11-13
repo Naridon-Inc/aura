@@ -90,6 +90,13 @@ pub struct ChatRequest {
     /// `Place` — for them this is carried and ignored.
     #[serde(default)]
     pub machine_id: Option<String>,
+    /// Folders linked to this workspace (the composer's "Link workspaces"
+    /// dialog) that the agent may read besides `cwd`. Empty → nothing added
+    /// (byte-identical request). Only the CLI wrapper reads it, and only for a
+    /// CLI with a real extra-directory flag, started on this laptop (see
+    /// `linked_dirs.rs`); every other brain ignores it.
+    #[serde(default)]
+    pub linked_dirs: Vec<String>,
 }
 
 /// Build the cacheable request prefix: the system prompt and tool list with
@@ -107,9 +114,9 @@ pub struct ChatRequest {
 /// The markers sit on a byte-stable tail, so identical inputs always
 /// serialize identically — which is what makes the cache actually hit.
 /// Below the model's cache minimum the API ignores the markers, so this is
-/// always safe to send. Gated to the two Anthropic-shaped brains that use
-/// it so it doesn't warn as dead code in builds without them.
-#[cfg(any(feature = "brain_anthropic_native", feature = "brain_aura_pro"))]
+/// always safe to send. Gated to the Anthropic-shaped brain that uses it so
+/// it doesn't warn as dead code in builds without it.
+#[cfg(feature = "brain_anthropic_native")]
 pub(crate) fn cacheable_prefix(system: Option<&str>, tools: &[Value]) -> (Value, Vec<Value>) {
     use serde_json::json;
     let system_val = match system.filter(|s| !s.is_empty()) {
@@ -373,10 +380,9 @@ pub enum BrainError {
     #[error("unknown provider: {provider_id}")]
     UnknownProvider { provider_id: String },
     /// Caller is not signed in (or the stored auth token was rejected).
-    /// Surfaced primarily by the `aura_pro` brain when the user has
-    /// signed out / their session expired; the picker UI uses this to
-    /// re-launch the existing onboarding flow rather than ask for an
-    /// API key the user doesn't have.
+    /// Surfaced by an agent whose own login has lapsed; the picker UI uses
+    /// this to offer that agent's sign-in rather than ask for an API key
+    /// the user doesn't have.
     #[error("auth_required: {message}")]
     AuthRequired { message: String },
     /// Subscription / quota check failed — the proxy returned HTTP 402.
@@ -445,4 +451,7 @@ pub mod cap_keys {
     pub const MAX_OUTPUT_TOKENS: &str = "max_output_tokens";
     pub const SUPPORTED_MODELS: &str = "supported_models";
     pub const DEFAULT_MODEL: &str = "default_model";
+    /// The models an agent offers, each as `{"id", "name"}`: what a picker
+    /// shows for a brain whose list only the running agent knows.
+    pub const MODEL_CHOICES: &str = "model_choices";
 }

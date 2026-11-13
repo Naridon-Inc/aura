@@ -1,0 +1,51 @@
+/* A transcript turn that failed to draw: the library alert, its warning mark
+   beside the title, the note and "Try again" on one row below. */
+.ui-alert.ui-chat-turn-error {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  column-gap: 12px;
+  max-width: 672px;
+}
+.ui-chat-turn-error > svg {
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+}
+.ui-chat-turn-error > .ui-alert-description {
+  grid-column: 2;
+}
+.ui-chat-turn-error-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ui-chat-turn-error-row > p {
+  margin: 0;
+}
+
+/* An engine that failed before answering: its warning mark, one plain
+   sentence, and a quiet way to sign it in again — all on one row. */
+.ui-alert.ui-chat-engine-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 672px;
+  padding: 6px 6px 6px 12px;
+  font-size: 13px;
+}
+.ui-chat-engine-error > svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ui-red);
+}
+.ui-chat-engine-error > p {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+.ui-chat-engine-error > button {
+  flex: none;
+}

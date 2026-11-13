@@ -1,8 +1,7 @@
-// Shell wiring — composes the three-column window: the AdeSidebar column
-// (its own header at y=0), the work column (WorkSurface: tab strip at y=0,
-// body, composer), and the review rail (its own header at y=0). No band
-// spans the top any more; the window chrome that used to need one rides in
-// the tab row instead (see `chromeLeading`/`chromeTrailing` below).
+// Shell wiring — composes the three-column window: the sidebar column (its
+// own header at y=0), the work column (WorkHeader at y=0, then WorkSurface's
+// tab strip, body and composer), and the review rail (its own header at y=0).
+// The three headers share one 40px line across the top of the window.
 //
 // Project root resolution: prefer `current_dir()` (the cwd the shell was
 // launched from — typically the repo the user wants), fall back to home.
@@ -21,7 +20,6 @@ import { WorkspaceCreateComposer } from "./components/workspace/WorkspaceCreateC
 import { accentForRoot, type WorktreeRef } from "./lib/workspaceRef";
 import { WorkspaceRoster } from "./components/WorkspaceRoster";
 import { PeopleRailMount } from "./components/collab/rail/PeopleRailMount";
-import { BuildNav } from "./components/BuildNav";
 import { useWorktreeBadges } from "./lib/useWorktreeBadges";
 import { openPopout } from "./lib/popout";
 import { requestRun } from "./lib/runRequest";
@@ -29,11 +27,10 @@ import { onIdle } from "./lib/idle";
 import { Button } from "./components/ui/button";
 import { AsciiSpinner } from "./components/ui/ascii-spinner";
 import { installInAppFileDropRouter, installOsFileDropRouter } from "./lib/osFileDrop";
-import {
-  AdeSidebar,
-  type AdeSection,
-  type TraceActions,
-} from "./components/AdeSidebar";
+import { installArchiveScript } from "./lib/archiveScript";
+import { nestedLossLines } from "./lib/nestedRepos";
+import type { AdeSection } from "./lib/paneSection";
+import type { TraceActions } from "./components/trace/traceActions";
 import { TracePage } from "./components/trace/TracePage";
 import { TRACE_GO_EVENT, goToTrace, type TraceDest } from "./components/trace/traceRoute";
 import { parseSessionAppLink } from "@shared/sessionLink";
@@ -65,12 +62,17 @@ import { usePlaceRoot } from "./lib/projectRoots";
 import {
   WORK_GO_EVENT,
   goToWork,
-  readWorkLens,
   writeWorkLens,
   type WorkLens,
 } from "./lib/workRoute";
 import { TasksPlace } from "./components/tasks/TasksPlace";
-import { useWorkspaceCustomization } from "./lib/workspaceCustomization";
+import {
+  isWorkspaceArchived,
+  setWorkspaceArchived,
+  useWorkspaceCustomization,
+} from "./lib/workspaceCustomization";
+import { archiveTarget, requestAddProject } from "./lib/workspaceShortcuts";
+import { toast } from "./lib/toast";
 // Managed agent/sibling worktrees live under
 // `<repo>/.{claude,gemini,aura}/worktrees/<name>` — machine-created checkouts
 // (an orchestrator spawning an agent in its own branch), not workspaces the
@@ -80,6 +82,11 @@ import { useWorkspaceCustomization } from "./lib/workspaceCustomization";
 // created. One definition, shared with the HUD, rather than the two identical
 // regexes that used to sit either side of `lib/`.
 import { isManagedWorktreeRoot as isManagedWorktree } from "./lib/hudProjects";
+import {
+  fleetHoldsRoot,
+  fleetRootFor,
+  foldFleets,
+} from "./lib/projectFleets";
 import {
   forgetRecent,
   lastRecent,
@@ -92,9 +99,14 @@ import {
   pluginStatusPills,
   usePluginContributes,
 } from "./lib/pluginContributesStore";
-import { PaneToggles, SidebarPeek } from "./components/TopBar";
+import { WorkHeader } from "./components/nav/WorkHeader";
+import { workHeaderNames } from "./components/nav/workHeaderNames";
 import { StatusPills } from "./components/topbar/StatusPills";
-import { StatusBar } from "./components/StatusBar";
+import { CallStatusPill } from "./components/nav/CallStatusPill";
+import { HeaderAlerts } from "./components/nav/HeaderAlerts";
+import { HeaderBranch } from "./components/nav/HeaderBranch";
+import { CliVersionChip } from "./components/nav/CliVersionChip";
+import { ClaudeUsageRing } from "./components/manager/chat/ClaudeUsageRing";
 import { managerBootCommand } from "./lib/managerBoot";
 import { refreshPluginContributes } from "./lib/pluginContributesStore";
 import {
@@ -120,7 +132,19 @@ import { WorkSurface } from "./components/WorkSurface";
 import { PRDetailPane } from "./components/workpanes/PRDetailPane";
 import { useAgents } from "./lib/agents";
 import { TerminalPanel } from "./components/terminal/TerminalPanel";
-import { SidebarHeader } from "./components/SidebarHeader";
+import { AppSidebar, type AppDestination } from "./components/nav/AppSidebar";
+import { CloudPlacePage } from "./components/cloudplace/CloudPlacePage";
+import { CloudSidebar } from "./components/cloudplace/CloudSidebar";
+import { STEP_OUT_OF_MACHINE_EVENT } from "./lib/placeScope";
+import {
+  cloudCoversWork,
+  localTerminalShown,
+  cloudPlaceNow,
+  leaveCloud,
+  listenForOpenCloud,
+  setCloudPage,
+  useCloudPlace,
+} from "./lib/cloudPlace";
 import { isWorktreeRoot } from "./lib/workspaceLabel";
 import { CallPanel } from "./components/chat/CallPanel";
 import {
@@ -129,8 +153,9 @@ import {
   type PluginRightRailPanelDescriptor,
 } from "./components/rightrail/RightRail";
 import { ReviewStateHeader } from "./components/rightrail/ReviewStateHeader";
+import { ArtifactsPanel } from "./components/rightrail/ArtifactsPanel";
 import { ChecksPanel } from "./components/rightrail/ChecksPanel";
-import { RailBrowser } from "./components/rightrail/RailBrowser";
+import { TasksRailPanel } from "./components/rightrail/TasksRailPanel";
 import { CommandPalette, type PaletteEntry } from "./components/CommandPalette";
 import { ShortcutsDialog } from "./components/dialogs/ShortcutsDialog";
 import { OpLogDialog } from "./components/dialogs/OpLogDialog";
@@ -141,6 +166,8 @@ import { IntentSplitMergeDialog } from "./components/dialogs/IntentSplitMergeDia
 import { SnapshotDialog } from "./components/dialogs/SnapshotDialog";
 import { FindWorktreesDialog } from "./components/dialogs/FindWorktreesDialog";
 import { PrAuthoringDialogHost } from "./components/dialogs/PrAuthoringDialog";
+import { NoteToWorkspaceHost } from "./components/workpanes/workspaces/SayToWorktreeDialog";
+import { ContinueInCloudHost } from "./components/cloudplace/ContinueInCloudDialog";
 import { KnowledgeDialog } from "./components/dialogs/KnowledgeDialog";
 import { RemoteDialog } from "./components/dialogs/RemoteDialog";
 import { PairPhoneDialog } from "./components/dialogs/PairPhoneDialog";
@@ -152,14 +179,18 @@ import { SignInWizard } from "./components/account/SignInWizard";
 import { AgentCustomizations } from "./components/commons/AgentCustomizations";
 import type { CustomizeViewId } from "./components/commons/agentCustomize/customizeShared";
 import { WorkspacesSurface } from "./components/workspaces/WorkspacesSurface";
+import { MachinesSurface } from "./components/workspaces/MachinesSurface";
+import { ReviewPanel } from "./components/rightrail/ReviewPanel";
 import {
   RemoteWorkspace,
   type RemoteWorkspaceEntry,
 } from "./components/cloud/RemoteWorkspace";
+import { RemoteHeaderTitle } from "./components/cloud/RemoteHeaderTitle";
+import { openOnMachine, underRoot } from "./components/cloud/openOnMachine";
+import { gitDiffStats as placeDiffStats } from "./lib/place/workApi";
 import { PublishRepoDialog } from "./components/workpanes/workspaces/PublishRepoDialog";
 import { SearchWorkpane } from "./components/SearchWorkpane";
 import { askConfirm, askNotice } from "./components/ui/ask";
-import { OnboardingDialog } from "./components/OnboardingDialog";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { AgentGateHost } from "./components/agent/AgentGateHost";
 import { PlanWizardHost } from "./components/workpanes/PlanWizard";
@@ -169,6 +200,8 @@ import { StrictCommitDialog } from "./components/dialogs/StrictCommitDialog";
 import { IntentVerificationDialog } from "./components/dialogs/IntentVerificationDialog";
 import { ManagerLauncher } from "./components/manager/ManagerLauncher";
 import { ManagerTabTitles } from "./components/manager/ManagerTabTitles";
+import { RenameChatHost } from "./components/chat/rename/RenameChatHost";
+import { AppSwitcherHost, stepAppSwitcher } from "./components/appSwitcher/AppSwitcherHost";
 import { checkStrictModeReadiness } from "./lib/strictModeGate";
 import {
   FilesSidebar,
@@ -180,6 +213,7 @@ import { useEditorStore, armWorkspaceSnapshots, readPersistedAgents, readPersist
 import { useIdeTabBridge } from "./lib/ideBridge/useIdeTabBridge";
 // AURA-1296 — keyboard + chat ergonomics chords (see dispatchAction).
 import { cycleOpenTab, jumpToAttentionTab } from "./lib/tabNav";
+import { copyActiveChatTranscript } from "./lib/chatTranscriptCopy";
 import { forkActiveChat } from "./lib/forkFromTab";
 import { CYCLE_EFFORT_EVENT } from "./lib/effortCycle";
 import {
@@ -208,20 +242,21 @@ import {
   FOCUS_MANAGER_EVENT,
   sendToAmbientManager,
 } from "./lib/focusManager";
-import { safetyCheckPrompt, proveGoalsPrompt } from "./lib/worktreeActions";
+import { safetyCheckPrompt } from "./lib/worktreeActions";
 import { sendAmbientManagerTurn } from "./lib/managerTurn";
 import { useAmbientTurnBusy } from "./lib/managerStore";
-import {
-  resolveOrchestratorSession,
-  startNewOrchestratorSession,
-} from "./lib/orchestratorSession";
-import { AuraSurface } from "./components/manager/AuraSurface";
+import { auraPanelAction } from "./lib/homeAuraPanel";
+import { GO_PROJECT_EVENT, type GoProjectDetail } from "./lib/turnProjects";
+import { useHomeAura } from "./components/home/useHomeAura";
+import { useAuraViewNote } from "./components/home/useAuraViewNote";
+import { HomeAuraLayout } from "./components/home/HomeAuraLayout";
+import { AuraPanelToggle, HomeAuraPanel } from "./components/home/HomeAuraPanel";
 import { landNewWorkspace } from "./lib/workspaceLanding";
 import { labelForAgentId } from "./lib/useLiveAgentSessions";
 import type { SelectedModel } from "./lib/modelCatalog";
 import { HudPublisher } from "./lib/hudPublisher";
 import { onHudSelectProject, onHudSend } from "./lib/hud";
-import { AURA_MANAGER_ENABLED, COMMONS_ENABLED, ONBOARDING_V2 } from "./lib/featureFlags";
+import { AURA_MANAGER_ENABLED, COMMONS_ENABLED } from "./lib/featureFlags";
 import { useAppActions, type AppActionId } from "./lib/keymap";
 import { findSlash } from "./lib/slashCommands";
 import {
@@ -269,9 +304,14 @@ import { AuraImpactsBanner } from "./components/AuraImpactsBanner";
 import { AgentMutationGuard } from "./components/AgentMutationGuard";
 import { AuraTrackingNotice } from "./components/AuraTrackingNotice";
 import { CrashRecoveryToast } from "./components/CrashRecoveryToast";
+import { ImportPromoToast } from "./components/ImportPromoToast";
+import { useImportAdoption } from "./lib/useImportAdoption";
 import { CliUpdateToast } from "./components/CliUpdateToast";
 import { Toaster } from "./components/Toaster";
-import { UpdateBanner } from "./components/UpdateBanner";
+import { CloudTeamHost } from "./components/cloudplace/CloudTeamHost";
+import { UpdateToast } from "./components/UpdateToast";
+import { ShellNotices } from "./components/nav/ShellNotices";
+import { InstallLocationNotice } from "./components/nav/InstallLocationNotice";
 import { useDocumentVisibility } from "./lib/useDocumentVisibility";
 import { relativeAgeFromDelta } from "./lib/relativeTime";
 import { titleCaseName } from "@shared/textCase";
@@ -494,18 +534,21 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     // tab is restored from localStorage so user choices persist across
     // sessions; legacy "chat" / "story" / "tasks" keys still resolve.
     // W1.4 — plugin tabs are persisted too (id format `plugin:<a>:<b>`).
-    // The rail is Files · Changes · Checks (+ Commons + plugin panels). The
-    // old aura/chat/story/tasks tabs are re-homed, and Trust + Review folded
-    // into Trace. Checks and PRs are one surface now (the PR list sits at the
-    // bottom of Checks), so a persisted "prs" restores into Checks. Never
-    // restore into a tab that no longer exists — fall back to Files.
+    // The rail is Artifacts · Files · Changes · Review · Checks · Tasks (+
+    // Commons + plugin panels). The old aura/chat/story tabs are re-homed, and
+    // Trust + Review folded into Trace. Checks and PRs are one surface now (the
+    // PR list sits at the bottom of Checks), so a persisted "prs" restores into
+    // Checks. The browser left the rail for a workspace tab, so a persisted
+    // "browser" lands on Files like any other tab that no longer exists.
     const raw = localStorage.getItem("aura.rightRail.tab");
     if (raw === "prs" || raw === "checks") return "checks";
     if (
+      raw === "artifacts" ||
       raw === "files" ||
       raw === "changes" ||
-      (raw === "commons" && COMMONS_ENABLED) ||
-      raw === "browser"
+      raw === "review" ||
+      raw === "tasks" ||
+      (raw === "commons" && COMMONS_ENABLED)
     )
       return raw;
     if (raw && raw.startsWith("plugin:")) return raw as RightRailTab;
@@ -524,6 +567,8 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // real DOM events; a single window-level capture router lands them past the
   // xterm canvas and past webview payload-stripping. Installed once.
   useEffect(() => installInAppFileDropRouter(), []);
+  // Archiving a copy, from anywhere, runs the repository's archive script in it.
+  useEffect(() => installArchiveScript(), []);
 
   // Any caller wanting a Manager session in focus (post-launch, plan handoff,
   // dashboard click) dispatches aura:focus-manager. The manager lives in a
@@ -592,6 +637,13 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     return () =>
       window.removeEventListener("aura:open-remote-workspace", onEnter);
   }, []);
+  // The place switcher's "this computer": step out of the machine in front
+  // without leaving it, so it stays one pick away with its sessions running.
+  useEffect(() => {
+    const onStepOut = () => setRemotePlaces(blurRemotePlaces);
+    window.addEventListener(STEP_OUT_OF_MACHINE_EVENT, onStepOut);
+    return () => window.removeEventListener(STEP_OUT_OF_MACHINE_EVENT, onStepOut);
+  }, []);
 
   // Window-level paste capture — any image on the clipboard pasted
   // anywhere in Aura is shoved into the clipboard tray and made
@@ -625,7 +677,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // for the matching block).
   const pluginContribs = usePluginContributes();
   const [paletteOpen, setPaletteOpen] = useState(false);
-  // ⌘/ keyboard-shortcuts cheat-sheet (Conductor parity).
+  // ⌘/ keyboard-shortcuts cheat-sheet.
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   // Live agent registry for the @ scope in the command palette.
   const { agents: discoveredAgents } = useAgents();
@@ -642,14 +694,11 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   const [sourceControlOpen, setSourceControlOpen] = useState(false);
   const [signInOpen, setSignInOpen] = useState(false);
   const [agentCustomizeOpen, setAgentCustomizeOpen] = useState(false);
-  // Which drawing of the work you're looking at. Three over the backlog (List,
-  // Board, Sprint) and two over what the crew is doing about it (Plan, Graph).
-  //
-  // There is no separate "Mission Control" page any more: a crew node carries
-  // `board_task_id` back to the board card it was projected from, so the two
-  // boards were always one store seen twice. See lib/workRoute. Remembered, so
-  // the destination reopens on the lens you left it on.
-  const [workLens, setWorkLens] = useState<WorkLens>(readWorkLens);
+  // Which drawing of the work Tasks shows. The Dashboard ("list") is the
+  // place; the crew graph opens only when something links to it directly, so
+  // the app always starts on the Dashboard rather than on a graph left open
+  // last time. See lib/workRoute.
+  const [workLens, setWorkLens] = useState<WorkLens>("list");
   const chooseWorkLens = useCallback((next: WorkLens) => {
     setWorkLens(next);
     writeWorkLens(next);
@@ -658,16 +707,14 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // parallel copies, so the Build sidebar stays a curated few. `wsFilter`
   // scopes it to one project when opened from that project's disclosure.
   const [wsOpen, setWsOpen] = useState(false);
-  // Aura's own page. Holds the orchestrator session id while open; null =
-  // closed. Deliberately NOT a workpane tab — Aura spans every project, so it
-  // must not render inside one project's frame.
-  const [auraSid, setAuraSid] = useState<string | null>(null);
-  // Mirror, so the Aura door can tell "open it" from "I'm already here, take me
-  // back" without re-creating its callback on every session change.
-  const auraSidRef = useRef<string | null>(null);
-  useEffect(() => {
-    auraSidRef.current = auraSid;
-  }, [auraSid]);
+  // Home lists workspaces; Machines lists the computers they can run on.
+  // Both are the Home destination, so one flag opens the page and this picks
+  // which list it shows.
+  const [wsView, setWsView] = useState<"workspaces" | "machines">("workspaces");
+  // The organization's cloud, chosen from the account menu: its own sidebar
+  // and its own pages in place of this machine's.
+  const cloud = useCloudPlace();
+  useEffect(() => listenForOpenCloud(), []);
   // Trace's page. Holds the destination you asked for; null = you are not in
   // Trace. Its destinations used to be workpane tabs, which put a PLACE in the
   // row that holds your open documents — so Trace drew its own switcher above
@@ -747,7 +794,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // main area" path calls this first: asking for somewhere else is leaving
   // here.
   const leavePages = useCallback(() => {
-    setAuraSid(null);
     setWsOpen(false);
     setTracePage(null);
     setPlace(null);
@@ -805,15 +851,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // Full-height ADE sidebar owns the traffic-light corner; the header drops
   // its own left inset in fullscreen (lights vanish) via this probe.
   const fullscreen = useIsFullscreen();
-  // In-rail browser: the far-edge globe tab + RailBrowser. Restored by request.
-  const BROWSER_RAIL_ENABLED = true;
-  // If the rail is parked on the (now absent) browser tab, fall back so the
-  // rail body isn't blank.
-  useEffect(() => {
-    if (!BROWSER_RAIL_ENABLED && rightRailTab === "browser") {
-      setRightRailTab("files");
-    }
-  }, [rightRailTab, BROWSER_RAIL_ENABLED]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [translocationBannerDismissed, setTranslocationBannerDismissed] =
     useState(false);
@@ -834,7 +871,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   >(undefined);
   const [intentEditTs, setIntentEditTs] = useState<number | null>(null);
   // Strict-mode commit-guard state. The guard is invoked synchronously
-  // from GitSidebar's commit handler via a Promise — we hold the
+  // from the Git view's commit handler via a Promise — we hold the
   // resolver here so the dialog buttons can decide the outcome.
   const [strictGuard, setStrictGuard] = useState<{
     open: boolean;
@@ -896,8 +933,8 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     window.addEventListener("aura:open-time-machine", onEvent);
     return () => window.removeEventListener("aura:open-time-machine", onEvent);
   }, []);
-  // `aura:open-checks` — the BuildNav "Checks" row (and any future entry point)
-  // dispatches this; route it into the full-screen Semantic CI surface. One
+  // `aura:open-checks` — the ship-ready pill and Trace's Checks action
+  // dispatch this; route it into the full-screen Semantic CI surface. One
   // overlay, opened from anywhere, mirroring the Time machine wiring.
   useEffect(() => {
     function onEvent() {
@@ -926,6 +963,17 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     window.addEventListener("aura:open-files-panel", onEvent);
     return () => window.removeEventListener("aura:open-files-panel", onEvent);
   }, []);
+  // `aura:toggle-zen` — the palette's "Toggle zen mode": both sidebars go,
+  // and come back together when either was the only one hidden.
+  useEffect(() => {
+    function onEvent() {
+      const show = !sidebarOpen && !reviewOpen;
+      setSidebarOpen(show);
+      setReviewOpen(show);
+    }
+    window.addEventListener("aura:toggle-zen", onEvent);
+    return () => window.removeEventListener("aura:toggle-zen", onEvent);
+  }, [sidebarOpen, reviewOpen]);
   // `aura:open-signin` — clicking "Sign in" anywhere (titlebar avatar, Settings
   // row, a team-chat nudge) opens the full-screen welcome surface rather than a
   // cramped popover. One overlay, opened from anywhere.
@@ -967,7 +1015,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   useEffect(() => {
     function onEvent(e: Event) {
       const lens = (e as CustomEvent<WorkLens | undefined>).detail;
-      setAuraSid(null);
       setWsOpen(false);
       setTracePage(null);
       if (lens) {
@@ -989,15 +1036,29 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // project", not "close".
   useEffect(() => {
     function onEvent(e: Event) {
-      const projectId = (e as CustomEvent<{ projectId?: string }>).detail
-        ?.projectId;
-      setAuraSid(null);
+      const detail = (e as CustomEvent<{ projectId?: string; open?: boolean }>)
+        .detail;
+      const projectId = detail?.projectId;
       setPlace(null);
       setWsFilter(projectId ?? null);
-      setWsOpen((open) => (projectId ? true : !open));
+      setWsView("workspaces");
+      // The sidebar's Home row is a destination, so it opens rather than
+      // toggles.
+      setWsOpen((open) => (projectId || detail?.open ? true : !open));
     }
     window.addEventListener("aura:open-workspaces", onEvent);
     return () => window.removeEventListener("aura:open-workspaces", onEvent);
+  }, []);
+  // `aura:open-machines` — the machines this project's agents can run on,
+  // fired by the roster menu beside "Connect a machine…" and the palette.
+  useEffect(() => {
+    function onEvent() {
+      setPlace(null);
+      setWsView("machines");
+      setWsOpen(true);
+    }
+    window.addEventListener("aura:open-machines", onEvent);
+    return () => window.removeEventListener("aura:open-machines", onEvent);
   }, []);
   // Deep-links carried in auto-DMs + page mentions: a task assignment opens the
   // task detail, an @mention of a person opens the DM thread (the Team sidebar
@@ -1139,7 +1200,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       window.removeEventListener("keydown", onKey);
     };
   }, []);
-  // Cmd+/ pops the keyboard-shortcuts cheat-sheet (Conductor parity). Also
+  // Cmd+/ pops the keyboard-shortcuts cheat-sheet. Also
   // openable from the command palette via `aura:open-shortcuts`. Fires even
   // inside inputs — ⌘/ never types a literal slash, and you often want the
   // map while mid-composer. Pressing it again toggles the sheet closed.
@@ -1160,13 +1221,15 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       window.removeEventListener("keydown", onKey);
     };
   }, []);
-  // Conductor-parity roster shortcuts (also shown as hints in the project
-  // right-click menu, so they must be real):
+  // Roster shortcut (also shown as a hint in the project right-click menu,
+  // so it must be real):
   //   ⌘⇧N → new workspace "from…" (opens the create composer on the base
   //          picker for the active project)
-  //   ⌘,  → repository settings (Copies & agents pane for the active repo)
-  // Both defer to the same window events the menu items dispatch, so there's
-  // one code path. Skipped while typing so ⌘, / ⌘⇧N inside a field is inert.
+  // It defers to the same window event the menu item dispatches, so there's
+  // one code path. Skipped while typing so ⌘⇧N inside a field is inert.
+  // ⌘, is the keymap's "settings" action alone: it opens Settings, the way
+  // every Mac app does. It used to also fire here and jump past Settings to
+  // the repository's copies page.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
@@ -1180,13 +1243,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         e.preventDefault();
         window.dispatchEvent(
           new CustomEvent("aura:new-workspace", { detail: { createFrom: true } }),
-        );
-        return;
-      }
-      if (!e.shiftKey && e.key === "," && !typing) {
-        e.preventDefault();
-        window.dispatchEvent(
-          new CustomEvent("aura:open-settings", { detail: { pane: "copies" } }),
         );
       }
     }
@@ -1252,7 +1308,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     window.addEventListener("aura:open-op-log", open);
     return () => window.removeEventListener("aura:open-op-log", open);
   }, []);
-  // Conflicts dialog summon — fired by the StatusBar chip and the
+  // Conflicts dialog summon — fired by the header conflicts chip and the
   // /conflicts slash command.
   useEffect(() => {
     function open() {
@@ -1326,8 +1382,8 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // home the user can actually find — the Radar's Zones section, which fetches
   // its own. So this poll fetched, every four seconds, a list nothing rendered.
   // Strict-mode posture from ~/.aura/credentials.json. Long-cadence
-  // poll (120s) — the field rarely changes. Drives the StatusBar +
-  // SessionInfoCard pill, and the commit-time confirmation guard.
+  // poll (120s) — the field rarely changes. Drives the header Strict
+  // pill + SessionInfoCard pill, and the commit-time confirmation guard.
   const [strictMode, setStrictMode] = useState<StrictModeInfo["mode"]>("off");
   // Task #229 — installed `aura` CLI version vs. the version the shell
   // was built against. One-shot at boot + manual refresh via the chip
@@ -1387,16 +1443,14 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     markTourSeen();
     setTourOpen(false);
   }, []);
-  // Tour hand-off: the final "Start building" step fires this. Switch to the
-  // Build surface via the real section button (the same nav the tour's
-  // `activate` steps use), then — once the composer has mounted — drop focus
-  // into it so the user can type their first ask immediately. Double rAF gives
-  // the surface swap a frame to render the composer before we focus it.
+  // Tour hand-off: the final "Start building" step fires this. Leave
+  // whichever page the tour walked to (the dashboard, Trace) for the
+  // workspace's chat, then — once the composer has mounted — drop focus into
+  // it so the user can type their first ask immediately. Double rAF gives the
+  // surface swap a frame to render the composer before we focus it.
   useEffect(() => {
     const onFocusComposer = () => {
-      document
-        .querySelector<HTMLElement>('[data-tour="section-build"]')
-        ?.click();
+      leavePagesRef.current();
       requestAnimationFrame(() =>
         requestAnimationFrame(() =>
           window.dispatchEvent(new Event("aura:focus-composer")),
@@ -1458,6 +1512,17 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   const editor = useEditorStore();
   // Store-backed bottom-panel open state (persisted + workspace-scoped).
   const terminalOpen = editor.terminalPanelOpen;
+  // The terminal panel is the lower half of the right column, so with that
+  // column closed ⌘J brings it back with the panel open; otherwise it
+  // collapses or expands the panel.
+  const toggleTerminal = () => {
+    if (!reviewOpen) {
+      setReviewOpen(true);
+      editor.setTerminalPanelOpen(true);
+      return;
+    }
+    editor.toggleTerminalPanel();
+  };
   // Always-current editor handle — useEditorStore() returns a fresh
   // object each render, but its mutators (openManager, …) are stable
   // module-level fns. A ref lets the []-dep callbacks below call the
@@ -1538,7 +1603,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       .catch((e) => console.error("[manager] new chat failed:", e));
   }, [lastKnownRoot]);
   // Open Aura — THE orchestrator conversation, on its own window-owning
-  // surface. Behind the sidebar's Aura row, ⌘⌥A, and `aura:open-aura`.
+  // surface. Behind the sidebar's Aura row and `aura:open-aura`.
   //
   // Two things were wrong with the old behaviour, and they compounded.
   //
@@ -1550,84 +1615,99 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // tab the backend can't load.
   //
   // And it opened as a workpane tab, which put a conversation that spans every
-  // project inside one project's frame: that repo's file tree, its changed-file
-  // count, its agent strip. Aura gets its own page across the whole shell, the
-  // way Workspaces does.
+  // project inside one project's frame. It then had a page of its own; now it
+  // sits beside Home — the page that lists every project's workspaces — as a
+  // panel you can resize or fold away (components/home). Every Aura door
+  // (header pill, palette, menu, ⌥⇧⌘A, the end of a Trace question) arrives
+  // at the same place: Home, panel open, on the current conversation, cursor
+  // in its composer.
   //
-  // `root` is only an anchor for minting a fresh session; the brain's
-  // control-plane tools reach every project regardless of which one it holds.
+  // `root` is only an anchor for minting a fresh session; the brain's tools
+  // take an explicit project on every call.
+  //
+  // The cloud has a Home of its own — the organization's workspaces — and the
+  // panel docks beside that one too, so a door pressed in the cloud keeps you
+  // in the cloud instead of dropping you back on this machine.
+  const cloudHomeShowing = cloudCoversWork(cloud) && cloud.page === "home";
+  const homeShowing =
+    cloudHomeShowing ||
+    (wsOpen &&
+      wsView === "workspaces" &&
+      !cloudCoversWork(cloud) &&
+      !(project?.root && (!!tracePage || place === "tasks")));
+  const homeAura = useHomeAura({
+    enabled: AURA_MANAGER_ENABLED,
+    anchor: project?.root ?? lastKnownRoot(),
+    visible: homeShowing,
+    pickFolder: () => pickAndOpenFolderRef.current(),
+  });
+  // In the cloud, Aura is told it is looking at the organization's cloud — its
+  // workspaces, machines and people — not the laptop project it is filed under.
+  useAuraViewNote(homeAura.sid, cloudCoversWork(cloud));
+  const homeAuraRef = useRef(homeAura);
+  homeAuraRef.current = homeAura;
+  const homeShowingRef = useRef(homeShowing);
+  homeShowingRef.current = homeShowing;
+  // Home with Aura's panel open and focused. Idempotent: pressed while you
+  // are already there it just puts the cursor back in the composer.
+  const showAuraOnHome = useCallback(() => {
+    if (cloudPlaceNow().open) {
+      setCloudPage("home");
+      homeAuraRef.current.reveal();
+      return;
+    }
+    setTracePage(null);
+    setPlace(null);
+    setWsView("workspaces");
+    setWsOpen(true);
+    homeAuraRef.current.reveal();
+  }, []);
+  // The header pill: a door you press yourself, so pressed while Aura is
+  // already beside Home it takes you back to your work.
   const focusOrStartChat = useCallback(() => {
     if (!AURA_MANAGER_ENABLED) {
       editorRef.current.setActiveDashboard();
       return;
     }
-    // Already on the Aura page → the click takes you back to your work.
-    if (auraSidRef.current) {
-      setAuraSid(null);
+    // In the cloud, Home is the work — there is no page behind it to go back
+    // to — so the door only brings the panel up.
+    if (homeShowingRef.current && homeAuraRef.current.shown && !cloudPlaceNow().open) {
+      setWsOpen(false);
       return;
     }
-    setWsOpen(false);
-    setPlace(null);
-    // No project needed to get here. Aura's conversation is stored unqualified
-    // by repo, so if one exists it opens on its own terms — the folder picker
-    // is only for the true first run, where there is no conversation yet and
-    // nowhere to start one.
-    void resolveOrchestratorSession(currentRootRef.current ?? lastKnownRoot())
-      .then((sid) => {
-        if (sid) setAuraSid(sid);
-        else pickAndOpenFolderRef.current();
-      })
-      .catch((e) => console.error("[manager] open Aura failed:", e));
-  }, [lastKnownRoot]);
-  // Show the Aura conversation. Not `focusOrStartChat`, which is a TOGGLE:
-  // pressed while the chat is already up it takes you back to your work. That
-  // is right for a door you press yourself, and wrong for the end of an action
-  // that has just put an answer in there — half the time it would close the
-  // very thing it was meant to reveal.
+    showAuraOnHome();
+  }, [showAuraOnHome]);
+  // Show the Aura conversation at the end of an action that has just put an
+  // answer in there. Never a toggle — that would close the very thing it was
+  // meant to reveal.
   const revealAuraChat = useCallback(() => {
-    if (!AURA_MANAGER_ENABLED || auraSidRef.current) return;
-    setWsOpen(false);
-    setPlace(null);
-    void resolveOrchestratorSession(currentRootRef.current ?? lastKnownRoot())
-      .then((sid) => {
-        if (sid) setAuraSid(sid);
-      })
-      .catch((e) => console.error("[manager] reveal Aura failed:", e));
-  }, [lastKnownRoot]);
-  // "New thread" from inside the Aura surface — a fresh conversation that
-  // becomes the one the Aura row opens from now on. The old one isn't deleted;
-  // it just stops being the one behind the door.
-  const startNewAuraThread = useCallback(() => {
-    const root = currentRootRef.current ?? lastKnownRoot();
-    if (!root) return;
-    void startNewOrchestratorSession(root)
-      .then((sid) => setAuraSid(sid))
-      .catch((e) => console.error("[manager] new Aura thread failed:", e));
-  }, [lastKnownRoot]);
-  // Aura from anywhere: ⌘⌥A and the `aura:open-aura` event (command palette).
-  // ⌘⇧A is already taken system-wide by the menu-bar HUD, which the OS
-  // intercepts before the webview ever sees it — so the in-app door gets ⌥.
-  // Declared after `focusOrStartChat` so the dep array doesn't hit its TDZ.
+    if (!AURA_MANAGER_ENABLED) return;
+    showAuraOnHome();
+  }, [showAuraOnHome]);
+  // ⌥⇧⌘A and the toolbar switch: from anywhere it opens Home with the panel;
+  // on Home it shows or hides the panel.
+  const toggleAuraPanel = useCallback(() => {
+    const action = auraPanelAction(
+      AURA_MANAGER_ENABLED,
+      homeShowingRef.current,
+      homeAuraRef.current.shown,
+    );
+    if (action === "open-on-home") showAuraOnHome();
+    else if (action === "open") homeAuraRef.current.reveal();
+    else if (action === "close") homeAuraRef.current.setOpen(false);
+  }, [showAuraOnHome]);
+  const toggleAuraPanelRef = useRef(toggleAuraPanel);
+  toggleAuraPanelRef.current = toggleAuraPanel;
+  // Aura from anywhere: the `aura:open-aura` event (command palette, menu,
+  // deep links). Opens rather than toggles — a summon names a destination.
   useEffect(() => {
     function open() {
-      focusOrStartChat();
-    }
-    function onKey(e: KeyboardEvent) {
-      if (!(e.metaKey || e.ctrlKey) || !e.altKey || e.shiftKey) return;
-      // Option composes a different character on macOS (⌥A → "å"), and whether
-      // Cmd suppresses that is inconsistent across WebKit versions — so match
-      // the physical key too rather than trusting `key` alone.
-      if (e.key.toLowerCase() !== "a" && e.code !== "KeyA") return;
-      e.preventDefault();
-      focusOrStartChat();
+      if (!AURA_MANAGER_ENABLED) editorRef.current.setActiveDashboard();
+      else showAuraOnHome();
     }
     window.addEventListener("aura:open-aura", open);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("aura:open-aura", open);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [focusOrStartChat]);
+    return () => window.removeEventListener("aura:open-aura", open);
+  }, [showAuraOnHome]);
   // The "new session" action behind the + button, ⌘N, and aura:new-session.
   const newSessionAction = useCallback(() => {
     // Native chat gated off → no inline chat, no launcher modal; just reveal
@@ -1640,16 +1720,16 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   }, [startInlineChat]);
   newSessionActionRef.current = newSessionAction;
 
-  // Cmd+T (or "aura:open-tasks") opens the Tasks board. Cmd+Shift+T
-  // also works for users who learned the original binding. Standup
-  // stays on Cmd+Shift+U — leaving the un-shifted Cmd+U slot free for
-  // the platform's "view source" instinct. With a repo open the board
-  // lands as a first-class workpane tab (#266); without one we fall
-  // back to the legacy modal.
+  // Cmd+T (or "aura:open-tasks") opens the details panel on its Tasks
+  // tab — the tasks' home beside the work. Cmd+Shift+T reopens the last
+  // closed tab. Standup stays on Cmd+Shift+U — leaving the un-shifted
+  // Cmd+U slot free for the platform's "view source" instinct.
   useEffect(() => {
     function openTasks() {
       if (!projectRootRef.current) return;
-      goPlace("tasks");
+      leavePages();
+      setRightRailTab("tasks");
+      setReviewOpen(true);
     }
     function openStandup() {
       const root = projectRootRef.current;
@@ -1659,7 +1739,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     }
     // V.Y.4 — open the active huddle's screenshare as a workpane tab.
     // CallPanel auto-fires `aura:open-screenshare` the first time a
-    // new track shows up; the StatusBar pill's "View share" button
+    // new track shows up; the header call pill's "View share" button
     // fires the same event with the same payload. The workpane id is
     // the composite huddle key so re-shares inside the same huddle
     // re-use the existing tab.
@@ -1685,7 +1765,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           t.isContentEditable);
       if (inEditable) return;
       if (k === "t" && !e.shiftKey) {
-        // Cmd+T opens the Tasks board — what users intuitively try first.
+        // Cmd+T opens the tasks — what users intuitively try first.
         e.preventDefault();
         openTasks();
       } else if (k === "t" && e.shiftKey) {
@@ -1711,7 +1791,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       );
       window.removeEventListener("keydown", onKey);
     };
-  }, [editor, leavePages, goPlace]);
+  }, [editor, leavePages]);
 
   // W1.4 — plugin right-rail panels. Each declared panel maps to a
   // tab on the right rail; tab id encodes the plugin so click handlers
@@ -1724,8 +1804,8 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       title: p.title,
       entry: p.entry,
     }));
-  // W1.4 — plugin status pills. Pass through to StatusBar so it can
-  // render them after the built-in pill list.
+  // W1.4 — plugin status pills. Rendered in the work header after the
+  // built-in alerts.
   const pluginPillEntries = pluginStatusPills(pluginContribs.rows);
   // Deep-links carried in a task assignment (see the matching comment up by
   // the `aura:open-crew` listener).
@@ -1759,8 +1839,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     // Control used to hold. This said Tasks was Team, which was true back
     // when a board could only be reached as a tab under Team's umbrella;
     // after the merge it meant clicking Tasks lit Team, so the rail disagreed
-    // with the page for the whole time you were on it. BuildNav lights the
-    // Tasks row inside the group; this lights the group.
+    // with the page for the whole time you were on it.
     if (place) return "build";
     if (
       editor.activePlanBuilder ||
@@ -1928,6 +2007,8 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // `lib/recentProjects` — see the note there about why a project used to
   // leave this list without anyone deciding it should.
   const [recents, setRecents] = useState<string[]>(() => readRecents());
+  // Settings → Import hands over the folders it brought in.
+  useImportAdoption(setRecents);
 
   // Per-root worktree list, keyed by repo root. Populated lazily — only
   // the active project gets refreshed automatically; the rail also picks
@@ -1969,7 +2050,9 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     // right-click popover data off the launch-critical path and collapses N
     // serial calls into one parallel batch merged in a single state update.
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let started = false;
     const cancelIdle = onIdle(() => {
+      started = true;
       void Promise.all(
         missing.map((root): Promise<readonly [string, WorktreeRef[] | null]> =>
           api
@@ -2017,6 +2100,10 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     });
     return () => {
       cancelIdle();
+      // A read cancelled before it started never ran: hand its roots back, or
+      // they stay "in flight" for good and their repository shows no
+      // workspaces but its own checkout.
+      if (!started) for (const root of missing) worktreeInFlight.current.delete(root);
       if (retryTimer) clearTimeout(retryTimer);
     };
   }, [recents, project?.root, worktreesByRoot, worktreeRetry]);
@@ -2042,22 +2129,43 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       .finally(() => worktreeInFlight.current.delete(root));
   }, []);
 
+  // The projects the sidebar draws: one per REPOSITORY, not one per folder you
+  // opened. Two checkouts of the same repo answer `git worktree list` with the
+  // same fleet, so a remembered root for each drew the project twice — same
+  // name, same copy count, same rows — and neither copy was wrong, which is
+  // what made it hard to read. Folding here means every surface below counts
+  // the same set.
+  const projectFleets = useMemo(
+    () =>
+      foldFleets(
+        recents.length ? recents : project?.root ? [project.root] : [],
+        worktreesByRoot,
+      ),
+    [recents, project?.root, worktreesByRoot],
+  );
+  // The projects to list, with the agent-made copies that leaked into recents
+  // dropped. Never empties the list: when every remembered root is a managed
+  // copy, the fold's own answer is better than nothing to click.
+  const visibleFleets = useMemo(() => {
+    const kept = projectFleets.filter((f) => !isManagedWorktree(f.root));
+    return kept.length > 0 ? kept : projectFleets;
+  }, [projectFleets]);
+
   // Roster badges — per-worktree diff + PR pills. Each group falls back to a
   // synthetic root row (matching WorkspaceRoster) so a plain repo still gets
-  // its own diff.
-  const rosterBadgeGroups = useMemo(() => {
-    const roots = recents.length ? recents : project?.root ? [project.root] : [];
-    return roots.map((root) => {
-      const wts = worktreesByRoot[root] ?? [];
-      return {
-        root,
-        worktrees: (wts.length
-          ? wts
-          : [{ path: root, branch: "" }]
+  // its own diff. Keyed off the folded projects, so a repo opened twice is
+  // diffed once rather than having every one of its copies walked twice.
+  const rosterBadgeGroups = useMemo(
+    () =>
+      projectFleets.map((fleet) => ({
+        root: fleet.root,
+        worktrees: (fleet.worktrees.length
+          ? fleet.worktrees
+          : [{ path: fleet.root, branch: "" }]
         ).map((w) => ({ path: w.path, branch: w.branch })),
-      };
-    });
-  }, [recents, project?.root, worktreesByRoot]);
+      })),
+    [projectFleets],
+  );
   const rosterBadges = useWorktreeBadges(rosterBadgeGroups);
 
   // Warm the PR list cache as soon as a repo opens, before the user
@@ -2483,6 +2591,34 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     return () => un?.();
   }, []);
 
+  // A changed file opened from the rail (Changes or Review): a diff by
+  // default, the plain editor for "edit", a side-by-side split for
+  // "diff-new-tab". One handler so both tabs open a file the same way.
+  const openChangedFile = useCallback(
+    (p: string, mode: "diff" | "diff-new-tab" | "edit") => {
+      // With a machine in front the file is the machine's, and opens as one
+      // of its tabs — the laptop's editor is behind it.
+      if (remoteEntry && project) {
+        openOnMachine(
+          mode === "edit"
+            ? { kind: "file", path: p }
+            : { kind: "diff", sha: null, path: underRoot(project.root, p) },
+        );
+        return;
+      }
+      if (mode === "diff-new-tab") {
+        editor
+          .openFileSplit(p, "row")
+          .catch((e) => console.error("open split failed:", e));
+        return;
+      }
+      editor
+        .open(p, { defaultView: mode === "edit" ? "edit" : "diff" })
+        .catch((e) => console.error("open failed:", e));
+    },
+    [editor, remoteEntry, project],
+  );
+
   // Wave B4 — pre-flight commit gate. Returns true to let the commit
   // proceed, false to abort. When strict mode is on AND the in-session
   // heuristic finds tool_uses without a matching intent, surface the
@@ -2692,6 +2828,9 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           /** The composer's model chip, applied to that chat. */
           model?: SelectedModel | null;
           effort?: ReasoningEffort | null;
+          /** An Aura chat already made for the worktree (one a cloud
+           *  workspace's conversation was brought into), opened on arrival. */
+          sessionId?: string;
           /** Agent tabs to place, for launches that DO spawn agents (the
            *  `/launch` verb's fleet). The composer's own launches leave this
            *  empty — their surface is Aura chat. */
@@ -2742,6 +2881,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
             for (const tab of detail?.tabs ?? []) {
               editorRef.current.openAgent({ ...tab, repoRoot: wt });
             }
+            if (detail?.sessionId) focusAmbientManager(wt, detail.sessionId, null);
             const mission = detail?.mission?.trim();
             if (!mission) return;
             // No agents were spawned — so what the copy opens into is the
@@ -3435,6 +3575,20 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     },
     [leavePages, loadProjectAt],
   );
+  // A project chip under an Aura turn: go to the workspace the turn made, or
+  // to the project it acted on (lib/turnProjects). Both are on this machine,
+  // so a chip pressed in the panel beside cloud Home leaves the cloud first —
+  // otherwise its page would go on covering the project you asked for.
+  useEffect(() => {
+    function onGo(e: Event) {
+      const d = (e as CustomEvent<GoProjectDetail>).detail;
+      if (!d?.root) return;
+      if (cloudPlaceNow().open) leaveCloud();
+      goToProject(d.workspace ?? d.root);
+    }
+    window.addEventListener(GO_PROJECT_EVENT, onGo);
+    return () => window.removeEventListener(GO_PROJECT_EVENT, onGo);
+  }, [goToProject]);
 
   // Walking into a club — several places in one window, which is what the
   // rail's "Side by side" row asks for. The store has held N clubs over any
@@ -3601,9 +3755,14 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       ) {
         return;
       }
-      const roots = recents.filter((root) => !isManagedWorktree(root));
+      // One stop per project: cycling used to visit a repo twice when two of
+      // its checkouts were remembered, and neither stop looked different.
+      const roots = visibleFleets.map((f) => f.root);
       if (roots.length < 2 || !project?.root) return;
-      const current = Math.max(0, roots.indexOf(project.root));
+      const current = Math.max(
+        0,
+        roots.indexOf(fleetRootFor(visibleFleets, project.root)),
+      );
       const delta = event.key === "ArrowDown" ? 1 : -1;
       const next = roots[(current + delta + roots.length) % roots.length];
       if (!next || next === project.root) return;
@@ -3614,7 +3773,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [recents, project?.root, loadProjectAt]);
+  }, [visibleFleets, project?.root, loadProjectAt]);
 
   // A session handed over from the console.
   //
@@ -3725,10 +3884,18 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           setSidebarOpen((v) => !v);
           return;
         case "toggle_terminal":
-          editor.toggleTerminalPanel();
+          toggleTerminal();
           return;
         case "toggle_review":
           setReviewOpen((v) => !v);
+          return;
+        case "go_home":
+          // The sidebar's Home row, by keyboard: leave whatever page is up
+          // and open the workspace list.
+          leavePages();
+          window.dispatchEvent(
+            new CustomEvent("aura:open-workspaces", { detail: { open: true } }),
+          );
           return;
         case "run_project": {
           // Run lives in the terminal panel, and the panel only exists while
@@ -3772,13 +3939,23 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         case "open_aura":
           window.dispatchEvent(new CustomEvent("aura:open-aura"));
           return;
+        case "toggle_aura_panel":
+          toggleAuraPanelRef.current();
+          return;
         case "workspaces":
           // Unscoped on purpose — a keyboard/palette summon has no project in
           // mind, so it opens on the whole fleet.
           window.dispatchEvent(new CustomEvent("aura:open-workspaces"));
           return;
+        case "machines":
+          window.dispatchEvent(new CustomEvent("aura:open-machines"));
+          return;
         case "tasks_board": {
-          if (projectRootRef.current) goPlace("tasks");
+          // The details panel's Tasks tab, with the panel open.
+          if (!projectRootRef.current) return;
+          leavePages();
+          setRightRailTab("tasks");
+          setReviewOpen(true);
           return;
         }
         case "open_prs":
@@ -3821,6 +3998,29 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         case "aura_ask":
           setAskOpen(true);
           return;
+        case "archive_workspace": {
+          // ⌘⇧A. A copy leaves the sidebar (its branch and files stay); the
+          // project's own folder is archived from the repository's menu.
+          const target = archiveTarget(currentRootRef.current, worktreesByRoot);
+          if (target.kind === "none") {
+            toast.danger("No workspace selected to archive");
+            return;
+          }
+          if (target.kind === "main") {
+            toast.warning(
+              "This is the repository's own folder",
+              "Only a copy can be archived here. To hide the whole repository, use Archive repository in its menu.",
+            );
+            return;
+          }
+          if (!isWorkspaceArchived(target.path)) setWorkspaceArchived(target.path, true);
+          return;
+        }
+        case "add_project":
+          // ⌥⌘A. The sidebar opens its add-project menu; with the sidebar
+          // hidden there is no menu to open, so the folder dialog stands in.
+          if (!requestAddProject()) pickAndOpenFolder();
+          return;
         case "plan_builder":
           editor.openPlanBuilder();
           return;
@@ -3836,6 +4036,14 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           // Same folder picker the workspace rail's `+` tile uses.
           pickAndOpenFolder();
           return;
+        case "open_in_app":
+        case "open_in_app_back": {
+          // ⌥⌘O, held. Only a folder on this computer opens in an app here; a
+          // checkout on a machine has nothing local to open.
+          const root = currentRootRef.current;
+          stepAppSwitcher(root && !machineIdForRoot(root) ? root : null, id === "open_in_app" ? 1 : -1);
+          return;
+        }
         // AURA-1296 — keyboard + chat ergonomics. The moves live in
         // lib/tabNav.ts and lib/forkFromTab.ts; this only routes.
         case "next_tab":
@@ -3849,6 +4057,9 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           return;
         case "fork_chat":
           void forkActiveChat(editor);
+          return;
+        case "copy_chat_transcript":
+          void copyActiveChatTranscript(editor);
           return;
         case "toggle_changes":
           // The Changes tab of the right rail. Already showing → hide the
@@ -3883,7 +4094,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         }
       }
     },
-    [editor, runCli, runHandover, pickAndOpenFolder, reviewOpen, rightRailTab],
+    [editor, runCli, runHandover, pickAndOpenFolder, reviewOpen, rightRailTab, leavePages, worktreesByRoot],
   );
 
   useAppActions(dispatchAction);
@@ -3915,7 +4126,8 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         // action off the footer and tell you there was nothing to look at.
         const [stats, impacts, conflicts, astConflicts, usageSum, intentCount, auditCount] =
           await Promise.all([
-            api.gitDiffStats(project!.root, sinceBase).catch(() => null),
+            // The checkout in front: the machine's when one is focused.
+            placeDiffStats(project!.root, sinceBase).catch(() => null),
             fetchImpacts(project!.root).catch(() => null),
             fetchConflicts(project!.root).catch(() => null),
             fetchAstConflicts(project!.root).catch(() => null),
@@ -3948,7 +4160,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       window.clearInterval(id);
       window.removeEventListener("aura:git-changed", onGitChanged);
     };
-  }, [project, windowVisible]);
+  }, [project, windowVisible, remotePlaces.focusedKey]);
 
   // Task #229 — one-shot Aura CLI version check on shell startup. The
   // chip popover wires `onRefreshCliVersion` to `refreshCliVersion`
@@ -3979,7 +4191,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
 
   // Strict-mode posture poll. Long cadence — the field rarely changes
   // (only when the human edits ~/.aura/credentials.json). On-load read
-  // gives the StatusBar pill an answer before the first 120s window.
+  // gives the header pill an answer before the first 120s window.
   useEffect(() => {
     if (!project) return;
     let cancelled = false;
@@ -4017,8 +4229,8 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         // The bundled "Get Started" sample (Recipe Box) is Aura's Quickstart:
         // seeded on first launch (the Rust command is idempotent — it early-
         // returns once the folder exists) and pinned into the project list ONCE,
-        // so it stays a permanent, one-click project in the switcher/roster the
-        // way Conductor keeps a Quickstart around. A genuine first run — no
+        // so it stays a permanent, one-click project in the switcher/roster —
+        // a quickstart that is always there. A genuine first run — no
         // pinned window, no saved workspace — boots straight onto it with its
         // live sample chat focused, which is what replaces the old onboarding
         // walkthrough: real content instead of a guided tour. Returning users
@@ -4178,14 +4390,22 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // the safest middle ground per the plan: surfaces missed intents
   // without writing on the user's behalf. Stop on unmount/switch so
   // the registry doesn't leak observers across roots. Polls status
-  // every 30s so the StatusBar chip reflects backend changes (e.g.
+  // every 30s so the header chip reflects backend changes (e.g.
   // user just started ollama).
   useEffect(() => {
     if (!project) return;
     const root = project.root;
     let cancelled = false;
+    // The AI picked in Settings › Change reasons (absent → automatic). Not
+    // passing it left every launch on automatic until that page was opened.
+    let preferred: string | null = null;
+    try {
+      preferred = localStorage.getItem("aura.aurawatch.backend");
+    } catch {
+      /* storage unavailable → automatic */
+    }
     api
-      .aurawatchStart(root, auraWatchMode)
+      .aurawatchStart(root, auraWatchMode, preferred)
       .then((s) => {
         if (cancelled) return;
         setAuraWatchBackend(s.backend);
@@ -4239,13 +4459,18 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     })();
   }, [project]);
 
+  // Subscribed ONCE for the life of the shell, reading the editor through its
+  // ref. Keyed on `editor` this re-subscribed on nearly every state change, and
+  // a cleanup that ran before the async `listen` resolved found nothing to
+  // remove — so every workspace switch left about four more handlers behind
+  // that were never taken off. With a handful of workspaces open each file an
+  // agent wrote ran `reloadFromDisk` dozens of times over.
   useEffect(() => {
+    let alive = true;
     let off: (() => void) | null = null;
-    (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
-      const handle = await listen<{ path: string; kind: string }>(
-        "fs:changed",
-        (ev) => {
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<{ path: string; kind: string }>("fs:changed", (ev) => {
           const path = ev.payload?.path;
           if (!path) return;
           // A change on this disk under a project that is standing in a
@@ -4256,15 +4481,21 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           // Only refresh files we have open — the FileTree picks up
           // creates/removes via its own poll, so we don't need to fire
           // a tree-wide refresh here (which would be jittery).
-          editor.reloadFromDisk(path).catch(() => {});
-        },
-      );
-      off = handle;
-    })();
+          editorRef.current.reloadFromDisk(path).catch(() => {});
+        }),
+      )
+      .then((unlisten) => {
+        if (alive) off = unlisten;
+        else unlisten();
+      })
+      .catch(() => {
+        /* no watcher in this host — buffers reload on focus instead */
+      });
     return () => {
-      if (off) off();
+      alive = false;
+      off?.();
     };
-  }, [editor]);
+  }, []);
 
   // The first frame of the app, both ways it can go. Neither had been given
   // the treatment every other surface in here got: the wait was a lowercase
@@ -4371,7 +4602,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   function runSlash(cmd: ReturnType<typeof findSlash>, extra: string) {
     if (!cmd) return;
     if (cmd.kind === "ui") {
-      if (cmd.target === "toggle_terminal") editor.toggleTerminalPanel();
+      if (cmd.target === "toggle_terminal") toggleTerminal();
       if (cmd.target === "claude_resume") setResumeOpen(true);
       if (cmd.target === "knowledge") setKnowledgeOpen(true);
       if (cmd.target === "remote") setRemoteOpen(true);
@@ -4551,6 +4782,18 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       .finally(() => setTraceAskSending(false));
   };
 
+  // The sidebar row that names where the window stands. Full pages win over
+  // whatever tab is open underneath them, the same precedence the work
+  // surface draws with.
+  const sidebarDestination: AppDestination =
+    place === "tasks"
+      ? "dashboard"
+      : wsOpen
+        ? "home"
+        : adeSection === "trace"
+          ? "trace"
+          : null;
+
   const traceActions: TraceActions = {
     onOverview: () => goTrace({ kind: "sessions", view: "overview" }),
     onSessions: () => goTrace({ kind: "sessions", view: "sessions" }),
@@ -4559,7 +4802,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
     onReview: () => askAura("review", safetyCheckPrompt()),
     onChecks: () => window.dispatchEvent(new CustomEvent("aura:open-checks")),
     onImpacts: () => goTrace({ kind: "tool", tool: "impacts" }),
-    onProve: () => askAura("goals", proveGoalsPrompt()),
+    onProve: () => goTrace({ kind: "prove" }),
     onRewind: () => goTrace({ kind: "tool", tool: "rewind" }),
     onAttest: () => goTrace({ kind: "tool", tool: "attest" }),
     onCodeMap: () => goTrace({ kind: "graph" }),
@@ -4583,12 +4826,49 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // every other surface first. It renders as its own layer over this one
   // instead, so a box can cover the fleet page it was opened from and give it
   // straight back when you leave.
-  const activePage = auraSid ? (
-    <AuraSurface
-      asPage
-      sessionId={auraSid}
-      onClose={() => setAuraSid(null)}
-      onNewThread={startNewAuraThread}
+  // Every open repository as Home and the Dashboard list it, and the one way
+  // both of them go to a workspace.
+  const workspaceProjects = visibleFleets.map(({ root }) => ({
+    id: root,
+    name: root.split("/").pop() || root,
+    emoji: workspaceCustomization[root]?.emoji,
+    letter: tileLetter(root),
+    accent: accentForRoot(root),
+  }));
+  const openWorkspaceAt = (p: string) => {
+    if (p !== project.root) loadProjectAt(p).catch((e) => console.error("switch failed:", e));
+  };
+  // Aura's panel and its switch, docked beside whichever Home is showing —
+  // this machine's or the cloud's. Only one of the two is ever mounted.
+  const auraPanelToggle = AURA_MANAGER_ENABLED ? (
+    <AuraPanelToggle shown={homeAura.shown} onToggle={toggleAuraPanel} />
+  ) : undefined;
+  const auraPanel = (
+    <HomeAuraPanel
+      sessionId={homeAura.sid}
+      resolving={homeAura.resolving}
+      hasAnchor={homeAura.hasAnchor}
+      focusNonce={homeAura.focusNonce}
+      onNewChat={homeAura.newThread}
+      onOpenSession={homeAura.openSession}
+      onCollapse={() => homeAura.setOpen(false)}
+      onOpenProject={pickAndOpenFolder}
+    />
+  );
+  const activePage = cloudCoversWork(cloud) ? (
+    // Wrapped on every cloud page, shown only on Home, so moving between the
+    // cloud's pages never remounts the page and refetches what it holds.
+    <HomeAuraLayout
+      shown={cloudHomeShowing && homeAura.shown}
+      width={homeAura.width}
+      onResize={homeAura.setWidth}
+      home={
+        <CloudPlacePage
+          repoRoot={project.root ?? ""}
+          toolbarTrailing={auraPanelToggle}
+        />
+      }
+      panel={auraPanel}
     />
   ) : tracePage && project.root ? (
     <TracePage
@@ -4603,39 +4883,45 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
       onClose={() => setTracePage(null)}
     />
   ) : place === "tasks" && project.root ? (
-    // One destination, four lenses, ONE rail — see tasks/TasksPlace. This
-    // branch used to fork on which surface owned the lens and mount the rail
-    // for only two of them, because the crew surface stood up a panel of its
-    // own on the same edge. It doesn't any more, so the fork is gone with it.
+    // The Dashboard — see tasks/TasksPlace.
     <TasksPlace
       repoRoot={project.root}
       lens={workLens}
       onLens={chooseWorkLens}
       onClose={() => setPlace(null)}
-    />
-  ) : wsOpen && project.root ? (
-    <WorkspacesSurface
-      asPage
-      onClose={() => setWsOpen(false)}
-      initialProjectId={wsFilter}
-      activePath={project.root}
-      worktreesByRoot={worktreesByRoot}
-      badgeByPath={rosterBadges}
-      onAddWorkspace={pickAndOpenFolder}
-      onOpen={(p) => {
-        if (p !== project.root)
-          loadProjectAt(p).catch((e) => console.error("switch failed:", e));
+      dashboard={{
+        projects: workspaceProjects,
+        worktreesByRoot,
+        badgeByPath: rosterBadges,
+        activePath: project.root,
+        onOpen: openWorkspaceAt,
+        onAddWorkspace: pickAndOpenFolder,
       }}
-      projects={(recents.length
-        ? recents.filter((r) => !isManagedWorktree(r))
-        : [project.root]
-      ).map((root) => ({
-        id: root,
-        name: root.split("/").pop() || root,
-        emoji: workspaceCustomization[root]?.emoji,
-        letter: tileLetter(root),
-        accent: accentForRoot(root),
-      }))}
+    />
+  ) : wsOpen && project.root && wsView === "machines" ? (
+    <MachinesSurface repoRoot={project.root} onClose={() => setWsOpen(false)} />
+  ) : wsOpen && (project.root || homeAura.shown) ? (
+    // Home, with Aura's panel docked on the right when it is open. With no
+    // project at all Home is an empty list and the panel is the way in.
+    <HomeAuraLayout
+      shown={homeAura.shown}
+      width={homeAura.width}
+      onResize={homeAura.setWidth}
+      home={
+        <WorkspacesSurface
+          asPage
+          onClose={() => setWsOpen(false)}
+          initialProjectId={wsFilter}
+          activePath={project.root ?? ""}
+          worktreesByRoot={worktreesByRoot}
+          badgeByPath={rosterBadges}
+          onAddWorkspace={pickAndOpenFolder}
+          onOpen={openWorkspaceAt}
+          projects={workspaceProjects}
+          toolbarTrailing={auraPanelToggle}
+        />
+      }
+      panel={auraPanel}
     />
   ) : null;
 
@@ -4663,8 +4949,10 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
   // The sidebar stays — it is the roster of every project plus the nav row you
   // used to get here, and that is navigation, not chrome.
   const pageOwnsWindow =
-    !!auraSid ||
+    cloudCoversWork(cloud) ||
+    (wsOpen && homeAura.shown) ||
     (!!project.root && (wsOpen || !!tracePage || !!place));
+  const workNames = workHeaderNames(project.root, project.name, worktreesByRoot);
 
 
   return (
@@ -4684,134 +4972,160 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         // room, and the NavRail toggle (⌘B) always wins thereafter.
         sidebarOpen={sidebarOpen}
         reviewOpen={reviewOpen && !pageOwnsWindow}
+        // Where you are, then the panel controls. Pages draw their own
+        // header, so the work column only carries this one around your work.
+        workHeader={
+          pageOwnsWindow
+            ? undefined
+            : (sidebarShown) => (
+                <WorkHeader
+                  // A machine in front is its own workspace: its name is the
+                  // title and its details open from it, not the local checkout's.
+                  repo={remoteEntry ? null : workNames.repo}
+                  repoRoot={remoteEntry ? null : workNames.repoRoot}
+                  title={remoteEntry ? <RemoteHeaderTitle /> : workNames.workspace}
+                  sidebarOpen={sidebarShown}
+                  fullscreen={fullscreen}
+                  onShowSidebar={() => setSidebarOpen(true)}
+                  actions={
+                    <>
+                      <CallStatusPill suppressed={sidebarShown} />
+                      <HeaderAlerts
+                        auditUnacked={auditUnacked}
+                        conflictsOpen={astConflictsOpen}
+                        // The accountability feed — every AI change on the
+                        // team, who made it, why, and whether it's sealed.
+                        onClickAudit={() => goTrace({ kind: "sessions", view: "team" })}
+                        onClickConflicts={() => setConflictsOpen(true)}
+                        pluginPills={pluginPillEntries.map((p) => ({
+                          pluginId: p.pluginId,
+                          id: p.id,
+                          render: p.render,
+                        }))}
+                        onClickPluginPill={(pluginId, pillId) => {
+                          dispatchPluginPillClick(pluginId, pillId);
+                          window.dispatchEvent(
+                            new CustomEvent("aura:plugin-pill-click", {
+                              detail: { pluginId, pillId },
+                            }),
+                          );
+                        }}
+                      />
+                      {/* Self-hiding: the Capture-off nudge and Strict. Both are
+                          about this laptop's checkout, so a machine in front
+                          leaves them out. */}
+                      {!remoteEntry && (
+                        <StatusPills
+                            repoRoot={project.root}
+                            onFocusChat={focusOrStartChat}
+                            auraDoor={AURA_MANAGER_ENABLED}
+                            onOpenGit={() => setSourceControlOpen(true)}
+                            onOpenSettings={() => setSettingsOpen(true)}
+                            onOpenStrict={() => {
+                              // Strict is a major feature — deep-link to the
+                              // Security & Policy page (its real home), not a
+                              // random settings pane.
+                              window.dispatchEvent(
+                                new CustomEvent("aura:open-settings", {
+                                  detail: { pane: "policy" },
+                                }),
+                              );
+                              setSettingsOpen(true);
+                            }}
+                            onOpenCapture={() => {
+                              // Deep-link to the Capture pane — one button there
+                              // installs the no-MCP git hooks for this repo.
+                              window.dispatchEvent(
+                                new CustomEvent("aura:open-settings", {
+                                  detail: { pane: "capture" },
+                                }),
+                              );
+                              setSettingsOpen(true);
+                            }}
+                        />
+                      )}
+                      {/* The checkout's branch — the machine's when one is in
+                          front, since the switcher reads through `lib/place`. */}
+                      <HeaderBranch
+                        repoRoot={project.root}
+                        dirty={(diffStats?.changed_files ?? 0) > 0}
+                      />
+                    </>
+                  }
+                  panels={{
+                    repoRoot: project.root,
+                    reviewOpen,
+                    terminalOpen,
+                    onToggleReview: () => setReviewOpen((v) => !v),
+                    onToggleTerminal: toggleTerminal,
+                  }}
+                />
+              )
+        }
         // ADE v2 runs the sidebar full-height to y=0 and hands it a header
         // zone (traffic-lights + nav + project switcher + search) so the
         // work-surface header starts right of the sidebar width.
-        sidebarHeader={
-          <SidebarHeader
-              fullscreen={fullscreen}
-              onBack={wsGoBack}
-              onForward={wsGoForward}
-              canBack={canWsBack}
-              canForward={canWsForward}
-              onToggleSidebar={() => setSidebarOpen((v) => !v)}
-              onOpenPalette={() => setPaletteOpen(true)}
-              onOpenSettings={() =>
-                window.dispatchEvent(new CustomEvent("aura:open-settings"))
-              }
-            projectLabel={project.name}
-          />
-        }
         sidebar={
-          <AdeSidebar
-            activeSection={adeSection}
-            // Clicking a destination goes to it. `adeSection` above is
-            // derived from the focused pane, so without this the rail could
-            // only ever REPORT where you were: clicking Trace lit the row and
-            // swapped the rail's list while the work surface kept showing
-            // whatever was already there. This opens the section's home, and
-            // `adeSection` then comes back around agreeing.
-            //
-            // Build is absent on purpose — Aura / Workspaces / Tasks are its
-            // rows and each carries its own door.
-            //
-            // `leavePages` first, for the reason it documents: Aura,
-            // Workspaces and Mission Control are full pages layered OVER the
-            // workpane, so opening a tab underneath one of them lands a tab
-            // you cannot see. Asking for somewhere else is leaving here.
-            onNavigate={(s) => {
-              if (s === "build") return;
+          cloud.open ? (
+            <CloudSidebar
+              fullscreen={fullscreen}
+              onHide={() => setSidebarOpen((v) => !v)}
+            />
+          ) : (
+          <AppSidebar
+            repoRoot={project.root}
+            fullscreen={fullscreen}
+            active={sidebarDestination}
+            onHide={() => setSidebarOpen((v) => !v)}
+            onBack={wsGoBack}
+            onForward={wsGoForward}
+            canBack={canWsBack}
+            canForward={canWsForward}
+            // Dashboard is the task board: every project's tasks on the
+            // stage board.
+            onDashboard={() => goToWork("list")}
+            onHome={() => {
               leavePages();
-              if (s === "trace") goTrace({ kind: "sessions", view: "overview" });
+              window.dispatchEvent(
+                new CustomEvent("aura:open-workspaces", {
+                  detail: { open: true },
+                }),
+              );
             }}
-            workspaceKey={project.root}
-            // Only what Trace actually holds. This used to add
-            // `conflictsCount` — merge conflicts in your working tree —
-            // so the rail badged Trace with 5 and the section had no row
-            // about any of them. Conflicts already have a home, and it is
-            // not this one: the review header names them and the Changes
-            // tab resolves them.
+            onCreate={() =>
+              window.dispatchEvent(
+                new CustomEvent("aura:new-workspace", {
+                  detail: { createFrom: true },
+                }),
+              )
+            }
+            onSearch={() => setPaletteOpen(true)}
+            onTrace={() => goTrace({ kind: "sessions", view: "overview" })}
+            // Only what Trace actually holds — merge conflicts have their own
+            // home in the review header and the Changes tab.
             traceCount={impactsCount}
-            repoRoot={project?.root ?? ""}
             whatsNew={whatsNew?.note}
             onDismissWhatsNew={dismissWhatsNew}
             onWhatsNewCta={takeReleaseCta}
-            buildRows={
-              <BuildNav
-                repoRoot={project.root}
-                // The orchestrator's permanent door. `focusOrStartChat`
-                // reopens the workspace's existing conversation and only
-                // starts a new one when there is none — the row must not
-                // spawn a fresh thread every time it is clicked.
-                onOpenAura={focusOrStartChat}
-                // Each row is a page, so the one you're standing in is the
-                // one that's lit — and when you're standing in none of them
-                // (a file, a terminal, an agent) none of them is. Workspaces
-                // used to be the fallback, so the rail claimed you were on
-                // the fleet page for the whole of an ordinary editing
-                // session. A manager session still open as a workpane tab
-                // (a project chat, a resumed thread) counts as Aura — the
-                // user is in Aura either way.
-                //
-                // Full pages are tested FIRST. A manager session left open as
-                // a workpane tab is a tab; Mission Control and Workspaces are
-                // pages drawn OVER that tab. Testing `activeManagerId` before
-                // them lit "Aura" while Mission Control's board filled the
-                // screen — the rail naming a room you had already left, on the
-                // strength of a tab nobody could see.
-                activeRow={
-                  auraSid
-                    ? "aura"
-                    : place === "tasks"
-                      ? "work"
-                      : wsOpen
-                        ? "workspaces"
-                        : editor.activeManagerId
-                          ? "aura"
-                          : null
-                }
-                onSelectWorkspaces={() => editor.closeAutomations(project.root)}
-                // No `projectId` in the detail — the row heads the whole
-                // roster, so its door opens on every project. The per-project
-                // count chip inside the roster keeps its scoped deep-link.
-                onOpenWorkspaces={() =>
-                  window.dispatchEvent(new CustomEvent("aura:open-workspaces"))
-                }
-                // No lens in the detail: the row means "take me to the
-                // work", and the work reopens on the drawing you left.
-                onOpenWork={() => goToWork()}
-              />
+            // Account-level readouts beside the plan badge: the provider
+            // usage ring, and the CLI version only when it needs attention.
+            footerStatus={
+              <>
+                <ClaudeUsageRing variant="footer" />
+                {cliVersion &&
+                  (cliVersion.status === "outdated" ||
+                    cliVersion.status === "missing" ||
+                    cliVersion.shadowing) && (
+                    <CliVersionChip
+                      info={cliVersion}
+                      onRefresh={refreshCliVersion}
+                      onUpdate={updateCli}
+                    />
+                  )}
+              </>
             }
-            buildBody={
-              // Your projects, in every section and on every page.
-              //
-              // This used to blank out on Aura, Workspaces and Mission
-              // Control, on the reasoning that a page bringing its own left
-              // column shouldn't have the roster stacked beside it. The
-              // reasoning was right about the collision and wrong about the
-              // fix: opening Mission Control made every project you have
-              // disappear, so the one list that answers "what am I working
-              // on" was missing from exactly the pages that span all of them.
-              //
-              // The collision is solved on the other axis instead — a page's
-              // own panel opens on the RIGHT now, where the Changes and Files
-              // rails open (see PlacePage, CrewWorkspace). Left edge: the
-              // app. Right edge: this surface. Nothing has to be taken away.
-              //
-              // Build = workspace roster only, per the mockup. The file
-              // tree + git changes live on the RIGHT rail (Files /
-              // Changes tabs) — see the reviewPanel below. `ade-sec-fill`
-              // makes it span the panel edges like Team/Plan; the `px-1.5`
-              // re-adds the canonical 6px gutter so the nav + roster land
-              // at the same 14px inset (and inset active pills) as
-              // Trace/Tasks/Pages, not flush to the panel edge.
-              <div className="ade-build ade-sec-fill px-1.5">
-                {/* Aura / Workspaces / Mission Control are `buildRows` above
-                    — they live in the sidebar's one nav list, not in a band
-                    of their own here. The "Projects" break header + its
-                    sort/new/fold-all controls live inside WorkspaceRoster,
-                    co-located with the collapse + sort state they drive. */}
-
+          >
+              <div className="ui-roster">
                 {/* Who is working on what, ABOVE the roster. It went below
                     first, on the reasoning that projects are the subject and
                     people are the addition — and below a roster of eleven
@@ -4835,18 +5149,20 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
                 />
 
                 <WorkspaceRoster
-                  workspaces={(recents.length
-                    ? recents.filter((r) => !isManagedWorktree(r))
-                    : [project.root]
-                  ).map((root) => ({
-                    id: root,
-                    letter: tileLetter(root),
-                    emoji: workspaceCustomization[root]?.emoji,
-                    active: !clubState.activeClubId && root === project.root,
-                    accent: accentForRoot(root),
-                    worktrees: worktreesByRoot[root] ?? [],
+                  workspaces={visibleFleets.map((fleet) => ({
+                    id: fleet.root,
+                    letter: tileLetter(fleet.root),
+                    emoji: workspaceCustomization[fleet.root]?.emoji,
+                    // The project you are in, whichever of its copies you
+                    // opened — the open checkout is a row inside this fleet.
+                    active:
+                      !clubState.activeClubId &&
+                      fleetHoldsRoot(fleet, project.root),
+                    accent: accentForRoot(fleet.root),
+                    worktrees: fleet.worktrees,
                   }))}
                   activePath={project.root}
+                  pageUp={sidebarDestination !== null}
                   badgeByPath={rosterBadges}
                   onAddProject={pickAndOpenFolder}
                   onOpenAllCopies={(projectId) =>
@@ -4899,9 +5215,16 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
                     // Destructive — deletes the managed worktree checkout
                     // on disk via `worktree_remove_managed`. Confirm, then
                     // re-fetch the root's worktree list so the row drops.
+                    // A separate repository inside the copy goes with it, so
+                    // name any whose work would be lost.
+                    const nestedLoss = nestedLossLines(
+                      await api.nestedReposDirty(path).catch(() => []),
+                    );
                     const ok = await askConfirm({
                       title: "Remove this worktree?",
-                      body: `${path}\n\nThe checkout is deleted from disk. Commits on its branch that you haven't merged are NOT removed.`,
+                      body:
+                        `${path}\n\nThe checkout is deleted from disk. Commits on its branch that you haven't merged are NOT removed.` +
+                        (nestedLoss.length > 0 ? `\n\n${nestedLoss.join("\n")}` : ""),
                       confirmLabel: "Remove",
                       tone: "danger",
                     });
@@ -4925,36 +5248,32 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
                   }}
                 />
               </div>
-            }
-            /* No trace body. The rail under the nav is the project roster and
-                only ever that.
-
-                Trace used to hand it a body of its own — a 232px column of ten
-                destinations — so the widest column on screen changed its
-                subject every time you changed destination, and your projects
-                were reachable from exactly one place. Trace navigates from its
-                own page now: its switcher is WorkSurface's TraceTabs. A page's
-                navigation belongs to the page; the rail belongs to the app. */
-          />
+          </AppSidebar>
+          )
         }
         // Only so the shell knows whether the macOS traffic lights need a bare
         // drag strip of their own: a page that paints its own header has no
-        // gutter for them, a tab-bearing surface reserves one itself. The work
-        // column has no chrome band any more — the pane toggles ride in the tab
-        // row (see `chromeTrailing` on WorkSurface below).
+        // gutter for them, while the work header reserves one itself.
         pageOwnsWindow={pageOwnsWindow}
+        // This laptop's terminal belongs to this laptop's places. In the
+        // cloud the dock is left out entirely — not just closed — so no
+        // local shell sits under the organization's pages.
         bottomPane={
-          <TerminalPanel
-            repoRoot={project.root}
-            maximized={terminalMaximized}
-            onToggleMaximize={() => setTerminalMaximized((v) => !v)}
-            onClosePanel={() => {
-              setTerminalMaximized(false);
-              editor.setTerminalPanelOpen(false);
-            }}
-          />
+          cloud.open ? undefined : (
+            <TerminalPanel
+              repoRoot={project.root}
+              open={terminalOpen}
+              onOpenChange={(open) => {
+                if (!open) setTerminalMaximized(false);
+                editor.setTerminalPanelOpen(open);
+              }}
+              maximized={terminalMaximized}
+              onToggleMaximize={() => setTerminalMaximized((v) => !v)}
+            />
+          )
         }
-        bottomPaneOpen={terminalOpen}
+        bottomPaneOpen={localTerminalShown(terminalOpen, cloud)}
+        bottomPaneKey={project.root}
         bottomPaneMaximized={terminalMaximized}
         reviewHeader={
           <ReviewStateHeader
@@ -4967,38 +5286,46 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           <RightRail
             activeTab={rightRailTab}
             onChangeTab={setRightRailTab}
+            artifactsView={
+              <ArtifactsPanel
+                repoRoot={project.root}
+                onOpen={(p) => openChangedFile(p, "edit")}
+                onChanges={() => setRightRailTab("changes")}
+              />
+            }
             filesView={
               <FilesSidebar
                 repoRoot={project.root}
                 selected={editor.activePath}
                 onSelect={(p) =>
-                  editor.open(p).catch((e) => console.error("open failed:", e))
+                  remoteEntry
+                    ? openOnMachine({ kind: "file", path: p })
+                    : editor.open(p).catch((e) => console.error("open failed:", e))
                 }
                 onSelectSplit={(p, direction) =>
-                  editor
-                    .openFileSplit(p, direction)
-                    .catch((e) => console.error("open split failed:", e))
+                  remoteEntry
+                    ? openOnMachine({ kind: "file", path: p })
+                    : editor
+                        .openFileSplit(p, direction)
+                        .catch((e) => console.error("open split failed:", e))
                 }
               />
             }
             changesView={
               <GitSidebar
                 repoRoot={project.root}
-                onOpen={(p, mode) => {
-                  if (mode === "diff-new-tab") {
-                    editor
-                      .openFileSplit(p, "row")
-                      .catch((e) => console.error("open split failed:", e));
-                    return;
-                  }
-                  editor
-                    .open(p, {
-                      defaultView: mode === "edit" ? "edit" : "diff",
-                    })
-                    .catch((e) => console.error("open failed:", e));
-                }}
-                onBeforeCommit={guardCommit}
+                onOpen={openChangedFile}
+                // On a machine, a file of one commit opens that commit's
+                // diff; the laptop keeps opening the file as it is now.
+                onOpenCommitFile={
+                  remoteEntry
+                    ? (sha, path) => openOnMachine({ kind: "diff", sha, path })
+                    : undefined
+                }
               />
+            }
+            reviewView={
+              <ReviewPanel repoRoot={project.root} onOpenFile={openChangedFile} />
             }
             checksView={
               <ChecksPanel
@@ -5015,135 +5342,55 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
                 />
               ) : undefined
             }
-            browserView={BROWSER_RAIL_ENABLED ? <RailBrowser /> : undefined}
-            changesCount={diffStats?.changed_files}
+            tasksView={<TasksRailPanel repoRoot={project.root} />}
+            changesRoot={project.root}
             pluginPanels={pluginPanelDescriptors}
           />
         }
-        statusBar={
-          <StatusBar
-            repoRoot={project.root}
-            sidebarOpen={sidebarOpen}
-            changedFiles={diffStats?.changed_files ?? null}
-            auditUnacked={auditUnacked}
-            conflictsOpen={astConflictsOpen}
-            onClickDiff={() => {
-              // The changes chip is a navigation, not a popup: open the
-              // Review changes page (the semantic diff / verdict surface)
-              // and poke the Changes panel so it focuses the working set.
-              window.dispatchEvent(new CustomEvent("aura:focus-changes"));
-              goTrace({ kind: "tool", tool: "review" });
-            }}
-            onClickAudit={() => {
-              // The accountability feed — every AI change on the team, who
-              // made it, why, and whether it's sealed. That's Trace's team
-              // view; it used to be a filter on the sidebar's History body.
-              goTrace({ kind: "sessions", view: "team" });
-            }}
-            onClickConflicts={() => setConflictsOpen(true)}
-            cliVersion={cliVersion}
-            onRefreshCliVersion={refreshCliVersion}
-            onUpdateCli={updateCli}
-            pluginPills={pluginPillEntries.map((p) => ({
-              pluginId: p.pluginId,
-              id: p.id,
-              render: p.render,
-            }))}
-            onClickPluginPill={(pluginId, pillId) => {
-              dispatchPluginPillClick(pluginId, pillId);
-              window.dispatchEvent(
-                new CustomEvent("aura:plugin-pill-click", {
-                  detail: { pluginId, pillId },
-                }),
-              );
-            }}
-            trailing={
-              // ADE chrome — the footer's trailing edge now carries only the
-              // two self-hiding status pills (Capture-off nudge + Strict). The
-              // ex-TopBar utility cluster (resource monitor, impact bell,
-              // mobile-remote, ⋮ overflow) was pulled out of the footer face:
-              // the monitor lives in Project health, impacts have the loud
-              // banner + trace row, mobile-remote is on ⌘K, and every overflow
-              // item duplicates a Trace sidebar row.
-              <StatusPills
-                  repoRoot={project.root}
-                  onFocusChat={focusOrStartChat}
-                  onOpenGit={() => setSourceControlOpen(true)}
-                  onOpenSettings={() => setSettingsOpen(true)}
-                  onOpenStrict={() => {
-                    // Strict is a major feature — deep-link to the
-                    // Security & Policy page (its real home), not a
-                    // random settings pane.
-                    window.dispatchEvent(
-                      new CustomEvent("aura:open-settings", {
-                        detail: { pane: "policy" },
-                      }),
-                    );
-                    setSettingsOpen(true);
-                  }}
-                  onOpenCapture={() => {
-                    // Deep-link to the Capture pane — one button there
-                    // installs the no-MCP git hooks for this repo.
-                    window.dispatchEvent(
-                      new CustomEvent("aura:open-settings", {
-                        detail: { pane: "capture" },
-                      }),
-                    );
-                    setSettingsOpen(true);
-                  }}
-              />
-            }
-          />
-        }
         body={
-          // Flex-col wrapper so the banners take their
-          // natural heights and WorkSurface consumes the remaining
-          // space cleanly. Without this column, WorkSurface's h-full
-          // resolved against the body slot's full height regardless of
-          // the banner stack above it, so the bottom of WorkSurface
-          // (including PlanTab's Build/Cancel bar) got clipped under
-          // the global status bar.
+          // Flex-col wrapper so a notice drawn above the work (sidebar
+          // hidden) takes its natural height and WorkSurface consumes the
+          // rest. Without this column, WorkSurface's h-full resolved against
+          // the body slot's full height regardless of what sat above it, so
+          // its bottom edge (including PlanTab's Build/Cancel bar) got
+          // clipped.
           <div className="flex flex-col h-full min-h-0 overflow-hidden">
-            <UpdateBanner />
-            {/* Auto-update needs a writable install location. That's false in
-                three cases the user can fix by moving Aura to Applications:
-                a read-only mounted DMG (`/Volumes/…` — issue #7), a Gatekeeper
-                App-Translocation quarantine path, or any other read-only spot.
-                Keying on `!writable` (not just `translocated`) covers all three;
-                the message is tailored to whichever it is. */}
-            {appLocation?.bundle_path &&
-              appLocation.writable === false &&
-              !translocationBannerDismissed &&
-              (() => {
-                const onDmg = appLocation.bundle_path.startsWith("/Volumes/");
-                return (
-                  <div className="px-3 py-2 bg-amber-500/15 border-b border-amber-500/30 text-sm text-amber-200 flex items-center gap-3">
-                    <span className="font-medium">
-                      {onDmg
-                        ? "Aura is running from the disk image. Updates won’t install."
-                        : "Auto-update disabled: app is running from a read-only quarantine."}
-                    </span>
-                    <span className="text-amber-300/80 font-mono text-xs truncate">
-                      {appLocation.bundle_path}
-                    </span>
-                    <div className="flex-1" />
-                    <span className="text-amber-200/80">
-                      {onDmg
-                        ? "Drag Aura into your Applications folder, then open it from there."
-                        : "Move Aura.app into ~/Applications to re-enable auto-update."}
-                    </span>
-                    <button
-                      type="button"
-                      className="text-xs text-amber-200 hover:text-amber-100 px-1.5 py-0.5 rounded hover:bg-amber-500/20"
-                      onClick={() => setTranslocationBannerDismissed(true)}
-                    >
-                      ×
-                    </button>
-                  </div>
-                );
-              })()}
+            {/* App-level notices: at the foot of the sidebar while it is on
+                screen, at the top of this column while it is hidden. */}
+            <ShellNotices>
+              <InstallLocationNotice
+                bundlePath={appLocation?.bundle_path}
+                writable={appLocation?.writable}
+                onDismiss={() => setTranslocationBannerDismissed(true)}
+                dismissed={translocationBannerDismissed}
+              />
+              <AuraImpactsBanner
+                repoRoot={project.root}
+                // Same door the topbar's impact inbox uses, so there's one
+                // impacts surface rather than one per entrance.
+                onOpenImpacts={() => goTrace({ kind: "tool", tool: "impacts" })}
+                dismissedIds={dismissedImpactIds}
+                onDismiss={(id) =>
+                  setDismissedImpactIds((prev) => {
+                    const next = new Set(prev);
+                    next.add(id);
+                    return next;
+                  })
+                }
+              />
+              {/* The notice can now replace an out-of-date `aura` helper itself.
+                  When it does, the sidebar's CLI chip must stop describing the copy
+                  that no longer exists — same state, updated from either door. */}
+              <AuraTrackingNotice
+                repoRoot={project.root}
+                onCliUpdated={(check) => setCliVersion(check)}
+              />
+            </ShellNotices>
             <Toaster />
+            <UpdateToast />
+            <CloudTeamHost />
             <CrashRecoveryToast />
+            <ImportPromoToast />
             <PluginToastHost />
             <HuddleErrorToast />
             <RecordingNotice />
@@ -5155,27 +5402,6 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
             )}
             <GetStartedTour open={tourOpen} onClose={closeTour} />
             <CliUpdateToast onInstalled={(check) => setCliVersion(check)} />
-            <AuraImpactsBanner
-              repoRoot={project.root}
-              // Same door the topbar's impact inbox uses, so there's one
-              // impacts surface rather than one per entrance.
-              onOpenImpacts={() => goTrace({ kind: "tool", tool: "impacts" })}
-              dismissedIds={dismissedImpactIds}
-              onDismiss={(id) =>
-                setDismissedImpactIds((prev) => {
-                  const next = new Set(prev);
-                  next.add(id);
-                  return next;
-                })
-              }
-            />
-            {/* The strip can now replace an out-of-date `aura` helper itself.
-                When it does, the footer chip must stop describing the copy
-                that no longer exists — same state, updated from either door. */}
-            <AuraTrackingNotice
-              repoRoot={project.root}
-              onCliUpdated={(check) => setCliVersion(check)}
-            />
             <AgentMutationGuard repoRoot={project.root} />
             {/* The work area, and the destinations that cover it.
                 Workspaces / Aura / Mission Control are PAGES: they fill this
@@ -5194,63 +5420,67 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
               {editor.managerTabs.length > 0 && (
                 <ManagerTabTitles tabs={editor.managerTabs} />
               )}
-              <WorkSurface
-                repoRoot={project.root}
-                projectName={project.name}
-                strictMode={strictMode}
-                traceActions={traceActions}
-                // Window chrome rides in the tab row. It used to have a 30px
-                // band of its own directly above it, holding these two icons
-                // and nothing else across the whole width of the work column
-                // — a second header whose only content was already in the
-                // same corner as the tab strip's.
-                chromeLeading={
-                  <SidebarPeek
-                    sidebarOpen={sidebarOpen}
-                    onToggleSidebar={() => setSidebarOpen((v) => !v)}
-                  />
-                }
-                chromeTrailing={
-                  <PaneToggles
-                    reviewOpen={reviewOpen}
-                    terminalOpen={terminalOpen}
-                    onToggleReview={() => setReviewOpen((v) => !v)}
-                    onToggleTerminal={() => editor.toggleTerminalPanel()}
-                    // AURA-1294 — so the Ports button knows which place this workspace runs on
-                    repoRoot={project.root}
-                  />
-                }
-                onOpenRewind={(filePath?: string) =>
-                  goTrace({
-                    kind: "tool",
-                    tool: "rewind",
-                    arg: filePath ? { file: filePath } : undefined,
-                  })
-                }
-                onLogIntent={(filePath?: string) => {
-                  // Scope "Add a reason" to the file the user clicked in the
-                  // insight strip (per-file reasoning, AURA-131) — pre-select
-                  // just that path instead of every dirty file. defaultPaths are
-                  // repo-relative to match the dialog's git-status entries;
-                  // WorkSurface hands us the absolute path. onClose clears the
-                  // default, so other openers stay unscoped.
-                  const rel =
-                    filePath && filePath.startsWith(project.root + "/")
-                      ? filePath.slice(project.root.length + 1)
-                      : filePath;
-                  setLogIntentDefaultPaths(rel ? [rel] : undefined);
-                  setLogIntentOpen(true);
-                }}
-                onSnapshot={() => setSnapshotOpen(true)}
-              />
+              <RenameChatHost />
+              <AppSwitcherHost />
+              {/* Under a page the work surface stays mounted and is out of
+                  view, and `inert` says so. The page's background hides DOM
+                  content, but a terminal or browser view floats above the
+                  whole webview and is hidden by nothing drawn in it. Each one
+                  reads `inert` on its way to the screen and steps off, the same
+                  way it does when its tab is switched away. `contents` keeps
+                  the wrapper out of the layout. */}
+              <div
+                // A machine in front is the work surface of this frame; the
+                // laptop's stays mounted, out of the layout and out of reach.
+                className={remoteEntry ? "hidden" : "contents"}
+                inert={activePage || remoteEntry ? true : undefined}
+              >
+                <WorkSurface
+                  repoRoot={project.root}
+                  projectName={project.name}
+                  strictMode={strictMode}
+                  traceActions={traceActions}
+                  onOpenRewind={(filePath?: string) =>
+                    goTrace({
+                      kind: "tool",
+                      tool: "rewind",
+                      arg: filePath ? { file: filePath } : undefined,
+                    })
+                  }
+                  onLogIntent={(filePath?: string) => {
+                    // Scope "Add a reason" to the file the user clicked in the
+                    // insight strip (per-file reasoning, AURA-131) — pre-select
+                    // just that path instead of every dirty file. defaultPaths are
+                    // repo-relative to match the dialog's git-status entries;
+                    // WorkSurface hands us the absolute path. onClose clears the
+                    // default, so other openers stay unscoped.
+                    const rel =
+                      filePath && filePath.startsWith(project.root + "/")
+                        ? filePath.slice(project.root.length + 1)
+                        : filePath;
+                    setLogIntentDefaultPaths(rel ? [rel] : undefined);
+                    setLogIntentOpen(true);
+                  }}
+                  onSnapshot={() => setSnapshotOpen(true)}
+                />
+              </div>
               {activePage && (
-                <div className="absolute inset-0 z-20 overflow-hidden bg-bg-content">
+                <div
+                  className={
+                    remoteEntry ? "hidden" : "absolute inset-0 z-20 overflow-hidden bg-bg-content"
+                  }
+                  // A machine opened from this page takes its place, and
+                  // leaving the machine hands the page straight back.
+                  inert={remoteEntry ? true : undefined}
+                >
                   {activePage}
                 </div>
               )}
-              {/* The machine you are standing in, over everything above —
-                  including whichever page you opened it from, which is exactly
-                  what lets leaving hand that page straight back.
+              {/* The machine you are standing in: the same frame — header,
+                  git toolbar, right panel, bottom panel — around the machine's
+                  own tabs, in place of the laptop's work surface. The panels
+                  read the machine through `lib/place`, and what they open lands
+                  on its tabs through `openOnMachine`.
 
                   Only the focused one is mounted. Its shells are not lost by
                   that: a remote tab is a persistent Terminal session keyed by
@@ -5262,7 +5492,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
               {remoteEntry && (
                 <div
                   key={remotePlaces.focusedKey ?? "remote"}
-                  className="absolute inset-0 z-30 overflow-hidden bg-bg-content"
+                  className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-bg-content"
                 >
                   <RemoteWorkspace
                     entry={remoteEntry}
@@ -5303,6 +5533,9 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         onClose={() => setPaletteOpen(false)}
         onPick={onPalettePick}
         repoRoot={project.root}
+        projects={workspaceProjects}
+        worktreesByRoot={worktreesByRoot}
+        badgeByPath={rosterBadges}
         recentFiles={editor.files.map((f) => ({ path: f.path, name: f.name }))}
         agents={discoveredAgents
           .filter((a) => a.available)
@@ -5432,6 +5665,8 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         />
       )}
       <PrAuthoringDialogHost />
+      <NoteToWorkspaceHost />
+      <ContinueInCloudHost />
       <SettingsDialog
         open={settingsOpen}
         repoRoot={project.root}
@@ -5490,7 +5725,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
         repoRoot={project.root}
         onClose={() => setSearchOpen(false)}
       />
-      {ONBOARDING_V2 ? <OnboardingFlow /> : <OnboardingDialog />}
+      <OnboardingFlow />
       {/* Global host for Aura's destructive-op gate. Catches the bare
           `agent-gate-request` event for every session and overlays a
           single blocking Allow/Deny card. Mounted once, here, so it sits
@@ -5508,7 +5743,7 @@ function App({ bootRootOverride, bootPlaceOverride }: AppProps = {}) {
           collapses and repo swaps. */}
       <CallPanel />
       <ScreenshareFloating />
-      {/* Conductor-style "start new work in an isolated copy" composer.
+      {/* The "start new work in an isolated copy" composer.
           Mounted once, self-manages open/close; any affordance opens it via
           window CustomEvent("aura:new-workspace", { detail: { repoRoot } }). */}
       <WorkspaceCreateComposer />

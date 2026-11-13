@@ -25,6 +25,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { api } from "../../lib/api";
+import { knownIdsOf } from "../../lib/machineRef";
 import { ManagerSurface } from "../manager/ManagerSurface";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
@@ -52,7 +53,15 @@ export function MachineChat({
         // Which conversation this is — remembered, or new — is decided in
         // `machineThread`. Everything left here is the part that renders it.
         const thread = await openThread(
-          { id: machineId, name: machineName, repoRoot },
+          {
+            id: machineId,
+            // The names the book has shown this window for this machine,
+            // past the current one — what a conversation from before it was
+            // renamed or reconnected is filed under.
+            formerIds: knownIdsOf(machineId).slice(1),
+            name: machineName,
+            repoRoot,
+          },
           fresh,
           {
             store: localStorage,
@@ -87,12 +96,12 @@ export function MachineChat({
       <div className="grid h-full place-items-center px-8">
         <div className="flex max-w-md flex-col items-center gap-2 text-center">
           <p className="text-sm text-text-2">
-            This machine isn’t filed under a project yet.
+            This machine isn’t filed under a repository yet.
           </p>
           <p className="text-xs text-text-5">
-            The conversation is kept on this laptop, under a project — that is
+            The conversation is kept on this laptop, under a repository — that is
             what lets it survive the machine being stopped. Open {machineName}{" "}
-            from a project on the Workspaces page and the chat comes with it.
+            from a repository on the Workspaces page and the chat comes with it.
           </p>
         </div>
       </div>

@@ -21,7 +21,9 @@ export type AppActionId =
   | "shortcuts"
   | "time_machine"
   | "open_aura"
+  | "toggle_aura_panel"
   | "workspaces"
+  | "machines"
   | "open_file"
   | "zoom_in"
   | "zoom_out"
@@ -42,6 +44,9 @@ export type AppActionId =
   | "notes"
   | "open_prs"
   | "mobile_waitlist"
+  // ⌘⇧H — Home, the list of every workspace. The way out of the one you are
+  // in without reaching for the sidebar.
+  | "go_home"
   // AURA-1296 — keyboard + chat ergonomics. Tab walking across every pane,
   // "the next tab that needs me", fork-in-place, the uncommitted-changes
   // pane, and the composer's effort ladder — each one chord, none of them
@@ -50,6 +55,7 @@ export type AppActionId =
   | "prev_tab"
   | "next_attention"
   | "fork_chat"
+  | "copy_chat_transcript"
   | "toggle_changes"
   | "cycle_effort"
   // The composer's model loadout and its latency switch. ⌘1…⌘5 pick the Nth
@@ -60,7 +66,16 @@ export type AppActionId =
   | "pick_model_3"
   | "pick_model_4"
   | "pick_model_5"
-  | "toggle_fast";
+  | "toggle_fast"
+  // ⌘⇧A archives the workspace in front; ⌥⌘A opens the sidebar's add-project
+  // menu. Ask Aura and Open Aura stay in the palette and the menu.
+  | "archive_workspace"
+  | "add_project"
+  // ⌥⌘O, held: the app switcher. Tap O again to step to the next app (with
+  // ⇧, the one before); let go of ⌘ or ⌥ to open the workspace's folder in
+  // it. Plain ⌘O stays the File menu's "open a folder".
+  | "open_in_app"
+  | "open_in_app_back";
 
 export type Dispatch = (id: AppActionId) => void;
 
@@ -70,7 +85,7 @@ export type Dispatch = (id: AppActionId) => void;
  *
  *  NB: `check_for_updates` is intentionally NOT here — the native
  *  "Check for Updates…" item emits `menu:check_for_updates`, which
- *  UpdateBanner listens for directly (it owns the update flow + UI). */
+ *  UpdateToast listens for directly (it owns the update flow + UI). */
 const MENU_ACTION_IDS: AppActionId[] = [
   "palette",
   "toggle_sidebar",
@@ -173,7 +188,7 @@ export function useAppActions(dispatch: Dispatch) {
         // AURA-1296 — with ⌥ held, macOS composes a different character
         // (⌥L → "¬", ⌥U → a dead key) and whether ⌘ suppresses that varies by
         // WebKit version, so a lettered ⌘⌥ chord is matched on the physical
-        // key. Same fix App.tsx applies to ⌘⌥A.
+        // key.
         key: e.altKey && /^Key[A-Z]$/.test(e.code) ? e.code.slice(3) : e.key,
         meta: true,
         shift: e.shiftKey,
@@ -221,17 +236,28 @@ export type Chord = {
 export function resolveShortcut(c: Chord): AppActionId | null {
   if (!c.meta) return null;
   switch (c.key.toLowerCase()) {
+    // ⌘⌥K / ⌘⌥J step to the previous / next comment in a diff; the diff on
+    // screen answers them itself (components/diff/review/CommentNav.tsx), so
+    // here they only stand back from the palette and the terminal.
     case "k":
-      return "palette";
-    // ⌘B toggles the sidebar — but not while you're typing. Everywhere
-    // else in computing ⌘B means bold, and we have three rich-text
-    // surfaces (the notes editor, the manager composer, the PR review
-    // box) that say so on their own toolbars. Without this guard the
-    // sidebar collapsed instead.
+      return c.alt ? null : "palette";
+    // ⌘B toggles the left sidebar and ⌘⌥B the right one — the pair the
+    // workspace layout is built around. Plain ⌘B stands down while you're
+    // typing: everywhere else in computing it means bold, and we have three
+    // rich-text surfaces (the notes editor, the manager composer, the PR
+    // review box) that say so on their own toolbars. ⌘⌥B is not bold
+    // anywhere, so it answers from a text box too.
+    //
+    // ⌘⇧B is the browser tab's (App.tsx). This case used to answer it as
+    // well, so opening a browser tab collapsed the sidebar beside it; and
+    // ⌘⌥B fell through to the same toggle, hiding the left side when you
+    // asked for the right.
     case "b":
+      if (c.shift) return null;
+      if (c.alt) return "toggle_review";
       return c.editable ? null : "toggle_sidebar";
     case "j":
-      return "toggle_terminal";
+      return c.alt ? null : "toggle_terminal";
     // ⌘R runs the project — the key every IDE gives to "run this", and the
     // one the agent working in this window is changing the code of. Reload
     // moves to ⌘⇧R and is dispatched rather than left to the webview: the
@@ -255,11 +281,15 @@ export function resolveShortcut(c: Chord): AppActionId | null {
     // palette entry, so without this row there is no way to reach it by
     // keyboard where the menubar isn't drawn.
     case "o":
-      return c.shift || c.alt ? null : "open_file";
+      if (c.alt) return c.shift ? "open_in_app_back" : "open_in_app";
+      return c.shift ? null : "open_file";
     // ⌘⇧I — Log Intent. Shift required (⌘I is italic in the rich-text
     // surfaces), matching the accelerator the Engine menu carries.
     case "i":
       return c.shift ? "aura_log_intent" : null;
+    // ⌘⇧H — Home. Shift required: plain ⌘H hides the app on macOS.
+    case "h":
+      return c.shift && !c.alt ? "go_home" : null;
     // ⌘+ / ⌘= zoom in. Most US keyboards send "=" without shift and
     // "+" with shift; accept both so the user doesn't have to think.
     case "+":
@@ -288,10 +318,18 @@ export function resolveShortcut(c: Chord): AppActionId | null {
     // surfaces and the one chord people expect to keep.
     case "e":
       return c.shift && !c.alt ? "toggle_fast" : null;
-    // ⌘⇧A — Ask Aura. Shift required so we don't conflict with
-    // ⌘A "Select All" inside text fields.
+    // ⌘⇧A archives the workspace in front, from anywhere, a text box
+    // included (⌘⇧A is not text). ⌥⌘A opens "Add project" under the
+    // sidebar's heading, but not while you type. Plain ⌘A stays Select All.
+    // The floating HUD's global chord is ⌃⌘A (src-tauri/src/hud.rs), so the
+    // OS no longer takes ⌘⇧A before the window sees it. ⌥⇧⌘A shows or
+    // hides Aura's panel on Home — from anywhere, a text box included, since
+    // the panel's own composer is a text box and the chord types nothing.
     case "a":
-      return c.shift ? "aura_ask" : null;
+      if (c.shift && !c.alt) return "archive_workspace";
+      if (c.alt && !c.shift) return c.editable ? null : "add_project";
+      if (c.alt && c.shift) return "toggle_aura_panel";
+      return null;
     // ⌘⇧P — Plan Builder. Shift required so we don't conflict with
     // ⌘P "Quick open file" pattern.
     case "p":
@@ -319,6 +357,10 @@ export function resolveShortcut(c: Chord): AppActionId | null {
       return c.alt && !c.shift ? "toggle_changes" : null;
     case "enter":
       return c.alt && !c.shift ? "fork_chat" : null;
+    // ⌘⌥C — a concise transcript of the chat in front, the chord its tab
+    // menu shows. ⌥ required: plain ⌘C is copy everywhere.
+    case "c":
+      return c.alt && !c.shift ? "copy_chat_transcript" : null;
     // ⌘⇧/ arrives as "?" on a US layout and as "/" on layouts where the
     // slash key has no shifted glyph; both mean the ladder.
     case "/":
@@ -346,7 +388,10 @@ const EDITOR_SURFACE_CLASSES = [
   "inputarea", // Monaco legacy textarea fallback
 ];
 
-function isEditableTarget(target: EventTarget | null): boolean {
+/** Is this event target somewhere text is typed? Exported because anything
+ *  that rescues a shortcut the webview dropped has to make the same call —
+ *  the chat view's ⌘V, for one, must not step on a field's own paste. */
+export function isEditableTarget(target: EventTarget | null): boolean {
   let el = target as HTMLElement | null;
   while (el) {
     const tag = el.tagName;

@@ -1,4 +1,4 @@
-// The floating, always-on-top HUD — the surface summoned with ⌘⇧A (or the
+// The floating, always-on-top HUD — the surface summoned with ⌃⌘A (or the
 // menu-bar icon). It renders inside its own frameless, transparent OS window
 // (`hud.rs` builds it; `main.tsx` mounts this when the URL carries `?hud=1`).
 //
@@ -195,7 +195,7 @@ function SidebarTurn({ turn, onOpen }: { turn: HudTurn; onOpen: () => void }) {
             {CopyGlyph}
             Copy
           </button>
-          <button type="button" className="hud-sb-act" onClick={onOpen} title="Open in project">
+          <button type="button" className="hud-sb-act" onClick={onOpen} title="Open in its workspace">
             {OpenGlyph}
             Open
           </button>
@@ -729,7 +729,7 @@ export function HudApp() {
       : activeProject.label
     : activeRoot
       ? prettyLeaf(basename(activeRoot))
-      : "No project";
+      : "No repository";
 
   // Collapsed glance text: what the agent last said, falling back to the plain
   // status when it hasn't spoken yet. Use `||` (not `??`) so an EMPTY string —
@@ -984,7 +984,7 @@ export function HudApp() {
                 placeholder={
                   state.canSend
                     ? "Ask anything…"
-                    : "Open a project in Aura to start a conversation"
+                    : "Open a repository in Aura to start a conversation"
                 }
                 onChange={(e) => setText(e.target.value)}
                 onKeyDown={onKeyDown}

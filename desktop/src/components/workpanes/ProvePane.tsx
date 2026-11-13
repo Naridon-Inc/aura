@@ -59,7 +59,7 @@ export function ProvePane({ repoRoot, onClose }: Props) {
   // surface replaces this input-first pane. Legacy body stays below, reachable
   // by flipping the flag off.
   if (GOALS_V2) {
-    return <GoalsPane repoRoot={repoRoot} onClose={onClose} />;
+    return <GoalsPane repoRoot={repoRoot} />;
   }
   return <ProvePaneLegacy repoRoot={repoRoot} onClose={onClose} />;
 }
@@ -518,7 +518,7 @@ function Caret({ open }: { open: boolean }) {
       height="9"
       viewBox="0 0 12 12"
       fill="none"
-      className={`transition-transform ${open ? "rotate-90" : ""}`}
+      className={open ? "rotate-90" : undefined}
     >
       <path d="M4 2.5 8 6l-4 3.5" stroke="currentColor" strokeWidth="1.5" />
     </svg>

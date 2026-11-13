@@ -22,7 +22,7 @@ import { describe, expect, test } from "bun:test";
 
 import { SHORTCUT_GROUPS, comboKeys } from "../src/lib/shortcuts";
 import { resolveShortcut, type AppActionId, type Chord } from "../src/lib/keymap";
-import { stripComments } from "./support/code";
+import { stripComments, strippedSrcTree } from "./support/code";
 
 const SRC = `${import.meta.dir}/../src`;
 
@@ -34,6 +34,7 @@ describe("the keymap chords are listed, and the listed chords resolve", () => {
   // it does. Add a chord to one side and this fails until it is on the other.
   const BOUND: Array<{ keys: string; id: AppActionId; chord: Chord }> = [
     { keys: "⌘⌥Enter", id: "fork_chat", chord: { key: "Enter", meta: true, shift: false, alt: true, editable: false } },
+    { keys: "⌘⌥C", id: "copy_chat_transcript", chord: { key: "c", meta: true, shift: false, alt: true, editable: false } },
     { keys: "⌘⇧/", id: "cycle_effort", chord: { key: "?", meta: true, shift: true, alt: false, editable: true } },
     { keys: "⌘⌥→", id: "next_tab", chord: { key: "ArrowRight", meta: true, shift: false, alt: true, editable: false } },
     { keys: "⌘⌥←", id: "prev_tab", chord: { key: "ArrowLeft", meta: true, shift: false, alt: true, editable: false } },
@@ -49,6 +50,12 @@ describe("the keymap chords are listed, and the listed chords resolve", () => {
     { keys: "⌘4", id: "pick_model_4", chord: { key: "4", meta: true, shift: false, alt: false, editable: true } },
     { keys: "⌘5", id: "pick_model_5", chord: { key: "5", meta: true, shift: false, alt: false, editable: true } },
     { keys: "⌘⇧E", id: "toggle_fast", chord: { key: "e", meta: true, shift: true, alt: false, editable: true } },
+    // ⌘⇧A archives from a text box too; ⌥⌘A stands down while you type.
+    { keys: "⌘⇧A", id: "archive_workspace", chord: { key: "A", meta: true, shift: true, alt: false, editable: true } },
+    { keys: "⌘⌥A", id: "add_project", chord: { key: "A", meta: true, shift: false, alt: true, editable: false } },
+    // The app switcher answers from a text box too: ⌥⌘O types nothing.
+    { keys: "⌘⌥O", id: "open_in_app", chord: { key: "O", meta: true, shift: false, alt: true, editable: true } },
+    { keys: "⌘⌥⇧O", id: "open_in_app_back", chord: { key: "O", meta: true, shift: true, alt: true, editable: true } },
   ];
   const listed = new Map(
     SHORTCUT_GROUPS.flatMap((g) => g.items).map((s) => [s.keys, s.label] as const),
@@ -101,6 +108,50 @@ describe("the keymap chords are listed, and the listed chords resolve", () => {
   });
 });
 
+
+describe("the A chords belong to the workspace, not the HUD", () => {
+  // The floating HUD used to register ⌘⇧A system-wide, so the window never
+  // saw it; it is ⌃⌘A now, and the sheet no longer prints an "Open Aura" chord
+  // that ⌥⌘A took over.
+  test("the HUD registers ⌃⌘A", async () => {
+    const hud = stripComments(await Bun.file(`${SRC}/../src-tauri/src/hud.rs`).text());
+    expect(hud).toContain("Modifiers::SUPER | Modifiers::CONTROL), Code::KeyA");
+    expect(hud).not.toContain("Modifiers::SUPER | Modifiers::SHIFT), Code::KeyA");
+  });
+
+  test("nothing else answers ⌥⌘A from App.tsx", async () => {
+    const app = stripComments(await Bun.file(`${SRC}/App.tsx`).text());
+    expect(app).not.toContain('e.code !== "KeyA"');
+  });
+
+  test("the sheet prints each A chord once", () => {
+    const keys = SHORTCUT_GROUPS.flatMap((g) => g.items).map((s) => s.keys);
+    expect(keys.filter((k) => k === "⌘⇧A")).toHaveLength(1);
+    expect(keys.filter((k) => k === "⌘⌥A")).toHaveLength(1);
+  });
+});
+
+describe("the R chords on the sheet are the ones the keymap answers", () => {
+  // The sheet said "Reload the app ⌘R" long after ⌘R became Run and reload
+  // moved to ⌘⇧R. Each row here is printed with its label and must resolve
+  // to the id whose handler does what the label says.
+  const ROWS: Array<{ label: string; keys: string; id: AppActionId; chord: Chord }> = [
+    { label: "Run the project", keys: "⌘R", id: "run_project", chord: { key: "r", meta: true, shift: false, alt: false, editable: false } },
+    { label: "Toggle review panel", keys: "⌘⌥R", id: "toggle_review", chord: { key: "r", meta: true, shift: false, alt: true, editable: false } },
+    { label: "Reload the app", keys: "⌘⇧R", id: "reload_app", chord: { key: "R", meta: true, shift: true, alt: false, editable: false } },
+  ];
+  const listed = new Map(
+    SHORTCUT_GROUPS.flatMap((g) => g.items).map((s) => [s.keys, s.label] as const),
+  );
+
+  test("each is printed under its own label", () => {
+    for (const r of ROWS) expect(listed.get(r.keys)).toBe(r.label);
+  });
+
+  test("each resolves to the id that does it", () => {
+    for (const r of ROWS) expect(resolveShortcut(r.chord)).toBe(r.id);
+  });
+});
 
 describe("comboKeys", () => {
   test("splits a combo into the caps that get drawn", () => {
@@ -257,19 +308,10 @@ describe("one key cap", () => {
     "components/team/presentation/Composer.tsx",
   ]);
 
-  async function sourceFiles(): Promise<string[]> {
-    const out: string[] = [];
-    for await (const rel of new Bun.Glob("**/*.{ts,tsx}").scan({ cwd: SRC })) {
-      out.push(rel);
-    }
-    return out;
-  }
-
   test("nothing hand-rolls a <kbd> outside the documented four", async () => {
     const rogue: string[] = [];
-    for (const rel of await sourceFiles()) {
+    for (const [rel, src] of await strippedSrcTree()) {
       if (SANCTIONED.has(rel)) continue;
-      const src = stripComments(await Bun.file(`${SRC}/${rel}`).text());
       if (/<kbd[\s>]/.test(src)) rogue.push(rel);
     }
     expect(rogue).toEqual([]);
@@ -279,8 +321,7 @@ describe("one key cap", () => {
     // It paints from Medusa's own zinc tag ramp, not our palette, so a themed
     // app was drawing one unthemed control.
     const medusa: string[] = [];
-    for (const rel of await sourceFiles()) {
-      const src = stripComments(await Bun.file(`${SRC}/${rel}`).text());
+    for (const [rel, src] of await strippedSrcTree()) {
       if (/from ["']@medusajs\/ui["']/.test(src) && /\bKbd\b/.test(src)) {
         medusa.push(rel);
       }
@@ -290,8 +331,10 @@ describe("one key cap", () => {
 
   test("the cap paints from the theme tokens", async () => {
     const kbd = await Bun.file(`${SRC}/components/ui/kbd.tsx`).text();
-    expect(kbd).toContain("bg-kbd-bg");
-    expect(kbd).toContain("text-kbd-fg");
+    expect(kbd).toContain('"ui-kbd"');
+    const css = await Bun.file(`${SRC}/components/ui/kbd.css`).text();
+    expect(css).toContain("var(--color-kbd-bg)");
+    expect(css).toContain("var(--color-kbd-fg)");
   });
 
   test("every theme pack declares both tokens", async () => {
@@ -314,14 +357,19 @@ describe("one cheat-sheet", () => {
     expect(board).toContain("<ShortcutsDialog");
   });
 
-  test("both surfaces render the groups, so both print the scopes", async () => {
-    for (const rel of [
-      "components/dialogs/ShortcutsDialog.tsx",
-      "components/dialogs/SettingsDialog.tsx",
-    ]) {
-      const src = stripComments(await Bun.file(`${SRC}/${rel}`).text());
-      expect(src).toContain("SHORTCUT_GROUPS");
-      expect(src).toContain("group.note");
-    }
+  test("one list feeds both surfaces, and both print the groups and their scopes", async () => {
+    const page = stripComments(
+      await Bun.file(`${SRC}/components/settings/pages/ShortcutsPage.tsx`).text(),
+    );
+    expect(page).toContain("SHORTCUT_GROUPS");
+    expect(page).toContain("group.note");
+    // The sheet is searchable, so it draws its own rows, but from the same list.
+    const sheet = stripComments(
+      await Bun.file(`${SRC}/components/dialogs/ShortcutsDialog.tsx`).text(),
+    );
+    expect(sheet).toContain("SHORTCUT_GROUPS");
+    expect(sheet).toContain("group.note");
+    expect(sheet).toContain("searchShortcuts");
+    expect(sheet).not.toMatch(/\bitems:\s*\[/);
   });
 });

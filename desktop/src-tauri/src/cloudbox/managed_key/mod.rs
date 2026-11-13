@@ -141,6 +141,7 @@ mod tests {
     fn machine(key_path: &str) -> Machine {
         Machine {
             id: "ubuntu@10.0.0.4".into(),
+            aliases: Vec::new(),
             name: "builder".into(),
             host: "10.0.0.4".into(),
             user: "ubuntu".into(),

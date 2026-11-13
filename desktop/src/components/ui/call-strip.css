@@ -1,0 +1,117 @@
+/* The in-call strip in the work header: the header's ghost buttons on a
+   faint tint that says the call's state at a glance — green while live,
+   amber while joining. Added here: the tint, the state dot, the muted /
+   sharing red, the labels that fold away on a narrow window, the mic level
+   bar, and the red Leave. */
+
+.ui-call-strip {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  padding: 0 2px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ui-green) 10%, transparent);
+}
+.ui-call-strip[data-state="connecting"] {
+  background: color-mix(in srgb, var(--ui-yellow) 10%, transparent);
+}
+.ui-call-strip > .ui-button {
+  color: var(--ui-muted-fg);
+}
+.ui-call-strip > .ui-button:hover {
+  color: var(--ui-fg);
+}
+.ui-call-strip > .ui-button[data-off="true"],
+.ui-call-strip > .ui-call-leave {
+  color: var(--ui-red);
+}
+.ui-call-strip > .ui-call-leave:hover {
+  background: color-mix(in srgb, var(--ui-red) 15%, transparent);
+  color: var(--ui-red);
+}
+
+.ui-call-strip > .ui-call-channel {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-call-channel-name {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-call-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--ui-green);
+}
+.ui-call-strip[data-state="connecting"] .ui-call-dot {
+  background: var(--ui-yellow);
+  animation: ui-call-pulse 1.4s ease-in-out infinite;
+}
+@keyframes ui-call-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-call-strip[data-state="connecting"] .ui-call-dot {
+    animation: none;
+  }
+}
+
+/* Labels fold away on a narrow window; the icons and titles still say it.
+   The remote-share count takes the label's place when it folds. */
+.ui-call-count {
+  display: none;
+  font-size: 11px;
+  font-weight: 500;
+}
+@media (max-width: 1023px) {
+  .ui-call-label {
+    display: none;
+  }
+  .ui-call-count {
+    display: inline;
+  }
+}
+
+.ui-call-screen {
+  position: relative;
+}
+.ui-call-live {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ui-red);
+}
+
+.ui-call-vu {
+  position: relative;
+  display: inline-block;
+  width: 12px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--ui-muted);
+}
+.ui-call-vu > span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--ui-green);
+  transition: width 75ms;
+}
+.ui-call-vu > span[data-peaking="true"] {
+  background: var(--ui-yellow);
+}

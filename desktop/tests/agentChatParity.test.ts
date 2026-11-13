@@ -39,9 +39,10 @@ import { readSrc } from "./support/code";
 const surface = await readSrc("components/agent/AgentSurface.tsx");
 const transcript = await readSrc("components/agent/normalized/NormalizedTranscript.tsx");
 const composer = await readSrc("components/agent/chat/AgentChatComposer.tsx");
-const pickerShell = await readSrc("components/chat/ModelCatalogPopover.tsx");
+const pickers = await readSrc("components/chat/model/AgentModelPickers.tsx");
+const catalogHooks = await readSrc("components/chat/model/catalogHooks.ts");
 const blocks = await readSrc("components/agent/chat/AgentBlockTranscript.tsx");
-const tiptap = await readSrc("components/manager/TiptapComposer.tsx");
+const suggestions = await readSrc("components/chat/composer/useComposerSuggestions.ts");
 const manager = await readSrc("components/manager/ManagerComposer.tsx");
 const store = await readSrc("lib/editorStore.ts");
 
@@ -254,24 +255,25 @@ describe("switching model inside the agent's own provider", () => {
   });
 
   it("asks the shared catalog rather than keeping a second model list", () => {
-    expect(composer).toContain("<BrainSwitcherModal");
-    expect(composer).toContain("liveCatalog={live}");
-    // The agent's catalog brain is built by the shared picker module, which
-    // every chat's model chip uses.
-    expect(composer).toContain("agentCatalogBrain(agentId)");
-    expect(pickerShell).toContain('id: `cli_wrapper:${agentId}`');
+    expect(composer).toContain("<AgentCliModelPicker");
+    expect(pickers).toContain("useLiveModelCatalog(enabled)");
+    // The agent's catalog brain is built by the shared catalog module, which
+    // every chat's model picker reads.
+    expect(pickers).toContain("agentCatalogBrain(agentId)");
+    expect(catalogHooks).toContain('id: `cli_wrapper:${agentId}`');
   });
 });
 
 describe("one composer, not two", () => {
-  it("mounts the brain's editor instead of a second implementation", () => {
-    expect(composer).toContain("<TiptapComposer");
+  it("mounts the shared composer box instead of a second implementation", () => {
+    expect(composer).toContain("<Composer");
+    expect(composer).not.toContain("<TiptapComposer");
     expect(composer).not.toContain("<textarea");
   });
 
   it("lets a host own the slash menu, and defaults to the brain's", () => {
-    expect(tiptap).toContain("if (slashRows) return slashRows(q);");
-    expect(composer).toContain("slashRows={slashRows}");
+    expect(suggestions).toContain("if (slashRows) return slashRows(slashQuery);");
+    expect(composer).toMatch(/useComposerSuggestions\(\{[^}]*slashRows,/);
   });
 
   it("shares the draft and recall rules with the brain rather than re-deriving them", () => {
@@ -304,11 +306,12 @@ describe("one composer, not two", () => {
 
   it("won't stack a second interrupt on top of the first", () => {
     expect(composer).toContain("if (interruptingRef.current) return;");
-    expect(composer).toContain("disabled={interrupting}");
   });
 
   it("stays typable mid-turn, because the CLI's own input queue is the queue", () => {
-    expect(composer).toContain("busy={false}");
+    // Queue, not a read-only field: the line lands when the turn ends.
+    expect(composer).toContain('mode={running ? "queue" : "send"}');
+    expect(composer).not.toMatch(/disabled=\{running\}/);
   });
 });
 
@@ -331,7 +334,7 @@ describe("nothing in the chat pushes the pane sideways", () => {
   it("scrolls a long command menu inside its own box", () => {
     // The menu is one row per command and some CLIs ship a hundred; it has to
     // scroll itself, and its summaries have to truncate rather than widen it.
-    expect(composer).toContain("max-h-[340px] overflow-y-auto");
+    expect(composer).toContain("max-h-[340px] max-w-[420px] overflow-y-auto");
     expect(composer).toContain("flex-1 min-w-0 truncate");
   });
 });

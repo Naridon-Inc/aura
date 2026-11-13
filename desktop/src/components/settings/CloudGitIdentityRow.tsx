@@ -17,11 +17,9 @@
 // Renders nothing when signed out — solo, git-config-derived identity still
 // works exactly as before, so nothing regresses.
 
-import { useCallback, useEffect, useState } from "react";
-import { IdCard } from "lucide-react";
-
-import { api } from "../../lib/api";
-import { gitIdentityFromAccount, type GitAuthor } from "../../lib/accountIdentity";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { gitIdentityFromAccount } from "../../lib/accountIdentity";
+import { useCloudAuthStatus } from "../../lib/cloudAuthCache";
 import {
   adoptAuthor,
   askAuthor,
@@ -31,9 +29,10 @@ import {
   type AuthorPlan,
   type Place,
 } from "../../lib/place";
+import { toast } from "../../lib/toast";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
-import { toast } from "../../lib/toast";
+import { SettingsRow } from "../ui/settings-row";
 
 /** The place this row is about. `repoRoot` alone still means this laptop — the
  *  settings pane's own case — so existing callers keep working and get the same
@@ -45,30 +44,13 @@ export function CloudGitIdentityRow({
   repoRoot: string;
   place?: Place | null;
 }) {
-  const [author, setAuthor] = useState<GitAuthor | null>(null);
+  // The signed-in account, shared and following sign-in changes.
+  const account = useCloudAuthStatus().data;
+  const author = useMemo(() => (account ? gitIdentityFromAccount(account) : null), [account]);
   const [plan, setPlan] = useState<AuthorPlan | null>(null);
   const [busy, setBusy] = useState(false);
 
   const target = place ?? placeHere(repoRoot);
-
-  useEffect(() => {
-    let alive = true;
-    const refresh = async () => {
-      try {
-        const s = await api.cloudAuthStatus();
-        if (alive) setAuthor(gitIdentityFromAccount(s));
-      } catch {
-        if (alive) setAuthor(null);
-      }
-    };
-    void refresh();
-    const onChange = () => void refresh();
-    window.addEventListener("aura:cloud-auth-changed", onChange);
-    return () => {
-      alive = false;
-      window.removeEventListener("aura:cloud-auth-changed", onChange);
-    };
-  }, []);
 
   // Whose name the next commit would carry, asked of the place rather than
   // assumed. A place that can't be reached leaves the plan null: the row then
@@ -111,41 +93,40 @@ export function CloudGitIdentityRow({
   const why = plan ? whyNotMe(plan) : "";
 
   return (
-    <div className="mb-3 rounded-lg border border-line-soft bg-bg-2/40 p-3">
-      <div className="mb-1.5 flex items-center gap-1.5 text-sm text-text-2">
-        <IdCard size={14} strokeWidth={1.75} aria-hidden />
-        <span className="font-medium">Your Aura account is your identity</span>
-      </div>
-      <p className="mb-2 text-xs text-text-4">
-        Signed in, Aura can author your commits from your account — no git
-        identity to set up. {plan ? `On ${plan.place}, this` : "This"} project
-        will use:
-      </p>
-      <div className="mb-2 font-mono text-xs text-text-3">
-        {author.name} &lt;{author.email}&gt;
-      </div>
-      {/* The uncomfortable half: what the commit would say instead. Shown only
-          when it isn't already theirs, because that is the only time it is
-          something to act on. */}
-      {!settled && why ? (
-        <p className="mb-2 text-xs text-amber-500/90">{why}</p>
-      ) : null}
-      <Button
-        variant="accentSoft"
-        size="sm"
-        disabled={busy || settled}
-        onClick={() => void apply()}
-      >
-        {busy ? (
-          <>
-            <AsciiSpinner /> Setting…
-          </>
-        ) : settled ? (
-          "Using your Aura identity"
-        ) : (
-          "Use for this project"
-        )}
-      </Button>
-    </div>
+    <SettingsRow
+      title="Your Aura account is your identity"
+      description={
+        <>
+          Signed in, Aura can author your commits from your account — no git identity to set up.{" "}
+          {plan ? `On ${plan.place}, this` : "This"} repository will use{" "}
+          <code>
+            {author.name} &lt;{author.email}&gt;
+          </code>
+          .
+        </>
+      }
+      // The uncomfortable half: what the commit would say instead. Shown only
+      // when it isn't already theirs, because that is the only time it is
+      // something to act on.
+      help={!settled && why ? why : undefined}
+      control={
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={busy || settled}
+          onClick={() => void apply()}
+        >
+          {busy ? (
+            <>
+              <AsciiSpinner /> Setting…
+            </>
+          ) : settled ? (
+            "Using your Aura identity"
+          ) : (
+            "Use for this repository"
+          )}
+        </Button>
+      }
+    />
   );
 }

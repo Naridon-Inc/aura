@@ -552,11 +552,11 @@ impl LiveSyncWorker {
 /// nothing that the next one does not fix.
 pub fn beat_session(session_id: &str, agent: &str) -> Result<(), String> {
     let config = ConfigManager::load();
-    let token = config.cloud_api_token
-        .or_else(|| std::env::var("AURA_CLOUD_TOKEN").ok())
+    // Through the endpoint override, like every other call here: with
+    // AURA_CLOUD_URL set, the saved login is never sent anywhere.
+    let token = crate::cloud_endpoint::token(config.cloud_api_token.as_deref())
         .ok_or_else(|| "No cloud token configured".to_string())?;
-    let cloud_url = config.cloud_url
-        .unwrap_or_else(|| "https://auravcs.com".to_string());
+    let cloud_url = crate::cloud_endpoint::origin_or(config.cloud_url.as_deref(), "https://auravcs.com");
 
     let payload = json!({
         "repo_full_name": repo_name(),

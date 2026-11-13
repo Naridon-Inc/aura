@@ -305,7 +305,7 @@ pub(super) fn resolve_one(repo_root: &str, input: &Value) -> Result<Target, Stri
 /// Resolve to the set of projects a sweep should cover: the one named, or
 /// every registered project when `project` was omitted. The `bool` is whether
 /// the fleet was capped.
-fn resolve_many(repo_root: &str, input: &Value) -> Result<(Vec<Target>, bool), String> {
+pub(super) fn resolve_many(repo_root: &str, input: &Value) -> Result<(Vec<Target>, bool), String> {
     let named = input
         .get("project")
         .and_then(|v| v.as_str())
@@ -709,6 +709,22 @@ async fn tool_agents_live(repo_root: &str, input: &Value) -> (String, bool) {
 // ── pull requests ──────────────────────────────────────────────────────
 
 async fn tool_prs_list(repo_root: &str, input: &Value) -> (String, bool) {
+    prs_list_with(repo_root, input, |root| crate::cmd_prs::pr_list(root, None)).await
+}
+
+/// `aura_prs_list` with the per-project reader handed in. The resolution —
+/// which checkouts a sweep covers, and which one a named project means — is
+/// the part with a contract; the reader only ever sees the root it was given,
+/// so a test can prove where each read went without a GitHub round-trip.
+pub(super) async fn prs_list_with<F, Fut>(
+    repo_root: &str,
+    input: &Value,
+    list: F,
+) -> (String, bool)
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<crate::cmd_prs::PrSummary>, String>>,
+{
     let (targets, capped) = match resolve_many(repo_root, input) {
         Ok(v) => v,
         Err(e) => return (e, true),
@@ -719,7 +735,7 @@ async fn tool_prs_list(repo_root: &str, input: &Value) -> (String, bool) {
         // A project with no GitHub remote (or no `gh`) errors here. In a
         // fleet sweep that is ordinary, not a failure — skip it quietly
         // rather than filling the result with noise about local-only repos.
-        let Ok(prs) = crate::cmd_prs::pr_list(t.root.clone(), None).await else {
+        let Ok(prs) = list(t.root.clone()).await else {
             continue;
         };
         if prs.is_empty() {
@@ -759,6 +775,45 @@ async fn tool_prs_list(repo_root: &str, input: &Value) -> (String, bool) {
 }
 
 async fn tool_pr_detail(repo_root: &str, input: &Value) -> (String, bool) {
+    pr_detail_with(repo_root, input, |root, number| async move {
+        let detail = crate::cmd_prs::pr_detail(root.clone(), number, None).await?;
+        // Checks are a separate call; a failure there shouldn't lose the
+        // detail we already have, so it degrades to an empty list.
+        let checks = crate::cmd_prs::pr_checks(root, number, None)
+            .await
+            .unwrap_or_default();
+        let check_rows: Vec<Value> = checks
+            .iter()
+            .map(|c| {
+                json!({
+                    "name": c.name,
+                    "state": c.bucket,
+                    "workflow": c.workflow,
+                    "description": c.description,
+                    "url": c.url,
+                })
+            })
+            .collect();
+        Ok((
+            serde_json::to_value(&detail).unwrap_or(Value::Null),
+            check_rows,
+        ))
+    })
+    .await
+}
+
+/// `aura_pr_detail` with the reader handed in, for the same reason as
+/// [`prs_list_with`]: the contract is which checkout `number` is looked up
+/// in, and that is decided here, before the reader is ever called.
+pub(super) async fn pr_detail_with<F, Fut>(
+    repo_root: &str,
+    input: &Value,
+    read: F,
+) -> (String, bool)
+where
+    F: FnOnce(String, u64) -> Fut,
+    Fut: std::future::Future<Output = Result<(Value, Vec<Value>), String>>,
+{
     let Some(number) = input.get("number").and_then(|v| v.as_u64()) else {
         return ("number is required".to_string(), true);
     };
@@ -766,31 +821,14 @@ async fn tool_pr_detail(repo_root: &str, input: &Value) -> (String, bool) {
         Ok(t) => t,
         Err(e) => return (e, true),
     };
-    let detail = match crate::cmd_prs::pr_detail(target.root.clone(), number, None).await {
-        Ok(d) => d,
+    let (detail, check_rows) = match read(target.root.clone(), number).await {
+        Ok(v) => v,
         Err(e) => return (format!("PR #{number} in {}: {e}", target.label), true),
     };
-    // Checks are a separate call; a failure there shouldn't lose the detail
-    // we already have, so it degrades to an empty list.
-    let checks = crate::cmd_prs::pr_checks(target.root.clone(), number, None)
-        .await
-        .unwrap_or_default();
-    let check_rows: Vec<Value> = checks
-        .iter()
-        .map(|c| {
-            json!({
-                "name": c.name,
-                "state": c.bucket,
-                "workflow": c.workflow,
-                "description": c.description,
-                "url": c.url,
-            })
-        })
-        .collect();
     (
         json!({
             "project": target.label,
-            "pr": serde_json::to_value(&detail).unwrap_or(Value::Null),
+            "pr": detail,
             "checks": check_rows,
         })
         .to_string(),

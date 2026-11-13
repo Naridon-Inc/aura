@@ -16,6 +16,19 @@
 
 import type { BrainChoice } from "./api";
 import type { SelectedModel } from "./modelCatalog";
+import { isRetiredBrain } from "./retiredBrains";
+
+// A pair saved on a brain the app no longer offers is forgotten on read, so
+// the chat shows — and the next turn runs on — the brain the app picks for a
+// session that chose nothing: the first agent or key the user has set up.
+function forget(key: string): null {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* storage disabled */
+  }
+  return null;
+}
 
 const MODEL_KEY = (sid: string) => `aura.manager.model.${sid}`;
 const BRAIN_KEY = (sid: string) => `aura.manager.brain.${sid}`;
@@ -28,6 +41,7 @@ export function loadSessionModel(sid: string): SelectedModel | null {
     if (!m || typeof m.brainId !== "string" || typeof m.label !== "string") {
       return null;
     }
+    if (isRetiredBrain(m.brainId)) return forget(MODEL_KEY(sid));
     return {
       brainId: m.brainId,
       modelId: typeof m.modelId === "string" ? m.modelId : null,
@@ -55,6 +69,7 @@ export function loadSessionBrain(sid: string): BrainChoice | null {
     if (!raw) return null;
     const b = JSON.parse(raw) as Partial<BrainChoice> | null;
     if (!b || typeof b.id !== "string") return null;
+    if (isRetiredBrain(b.id)) return forget(BRAIN_KEY(sid));
     return b as BrainChoice;
   } catch {
     return null;

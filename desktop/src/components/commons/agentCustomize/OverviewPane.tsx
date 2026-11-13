@@ -2,15 +2,22 @@
 // "tell the agent what you want" box (describe a change in plain English and a
 // real agent goes and makes it), and a grid of cards that show, at a glance,
 // what's set up — how many agents are ready, which connections exist, whether
-// the safety net is on — each a doorway into its section. Mirrors the
-// reference's "Customize Your Agent" home, in Aura's own language and skin.
+// the safety net is on — each a doorway into its section. It is a settings
+// page: the page title and intro, the ask box as the library's textarea and
+// button, and each section as a settings row with its count and an Open.
 
 import { useState, type ReactNode } from "react";
-import { ArrowRight, CornerDownLeft, Sparkles } from "lucide-react";
+import { ArrowRight, CornerDownLeft } from "lucide-react";
 
 import type { Agent } from "../../../lib/agents";
 import type { CustomizeNavItem, CustomizeStores } from "./customizeShared";
-import { CountPill, instructionCount } from "./customizeShared";
+import { instructionCount } from "./customizeShared";
+import { Badge } from "../../ui/badge";
+import { Button } from "../../ui/button";
+import { SettingsIntro } from "../../ui/settings-blocks";
+import { SettingsRow, SettingsSection } from "../../ui/settings-row";
+import { Textarea } from "../../ui/textarea";
+import "../../ui/customize-overview.css";
 
 export function OverviewPane({
   nav,
@@ -19,7 +26,7 @@ export function OverviewPane({
   onNavigate,
   onClose,
 }: {
-  /** The category items (Overview excluded) rendered as cards. */
+  /** The category items (Overview excluded) rendered as rows. */
   nav: CustomizeNavItem[];
   agents: Agent[];
   stores: CustomizeStores;
@@ -44,83 +51,73 @@ export function OverviewPane({
   };
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-3xl px-8 py-9">
-        {/* Hero */}
-        <div className="mb-7 text-center">
-          <div
-            className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-xl"
-            style={{
-              background:
-                "color-mix(in srgb, var(--color-accent) 16%, transparent)",
-              color: "var(--color-accent)",
-            }}
-          >
-            <Sparkles size={20} />
-          </div>
-          <h1 className="text-xl font-semibold text-text-1">
-            Customize your agent
-          </h1>
-          <p className="mx-auto mt-1.5 max-w-md text-base leading-relaxed text-text-3">
-            Tell it what you want in plain words, or set things up by hand below, who does the work, what it can reach, and how you stay protected.
-          </p>
-        </div>
+    <div className="ui-customize-overview">
+      <div className="ui-settings-page">
+        <h1>Customize your agent</h1>
+        <SettingsIntro>
+          Tell it what you want in plain words, or set things up by hand below, who does the work,
+          what it can reach, and how you stay protected.
+        </SettingsIntro>
 
-        {/* Prompt box */}
-        <div className="mb-8 rounded-xl border border-line-soft bg-bg-1/50 p-2.5 focus-within:border-line-strong">
-          <textarea
+        <div className="ui-customize-ask" data-disabled={target ? undefined : ""}>
+          <Textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
             }}
             rows={2}
+            aria-label="What you want the agent to change"
             placeholder={
               target
                 ? "e.g. Add a check that runs my tests before every commit"
                 : "Install a coding agent to use this"
             }
             disabled={!target}
-            className="w-full resize-none bg-transparent px-2 pt-1.5 text-base leading-relaxed text-text-1 placeholder:text-text-4 focus:outline-none disabled:opacity-60"
           />
-          <div className="flex items-center justify-between px-1 pt-1">
-            <span className="text-xs text-text-4">
-              {target
-                ? `${target.label} will pick this up`
-                : "No agent installed yet"}
-            </span>
-            <button
-              type="button"
-              onClick={submit}
-              disabled={!draft.trim() || !target}
-              className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-white transition-[filter] hover:brightness-110 disabled:opacity-40"
-              style={{ background: "var(--color-accent)" }}
-            >
+          <div className="ui-customize-ask-foot">
+            <span>{target ? `${target.label} will pick this up` : "No agent installed yet"}</span>
+            <Button size="sm" onClick={submit} disabled={!draft.trim() || !target}>
               Send
-              <CornerDownLeft size={13} />
-            </button>
+              <CornerDownLeft />
+            </Button>
           </div>
         </div>
 
-        {/* Category cards */}
-        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <SettingsSection title="Set it up by hand">
           {nav.map((item) => (
-            <CategoryCard
+            <SettingsRow
               key={item.id}
-              icon={item.icon}
-              label={item.label}
-              blurb={item.blurb}
-              meta={cardMeta(item.id, agents, stores)}
-              onClick={() => onNavigate(item.id)}
+              className="ui-customize-row"
+              title={
+                <span className="ui-customize-row-title">
+                  {item.icon}
+                  {item.label}
+                </span>
+              }
+              description={item.blurb}
+              control={
+                <span className="ui-customize-row-control">
+                  {cardMeta(item.id, agents, stores)}
+                  <Button size="sm" variant="ghost" onClick={() => onNavigate(item.id)}>
+                    Open
+                    <ArrowRight />
+                  </Button>
+                </span>
+              }
             />
           ))}
-        </div>
+        </SettingsSection>
       </div>
     </div>
   );
 }
 
-// The live count/status shown on each card — the at-a-glance "what's set up".
+function Count({ children }: { children: ReactNode }) {
+  return <Badge variant="secondary">{children}</Badge>;
+}
+
+// The live count/status shown on each row — the at-a-glance "what's set up".
 function cardMeta(
   id: CustomizeNavItem["id"],
   agents: Agent[],
@@ -129,67 +126,27 @@ function cardMeta(
   switch (id) {
     case "agents": {
       const n = agents.filter((a) => a.available).length;
-      return <CountPill>{n === 1 ? "1 ready" : `${n} ready`}</CountPill>;
+      return <Count>{n === 1 ? "1 ready" : `${n} ready`}</Count>;
     }
     case "skills": {
       const n = stores.plugins.filter((p) => p.kind === "skill").length;
-      return <CountPill>{n}</CountPill>;
+      return <Count>{n}</Count>;
     }
     case "instructions": {
       const n = instructionCount(stores.memory);
-      return <CountPill>{n === 1 ? "1 rule" : `${n} rules`}</CountPill>;
+      return <Count>{n === 1 ? "1 rule" : `${n} rules`}</Count>;
     }
     case "hooks":
-      return (
-        <CountPill>{stores.capture?.enabled ? "On" : "Off"}</CountPill>
-      );
+      return <Count>{stores.capture?.enabled ? "On" : "Off"}</Count>;
     case "mcp":
-      return <CountPill>{stores.mcp.length}</CountPill>;
+      return <Count>{stores.mcp.length}</Count>;
     case "addons": {
       // Add-ons are the ADE-native plugins, so installed plugins are the
       // at-a-glance signal.
       const n = stores.plugins.filter((p) => p.kind === "plugin").length;
-      return <CountPill>{n === 1 ? "1 plugin" : `${n} plugins`}</CountPill>;
+      return <Count>{n === 1 ? "1 plugin" : `${n} plugins`}</Count>;
     }
     default:
       return null;
   }
-}
-
-function CategoryCard({
-  icon,
-  label,
-  blurb,
-  meta,
-  onClick,
-}: {
-  icon: ReactNode;
-  label: string;
-  blurb: string;
-  meta: ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="group flex flex-col gap-2 rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] p-3.5 text-left transition-colors hover:border-line-strong hover:bg-state-hover"
-    >
-      <div className="flex items-center justify-between">
-        <span className="flex items-center gap-2 text-text-2">
-          {icon}
-          <span className="text-base font-medium text-text-1">{label}</span>
-        </span>
-        {meta}
-      </div>
-      <p className="text-sm leading-relaxed text-text-4">{blurb}</p>
-      <span className="mt-0.5 inline-flex items-center gap-1 text-xs text-text-4 transition-colors group-hover:text-accent">
-        Open
-        <ArrowRight
-          size={12}
-          className="transition-transform group-hover:translate-x-0.5"
-        />
-      </span>
-    </button>
-  );
 }

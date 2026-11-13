@@ -1,0 +1,59 @@
+/* Pair phone: the shared dialog holding a QR big enough to scan from across
+   a desk. The QR's ground stays white in both themes; a phone camera needs
+   the contrast, not the palette. */
+.ui-dialog-content.ui-pair-phone {
+  width: min(520px, calc(100vw - 32px));
+}
+.ui-pair-phone-code {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.ui-pair-phone-qr {
+  display: grid;
+  place-items: center;
+  width: min(50vmin, 420px);
+  aspect-ratio: 1;
+  padding: 16px;
+  border-radius: 8px;
+  background: #fff;
+  color: #6b6b6b;
+  font-size: 13px;
+}
+.ui-pair-phone-qr > img {
+  width: 100%;
+  height: 100%;
+}
+.ui-pair-phone-qr > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-pair-phone-typed {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-pair-phone-typed code {
+  margin-left: 6px;
+  color: var(--ui-fg);
+  font-family: var(--font-mono);
+  font-size: 15px;
+  letter-spacing: 0.2em;
+}
+.ui-pair-phone-note {
+  margin: 16px 0 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ui-pair-phone .ui-dialog-footer {
+  align-items: center;
+}
+.ui-pair-phone-expiry {
+  margin-right: auto;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}

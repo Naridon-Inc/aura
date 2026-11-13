@@ -10,20 +10,19 @@
 import { useState } from "react";
 import { ArrowUpRight, Bot, Download, Pin, Plus, RefreshCw } from "lucide-react";
 
-import { api } from "../../../lib/api";
+import { lookAgainForAgents } from "../../../lib/agentsListCache";
 import type { Agent } from "../../../lib/agents";
 import { usePinned } from "../../../lib/agentPrefs";
 import { AgentIcon } from "../../agent/AgentIcon";
 import { agentDisplayLabel, canonicalAgentId } from "../../../lib/agentIdentity";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
+import { Badge } from "../../ui/badge";
 import { Button } from "../../ui/button";
-import {
-  Card,
-  CountPill,
-  EmptyHint,
-  PaneIntro,
-  PaneScroll,
-  PaneSpinner,
-} from "./customizeShared";
+import { SettingsActions } from "../../ui/settings-blocks";
+import { SettingsMcpToolbar } from "../../ui/settings-mcp-parts";
+import { SettingsRow, SettingsSection } from "../../ui/settings-row";
+import { SettingsServiceMark, SettingsServiceTitle } from "../../ui/settings-services-row";
+import { Card, EmptyHint, PaneIntro, PaneScroll, PaneSpinner } from "./customizeShared";
 
 export function AgentsPane({
   agents,
@@ -58,7 +57,7 @@ export function AgentsPane({
   const scan = async () => {
     setScanning(true);
     try {
-      await api.agentsReload();
+      await lookAgainForAgents();
     } catch {
       /* reload is best-effort; discovery below is the source of truth */
     } finally {
@@ -76,22 +75,28 @@ export function AgentsPane({
       <PaneIntro
         title="Agents"
         blurb="The assistants that read and change your code. Ready ones start with a click; the rest are agents Aura supports. Install the CLI and hit Scan again to light it up."
-        action={
-          <Button
-            size="sm"
-            variant="subtle"
-            onClick={scan}
-            disabled={scanning || loading}
-            className="gap-1.5"
-          >
-            <RefreshCw
-              size={13}
-              className={scanning ? "animate-spin" : undefined}
-            />
-            Scan again
-          </Button>
-        }
       />
+
+      {/* The page's one action sits in a row's control slot, the way the
+          connections settings page carries its toolbar. */}
+      <Card>
+        <SettingsRow
+          title="Coding agents"
+          description={
+            agents.length > 0
+              ? `${ready.length} ready · ${notInstalled.length} available to add`
+              : undefined
+          }
+          control={
+            <SettingsMcpToolbar>
+              <Button size="sm" variant="ghost" onClick={scan} disabled={scanning || loading}>
+                {scanning ? <AsciiSpinner /> : <RefreshCw />}
+                Scan again
+              </Button>
+            </SettingsMcpToolbar>
+          }
+        />
+      </Card>
 
       {loading && agents.length === 0 ? (
         <PaneSpinner label="Looking for installed agents…" />
@@ -102,145 +107,118 @@ export function AgentsPane({
           body="Install one (Claude Code, Gemini CLI, Codex, Cursor, or Kimi-Coder) and hit Scan again. It shows up here automatically, nothing to configure."
         />
       ) : (
-        <div className="space-y-6">
+        <>
           {/* Ready — the agents you can start right now. */}
           {ready.length > 0 ? (
-            <section>
-              <SectionLabel>
-                Ready <CountPill>{ready.length}</CountPill>
-              </SectionLabel>
-              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                {ready.map((agent) => {
-                  const canonical = canonicalAgentId(agent.id);
-                  return (
-                    <Card
-                      key={agent.id}
-                      className="flex items-center gap-3 p-3"
-                    >
-                      <AgentIcon
-                        agentId={canonical}
-                        label={agent.label}
-                        size={26}
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-base font-medium text-text-1">
-                          {agentDisplayLabel(canonical)}
-                        </div>
-                        <div className="truncate text-sm text-text-4">
-                          {agent.description}
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => togglePin(agent.id)}
-                        aria-pressed={isPinned(agent.id)}
-                        title={
-                          isPinned(agent.id)
-                            ? `${agentDisplayLabel(canonical)} leads the New-tab menu. Click to unpin it.`
-                            : `Put ${agentDisplayLabel(canonical)} at the top of the New-tab menu`
+            <SettingsSection title="Ready">
+              {ready.map((agent) => {
+                const canonical = canonicalAgentId(agent.id);
+                const name = agentDisplayLabel(canonical);
+                const pinned = isPinned(agent.id);
+                return (
+                  <SettingsRow
+                    key={agent.id}
+                    title={
+                      <SettingsServiceTitle
+                        mark={
+                          <SettingsServiceMark>
+                            <AgentIcon agentId={canonical} label={agent.label} size={16} />
+                          </SettingsServiceMark>
                         }
-                        className="shrink-0 rounded-md p-1.5 transition-colors hover:bg-state-hover"
-                        style={{
-                          color: isPinned(agent.id)
-                            ? "var(--color-blue)"
-                            : "var(--color-text-4)",
-                        }}
                       >
-                        <Pin
-                          size={14}
-                          className={isPinned(agent.id) ? "fill-current" : undefined}
-                        />
-                      </button>
-                      <Button
-                        size="sm"
-                        variant="subtle"
-                        onClick={() => start(agent)}
-                        className="shrink-0 gap-1"
-                      >
-                        Start
-                        <ArrowUpRight size={13} />
-                      </Button>
-                    </Card>
-                  );
-                })}
-              </div>
-            </section>
+                        {name}
+                      </SettingsServiceTitle>
+                    }
+                    description={agent.description}
+                    control={
+                      <SettingsActions>
+                        <Button
+                          variant="ghost"
+                          size="iconSm"
+                          className="ui-customize-pin"
+                          onClick={() => togglePin(agent.id)}
+                          aria-pressed={pinned}
+                          aria-label={pinned ? `Unpin ${name}` : `Pin ${name}`}
+                          title={
+                            pinned
+                              ? `${name} leads the New-tab menu. Click to unpin it.`
+                              : `Put ${name} at the top of the New-tab menu`
+                          }
+                        >
+                          <Pin />
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => start(agent)}>
+                          Start
+                          <ArrowUpRight />
+                        </Button>
+                      </SettingsActions>
+                    }
+                  />
+                );
+              })}
+            </SettingsSection>
           ) : null}
 
           {/* Supported but not found — discoverable, dimmed, with the brand
               mark so the user knows what's out there to add. */}
           {notInstalled.length > 0 ? (
-            <section>
-              <SectionLabel>
-                Available to add <CountPill>{notInstalled.length}</CountPill>
-              </SectionLabel>
-              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                {notInstalled.map((agent) => {
-                  const canonical = canonicalAgentId(agent.id);
-                  return (
-                    <Card
-                      key={agent.id}
-                      className="flex items-center gap-3 p-3 opacity-70"
-                    >
-                      <span className="grayscale">
-                        <AgentIcon
-                          agentId={canonical}
-                          label={agent.label}
-                          size={26}
-                        />
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-base font-medium text-text-2">
-                          {agentDisplayLabel(canonical)}
-                        </div>
-                        <div className="truncate text-sm text-text-4">
-                          Not installed on this machine
-                        </div>
-                      </div>
-                      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-bg-2 px-2 py-0.5 text-xs font-medium text-text-4">
-                        <Download size={11} />
+            <SettingsSection title="Available to add">
+              {notInstalled.map((agent) => {
+                const canonical = canonicalAgentId(agent.id);
+                return (
+                  <SettingsRow
+                    key={agent.id}
+                    className="ui-customize-dim"
+                    title={
+                      <SettingsServiceTitle
+                        mark={
+                          <SettingsServiceMark>
+                            <AgentIcon agentId={canonical} label={agent.label} size={16} />
+                          </SettingsServiceMark>
+                        }
+                      >
+                        {agentDisplayLabel(canonical)}
+                      </SettingsServiceTitle>
+                    }
+                    description="Not installed on this machine"
+                    control={
+                      <Badge variant="outline">
+                        <Download size={12} />
                         Install
-                      </span>
-                    </Card>
-                  );
-                })}
-              </div>
-            </section>
+                      </Badge>
+                    }
+                  />
+                );
+              })}
+            </SettingsSection>
           ) : null}
 
           {/* Add your own — the real power-user path: a [[agent]] block in the
               TOML, then Scan again. Honest about what "add" means. */}
-          <section>
-            <Card className="flex items-start gap-3 p-3.5">
-              <Plus size={15} className="mt-0.5 shrink-0 text-text-4" />
-              <div className="min-w-0 flex-1">
-                <div className="text-base font-medium text-text-1">
+          <Card>
+            <SettingsRow
+              title={
+                <SettingsServiceTitle
+                  mark={
+                    <SettingsServiceMark>
+                      <Plus />
+                    </SettingsServiceMark>
+                  }
+                >
                   Add your own agent
-                </div>
-                <div className="mt-0.5 text-sm leading-relaxed text-text-4">
-                  Point Aura at any CLI by adding an{" "}
-                  <code className="rounded bg-bg-2 px-1 py-0.5 text-xs">
-                    [[agent]]
-                  </code>{" "}
-                  block to{" "}
-                  <code className="rounded bg-bg-2 px-1 py-0.5 text-xs">
-                    ~/.aura/agents.toml
-                  </code>
-                  , then hit Scan again. No rebuild needed.
-                </div>
-              </div>
-            </Card>
-          </section>
-        </div>
+                </SettingsServiceTitle>
+              }
+              description={
+                <>
+                  Point Aura at any CLI by adding an <code>[[agent]]</code> block to{" "}
+                  <code>~/.aura/agents.toml</code>, then hit Scan again. No rebuild needed.
+                </>
+              }
+              control={null}
+            />
+          </Card>
+        </>
       )}
     </PaneScroll>
-  );
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="section-label mb-2 flex items-center gap-2 px-0.5">
-      {children}
-    </div>
   );
 }

@@ -5,9 +5,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Dialog } from "../Dialog";
+import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
+import { Code } from "../ui/code";
 import { Input } from "../ui/input";
+import { Select } from "../ui/select";
 import { Textarea } from "../ui/textarea";
+import "../ui/pr-form.css";
 import type { GitBranchRich } from "../../lib/api";
 import { gitBranchesRich } from "../../lib/place/workApi";
 import { prCreate, prEdit } from "../../lib/prApi";
@@ -166,15 +171,10 @@ export function PrAuthoringDialogHost() {
       title={editing ? `Edit pull request #${request.number}` : "Create pull request"}
       footer={
         <>
-          <Button variant="ghost" size="xs" onClick={close} disabled={busy}>
+          <Button variant="outline" onClick={close} disabled={busy}>
             Cancel
           </Button>
-          <Button
-            variant="default"
-            size="xs"
-            onClick={() => void submit()}
-            disabled={busy || !title.trim()}
-          >
+          <Button onClick={() => void submit()} disabled={busy || !title.trim()}>
             {busy
               ? editing
                 ? "Saving…"
@@ -188,17 +188,14 @@ export function PrAuthoringDialogHost() {
         </>
       }
     >
-      <div className="space-y-3 text-sm">
+      <div className="ui-pr-form">
         {!editing && request && (
-          <div className="rounded border border-line-soft bg-bg-1 px-2.5 py-2 text-text-3">
-            Source branch{" "}
-            <span className="font-mono text-text-1">{request.headBranch}</span>
-          </div>
+          <p className="ui-pr-form-source">
+            Source branch <Code size="sm">{request.headBranch}</Code>
+          </p>
         )}
-        <label className="block space-y-1">
-          <span className="section-label">
-            Title
-          </span>
+        <label className="ui-form-field">
+          Title
           <Input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
@@ -209,10 +206,8 @@ export function PrAuthoringDialogHost() {
             }}
           />
         </label>
-        <label className="block space-y-1">
-          <span className="section-label">
-            Description
-          </span>
+        <label className="ui-form-field">
+          Description
           <Textarea
             value={body}
             onChange={(e) => setBody(e.target.value)}
@@ -221,43 +216,36 @@ export function PrAuthoringDialogHost() {
             placeholder="What changed, why it changed, and anything reviewers should know."
           />
         </label>
-        <label className="block space-y-1">
-          <span className="section-label">
-            Target branch
-          </span>
-          <select
+        <label className="ui-form-field">
+          Target branch
+          <Select
             value={baseBranch}
-            onChange={(e) => setBaseBranch(e.target.value)}
+            onChange={setBaseBranch}
             disabled={busy}
-            className="h-8 w-full rounded border border-line bg-bg-1 px-2 text-sm text-text-1 outline-none focus:border-text-4"
-          >
-            {!editing && <option value="">Repository default</option>}
-            {branchOptions.map((branch) => (
-              <option key={branch} value={branch}>
-                {branch}
-              </option>
-            ))}
-          </select>
+            aria-label="Target branch"
+            options={[
+              ...(editing ? [] : [{ value: "", label: "Repository default" }]),
+              ...branchOptions.map((branch) => ({ value: branch, label: branch })),
+            ]}
+          />
         </label>
-        <label className="flex items-center gap-2 text-text-2">
-          <input
-            type="checkbox"
+        <label className="ui-check-label">
+          <Checkbox
             checked={draft}
-            onChange={(e) => setDraft(e.target.checked)}
+            onCheckedChange={(next) => setDraft(next === true)}
             disabled={busy}
-            className="accent-accent"
           />
           Keep this pull request as a draft
         </label>
         {error && (
-          <div role="alert" className="text-xs text-red">
-            {error}
-          </div>
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         )}
         {!editing && (
-          <div className="text-xs text-text-5">
+          <p className="ui-pr-form-help">
             Creating the pull request pushes the source branch first.
-          </div>
+          </p>
         )}
       </div>
     </Dialog>

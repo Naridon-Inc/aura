@@ -10,11 +10,16 @@ use serde::Serialize;
 use std::fs;
 use std::panic;
 use std::path::PathBuf;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize)]
 struct CrashReport {
     timestamp_ms: u64,
+    /// What kind of record this is. Reports written before this field existed
+    /// are all panics, which is what `kind_of` reads a missing one as.
+    kind: &'static str,
     panic_message: String,
     location: Option<String>,
     thread: Option<String>,
@@ -22,6 +27,14 @@ struct CrashReport {
     app_version: &'static str,
     last_active_session: Option<ActiveSession>,
 }
+
+/// A panic in this process: the shell itself came apart.
+const KIND_PANIC: &str = "panic";
+
+/// macOS killed the window's renderer under memory pressure and the page was
+/// reloaded. See `renderer_recovery` — the shell never stopped running, which
+/// is why this record exists at all: nothing else writes one.
+const KIND_RENDERER_RECLAIMED: &str = "renderer_reclaimed";
 
 #[derive(Serialize)]
 struct ActiveSession {
@@ -107,6 +120,7 @@ fn write_report_inner(
 
     let report = CrashReport {
         timestamp_ms,
+        kind: KIND_PANIC,
         panic_message,
         location,
         thread,
@@ -126,6 +140,70 @@ fn write_report_inner(
 pub(crate) fn crashes_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     home.join(".aura").join("aura-shell-crashes")
+}
+
+/// A renderer reclaim, written in the same shape as a panic report.
+///
+/// It reuses `panic_message` deliberately: that field is the contract the
+/// launch toast and `aura_crash_reports_list` already read, so a reclaim
+/// surfaces with no extra plumbing on either side. `kind` is what keeps the
+/// toast honest about which of the two happened.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[derive(Serialize)]
+struct RendererReclaimed {
+    timestamp_ms: u64,
+    kind: &'static str,
+    panic_message: String,
+    webview: String,
+    reload_delay_ms: u64,
+    reclaims_in_window: usize,
+    app_version: &'static str,
+    last_active_session: Option<ActiveSession>,
+}
+
+/// Note that macOS took `label`'s renderer and the page is being reloaded.
+///
+/// The one failure mode in this app that writes no crash report of its own —
+/// the shell does not stop running, so neither the panic hook above nor
+/// macOS's own reporter has anything to say. Without this the evidence is a
+/// single `runningboardd` line that ages out of the system log in two days.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub fn record_renderer_reclaimed(label: &str, reload_in: Duration, nth_in_window: usize) {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let message = format!(
+        "macOS reclaimed this window's renderer under memory pressure \
+         (jetsam SIGKILL of com.apple.WebKit.WebContent). The shell kept \
+         running — reloading the page in {}ms. This is reclaim {nth_in_window} \
+         in the last 5 minutes.",
+        reload_in.as_millis()
+    );
+
+    let report = RendererReclaimed {
+        timestamp_ms,
+        kind: KIND_RENDERER_RECLAIMED,
+        panic_message: message.clone(),
+        webview: label.to_string(),
+        reload_delay_ms: reload_in.as_millis() as u64,
+        reclaims_in_window: nth_in_window,
+        app_version: env!("CARGO_PKG_VERSION"),
+        last_active_session: find_active_session(),
+    };
+
+    let json =
+        serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{\"err\":\"serialize\"}".into());
+
+    if let Err(e) = fs::create_dir_all(crashes_dir())
+        .and_then(|()| fs::write(crashes_dir().join(format!("{timestamp_ms}.json")), &json))
+    {
+        // A reclaim and a full disk arrive together more often than not — the
+        // same pressure that evicts the renderer is usually a machine with
+        // nothing left anywhere. Say it where a full disk cannot swallow it.
+        crate::last_resort::note("the renderer-reclaim record", &e, &message);
+    }
 }
 
 fn sessions_dir() -> Option<PathBuf> {
@@ -192,6 +270,10 @@ fn find_active_session() -> Option<ActiveSession> {
 pub struct CrashSummary {
     pub path: String,
     pub timestamp_ms: u64,
+    /// `"panic"` or `"renderer_reclaimed"`. Records written before the field
+    /// existed are panics, so a missing one reads as `"panic"` rather than as
+    /// something unknown.
+    pub kind: String,
     pub panic_message: String,
     pub location: Option<String>,
     pub session_id: Option<String>,
@@ -220,6 +302,11 @@ pub fn aura_crash_reports_list() -> Vec<CrashSummary> {
         out.push(CrashSummary {
             path: path.to_string_lossy().to_string(),
             timestamp_ms: v.get("timestamp_ms").and_then(|x| x.as_u64()).unwrap_or(0),
+            kind: v
+                .get("kind")
+                .and_then(|x| x.as_str())
+                .unwrap_or(KIND_PANIC)
+                .to_string(),
             panic_message: v
                 .get("panic_message")
                 .and_then(|x| x.as_str())

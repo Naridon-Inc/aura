@@ -1,15 +1,16 @@
 // "Aura on your phone" — the waitlist body, shared by the What's New moment
 // and Settings → Connections → Aura on your phone.
 //
-// Deliberately one screen: what the phone app is for, where to reach you,
-// which phone. No account, no sign-in, no second step. Once someone has
+// Deliberately one screen: where to reach you, which phone. What the phone
+// app is for is said by whatever frames this — the dialog's description, the
+// settings page's intro. No account, no sign-in, no second step. Once someone has
 // joined, the pane says so and stays quiet — the form doesn't come back.
 //
 // Plain language throughout (the audience are not engineers): "iPhone", not
 // "iOS build"; "we'll email you", not "we'll notify you via the waitlist".
 
 import { useEffect, useRef, useState } from "react";
-import { Check, Smartphone } from "lucide-react";
+import { Smartphone } from "lucide-react";
 
 import { api } from "../../lib/api";
 import {
@@ -19,10 +20,15 @@ import {
   type WaitlistPlatform,
   type WaitlistState,
 } from "../../lib/mobileWaitlist";
+import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
+import { Field } from "../ui/field";
 import { Input } from "../ui/input";
-import { Segment } from "../ui/segment";
+import { SegmentedControl } from "../ui/segmented";
+import { SettingsActions } from "../ui/settings-blocks";
+import { SettingsRow } from "../ui/settings-row";
+import "../ui/waitlist.css";
 
 const PLATFORMS: { value: WaitlistPlatform; label: string }[] = [
   { value: "ios", label: "iPhone" },
@@ -34,9 +40,12 @@ export function MobileWaitlistPane({
   /** Rendered under the form — lets the dialog add its own "Not now". */
   footer,
   onJoined,
+  layout = "form",
 }: {
   footer?: React.ReactNode;
   onJoined?: (state: WaitlistState) => void;
+  /** "rows" lays the same form out as settings rows, for the Settings page. */
+  layout?: "form" | "rows";
 }) {
   const [state, setState] = useState<WaitlistState | null>(null);
   const [email, setEmail] = useState("");
@@ -92,120 +101,118 @@ export function MobileWaitlistPane({
 
   if (state == null) {
     return (
-      <div className="flex items-center gap-2 py-6 text-sm text-text-3">
-        <AsciiSpinner />
-        <span>Checking…</span>
-      </div>
+      <p className="ui-settings-status">
+        <AsciiSpinner size={10} />
+        Checking…
+      </p>
+    );
+  }
+
+  if (state.joined && layout === "rows") {
+    return (
+      <SettingsRow
+        title="You’re on the list"
+        description={`We’ll email ${state.email || "you"} the moment the ${
+          state.platform ? PLATFORM_LABEL[state.platform].toLowerCase() : "phone"
+        } app is ready to try. Nothing else. No newsletter.`}
+        control={null}
+      />
     );
   }
 
   if (state.joined) {
     return (
-      <div className="flex flex-col gap-3">
-        <div className="flex items-start gap-2.5">
-          <span
-            className="mt-px grid h-5 w-5 shrink-0 place-items-center rounded-md"
-            style={{
-              background: "color-mix(in srgb, var(--color-accent) 16%, transparent)",
-              color: "var(--color-accent)",
-            }}
-          >
-            <Check className="h-3 w-3" aria-hidden="true" />
-          </span>
-          <div className="min-w-0">
-            <div className="text-base font-medium text-text-1">
-              You&rsquo;re on the list.
-            </div>
-            <p className="mt-0.5 text-sm leading-snug text-text-3">
-              We&rsquo;ll email {state.email || "you"} the moment the{" "}
-              {state.platform ? PLATFORM_LABEL[state.platform].toLowerCase() : "phone"} app
-              is ready to try. Nothing else. No newsletter.
-            </p>
-          </div>
-        </div>
-        {footer}
+      <div className="ui-waitlist">
+        <Alert>
+          <AlertTitle>You&rsquo;re on the list.</AlertTitle>
+          <AlertDescription>
+            We&rsquo;ll email {state.email || "you"} the moment the{" "}
+            {state.platform ? PLATFORM_LABEL[state.platform].toLowerCase() : "phone"} app is
+            ready to try. Nothing else. No newsletter.
+          </AlertDescription>
+        </Alert>
+        {footer && <SettingsActions>{footer}</SettingsActions>}
       </div>
     );
   }
 
   const canSend = email.trim().length > 0 && !sending;
+  const emailInput = (
+    <Input
+      id="waitlist-email"
+      type="email"
+      autoComplete="email"
+      placeholder="you@example.com"
+      value={email}
+      invalid={error != null}
+      onChange={(e) => {
+        setEmail(e.currentTarget.value);
+        if (error) setError(null);
+      }}
+    />
+  );
+  const phonePicker = (
+    <SegmentedControl<WaitlistPlatform>
+      value={platform}
+      onChange={setPlatform}
+      options={PLATFORMS}
+      ariaLabel="Which phone?"
+    />
+  );
+  const joinButton = (
+    <Button type="submit" size="sm" disabled={!canSend}>
+      {sending ? (
+        <>
+          <AsciiSpinner size={10} />
+          Sending…
+        </>
+      ) : (
+        <>
+          <Smartphone />
+          Join the waitlist
+        </>
+      )}
+    </Button>
+  );
+  const onSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (canSend) void submit();
+  };
+
+  if (layout === "rows") {
+    return (
+      <form onSubmit={onSubmit}>
+        <SettingsRow
+          title="Email"
+          description="Where to send your invite."
+          htmlFor="waitlist-email"
+          help={error ? <span className="ui-settings-error">{error}</span> : undefined}
+          control={emailInput}
+        />
+        <SettingsRow title="Which phone?" description="The app you want first." control={phonePicker} />
+        <SettingsRow
+          title="Waitlist"
+          description="Your email goes to us and nobody else, and is used for this one invite. Nothing about your code or your repositories leaves this computer."
+          control={joinButton}
+        />
+      </form>
+    );
+  }
 
   return (
-    <div className="flex flex-col gap-3.5">
-      <p className="text-sm leading-relaxed text-text-3">
-        Aura is coming to iPhone and Android. Check on what your agents are
-        doing, steer them, and approve work while you&rsquo;re away from your
-        desk. Tell us where to reach you and we&rsquo;ll send an invite when
-        it&rsquo;s ready.
-      </p>
-
-      <div className="flex flex-col gap-1.5">
-        <label
-          htmlFor="waitlist-email"
-          className="text-xs font-medium text-text-3"
-        >
-          Email
-        </label>
-        <Input
-          id="waitlist-email"
-          type="email"
-          autoComplete="email"
-          placeholder="you@example.com"
-          value={email}
-          invalid={error != null}
-          onChange={(e) => {
-            setEmail(e.currentTarget.value);
-            if (error) setError(null);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && canSend) {
-              e.preventDefault();
-              void submit();
-            }
-          }}
-        />
-      </div>
-
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium text-text-3">Which phone?</span>
-        <Segment<WaitlistPlatform>
-          value={platform}
-          onChange={setPlatform}
-          options={PLATFORMS}
-          size="sm"
-        />
-      </div>
-
-      {error && (
-        <div className="text-sm leading-snug text-red-400">{error}</div>
-      )}
-
-      <div className="flex items-center gap-2">
-        <Button
-          size="sm"
-          disabled={!canSend}
-          onClick={() => void submit()}
-          className="gap-1.5"
-        >
-          {sending ? (
-            <>
-              <AsciiSpinner />
-              Sending…
-            </>
-          ) : (
-            <>
-              <Smartphone className="h-3.5 w-3.5" aria-hidden="true" />
-              Join the waitlist
-            </>
-          )}
-        </Button>
+    <form className="ui-waitlist" onSubmit={onSubmit}>
+      <Field label="Email" htmlFor="waitlist-email" error={error ?? undefined}>
+        {emailInput}
+      </Field>
+      <Field label="Which phone?">{phonePicker}</Field>
+      <SettingsActions>
+        {joinButton}
         {footer}
-      </div>
-
-      <p className="text-xs leading-snug text-text-4">
-        Your email goes to us and nobody else, and is used for this one invite.
-        Nothing about your code or your projects leaves this computer.
+      </SettingsActions>
+      <p className="ui-waitlist-note">
+        Your email goes to us and nobody else, and is used for this one invite. Nothing about
+        your code or your repositories leaves this computer.
       </p>
-    </div>
+    </form>
   );
 }

@@ -1,58 +1,33 @@
 // FeatureGates — the three at-a-glance reads on a feature: Confidence (how much
 // is built + checked), Risk (what could bite you), Drift (did the plan hold).
-// Each is a compact card with a plain value, a five-segment health bar, and one
-// plain sentence of why — no code names, no invented numbers. Above them, a
-// single line answers the question the whole card exists for: is this finished?
+// Each is a figure with a plain value and one plain sentence of why — no code
+// names, no invented numbers. The value is the reading; a bar drawn beside it
+// said the same thing twice. Above them, a single line answers the question
+// the whole panel exists for: is this finished?
 //
-// Colour is status, not brand: green reads good, amber "watch", red "problem",
-// muted "not checked". The arctic-blue accent is deliberately kept off these —
-// it's reserved for things you click, and a gate is a readout, not an action.
+// Colour is status, not brand: green reads good, yellow "watch", red "problem",
+// plain "not checked". A gate is a readout, not an action, so nothing here
+// looks clickable.
 
 import type { FeatureSignals, Gate, GateBand } from "../../lib/featureSignals";
+import { TraceVerdict } from "../ui/trace-report";
+import { TraceStat, TraceStats } from "../ui/trace-stats";
+import "./goals.css";
 
-const BAND_COLOR: Record<GateBand, string> = {
-  strong: "var(--color-accent-green)",
-  fair: "var(--color-amber)",
-  weak: "var(--color-red)",
-  unknown: "var(--color-text-4)",
+const BAND_TONE: Record<GateBand, "good" | "warn" | "bad" | undefined> = {
+  strong: "good",
+  fair: "warn",
+  weak: "bad",
+  unknown: undefined,
 };
 
-// Five discrete cells filled by the gate's 0–100 health — the segmented bar the
-// competitor surfaces use, sized to read at a glance without a percentage.
-function SegBar({ pct, color }: { pct: number; color: string }) {
-  // Full only at 100, and never empty once there is something — the same
-  // rule the number follows. Rounding filled all five segments at 99%, so a
-  // feature one part short drew a finished bar.
-  const filled =
-    pct >= 100 ? 5 : pct <= 0 ? 0 : Math.min(4, Math.max(1, Math.floor(pct / 20)));
+function GateStat({ gate }: { gate: Gate }) {
   return (
-    <div className="flex items-center gap-[3px]" aria-hidden>
-      {Array.from({ length: 5 }).map((_, i) => (
-        <span
-          key={i}
-          className="h-1.5 flex-1 rounded-[1px]"
-          style={{ background: i < filled ? color : "var(--color-bg-2)" }}
-        />
-      ))}
-    </div>
-  );
-}
-
-function GateCard({ gate }: { gate: Gate }) {
-  const color = BAND_COLOR[gate.band];
-  return (
-    <div className="min-w-0 rounded-md border border-line-soft bg-bg-0 px-2.5 py-2">
-      <div className="flex items-baseline justify-between gap-1">
-        <span className="section-label">{gate.label}</span>
-        <span className="text-base font-semibold tabular-nums" style={{ color }}>
-          {gate.value}
-        </span>
-      </div>
-      <div className="mt-1.5">
-        <SegBar pct={gate.pct} color={color} />
-      </div>
-      <p className="mt-1.5 text-xs leading-snug text-text-4">{gate.rationale}</p>
-    </div>
+    <TraceStat label={gate.label} sub={gate.rationale}>
+      <span className="ui-goal-gate-value" data-tone={BAND_TONE[gate.band]}>
+        {gate.value}
+      </span>
+    </TraceStat>
   );
 }
 
@@ -67,31 +42,25 @@ function GateCard({ gate }: { gate: Gate }) {
 export function FeatureGates({
   signals,
   driftOverride,
+  headline = true,
 }: {
   signals: FeatureSignals;
   driftOverride?: Gate | null;
+  /** Off where the same sentence already sits right above (a goal's own
+   *  reason line), so it isn't said twice. */
+  headline?: boolean;
 }) {
-  const dot = signals.done
-    ? "var(--color-accent-green)"
-    : signals.rated
-      ? "var(--color-amber)"
-      : "var(--color-text-4)";
   const drift = driftOverride ?? signals.drift;
   return (
-    <div className="flex flex-col gap-2.5">
-      <div className="flex items-start gap-2">
-        <span
-          aria-hidden
-          className="mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full"
-          style={{ background: dot }}
-        />
-        <p className="text-sm leading-snug text-text-2">{signals.headline}</p>
-      </div>
-      <div className="grid grid-cols-3 gap-1.5">
-        <GateCard gate={signals.confidence} />
-        <GateCard gate={signals.risk} />
-        <GateCard gate={drift} />
-      </div>
+    <div className="ui-goal-gates">
+      {headline ? (
+        <TraceVerdict tone={signals.done ? "good" : signals.rated ? "warn" : "muted"} title={signals.headline} />
+      ) : null}
+      <TraceStats label="How finished this feature is">
+        <GateStat gate={signals.confidence} />
+        <GateStat gate={signals.risk} />
+        <GateStat gate={drift} />
+      </TraceStats>
     </div>
   );
 }

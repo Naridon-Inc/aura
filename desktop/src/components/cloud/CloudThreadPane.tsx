@@ -15,6 +15,7 @@
 // said something else.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, CloudOff, Copy } from "lucide-react";
 
 import { api } from "../../lib/api";
 import {
@@ -31,11 +32,14 @@ import {
 import { openManagerSession } from "../../lib/editorStore";
 import { labelForAgentId } from "../../lib/useLiveAgentSessions";
 import { relativeAgeFromDelta } from "../../lib/relativeTime";
-import { AgentIcon } from "../agent/AgentIcon";
-import { AsciiSpinner } from "../ui/ascii-spinner";
+import { AgentMessageBody } from "../manager/chat/AgentMessageBody";
 import { Button } from "../ui/button";
-import { CopyButton } from "../ui/copyButton";
+import { ChatComposerArea, ChatNotice, ChatTranscript } from "../ui/chat-surface";
 import { CloudGlyph } from "../ui/cloud-glyph";
+import { Composer } from "../ui/composer";
+import { ChatStatus, Message, MessageActions, MessageBody } from "../ui/message";
+import { EmptyState, LoadingState } from "../ui/state";
+import "../ui/cloud-thread.css";
 
 /** The agent a reply is addressed to when the thread can't say. Only reachable
  *  for a thread whose every row somehow lost its agent; every real row carries
@@ -80,8 +84,8 @@ export function CloudThreadPane({
 
   if (!loaded && !thread) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-text-4">
-        <AsciiSpinner /> <span className="ml-2">Reading the board…</span>
+      <div className="ui-cloud-thread-state">
+        <LoadingState size="md" label="Reading the board…" />
       </div>
     );
   }
@@ -90,12 +94,12 @@ export function CloudThreadPane({
     // The board is the only record, and it has a retention window. Say that,
     // rather than showing an empty chat that implies nothing was ever said.
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-1 px-6 text-center">
-        <p className="text-sm text-text-3">This conversation isn’t on the board.</p>
-        <p className="max-w-md text-xs text-text-5">
-          Cloud work is kept for a while and then rolls off. If you sent this a
-          long time ago, its record is gone — nothing on this machine held a copy.
-        </p>
+      <div className="ui-cloud-thread-state">
+        <EmptyState
+          icon={CloudOff}
+          title="This conversation isn’t on the board"
+          body="Cloud work is kept for a while and then rolls off. If you sent this a long time ago, its record is gone — nothing on this machine held a copy."
+        />
       </div>
     );
   }
@@ -130,28 +134,21 @@ function ThreadBody({
   }, [thread.jobs.length]);
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex items-center gap-2 border-b border-line-soft px-4 py-2.5">
-        <span className="flex-none text-text-4">
-          <CloudGlyph size={14} pulse={running && latest.status !== "submitted"} />
-        </span>
-        <div className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate text-sm text-text-1">{thread.title}</span>
-          <span className="flex items-center gap-1.5 text-xs text-text-5">
+    <div className="ui-cloud-thread">
+      <header className="ui-cloud-thread-head">
+        <CloudGlyph size={14} pulse={running && latest.status !== "submitted"} />
+        <div className="ui-cloud-thread-title">
+          <strong>{thread.title}</strong>
+          <small>
             <span style={{ color: tint }}>{label}</span>
-            <span>·</span>
             <span>{who}</span>
-            {latest.repo && (
-              <>
-                <span>·</span>
-                <span className="font-mono">{latest.repo}</span>
-              </>
-            )}
-          </span>
+            {latest.repo && <code>{latest.repo}</code>}
+          </small>
         </div>
         {chat && (
           <Button
             variant="ghost"
+            size="sm"
             onClick={() => openManagerSession(chat, thread.title.slice(0, 60))}
             title="This work was handed over from a chat. Open it."
           >
@@ -160,13 +157,11 @@ function ThreadBody({
         )}
       </header>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
-        <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
-          {thread.jobs.map((job) => (
-            <Turn key={job.id} job={job} nowMs={nowMs} agent={agent} />
-          ))}
-        </div>
-      </div>
+      <ChatTranscript ref={scrollRef}>
+        {thread.jobs.map((job) => (
+          <Turn key={job.id} job={job} nowMs={nowMs} />
+        ))}
+      </ChatTranscript>
 
       <ReplyBox
         threadKey={thread.key}
@@ -179,88 +174,90 @@ function ThreadBody({
 }
 
 /** One exchange: what you asked, and whatever the machine has to say about it
- *  so far. They are one task on the board, which is why they are one block
- *  here rather than two unrelated bubbles. */
-function Turn({
-  job,
-  nowMs,
-  agent,
-}: {
-  job: CloudJobWithRoot;
-  nowMs: number;
-  agent: string;
-}) {
+ *  so far. They are one task on the board, so the answer's facts — status,
+ *  commit, branch, task id, age — sit under the answer, the way a chat turn's
+ *  footer does. */
+function Turn({ job, nowMs }: { job: CloudJobWithRoot; nowMs: number }) {
   const { label, tint } = cloudStatusLine(job, nowMs);
   const asked = job.text?.trim() || "";
   const stamp = stampOf(job.created_at, nowMs);
   const answered = job.result || job.error_message;
+  const working = isCloudJobRunning(job.status) && job.status !== "submitted";
 
   return (
-    <div className="flex flex-col gap-2">
-      {/* Yours. Right-aligned like every other chat in the app, so a thread
-          reads as a conversation at a glance rather than as a log. */}
+    <>
       {asked && (
-        <div className="flex justify-end">
-          <div className="max-w-[85%] rounded-2xl bg-surface-3 px-3.5 py-2">
-            <p className="whitespace-pre-wrap break-words text-sm text-text-1">
-              {asked}
-            </p>
+        <Message role="user">
+          <div className="ui-chat-user-stack">
+            <MessageBody tone="user">{asked}</MessageBody>
+            <MessageActions text={asked} />
           </div>
-        </div>
+        </Message>
       )}
 
-      <div className="flex gap-2.5">
-        <span className="mt-0.5 flex-none">
-          <AgentIcon agentId={job.agent || agent} label={labelForAgentId(job.agent || agent)} size={18} />
-        </span>
-        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-          {job.error_message && (
-            <p
-              className="whitespace-pre-wrap break-words text-sm"
-              style={{ color: "var(--color-red)" }}
-            >
-              {job.error_message}
-            </p>
-          )}
-          {job.result && (
-            <p className="whitespace-pre-wrap break-words text-sm text-text-2">
-              {job.result}
-            </p>
-          )}
+      <Message role="assistant">
+        <MessageBody className="ui-chat-answer">
+          {job.error_message && <ChatStatus state="error">{job.error_message}</ChatStatus>}
+          {job.result && <AgentMessageBody source={job.result} />}
           {/* Nothing has come back yet. The status IS the answer here, so it
-              stands where the reply would be instead of only in the meta line
-              — an empty space under a question reads as a dropped message. */}
+              stands where the reply would be — an empty space under a
+              question reads as a dropped message. */}
           {!answered && (
-            <p className="flex items-center gap-1.5 text-sm" style={{ color: tint }}>
-              {isCloudJobRunning(job.status) && job.status !== "submitted" && (
-                <AsciiSpinner />
-              )}
-              {label}
-              {job.status === "submitted" && (
-                <span className="text-text-5">
-                  — it starts as soon as a machine is free
-                </span>
-              )}
-            </p>
+            <ChatStatus state={working ? "working" : "empty"}>
+              <span style={{ color: tint }}>{label}</span>
+              {job.status === "submitted" && " — it starts as soon as a machine is free"}
+            </ChatStatus>
           )}
-
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-5">
-            {answered && <span style={{ color: tint }}>{label}</span>}
-            {job.commit_sha && (
-              <span className="font-mono" title={job.commit_sha}>
-                {job.commit_sha.slice(0, 8)}
+          <MessageActions text={job.result || undefined}>
+            {answered && (
+              <span className="ui-turn-fact" style={{ color: tint }}>
+                {label}
               </span>
             )}
-            {job.branch && <span className="font-mono">{job.branch}</span>}
-            <span className="flex items-center gap-1 font-mono">
+            {job.commit_sha && (
+              <code className="ui-turn-fact" title={job.commit_sha}>
+                {job.commit_sha.slice(0, 8)}
+              </code>
+            )}
+            {job.branch && <code className="ui-turn-fact">{job.branch}</code>}
+            <code className="ui-turn-fact" title={job.id}>
               {job.id.slice(0, 8)}
-              <CopyButton content={job.id} variant="mini" />
-            </span>
-            {stamp && <span className="tabular-nums">{stamp}</span>}
-          </div>
-        </div>
-      </div>
-    </div>
+            </code>
+            <CopyId id={job.id} />
+            {stamp && <span className="ui-turn-fact">{stamp}</span>}
+          </MessageActions>
+        </MessageBody>
+      </Message>
+    </>
+  );
+}
+
+/** Copies a task's full id — what a runner log or the board is searched by. */
+function CopyId({ id }: { id: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(t);
+  }, [copied]);
+  const label = copied ? "Copied" : "Copy task id";
+  return (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      title={label}
+      aria-label={label}
+      onClick={() => {
+        navigator.clipboard.writeText(id).then(
+          () => setCopied(true),
+          () => {
+            // A denied clipboard leaves the id on screen to select by hand.
+          },
+        );
+      }}
+    >
+      {copied ? <Check /> : <Copy />}
+    </Button>
   );
 }
 
@@ -268,9 +265,10 @@ function Turn({
  *
  *  A reply is a new task carrying the thread's context, not a keystroke into a
  *  live process — the runner claims tasks, it isn't holding a socket open for
- *  us. That difference is stated on screen rather than hidden behind a chat
- *  bubble, because it changes what you should expect: your words land when the
- *  box next looks at the board, and if it is mid-job they land after that job. */
+ *  us. That difference is stated under the composer rather than hidden behind
+ *  a chat bubble, because it changes what you should expect: your words land
+ *  when the box next looks at the board, and if it is mid-job they land after
+ *  that job. */
 function ReplyBox({
   threadKey,
   repoRoot,
@@ -288,10 +286,12 @@ function ReplyBox({
 
   if (!repoRoot) {
     return (
-      <div className="border-t border-line-soft px-4 py-3 text-xs text-text-5">
-        This project isn’t open on this machine, so there’s nowhere to send a
-        reply from. Open the project to keep the conversation going.
-      </div>
+      <ChatComposerArea>
+        <ChatNotice>
+          This repository isn’t open on this machine, so there’s nowhere to send a
+          reply from. Open the repository to keep the conversation going.
+        </ChatNotice>
+      </ChatComposerArea>
     );
   }
 
@@ -319,51 +319,27 @@ function ReplyBox({
   };
 
   return (
-    <div className="flex flex-col gap-1.5 border-t border-line-soft px-4 py-3">
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-1.5">
-        <div className="flex items-end gap-2">
-          <textarea
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void send();
-              }
-            }}
-            rows={2}
-            placeholder="Say something else to the machine…"
-            // bg-state-hover, matching the app's own Input: `bg-surface-2` was
-            // a class that does not exist in this stylesheet, so the composer
-            // had no fill at all and whatever sat behind it showed through.
-            className="min-h-[46px] flex-1 resize-none rounded-lg border border-line-soft bg-state-hover px-3 py-2 text-sm text-text-1 outline-none placeholder:text-text-5 focus:border-line"
-          />
-          <Button
-            variant="accentSoft"
-            onClick={() => void send()}
-            disabled={!text.trim() || sending}
-          >
-            {sending ? (
-              <span className="flex items-center gap-1.5">
-                <AsciiSpinner /> Sending…
-              </span>
-            ) : (
-              "Send"
-            )}
-          </Button>
-        </div>
-        {error ? (
-          <p className="text-xs" style={{ color: "var(--color-red)" }}>
-            {error}
-          </p>
-        ) : (
-          <p className="text-xs text-text-5">
-            {latestIsRunning
-              ? "The machine is busy with this thread — your reply is picked up after it finishes."
-              : "Goes on the board as the next piece of work in this conversation."}
-          </p>
-        )}
-      </div>
-    </div>
+    <ChatComposerArea>
+      {error && (
+        <ChatNotice onDismiss={() => setError(null)}>
+          <span className="ui-cloud-thread-error">Couldn’t send: {error}</span>
+        </ChatNotice>
+      )}
+      <Composer
+        value={text}
+        onChange={setText}
+        onSend={() => void send()}
+        sendDisabled={sending}
+        ariaLabel="Reply to the machine"
+        placeholder="Say something else to the machine…"
+      />
+      <ChatNotice>
+        {sending
+          ? "Sending…"
+          : latestIsRunning
+            ? "The machine is busy with this thread — your reply is picked up after it finishes."
+            : "Goes on the board as the next piece of work in this conversation."}
+      </ChatNotice>
+    </ChatComposerArea>
   );
 }

@@ -58,7 +58,7 @@ describe("what the host is told they are giving away", () => {
   // host believing they granted a chat seat.
   test("drive says it reaches the files", () => {
     expect(ACCESS_META.drive.hostBlurb.toLowerCase()).toContain("files");
-    expect(ACCESS_META.drive.guestBlurb.toLowerCase()).toContain("project");
+    expect(ACCESS_META.drive.guestBlurb.toLowerCase()).toContain("repository");
   });
 
   test("watch says it does not", () => {

@@ -72,6 +72,7 @@ pub async fn place_boot(
     machine_id: Option<String>,
     address: Option<Address>,
     open: Open,
+    remote_root: Option<String>,
 ) -> Result<String, String> {
     let place = match machine_id
         .as_deref()
@@ -83,6 +84,12 @@ pub async fn place_boot(
             Some(a) => Place::at_address(a)?,
             None => Place::resolve(root.unwrap_or_default(), None),
         },
+    };
+    // A workspace launched onto a box works in a sibling worktree, not the
+    // checkout the machine row records; its shell opens there.
+    let place = match remote_root.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        Some(there) if place.is_remote() => super::place_work::rerooted(place, there)?,
+        _ => place,
     };
     place.boot(&open)
 }
@@ -267,6 +274,7 @@ mod tests {
         Place::Box {
             machine: Box::new(Machine {
                 id: "ubuntu@box.example:/srv/work".into(),
+                aliases: Vec::new(),
                 name: "aura-runner".into(),
                 host: "box.example".into(),
                 user: "ubuntu".into(),

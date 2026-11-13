@@ -1,0 +1,125 @@
+{
+ "initialize": [
+  {
+   "jsonrpc": "2.0",
+   "id": 0,
+   "result": {
+    "protocolVersion": 1,
+    "authMethods": [
+     {
+      "id": "oauth-personal",
+      "name": "Log in with Google",
+      "description": "Log in with your Google account"
+     },
+     {
+      "id": "gemini-api-key",
+      "name": "Gemini API key",
+      "description": "Use an API key with Gemini Developer API",
+      "_meta": {
+       "api-key": {
+        "provider": "google"
+       }
+      }
+     },
+     {
+      "id": "vertex-ai",
+      "name": "Vertex AI",
+      "description": "Use an API key with Vertex AI GenAI API"
+     },
+     {
+      "id": "gateway",
+      "name": "AI API Gateway",
+      "description": "Use a custom AI API Gateway",
+      "_meta": {
+       "gateway": {
+        "protocol": "google",
+        "restartRequired": "false"
+       }
+      }
+     }
+    ],
+    "agentInfo": {
+     "name": "gemini-cli",
+     "title": "Gemini CLI",
+     "version": "0.55.1"
+    },
+    "agentCapabilities": {
+     "loadSession": true,
+     "promptCapabilities": {
+      "image": true,
+      "audio": true,
+      "embeddedContext": true
+     },
+     "mcpCapabilities": {
+      "http": true,
+      "sse": true
+     }
+    }
+   }
+  }
+ ],
+ "session_new": [
+  {
+   "jsonrpc": "2.0",
+   "id": 1,
+   "result": {
+    "sessionId": "ebbf0ebe-af1e-465c-83aa-b78c7fc2e3b4",
+    "modes": {
+     "availableModes": [
+      {
+       "id": "default",
+       "name": "Default",
+       "description": "Prompts for approval"
+      },
+      {
+       "id": "autoEdit",
+       "name": "Auto Edit",
+       "description": "Auto-approves edit tools"
+      },
+      {
+       "id": "yolo",
+       "name": "YOLO",
+       "description": "Auto-approves all tools"
+      },
+      {
+       "id": "plan",
+       "name": "Plan",
+       "description": "Read-only mode"
+      }
+     ],
+     "currentModeId": "default"
+    },
+    "models": {
+     "availableModels": [
+      {
+       "modelId": "auto",
+       "name": "Auto",
+       "description": "Let Gemini CLI decide the best model for the task: gemini-3.1-pro-preview, gemini-3.5-flash"
+      },
+      {
+       "modelId": "gemini-3.1-pro-preview",
+       "name": "gemini-3.1-pro-preview"
+      },
+      {
+       "modelId": "gemini-3-flash-preview",
+       "name": "gemini-3-flash-preview"
+      },
+      {
+       "modelId": "gemini-2.5-pro",
+       "name": "gemini-2.5-pro"
+      },
+      {
+       "modelId": "gemini-3.5-flash",
+       "name": "gemini-3.5-flash"
+      },
+      {
+       "modelId": "gemini-3.1-flash-lite",
+       "name": "gemini-3.1-flash-lite"
+      }
+     ],
+     "currentModelId": "auto"
+    }
+   }
+  }
+ ]
+}

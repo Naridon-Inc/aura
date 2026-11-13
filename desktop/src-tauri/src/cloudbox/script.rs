@@ -240,8 +240,19 @@ pub fn list_sessions() -> String {
 /// long before any of this existed and they are real projects; a layout we
 /// invent now would make them invisible. So we scan a couple of roots one level
 /// deep and take whatever has a `.git` in it.
+///
+/// `$HOME/aura-workspaces` is where `aura runner serve --all-projects` clones
+/// each repository it takes cloud work for (`<owner>__<name>`) when it runs
+/// from the home directory rather than inside a checkout — which is how its
+/// service runs. Left out, a box doing a team's work on six repositories read
+/// as holding the one somebody cloned by hand.
 pub fn project_roots() -> Vec<&'static str> {
-    vec!["$HOME", "$HOME/aura/projects", "$HOME/workspaces"]
+    vec![
+        "$HOME",
+        "$HOME/aura/projects",
+        "$HOME/workspaces",
+        "$HOME/aura-workspaces",
+    ]
 }
 
 /// Every project the box has: path, remote, branch, and how much uncommitted
@@ -426,8 +437,22 @@ fn inner_command(spec: &NewSession, preload: &str, confine: Option<&str>) -> Str
                 ))
             )
         }
-        None => format!("{preload}exec \"$SHELL\" -l"),
+        None => match shell_run(spec) {
+            // Quoted as one word for the login shell, so a command that ends
+            // in `&` or spans lines means what it says, and the shell reads
+            // the profile that puts node, cargo and the rest on PATH.
+            Some(run) => format!("{preload}\"$SHELL\" -lc {}; exec \"$SHELL\" -l", quote(run)),
+            None => format!("{preload}exec \"$SHELL\" -l"),
+        },
     }
+}
+
+/// The command a shell session starts with, when it was given one.
+fn shell_run(spec: &NewSession) -> Option<&str> {
+    spec.run
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty() && spec.kind == "shell")
 }
 
 /// The agent's own command line: the binary, and its first words if it was
@@ -618,6 +643,7 @@ mod tests {
             title: None,
             branch: None,
             prompt: None,
+            run: None,
         }
     }
 
@@ -839,6 +865,21 @@ mod tests {
         let inner = inner_command(&s, "", None);
         assert!(out.contains(&quote(&inner)));
         assert!(!out.contains("; ls'\n"));
+    }
+
+    #[test]
+    fn a_shell_session_given_a_command_runs_it_then_stays_a_shell() {
+        let mut s = spec("shell", None);
+        s.run = Some("npm run dev &\nwait".into());
+        let inner = inner_command(&s, "", None);
+        assert_eq!(inner, format!("\"$SHELL\" -lc {}; exec \"$SHELL\" -l", quote("npm run dev &\nwait")));
+        // An agent session never runs it.
+        let mut a = spec("agent", Some("claude"));
+        a.run = Some("rm -rf x".into());
+        assert!(!inner_command(&a, "", None).contains("rm -rf"));
+        // Blank is a plain shell.
+        s.run = Some("  ".into());
+        assert_eq!(inner_command(&s, "", None), "exec \"$SHELL\" -l");
     }
 
     #[test]

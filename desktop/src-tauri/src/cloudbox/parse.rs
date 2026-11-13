@@ -84,6 +84,27 @@ pub fn sessions(stdout: &str) -> Vec<BoxSession> {
 }
 
 /// The projects a box holds.
+/// What a project on the box is called in a list: its directory's name, except
+/// for one the runner cloned for cloud work, whose directory is the remote's
+/// `<owner>__<name>` — that one is called by its repository's own name, the
+/// way a person who cloned it by hand would have named the folder.
+fn project_name(path: &str) -> &str {
+    let name = basename(path);
+    let parent = basename(
+        path.trim_end_matches('/')
+            .strip_suffix(name)
+            .unwrap_or_default(),
+    );
+    if parent == "aura-workspaces" || parent == "workspaces" {
+        if let Some((owner, repo)) = name.split_once("__") {
+            if !owner.is_empty() && !repo.is_empty() {
+                return repo;
+            }
+        }
+    }
+    name
+}
+
 pub fn projects(stdout: &str) -> Vec<BoxProject> {
     let mut out = Vec::new();
     for line in stdout.lines() {
@@ -100,7 +121,7 @@ pub fn projects(stdout: &str) -> Vec<BoxProject> {
             continue;
         }
         out.push(BoxProject {
-            name: basename(&path).to_string(),
+            name: project_name(&path).to_string(),
             path,
             remote: opt(f[1]),
             branch: opt(f[2]),
@@ -242,6 +263,22 @@ mod tests {
         assert_eq!(p[1].name, "naridon");
         assert_eq!(p[1].dirty, 3);
         assert_eq!(p[1].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_repository_the_runner_cloned_goes_by_its_own_name() {
+        let p = projects(&format!(
+            "{}\n{}\n{}",
+            row(&["/home/ubuntu/aura-workspaces/acme__api", "git@github.com:acme/api.git", "main", "0"]),
+            row(&["/home/ubuntu/workspaces/acme__web", "", "main", "0"]),
+            // Anywhere else a double underscore is just part of the folder's name.
+            row(&["/home/ubuntu/my__notes", "", "main", "0"]),
+        ));
+        let names: Vec<&str> = p.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, vec!["api", "my__notes", "web"]);
+        assert_eq!(p[0].path, "/home/ubuntu/aura-workspaces/acme__api");
+        // A folder that is only the separator keeps its own name.
+        assert_eq!(project_name("/home/ubuntu/aura-workspaces/__"), "__");
     }
 
     #[test]

@@ -1,0 +1,193 @@
+/* Trace page chrome — the page header, view strip and list toolbar, drawn with
+   the same measurements as every other top-level page. */
+
+.ui-trace-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-trace-page-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+/* The view an opened record covers stays mounted, so Back lands on the same
+   filter, scroll and row. */
+.ui-trace-page-body[hidden] {
+  display: none;
+}
+
+/* 40px page header. */
+.ui-trace-header {
+  height: 40px;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--ui-border);
+  padding: 0 12px;
+  background: var(--ui-sidebar);
+  white-space: nowrap;
+  overflow: hidden;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.ui-trace-header-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-trace-header-title .ui-trace-crumb {
+  color: var(--ui-muted-fg);
+}
+.ui-trace-header-spacer {
+  flex: 1;
+  min-width: 8px;
+}
+.ui-trace-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.ui-trace-header-actions > .ui-button-ghost {
+  color: var(--ui-muted-fg);
+}
+.ui-trace-header-actions > .ui-button-ghost:hover {
+  color: var(--ui-fg);
+}
+.ui-trace-header-project {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 200px;
+  padding: 0 8px;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+}
+.ui-trace-header-project > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-trace-header-project svg {
+  flex-shrink: 0;
+}
+.ui-trace-header-divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: var(--ui-border);
+}
+
+/* View strip — the dashboard's underline tab list, with icons and counts. */
+.ui-trace-strip {
+  justify-content: space-between;
+  gap: 16px;
+}
+.ui-trace-strip [role="tab"] svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.ui-trace-strip [role="tab"]:hover {
+  color: var(--ui-fg);
+}
+.ui-trace-strip [role="tab"]:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+.ui-trace-strip-count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.ui-trace-strip-trailing {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* List toolbar — Home's toolbar. Its last button is Home's primary verb; a
+   Trace toolbar ends on a quiet one, so it keeps the quiet colour. */
+.ui-trace-toolbar .ui-home-filters > .ui-button-ghost:last-child {
+  color: var(--ui-muted-fg);
+}
+.ui-trace-toolbar .ui-home-filters > .ui-button-ghost:hover {
+  color: var(--ui-fg);
+}
+.ui-trace-toolbar-spacer {
+  flex: 1;
+  min-width: 0;
+}
+.ui-trace-toolbar-meta {
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+  white-space: nowrap;
+}
+
+@media (max-width: 1200px) {
+  .ui-trace-toolbar .ui-home-search {
+    flex-basis: auto;
+  }
+  .ui-home-toolbar.ui-trace-toolbar {
+    flex-wrap: nowrap;
+    padding: 0 8px 0 16px;
+    gap: 12px;
+  }
+  .ui-trace-toolbar .ui-home-filters {
+    width: auto;
+  }
+}
+
+/* A Trace tool drawn as a page (Review, Memory, Doctor, Attestations): the
+   tool's column, then a footer bar holding the tool's own actions. */
+.ui-trace-tool {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-trace-tool-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.ui-trace-tool-scroll[data-fill] {
+  display: flex;
+  overflow: hidden;
+}
+.ui-trace-tool-column {
+  width: 100%;
+  margin: 0 auto;
+  padding: 20px 24px;
+}
+.ui-trace-tool-scroll[data-fill] > .ui-trace-tool-column {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.ui-trace-tool-footer {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--ui-border);
+  padding: 12px 24px;
+  background: var(--ui-bg);
+}

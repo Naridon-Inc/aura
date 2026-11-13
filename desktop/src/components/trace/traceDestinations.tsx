@@ -1,4 +1,4 @@
-// Trace · destinations — the ONE list of the places Trace goes, and the glyph
+// Trace · destinations — the ONE list of the places Trace goes, and the icon
 // each wears.
 //
 // It used to be eight hand-written rows in the sidebar, each carrying its own
@@ -21,7 +21,17 @@
 // addressed — `{ kind: "tool", tool: "doctor" }` and `{ kind: "graph" }` — so a
 // saved link keeps working while nothing on screen points at them.
 
-import type { ReactNode } from "react";
+import {
+  Gauge,
+  GitFork,
+  Rows3,
+  ShieldCheck,
+  Stethoscope,
+  Target,
+  Users,
+  Waypoints,
+  type LucideIcon,
+} from "lucide-react";
 
 import {
   CODE_MAP_ENABLED,
@@ -47,7 +57,7 @@ export type TraceKey =
   | "codemap";
 
 /** The handlers a destination can call. Kept as a bag of callbacks (rather
- *  than one `onGo(key)`) because the two asking destinations need App-level
+ *  than one `onGo(key)`) because the asking destination needs App-level
  *  state — the busy guard that stops a second click buying a second agent
  *  turn — and the navigating ones only need the editor store. */
 export type TraceHandlers = {
@@ -71,11 +81,11 @@ export type TraceDestination = {
   /** Plain-language "what is this" — several destinations have jargon names
    *  (Attestations, Intent ↔ AST), and the audience is not engineers. */
   hint: string;
-  glyph: ReactNode;
+  icon: LucideIcon;
   /** Off behind a feature flag → the destination is absent, not disabled. */
   enabled: boolean;
-  /** True for the two that hand a question to Aura instead of opening a pane.
-   *  They can never be the active destination, and they take a busy state. */
+  /** True for a destination that hands a question to Aura instead of opening
+   *  a pane. It can never be the active one, and it takes a busy state. */
   asks?: boolean;
   /** Shows only when something is actually reaching your work — a dead menu
    *  entry reading 0 is worse than no entry. */
@@ -85,97 +95,16 @@ export type TraceDestination = {
   run: (h: TraceHandlers) => void;
 };
 
-// ── Glyphs ───────────────────────────────────────────────────────────────────
-// Kept as bare path elements so every surface that draws them supplies its own
-// <svg> chrome (size, stroke) and they can never disagree on shape.
-
-export const GLYPH_GOAL = (
-  <>
-    <circle cx="12" cy="12" r="9" />
-    <circle cx="12" cy="12" r="5" />
-    <circle cx="12" cy="12" r="1" />
-  </>
-);
-export const GLYPH_DOCTOR = (
-  <>
-    <path d="M5 3v6a5 5 0 0 0 10 0V3" />
-    <path d="M5 3H3M15 3h2M10 14v3a4 4 0 0 0 8 0v-1" />
-    <circle cx="18" cy="13" r="2" />
-  </>
-);
-export const GLYPH_CODEMAP = (
-  <>
-    <circle cx="6" cy="6" r="2.5" />
-    <circle cx="18" cy="9" r="2.5" />
-    <circle cx="9" cy="18" r="2.5" />
-    <path d="M8 7.5 15.5 9M8 16l1.5-7" />
-  </>
-);
-export const GLYPH_OVERVIEW = (
-  <>
-    <path d="M5 18a8 8 0 1 1 14 0" />
-    <path d="M12 14.5 16 9" strokeLinecap="round" />
-    <circle cx="12" cy="14.5" r="1.1" />
-  </>
-);
-export const GLYPH_SESSIONS = (
-  <>
-    <rect x="3" y="4" width="18" height="5" rx="1.5" />
-    <rect x="3" y="13" width="18" height="5" rx="1.5" />
-    <path d="M7 6.5h.01M7 15.5h.01" />
-  </>
-);
-// Team activity — two figures + a pulse line, hinting "what everyone's AI is
-// doing to our project, as it happens".
-export const GLYPH_TEAM_ACTIVITY = (
-  <>
-    <circle cx="9" cy="8" r="3" />
-    <path d="M3.5 19a5.5 5.5 0 0 1 11 0" />
-    <path d="M16 4.5a3 3 0 0 1 0 5.8M18.5 19a5.5 5.5 0 0 0-3-4.9" />
-  </>
-);
-// Cost & usage — a banknote: a rounded bill with a coin in the middle,
-// hinting "what this is costing us in tokens and dollars". No longer a cell
-// here; it marks the door Sessions carries into the pane, which is why the
-// shape still lives in this file: one mark wherever you meet the surface.
-export const GLYPH_USAGE = (
-  <>
-    <rect x="2.5" y="6" width="19" height="12" rx="2" />
-    <circle cx="12" cy="12" r="2.5" />
-    <path d="M6 9.5v5M18 9.5v5" />
-  </>
-);
-// Cross-branch impacts — a horizontal git-fork: one node on the left splitting
-// rightward into two diverged branch nodes, hinting "a change on another
-// branch reaches yours". Deliberately horizontal (no vertical trunk) so it
-// reads unmistakably as a fork.
-export const GLYPH_IMPACTS = (
-  <>
-    <circle cx="5" cy="12" r="2" />
-    <circle cx="19" cy="6" r="2" />
-    <circle cx="19" cy="18" r="2" />
-    <path d="M7 12h5" />
-    <path d="M12 12C14.5 12 14.5 6 17 6" />
-    <path d="M12 12C14.5 12 14.5 18 17 18" />
-  </>
-);
-// Safety check — a shield with a check, hinting "a second set of eyes
-// finds bugs, security holes, and things that don't match the ask".
-export const GLYPH_SAFETY = (
-  <>
-    <path d="M12 3 5 5.5v5.2c0 4.4 3 7.3 7 8.8 4-1.5 7-4.4 7-8.8V5.5Z" />
-    <path d="m9 11.5 2 2 4-4.2" />
-  </>
-);
-
 // ── The list ─────────────────────────────────────────────────────────────────
+// Each destination wears an icon from the same line set as the rest of the
+// app, so the strip reads like every other view switch.
 
 export const TRACE_DESTINATIONS: TraceDestination[] = [
   {
     key: "overview",
     label: "Overview",
     hint: "Live activity, headline numbers, and a one-line cost summary. At a glance, links to the rest.",
-    glyph: GLYPH_OVERVIEW,
+    icon: Gauge,
     enabled: true,
     run: (h) => h.onOverview(),
   },
@@ -186,7 +115,7 @@ export const TRACE_DESTINATIONS: TraceDestination[] = [
     key: "sessions",
     label: "My sessions",
     hint: "Your own AI coding sessions. Open any run to see what changed and why.",
-    glyph: GLYPH_SESSIONS,
+    icon: Rows3,
     enabled: true,
     gap: true,
     run: (h) => h.onSessions(),
@@ -195,20 +124,21 @@ export const TRACE_DESTINATIONS: TraceDestination[] = [
     key: "team",
     label: "Team activity",
     hint: "Every AI change across your team, who made it, why, and if it touches the work you're in.",
-    glyph: GLYPH_TEAM_ACTIVITY,
+    icon: Users,
     enabled: TEAM_ACTIVITY_ENABLED,
     run: (h) => h.onTeamActivity(),
   },
 
   // Two trust rungs: built right (Goals) → reviewed (Safety check). Each
   // answers a distinct question so neither reads as a synonym of the other.
+  // Goals is a page — the list of what you asked for, each with its own
+  // Prove — so it is a tab; only the safety check is a question to Aura.
   {
     key: "goals",
     label: "Goals",
     hint: "Pick something you asked for and confirm it's truly built. Aura traces it through the real code, end to end.",
-    glyph: GLYPH_GOAL,
+    icon: Target,
     enabled: true,
-    asks: true,
     gap: true,
     run: (h) => h.onProve(),
   },
@@ -216,7 +146,7 @@ export const TRACE_DESTINATIONS: TraceDestination[] = [
     key: "review",
     label: "Safety check",
     hint: "A second set of eyes on your changes. Bugs, security holes, and things that don't match what you asked.",
-    glyph: GLYPH_SAFETY,
+    icon: ShieldCheck,
     enabled: true,
     asks: true,
     run: (h) => h.onReview(),
@@ -225,7 +155,7 @@ export const TRACE_DESTINATIONS: TraceDestination[] = [
     key: "impacts",
     label: "Impacts on me",
     hint: "Code you depend on changed on another branch. Fix or acknowledge before it bites.",
-    glyph: GLYPH_IMPACTS,
+    icon: GitFork,
     enabled: true,
     onlyWhenImpacts: true,
     run: (h) => h.onImpacts(),
@@ -235,9 +165,9 @@ export const TRACE_DESTINATIONS: TraceDestination[] = [
   // see their flags for why each is hidden rather than deleted.
   {
     key: "doctor",
-    label: "Project health",
-    hint: "A quick health check of your project. Finds anything stuck or half-set-up before it trips you, and tells you how to fix it.",
-    glyph: GLYPH_DOCTOR,
+    label: "Repository health",
+    hint: "A quick health check of your repository. Finds anything stuck or half-set-up before it trips you, and tells you how to fix it.",
+    icon: Stethoscope,
     enabled: PROJECT_HEALTH_ENABLED,
     gap: true,
     run: (h) => h.onDoctor(),
@@ -245,8 +175,8 @@ export const TRACE_DESTINATIONS: TraceDestination[] = [
   {
     key: "codemap",
     label: "Code Map",
-    hint: "A map of your project's files and how they connect. What touches what.",
-    glyph: GLYPH_CODEMAP,
+    hint: "A map of your repository's files and how they connect. What touches what.",
+    icon: Waypoints,
     enabled: CODE_MAP_ENABLED,
     run: (h) => h.onCodeMap(),
   },

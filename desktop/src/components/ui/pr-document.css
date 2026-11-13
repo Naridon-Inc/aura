@@ -1,0 +1,233 @@
+/* The Checks tab, top to bottom: the pull request's title, its facts list,
+   its description, then the Git status list. One left edge for all of it;
+   anything with a hover fill reaches a few pixels past that edge instead of
+   moving its text off it. */
+
+.ui-checks-doc {
+  --aura-checks-line: 1.55;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px 16px;
+  font-size: 13px;
+}
+
+/* Title: bold, wrapping, click to edit. */
+.ui-pr-doc-title {
+  display: block;
+  width: calc(100% + 8px);
+  margin: 0 -4px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--ui-fg);
+  font: 600 14px/20px var(--font-sans);
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.ui-pr-doc-title:hover {
+  background: var(--ui-hover);
+}
+.ui-pr-doc-title[data-static] {
+  cursor: default;
+}
+.ui-pr-doc-title[data-static]:hover {
+  background: none;
+}
+.ui-pr-doc-title:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+.ui-input.ui-pr-doc-title-input {
+  height: 28px;
+  padding: 2px 4px;
+  font-weight: 600;
+}
+
+/* Facts: Branch, Review, Merge, Stack — a term column and a value. */
+.ui-pr-details.ui-pr-details--rail {
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 0 8px;
+  padding: 0;
+  border-bottom: 0;
+  font-size: 13px;
+}
+.ui-pr-details.ui-pr-details--rail dt,
+.ui-pr-details.ui-pr-details--rail dd {
+  min-height: 28px;
+}
+.ui-pr-details.ui-pr-details--rail dd {
+  flex-wrap: nowrap;
+}
+.ui-pr-details--rail code {
+  min-width: 0;
+  padding: 1px 5px;
+  font-size: 11px;
+}
+.ui-pr-details--rail .ui-pr-details-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-pr-details--rail dd > button {
+  flex: none;
+  margin-left: auto;
+}
+/* A value's text action (Request, Queue): as quiet as the value. */
+.ui-pr-details--rail dd > .ui-button.ui-button-ghost {
+  height: 24px;
+  margin-right: -4px;
+  padding: 0 4px;
+  background: none;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  font-weight: 400;
+}
+.ui-pr-details--rail dd > .ui-button.ui-button-ghost:hover {
+  background: none;
+  color: var(--ui-fg);
+}
+/* The Stack value opens the chain. */
+.ui-pr-details-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ui-fg);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ui-pr-details--rail dd > .ui-pr-details-link {
+  flex: 0 1 auto;
+  margin-left: 0;
+}
+.ui-pr-details-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.ui-pr-details-aside {
+  color: var(--ui-muted-fg);
+}
+.ui-popover.ui-pr-stack-popover {
+  width: 340px;
+  max-height: 360px;
+  padding: 4px 0;
+  overflow-y: auto;
+}
+
+/* Description: muted, in a box no taller than eight lines, scrolling on its
+   own past that. */
+.ui-pr-doc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ui-pr-doc-description,
+.ui-input.ui-textarea.ui-pr-doc-editor {
+  max-height: calc(13px * var(--aura-checks-line) * 8 + 4px);
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: var(--aura-checks-line);
+}
+.ui-pr-doc-description {
+  margin: 0 -4px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: var(--ui-muted-fg);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+/* The description is GitHub markdown, drawn at the tab's own size: a heading
+   is a bold line rather than a document's heading, and blocks sit close. */
+.ui-pr-doc-description .ui-message-markdown {
+  font-size: 13px;
+  line-height: var(--aura-checks-line);
+}
+.ui-pr-doc-description .ui-message-markdown :is(h1, h2, h3, h4, h5, h6) {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ui-fg);
+}
+.ui-pr-doc-description .ui-message-markdown :is(p, ul, ol, blockquote, table, .ui-code-message) {
+  margin-block: 6px;
+}
+/* Inline code that wraps keeps its box on both lines. */
+.ui-pr-doc-description .ui-message-markdown :not(pre) > code {
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+.ui-pr-doc-description .ui-message-markdown > :first-child {
+  margin-top: 0;
+}
+.ui-pr-doc-description .ui-message-markdown > :last-child {
+  margin-bottom: 0;
+}
+.ui-pr-doc-description:hover {
+  background: var(--ui-hover);
+}
+.ui-pr-doc-description:focus-visible,
+.ui-pr-doc-empty > [role="button"]:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: 1px;
+}
+.ui-input.ui-textarea.ui-pr-doc-editor {
+  min-height: 4.5em;
+  resize: none;
+}
+.ui-pr-doc-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+.ui-pr-doc-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+  color: var(--ui-muted-fg);
+}
+.ui-pr-doc-empty > [role="button"] {
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ui-pr-doc-empty > [role="button"]:hover {
+  color: var(--ui-fg);
+}
+.ui-button.ui-pr-doc-action {
+  height: 24px;
+  margin-right: -4px;
+  padding: 0 4px;
+  background: none;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  font-weight: 400;
+}
+.ui-button.ui-pr-doc-action:hover:not(:disabled) {
+  background: none;
+  color: var(--ui-fg);
+}
+
+/* No pull request yet: what Create PR does, in one muted line. */
+.ui-pr-doc-note {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: var(--aura-checks-line);
+}
+
+/* Git status: a small muted label over the flat list. */
+.ui-checks-status {
+  margin-top: 8px;
+}
+.ui-checks-doc .ui-checks-status > .ui-details-caption {
+  padding: 0 0 4px;
+  font-size: 12px;
+}

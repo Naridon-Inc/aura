@@ -48,16 +48,6 @@ export type ToolFacet = {
   alwaysAllowable?: boolean;
 };
 
-/** Short label for the header chip. */
-export const KIND_LABEL: Record<ToolKind, string> = {
-  reads: "Reads",
-  changes: "Changes a file",
-  runs: "Runs a command",
-  network: "Goes online",
-  connection: "Uses a connection",
-  other: "Permission",
-};
-
 function str(input: unknown, key: string): string | null {
   if (!input || typeof input !== "object") return null;
   const v = (input as Record<string, unknown>)[key];
@@ -111,12 +101,12 @@ function mcpParts(name: string): { server: string; tool: string } | null {
 const CAPABILITY_FACET: Record<string, { title: string; body: string; kind: ToolKind }> = {
   delete_exported_symbol: {
     title: "Delete something other code may be calling",
-    body: "This removes a function or type that the rest of your project can use by name. If anything else calls it, that code stops working. Aura spotted it by reading what the file says now against what it would say after.",
+    body: "This removes a function or type that the rest of your repository can use by name. If anything else calls it, that code stops working. Aura spotted it by reading what the file says now against what it would say after.",
     kind: "changes",
   },
   write_outside_claimed_zone: {
     title: "Edit a file someone else is holding",
-    body: "A teammate claimed this area of the project so their work wouldn't be overwritten. Editing it anyway is allowed — but talk to them first, because one of you will lose changes.",
+    body: "A teammate claimed this area of the repository so their work wouldn't be overwritten. Editing it anyway is allowed — but talk to them first, because one of you will lose changes.",
     kind: "changes",
   },
   dispatch_to_machine: {
@@ -144,7 +134,7 @@ export function describeToolCall(toolName: string, input: unknown): ToolFacet {
       const command = str(input, "command");
       return {
         title: "Run a command on your computer",
-        body: "A command runs with the same access you have. It isn't limited to this project. Read it before you allow it.",
+        body: "A command runs with the same access you have. It isn't limited to this repository. Read it before you allow it.",
         detail: command
           ? { label: "Command", value: command, mono: true }
           : undefined,
@@ -213,7 +203,7 @@ export function describeToolCall(toolName: string, input: unknown): ToolFacet {
       const pattern = str(input, "pattern");
       return {
         title: "Search inside your files",
-        body: "Nothing is changed. It's searching the text of your project for something.",
+        body: "Nothing is changed. It's searching the text of your repository for something.",
         detail: pattern
           ? { label: "Searching for", value: pattern, mono: true }
           : undefined,
@@ -259,7 +249,7 @@ export function describeToolCall(toolName: string, input: unknown): ToolFacet {
     case "TaskUpdate":
       return {
         title: "Update its own to-do list",
-        body: "This only affects the checklist the agent keeps for itself. Nothing in your project changes.",
+        body: "This only affects the checklist the agent keeps for itself. Nothing in your repository changes.",
         kind: "other",
       };
 

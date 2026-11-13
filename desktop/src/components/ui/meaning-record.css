@@ -1,0 +1,66 @@
+/* Trace's "why & proof" record: the verdict as a notice, then the changes day
+   by day on the story timeline, each with the newest reason it was made and
+   whether it checks out. Opened, a change reads every reason and every goal
+   checked as the story's chapters. The notice, the days, the timeline and the
+   chapters are the shared parts; this is only how they sit in the record. */
+
+.ui-meaning {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.ui-meaning-banner {
+  padding: 4px 0 8px;
+}
+.ui-meaning-banner strong {
+  font-weight: 500;
+  color: var(--ui-fg);
+}
+.ui-meaning-banner-detail {
+  color: var(--ui-muted-fg);
+}
+.ui-meaning-scope {
+  color: var(--ui-faint);
+}
+.ui-meaning-sha {
+  color: var(--ui-faint);
+  font: 11px var(--font-mono);
+}
+
+/* The newest reason, on its own line above the facts: the why is the point
+   of the record, so it reads before the hash and the time. */
+.ui-meaning-reason {
+  display: -webkit-box;
+  flex-basis: 100%;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  color: var(--ui-fg);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+/* An opened change. It sits in the timeline under its moment, indented to the
+   moment's text, with the connector running past it to the next marker. */
+.ui-timeline.ui-trace-timeline li.ui-meaning-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 8px 8px 30px;
+}
+.ui-timeline.ui-trace-timeline li.ui-meaning-detail:not(:last-child)::before {
+  top: 0;
+}
+.ui-meaning-why,
+.ui-meaning-goal {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 4px 0;
+}
+.ui-meaning-why > span {
+  color: var(--ui-faint);
+  font-size: 12px;
+}

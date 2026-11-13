@@ -15,20 +15,17 @@
 // "working"); an empty lane says, in plain words, what would land there
 // (STAGE_HINT) rather than showing a fake card. No "lease / node / DAG" ever.
 
-import type { JSX, ReactNode } from "react";
+import type { JSX } from "react";
 import { FolderGit2, GitCommitHorizontal } from "lucide-react";
 
 import type { MissionRun, MissionState } from "../../../lib/api";
 import {
-  BoardCard,
-  BoardCardMeta,
-  BoardCardMetaRow,
-  BoardCardTitle,
   BoardColumn,
   BoardEmptyHint,
   BoardFrame,
   StateGlyph,
 } from "../../board";
+import { TaskBoardCard, TaskFact } from "../../ui/tasks-board";
 import { AgentBit, agentsWorthNaming } from "../crew/crewShared";
 import { MissionRetryButton } from "./MissionRetryButton";
 import {
@@ -49,6 +46,7 @@ import {
   STAGE_GLYPH_GROUP,
   type MissionStageId,
 } from "./missionData";
+import "../../ui/mission-board.css";
 
 /** The one quiet status sub-line under a card's title. It is the calm, plain-
  *  language read of where a run is — never a loud chip that clips, never a raw
@@ -70,15 +68,8 @@ function StatusLine({
   if (stage === "building") {
     const e = elapsedLabel(run.startedAtMs, now);
     return (
-      <span
-        className="inline-flex items-center gap-1.5 text-xs font-medium"
-        style={{ color: "var(--color-amber)" }}
-      >
-        <span
-          className="h-1.5 w-1.5 flex-shrink-0 rounded-full"
-          style={{ background: "var(--color-amber)" }}
-          aria-hidden
-        />
+      <span className="ui-mission-status" data-tone="attention">
+        <span className="ui-mission-status-dot" aria-hidden />
         An agent is on it{e ? ` · ${e}` : ""}
       </span>
     );
@@ -88,14 +79,14 @@ function StatusLine({
     // work stopped. `waitingOn` carries which kind of answer it is after.
     const w = waitingOnLabel(run.waitingOn);
     return (
-      <span className="text-xs font-medium" style={{ color: "var(--color-amber)" }}>
+      <span className="ui-mission-status" data-tone="attention">
         {w ? `Stopped · ${w}` : "Stopped. Waiting on you"}
       </span>
     );
   }
   if (stage === "reviewing") {
     return (
-      <span className="text-xs font-medium" style={{ color: "var(--color-amber)" }}>
+      <span className="ui-mission-status" data-tone="attention">
         {run.prNumber != null
           ? `Ready to review · PR #${run.prNumber}`
           : "Ready to review"}
@@ -117,15 +108,8 @@ function StatusLine({
     const p = proofPill(run.proof);
     return (
       <span
-        className="text-xs font-medium"
-        style={{
-          color:
-            p.tone === "green"
-              ? "var(--color-accent-green)"
-              : p.tone === "amber"
-                ? "var(--color-amber)"
-                : "var(--color-text-4)",
-        }}
+        className="ui-mission-status"
+        data-tone={p.tone === "green" ? "ok" : p.tone === "amber" ? "attention" : "quiet"}
       >
         {p.label}
       </span>
@@ -142,15 +126,18 @@ function StatusLine({
   const w = waitingOnLabel(run.waitingOn);
   if (!w) return null;
   return (
-    <span className="line-clamp-2 text-xs leading-snug text-text-4">{w}</span>
+    <p className="ui-workspace-card-summary" title={w}>
+      {w}
+    </p>
   );
 }
 
-/** One run as a board card. The TITLE is the hero; under it a single quiet
- *  status sub-line says where the run is in plain words; then the shared meta
- *  row of handle · agent · commit · "2m ago" — the fields a non-engineer scans
- *  without opening the run. No per-card stage glyph (the column header already
- *  names the stage) and no clipped status chip. */
+/** One run as a board card — the task board's card, drawn the way a task's
+ *  is: the handle on top, the TITLE as the hero, under it a single quiet
+ *  status sub-line saying where the run is in plain words, then the facts a
+ *  non-engineer scans without opening the run (agent · commit · "2m ago"). No
+ *  per-card stage glyph (the column header already names the stage) and no
+ *  clipped status chip. */
 function MissionBoardCard({
   run,
   now,
@@ -173,84 +160,71 @@ function MissionBoardCard({
    *  it can see whether its finished runs differ — see `proofWorthShowing`. */
   showProof: boolean;
   /** In the all-projects board a card leads with which project it lives in —
-   *  the Conductor "workspace across every project" read. Off for a single
+   *  the "workspace across every project" read. Off for a single
    *  project's board (the tab already says which project). */
   showProject?: boolean;
 }): JSX.Element {
   const stage = deriveStage(run);
   const status = StatusLine({ run, now, stage, showProof });
 
-  // Footer cluster — handle first (the quiet identity), then only the fields
-  // that actually exist on this run, so a queued card (no commit, no agent yet)
-  // drops them cleanly rather than showing empty chrome. Never invents a value.
+  // The facts — only the ones that actually exist on this run, so a queued
+  // card (no commit, no agent yet) drops them cleanly rather than showing
+  // empty chrome. Never invents a value.
   const sha = shortCommit(run.commit);
   const ago = endedAgoLabel(run.endedAtMs, now);
-  const metaItems: ReactNode[] = [
-    <BoardCardMeta key="ref" mono title="This run's handle">
-      {shortRef(run)}
-    </BoardCardMeta>,
-  ];
-  if (run.agent && showAgent) {
-    metaItems.push(
-      <BoardCardMeta key="agent" title={`Agent: ${harnessLabel(run.agent)}`}>
-        <AgentBit agentKind={run.agent} size={11} />
-        {harnessLabel(run.agent)}
-      </BoardCardMeta>,
-    );
-  }
-  if (sha) {
-    metaItems.push(
-      <BoardCardMeta
-        key="sha"
-        icon={GitCommitHorizontal}
-        mono
-        title={run.commit ?? undefined}
-      >
-        {sha}
-      </BoardCardMeta>,
-    );
-  }
-  if (ago) {
-    metaItems.push(<BoardCardMeta key="ago">{ago}</BoardCardMeta>);
-  }
+  const namedAgent = run.agent && showAgent ? run.agent : null;
+  const title = run.title || "(untitled)";
 
   return (
-    <BoardCard
+    <TaskBoardCard
+      label={title}
+      taskId={run.id}
       selected={selected}
       onOpen={() => onSelect(run)}
-      title={run.title}
     >
-      {/* All-projects board only: which project this run lives in, led like the
-          Conductor workspace handle — a quiet mono line above the title. */}
-      {showProject && run.projectName ? (
-        <div
-          className="flex items-center gap-1 truncate font-mono text-xs text-text-3"
-          title={`Project: ${run.projectName}`}
-        >
-          <FolderGit2 className="h-3 w-3 flex-shrink-0" strokeWidth={1.5} aria-hidden />
-          <span className="truncate">{run.projectName}</span>
+      <div className="ui-workspace-card-content">
+        <div className="ui-workspace-card-meta">
+          <span title="This run's handle">{shortRef(run)}</span>
+          {/* All-projects board only: which project this run lives in, beside
+              the handle. */}
+          {showProject && run.projectName ? (
+            <TaskFact icon={<FolderGit2 aria-hidden />} title={`Repository: ${run.projectName}`}>
+              {run.projectName}
+            </TaskFact>
+          ) : null}
+          {/* The lane is called "Couldn't finish"; the card saying it again
+              would add nothing. What the card owes the reader here is the way
+              out — a direct "Try again" that re-queues the work in one click,
+              without opening the run. */}
+          {stage === "failed" ? (
+            <MissionRetryButton runs={[run]} onRetry={onRetry} label="Try again" />
+          ) : null}
         </div>
-      ) : null}
-
-      <BoardCardTitle className="font-medium">
-        {run.title || "(untitled)"}
-      </BoardCardTitle>
-
-      {/* Quiet status sub-line — plain words, never a clipped chip. On a failed
-          card the verdict shares its row with a direct "Retry" so a non-engineer
-          re-queues the work in one click, without opening the run. */}
-      {stage === "failed" ? (
-        // The lane is called "Couldn't finish"; the card said it again. What
-        // the card owes the reader here is the way out, not the verdict.
-        <div className="flex items-center justify-end">
-          <MissionRetryButton runs={[run]} onRetry={onRetry} label="Try again" />
-        </div>
-      ) : (
-        status && <div>{status}</div>
-      )}
-
-      <BoardCardMetaRow>{metaItems}</BoardCardMetaRow>
-    </BoardCard>
+        <strong className="ui-workspace-card-title" title={title}>
+          {title}
+        </strong>
+        {/* Quiet status sub-line — plain words, never a clipped chip. */}
+        {stage !== "failed" && status}
+        {(namedAgent || sha || ago) && (
+          <footer>
+            {namedAgent && (
+              <TaskFact
+                icon={<AgentBit agentKind={namedAgent} size={12} />}
+                title={`Agent: ${harnessLabel(namedAgent)}`}
+              >
+                {harnessLabel(namedAgent)}
+              </TaskFact>
+            )}
+            {sha && (
+              <TaskFact icon={<GitCommitHorizontal aria-hidden />} title={run.commit ?? undefined}>
+                <span className="ui-mission-mono">{sha}</span>
+              </TaskFact>
+            )}
+            {ago && <time>{ago}</time>}
+          </footer>
+        )}
+      </div>
+    </TaskBoardCard>
   );
 }
 
@@ -297,7 +271,7 @@ export function MissionBoard(props: {
   ];
 
   return (
-    <BoardFrame>
+    <BoardFrame label="The crew's work by stage">
       {ordered.map((col) => (
         <BoardColumn
           key={col.stage}

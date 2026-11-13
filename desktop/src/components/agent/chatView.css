@@ -14,30 +14,6 @@
 .chat-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .chat-identity > svg { flex-shrink: 0; }
 .chat-identity strong { font-size: 13px; font-weight: 500; white-space: nowrap; }
-.chat-heading-divider { color: var(--color-text-4); font-size: 15px; }
-.chat-workspace-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-3); font-size: 12px; }
-.chat-heading-actions { display: flex; align-items: center; gap: 6px; }
-.chat-heading-search { display: flex; align-items: center; gap: 7px; height: 28px; border-radius: 5px; padding: 0 8px; color: var(--color-text-3); font-size: 12px; }
-.chat-heading-search:hover, .chat-heading-search[aria-expanded=true] { background: var(--color-bg-2); color: var(--color-text-1); }
-.chat-icon-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 5px;
-  color: var(--color-text-3);
-  background: transparent;
-  flex-shrink: 0;
-}
-.chat-icon-button:hover {
-  background: var(--color-bg-2);
-  color: var(--color-text-1);
-}
-.chat-icon-button:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
 .chat-workspace button:focus-visible,
 .chat-workspace input:focus-visible {
   outline: 2px solid var(--color-accent);
@@ -60,16 +36,34 @@
   user-select: text;
   scrollbar-gutter: stable;
 }
+/* The transcript column. Its max-width is the composer's column plus the
+   gutters it pads away, so the two line up — and the prose then steps a
+   further --chat-prose-inset in on each side, which is the relationship that
+   makes a transcript readable: the text you read sits inside the edges of the
+   box you type in, not flush with them. */
 .chat-reading-column {
   width: 100%;
-  max-width: calc(var(--chat-col, 760px) + 2 * var(--chat-gutter, 24px));
+  max-width: calc(
+    var(--chat-col, 760px) + 2 * var(--chat-gutter, 24px) + 2 * var(--chat-prose-inset, 0px)
+  );
   margin: auto;
-  padding: 14px var(--chat-gutter, 16px);
+  padding: 14px calc(var(--chat-gutter, 16px) + var(--chat-prose-inset, 0px));
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  /* Paced by RELATION, not evenly. See the margin rules below: a transcript
+     spaced on one number reads as a list of rows, and reads as turns only when
+     the gap resets at each exchange. */
+  gap: 0;
   overflow-wrap: anywhere;
 }
+/* Inside one exchange — a user message and the answer under it — the gap is
+   22px. Between one exchange and the next it is 48, and that doubling is the
+   whole reason a long conversation scans. A turn that CARRIES
+   a user message opens the next exchange, so it is the one that takes the big
+   gap; everything else takes the small one. */
+.chat-reading-column > * + * { margin-top: var(--chat-step-gap, 22px); }
+.chat-reading-column > *:has([data-message-role="user"]) { margin-top: var(--chat-turn-gap, 48px); }
+.chat-reading-column > *:first-child { margin-top: 0; }
 .chat-search {
   display: flex;
   align-items: center;
@@ -97,7 +91,9 @@
   flex-direction: column;
   align-items: flex-start;
   justify-content: center;
-  max-width: calc(var(--chat-col, 760px) + 2 * var(--chat-gutter, 24px));
+  max-width: calc(
+    var(--chat-col, 760px) + 2 * var(--chat-gutter, 24px) + 2 * var(--chat-prose-inset, 0px)
+  );
   margin: auto;
   padding: 32px 32px 72px;
 }
@@ -131,6 +127,52 @@
 /* A docked card and the composer meet on one hairline as a single panel. */
 .chat-dock:has(.composer-docked) { gap: 0; }
 .chat-dock .chat-notice { margin: 0 0 6px; }
+
+/* ── The composer over a content surface ───────────────────────────────────
+   Flipping to the terminal used to take this whole layer away, composer and
+   all — and with it the model picker, the mode, @file mentions and up-arrow
+   recall, on the view the pane OPENS in. The layer stays now: the conversation
+   goes invisible and its dock stays as a strip over whatever is showing, which
+   you click to type a prompt without leaving the TUI. The rule — a content
+   tab plus an empty composer is a strip — lives in `composerCollapse`.
+
+   `visibility`, not `display`, and that is load-bearing. A display:none scroll
+   region reports scrollTop 0, so every flip back to the conversation would
+   land at the top of a long session; an invisible one keeps its box and keeps
+   its place. */
+.chat-workspace[data-chat-overlay] {
+  background: transparent;
+  /* Everything the strip does not want belongs to the pane behind it. */
+  pointer-events: none;
+}
+.chat-workspace[data-chat-overlay] > *:not(.chat-dock) {
+  visibility: hidden;
+}
+.chat-workspace[data-chat-overlay] .chat-dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  visibility: visible;
+  pointer-events: auto;
+}
+/* The usage line is a footnote on a conversation you are reading. Over a
+   terminal it is one more row of small grey text on top of small grey text. */
+.chat-workspace[data-chat-overlay] .chat-usage {
+  display: none;
+}
+/* Opaque over content. The shared box's fill is part-transparent in the light
+   theme, which reads fine against a pane; against scrolling terminal output
+   the draft would be typed over somebody else's text. */
+.chat-workspace[data-chat-overlay] .chat-composer {
+  background: var(--ui-sidebar);
+}
+/* And a real lift, since it is floating rather than sitting at the foot of a
+   column. Excluded while focused, where the box's own focus border is the
+   signal. */
+.chat-workspace[data-chat-overlay] .chat-composer:not(:focus-within) {
+  box-shadow: 0 2px 10px rgb(0 0 0 / 0.14);
+}
 .chat-usage {
   display: flex;
   justify-content: flex-end;
@@ -140,98 +182,10 @@
   color: var(--color-text-4);
   font-variant-numeric: tabular-nums;
 }
-.chat-compose-box {
-  display: flex;
-  align-items: flex-end;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--color-line);
-  border-radius: 8px;
-  background: var(--color-bg-content);
-}
-.chat-compose-box:focus-within {
-  border-color: color-mix(
-    in srgb,
-    var(--color-accent) 55%,
-    var(--color-line-soft)
-  );
-}
-.chat-compose-box textarea {
-  min-width: 0;
-  min-height: 28px;
-}
-.chat-send {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  flex-shrink: 0;
-  border-radius: 5px;
-  background: var(--color-text-1);
-  color: var(--color-bg-content);
-}
-.chat-send:hover:not(:disabled) {
-  background: var(--color-text-2);
-}
-.chat-send:disabled {
-  background: var(--color-bg-2);
-  color: var(--color-text-4);
-  cursor: default;
-}
 .chat-compose-hint {
   margin-top: 6px;
   font-size: 10.5px;
   color: var(--color-text-3);
-}
-.chat-user-message {
-  padding: 8px 10px;
-  border: 1px solid var(--color-line);
-  border-radius: 5px;
-  background: var(--color-bg-2);
-  color: var(--color-text-1);
-  font-size: 13px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-}
-.chat-record {
-  padding: 1px 0 1px 14px;
-  border-left: 2px solid var(--color-line);
-}
-.chat-record-label {
-  margin-bottom: 8px;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--color-text-3);
-}
-.chat-record-action {
-  margin-top: 10px;
-  padding: 5px 8px;
-  border: 1px solid var(--color-line);
-  border-radius: 4px;
-  color: var(--color-text-1);
-  font-size: 11.5px;
-}
-.chat-record-action:hover {
-  background: var(--color-bg-2);
-}
-.chat-question-options {
-  margin-top: 6px;
-  padding-left: 17px;
-  list-style: disc;
-  font-size: 12.5px;
-  line-height: 1.7;
-  color: var(--color-text-2);
-}
-.chat-stop {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 9px;
-  border: 1px solid var(--color-line-soft);
-  border-radius: 5px;
-  white-space: nowrap;
-  color: var(--color-text-2);
-  font-size: 12px;
 }
 .chat-jump {
   align-self: center;
@@ -313,14 +267,9 @@
   }
   .chat-reading-column {
     padding: 12px;
-    gap: 10px;
   }
   .chat-dock {
     padding-inline: 12px;
-  }
-  .chat-compose-box {
-    padding: 11px;
-    gap: 6px;
   }
   .chat-empty {
     padding: 24px 16px 48px;
@@ -341,21 +290,10 @@
 /* A permission's "Requested action" is the top of the same panel as its
    question, not a loose line above it. */
 .chat-controls > details { border: 1px solid var(--chat-rule); border-bottom: 0; border-radius: var(--chat-radius) var(--chat-radius) 0 0; background: var(--chat-panel); }
-.chat-controls > details + .question-flow { border-top-left-radius: 0; border-top-right-radius: 0; }
-
-@media (max-width: 540px) { .chat-heading { min-height: 36px; padding: 3px 8px; gap: 8px; } .chat-heading-action-label { display: none; } .chat-heading-search { padding: 0 6px; } }
+@media (max-width: 540px) { .chat-heading { min-height: 36px; padding: 3px 8px; gap: 8px; } }
 
 .manager-chat-heading .chat-identity { flex: 1; font-size: 13px; overflow: hidden; white-space: nowrap; }
-.manager-chat-heading .icon-btn { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 5px; color: var(--color-text-3); flex-shrink: 0; }
-.manager-chat-heading .icon-btn:hover { color: var(--color-text-1); background: var(--color-bg-2); }
 .manager-chat-heading { gap: 8px; }
 
-.chat-heading-actions { flex-shrink: 0; gap: 4px; }
-.chat-view-switcher { display:flex; align-items:center; border:1px solid var(--color-line); border-radius:5px; padding:2px; gap:2px; background:var(--color-bg-content); }
-.chat-view-switcher button { display:flex; align-items:center; gap:5px; height:24px; padding:0 7px; font-size:11px; border:1px solid transparent; border-radius:3px; color:var(--color-text-3); }
-.chat-view-switcher button[aria-pressed="true"] { color:var(--color-text-1); background:var(--color-bg-2); border-color:var(--color-line-soft); }
-.chat-view-switcher button:hover { color:var(--color-text-1); }
-.chat-view-switcher button:focus-visible { outline:2px solid var(--color-accent); outline-offset:1px; }
-.chat-view-switcher button:disabled { opacity:.45; }
 .chat-heading .chat-state { margin-right:4px; }
-@media (max-width:520px) { .chat-heading { gap:6px; padding-inline:8px; } .chat-heading .chat-workspace-name, .chat-heading-divider { display:none; } }
+@media (max-width:520px) { .chat-heading { gap:6px; padding-inline:8px; } }

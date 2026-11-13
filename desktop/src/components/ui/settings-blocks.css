@@ -1,0 +1,235 @@
+/* Pieces a settings page needs beyond a row: the sentence under the
+   page title, an untitled run of rows, a read-only table of facts and a
+   one-line live status. Same type scale and tokens as the settings rows
+   so they sit in the same column without a seam. */
+
+.ui-settings-intro {
+  max-width: 560px;
+  margin: 0 0 16px;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.ui-settings-group {
+  margin-bottom: 32px;
+}
+
+.ui-settings-facts {
+  margin-block: 8px 16px;
+}
+.ui-settings-facts .ui-table-cell {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-settings-facts .ui-table-cell:first-child {
+  width: 160px;
+  padding-right: 16px;
+  color: var(--ui-muted-fg);
+}
+.ui-settings-facts .ui-table-cell:last-child {
+  text-align: right;
+}
+.ui-settings-facts .ui-settings-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.ui-settings-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+}
+
+.ui-settings-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.ui-settings-number {
+  width: 120px;
+}
+
+.ui-settings-error {
+  margin: 0 0 16px;
+  color: var(--ui-red);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.ui-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ui-settings-empty {
+  padding-block: 24px;
+  border-bottom: 1px solid var(--ui-border);
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+}
+
+.ui-settings-terminal-sample {
+  margin: 0;
+  font-family: var(--font-mono);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.ui-settings-swatches {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 4px;
+}
+.ui-settings-swatches > span {
+  width: 16px;
+  height: 16px;
+}
+.ui-settings-paste {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-settings-paste .ui-textarea {
+  min-height: 160px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ui-settings-section a {
+  color: var(--ui-fg);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ui-settings-log {
+  margin: 0;
+  max-height: 80px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ui-muted-fg);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.ui-settings-page code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-fg);
+}
+.ui-settings-path {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A long tally (event name, count) that scrolls inside the page instead
+   of pushing every later section off screen. 256px shows about a dozen
+   lines, enough to read the top of the list at a glance. */
+.ui-settings-counts {
+  max-height: 256px;
+  overflow: auto;
+  margin-block: 8px 16px;
+}
+.ui-settings-counts .ui-table-cell {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--ui-border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ui-settings-counts .ui-table-cell:last-child {
+  text-align: right;
+  color: var(--ui-muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Multi-line commands and instructions in a row's control column. 320px
+   holds a typical install or dev command on one line without crowding the
+   title beside it. */
+.ui-settings-page .ui-settings-control .ui-textarea {
+  width: 320px;
+  max-width: 100%;
+}
+.ui-settings-scripts .ui-textarea,
+.ui-settings-scripts .ui-input {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* An editable list under a row: one line per entry, inputs side by side. */
+.ui-settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-settings-list-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-settings-list-name {
+  width: 128px;
+  flex: none;
+}
+.ui-settings-list-command {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.ui-settings-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ui-badge.ui-settings-chip {
+  gap: 4px;
+  padding-right: 2px;
+  /* File names are case-sensitive: .env and .ENV are different files. */
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* A stacked label-over-input field among rows: the same 16px block
+   padding a row has, so a form inside a page keeps the row rhythm. */
+.ui-settings-field {
+  padding-block: 16px;
+}
+
+/* The settings frame's account slot holds the same account button the
+   sidebar uses, which brings its own 12px inset and 32px height; the
+   slot's padding shrinks to match so the row stays 40px tall and the
+   avatar lines up with the page list below it. */
+.ui-settings-account:has(> .ui-nav-account) {
+  padding: 4px 0;
+}
+
+/* A page that opens on a titled section gets the same 24px above the
+   heading that a row has above its title, so a section heading never
+   sits tight under the page title or the sentence beneath it. */
+.ui-settings-page > h1 + .ui-settings-section,
+.ui-settings-page > [data-pane] > .ui-settings-section:first-child,
+.ui-settings-page .ui-settings-intro + .ui-settings-section {
+  padding-top: 24px;
+}
+
+/* A titled section straight after a loose row keeps the 32px a section
+   or group leaves below itself, instead of starting under the row's rule. */
+.ui-settings-row + .ui-settings-section {
+  margin-top: 32px;
+}
+
+/* A section that follows the empty line or the provider tabs keeps the same
+   gap it has after a run of rows. */
+.ui-settings-empty + .ui-settings-section,
+.ui-provider-settings + .ui-settings-section {
+  margin-top: 32px;
+}

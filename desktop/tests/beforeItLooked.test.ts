@@ -288,7 +288,7 @@ describe("both surfaces render the state their readouts computed", () => {
     expect(src).toContain("onRetry={() => void refreshAll()}");
     // The header's own note comes from the readout, falling through to the
     // caller's counts only when the readout has nothing to correct.
-    expect(src).toContain("{readout.headerNote ??");
+    expect(src).toContain("readout.headerNote ?? filesChanged(");
     expect(src.split('"no changes"').length - 1).toBe(1);
   });
 
@@ -306,14 +306,15 @@ describe("both surfaces render the state their readouts computed", () => {
 });
 
 describe("starting new work here won't run checkout -b on a tree it couldn't read", () => {
-  // The composer's "In this folder" path is `git checkout -b` and nothing
-  // else, which git refuses to do over uncommitted work. The guard above it
+  // The new-workspace dialog's "In this folder" path (its start logic lives
+  // in `launchNewWork.ts`) is `git checkout -b` and nothing else, which git
+  // refuses to do over uncommitted work. The guard above it
   // exists so the user gets that in words — "commit them first, or turn on
   // Separate copy" — instead of a raw command failure. `catch(() => ({}))`
   // answered "the tree is clean" for every way the status read can fail, and
   // walked straight past the guard into the command it exists to prevent.
 
-  const REL = "components/workspace/WorkspaceCreateComposer.tsx";
+  const REL = "components/workspace/launchNewWork.ts";
 
   test("a failed status read is not a clean tree", async () => {
     const src = code(await read(REL));
@@ -331,7 +332,8 @@ describe("starting new work here won't run checkout -b on a tree it couldn't rea
     expect(block).toContain("Couldn\u2019t check");
     // …and it points at the way out, the same as the dirty-tree message does.
     expect(block).toContain("Separate copy");
-    expect(block).toContain("return;");
+    // It returns a refusal the dialog shows, rather than falling through.
+    expect(block).toMatch(/return \{\s*kind: "refused"/);
   });
 
   test("the two messages are different sentences", async () => {

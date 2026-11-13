@@ -77,6 +77,72 @@ where
     Ok(built)
 }
 
+/// The provider-id family of chats whose agent runs on one of the org's
+/// machines: `place:<key>`, the key the machine keeps the agent under.
+pub const PLACE_PREFIX: &str = "place:";
+
+/// Whether `provider_id` is a chat on one of the org's machines.
+pub fn on_a_machine(provider_id: &str) -> bool {
+    provider_id.starts_with(PLACE_PREFIX)
+}
+
+/// A chat on one of the org's machines stays there. Once a session's brain is
+/// a machine's agent (`pinned`), a turn or a switch may only name that same
+/// agent: any other brain would answer from this laptop, without the
+/// conversation the machine holds and without the workspace's viewers seeing
+/// it. Its models are the ones that agent offers.
+pub fn stays_on_machine(pinned: Option<&str>, asked: Option<&str>) -> Result<(), String> {
+    match pinned {
+        Some(p) if p.starts_with(PLACE_PREFIX) && asked.map(str::trim) != Some(p) => Err(
+            "This chat runs on one of your organization's machines, so it uses the models \
+             there. Start a new chat to use a model on this laptop."
+                .into(),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Whether `provider_id` names a brain a session may be switched to: one in
+/// the registry, or a machine's chat this laptop is connected to right now.
+pub fn is_switchable(provider_id: &str) -> bool {
+    if provider_id.starts_with(PLACE_PREFIX) {
+        return held(provider_id).is_some();
+    }
+    descriptors().iter().any(|d| d.provider_id == provider_id)
+}
+
+/// Keep `brain` as the live brain for `provider_id`, unless one is already
+/// held — then that one is handed back and `brain` is dropped unused.
+///
+/// For a brain only its caller can build: a `place:` chat needs the machine
+/// that reaches it and how far its log has got, and neither is in the id.
+pub fn hold(provider_id: &str, brain: Arc<dyn Brain>) -> Arc<dyn Brain> {
+    let mut held = LIVE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    held.entry(provider_id.to_string()).or_insert(brain).clone()
+}
+
+/// The live brain for `provider_id`, if one is held.
+pub fn held(provider_id: &str) -> Option<Arc<dyn Brain>> {
+    LIVE.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .get(provider_id)
+        .cloned()
+}
+
+/// Let go of the live brain for `provider_id`. Its agent connection closes
+/// once the last turn holding it ends; the next [`hold`] starts afresh.
+pub fn release(provider_id: &str) -> bool {
+    LIVE.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .remove(provider_id)
+        .is_some()
+}
+
 /// Provider ids currently holding a live agent. Test-only: the point of
 /// [`LIVE`] is *which* brains are in it, and that is worth asserting.
 #[cfg(test)]
@@ -118,20 +184,6 @@ pub struct BrainDescriptor {
 /// configured in `BrainSettings.providers`.
 pub fn descriptors() -> Vec<BrainDescriptor> {
     let mut out = Vec::new();
-
-    // Aura Pro leads the picker — it's the zero-setup option we want
-    // the user to land on first. No API-key column (the brain reuses
-    // the Aura cloud token); the picker UI special-cases this
-    // provider_id to render sign-in state + a quota chip instead.
-    #[cfg(feature = "brain_aura_pro")]
-    {
-        out.push(BrainDescriptor {
-            provider_id: super::aura_pro::PROVIDER_ID.to_string(),
-            display_name: "Aura Pro".to_string(),
-            blurb: "Sign in with your Aura account — no API key required. Streams through aura-cloud.".to_string(),
-            requires_api_key: false,
-        });
-    }
 
     #[cfg(feature = "brain_anthropic_native")]
     {
@@ -292,12 +344,12 @@ fn cli_wrapper_descriptors() -> Vec<BrainDescriptor> {
 /// pinned it in settings should not have their choice silently rewritten.
 #[cfg(feature = "brain_acp")]
 fn acp_descriptors() -> Vec<BrainDescriptor> {
-    super::acp::descriptors_for_installed_agents()
+    super::acp::hosted_agents()
         .into_iter()
         .map(|a| BrainDescriptor {
             provider_id: format!("{}{}", super::acp::PROVIDER_PREFIX, a.id),
-            display_name: a.label.to_string(),
-            blurb: a.blurb.to_string(),
+            display_name: a.label,
+            blurb: a.blurb,
             requires_api_key: false,
         })
         .collect()
@@ -363,17 +415,17 @@ fn display_name_for_slug(slug: &str) -> String {
     }
 }
 
-/// Best available *local* brain to fall back to when the preferred brain
-/// (typically `aura_pro`) can't serve a turn — e.g. the cloud rejected the
-/// subscription, the token expired, or the network is down. Order mirrors
-/// the picker's intent: a key-backed native provider first (best tool-use
-/// fidelity), then any installed CLI wrapper, then a configured
-/// `openai_compat` endpoint. Never returns `exclude` (the brain that just
-/// failed) — so a fallback can't loop back onto the same dead provider.
+/// Best available brain to fall back to when the preferred brain can't serve
+/// a turn — it is rate-limited, its login expired, or the network is down —
+/// and the one a retired saved choice moves to. Order mirrors the picker's
+/// intent: a key-backed native provider first (best tool-use fidelity), then
+/// any installed CLI wrapper, then a configured `openai_compat` endpoint.
+/// Never returns `exclude` (the brain that just failed) — so a fallback
+/// can't loop back onto the same dead provider.
 ///
-/// Returns `None` when nothing local is configured (no API keys, no CLIs
-/// installed) — in that case the original entitlement error is the right
-/// thing to surface, since there's genuinely nothing to fall back to.
+/// Returns `None` when nothing is set up (no API keys, no CLIs installed) —
+/// then the original error is the right thing to surface, since there's
+/// genuinely nothing to fall back to.
 pub fn first_available_fallback(exclude: &str) -> Option<String> {
     first_available_fallback_excluding(&[exclude])
 }
@@ -426,25 +478,37 @@ pub fn first_available_fallback_excluding(excludes: &[&str]) -> Option<String> {
 /// isn't compiled into this build, or `Keychain` if a required API
 /// key is missing.
 pub fn build(provider_id: &str) -> Result<Arc<dyn Brain>, BrainError> {
+    // `place:<key>` — a chat on one of the org's machines. Never built here:
+    // the workspace that opens it builds and holds it (see `hold`), so a turn
+    // that arrives first has nothing to reach the machine with.
+    if provider_id.starts_with(PLACE_PREFIX) {
+        return held(provider_id).ok_or_else(|| BrainError::Other {
+            message: "This chat runs on one of your organization's machines and isn't \
+                      connected from this laptop right now. Open its workspace from Cloud \
+                      to reconnect."
+                .into(),
+        });
+    }
+
     // `acp:<agent>` — a live agent session. Matched before the exact
     // table for the same reason `cli_wrapper:` is: it's a family.
     #[cfg(feature = "brain_acp")]
     {
         if let Some(id) = provider_id.strip_prefix(super::acp::PROVIDER_PREFIX) {
-            let agent = super::acp::brain::agent_by_id(id).ok_or_else(|| BrainError::Other {
+            let agent = super::acp::hosted_agent(id).ok_or_else(|| BrainError::Other {
                 message: format!(
-                    "{id} isn't an agent Aura knows how to run over ACP. Installed: {}",
-                    super::acp::descriptors_for_installed_agents()
+                    "{id} isn't an ACP agent this machine can run. Install it from Settings → Agents. Ready: {}",
+                    super::acp::hosted_agents()
                         .iter()
-                        .map(|a| a.id)
+                        .map(|a| a.id.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
             })?;
             // Cached: this brain *is* the running agent. See [`LIVE`].
             return live(provider_id, || {
-                Arc::new(super::acp::AcpBrain::from_agent(
-                    agent,
+                Arc::new(super::acp::AcpBrain::from_hosted(
+                    &agent,
                     super::gate::for_agent(provider_id),
                 ))
             });
@@ -498,29 +562,6 @@ pub fn build(provider_id: &str) -> Result<Arc<dyn Brain>, BrainError> {
     }
 
     match provider_id {
-        #[cfg(feature = "brain_aura_pro")]
-        id if id == super::aura_pro::PROVIDER_ID => {
-            let creds = super::aura_pro::read_credentials();
-            let token = creds.cloud_token.ok_or_else(|| BrainError::AuthRequired {
-                message:
-                    "Not signed in to Aura — open Onboarding (or Settings → Brain → Aura Pro) to sign in"
-                        .into(),
-            })?;
-            let mut brain = super::aura_pro::AuraProBrain::new(token);
-            if let Some(origin) = creds.cloud_origin {
-                brain = brain.with_cloud_origin(origin);
-            }
-            // Honor a user-chosen model override (settings UI may write
-            // this later) but fall through to the brain's built-in
-            // default when nothing is set.
-            let settings = settings::load();
-            if let Some(cfg) = settings.providers.get(super::aura_pro::PROVIDER_ID) {
-                if let Some(model) = cfg.model.as_deref().filter(|s| !s.is_empty()) {
-                    brain = brain.with_model(model);
-                }
-            }
-            Ok(Arc::new(brain))
-        }
         #[cfg(feature = "brain_anthropic_native")]
         "anthropic_native" => {
             let api_key = super::keychain::get_api_key("anthropic_native")?
@@ -810,7 +851,7 @@ mod tests {
         for d in descriptors() {
             let _ = build(&d.provider_id);
         }
-        let live_families = ["pi", "acp:"];
+        let live_families = ["pi", "acp:", PLACE_PREFIX];
         for id in live_ids() {
             assert!(
                 live_families.iter().any(|f| id.starts_with(f)),
@@ -883,8 +924,73 @@ mod tests {
             Ok(_) => panic!("an agent that doesn't exist must not build"),
         };
         assert!(
-            msg.contains("not-a-real-agent") && msg.contains("Installed"),
+            msg.contains("not-a-real-agent") && msg.contains("Ready:") && msg.contains("Settings"),
             "the message has to be actionable: {msg}"
         );
+    }
+
+    /// A chat on a machine is reached only through the brain its workspace
+    /// built: before that, a turn is told how to reconnect rather than
+    /// handed a fresh agent that knows nothing of the conversation.
+    #[test]
+    #[cfg(feature = "brain_acp")]
+    fn a_place_chat_is_only_the_brain_its_workspace_holds() {
+        let id = format!("{PLACE_PREFIX}ws-registry-test");
+        match build(&id) {
+            Err(BrainError::Other { message }) => assert!(message.contains("Open its workspace"), "{message}"),
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("nothing was held for {id}"),
+        }
+        let made: Arc<dyn Brain> = Arc::new(super::super::acp::AcpBrain::new(
+            "registry-test",
+            "true",
+            vec![],
+            super::super::gate::for_agent("registry-test"),
+        ));
+        let kept = hold(&id, made.clone());
+        assert!(Arc::ptr_eq(&kept, &made));
+        let second: Arc<dyn Brain> = Arc::new(super::super::acp::AcpBrain::new(
+            "registry-test",
+            "true",
+            vec![],
+            super::super::gate::for_agent("registry-test"),
+        ));
+        assert!(Arc::ptr_eq(&hold(&id, second), &made), "the first brain held stays held");
+        assert!(Arc::ptr_eq(&build(&id).expect("held"), &made));
+        assert!(release(&id));
+        assert!(build(&id).is_err(), "released means the next turn has to reconnect");
+    }
+
+    /// A machine's chat can't be moved onto a laptop brain, by a switch or by
+    /// a turn that names another engine; other chats switch freely.
+    #[test]
+    fn a_machine_chat_stays_on_its_machine() {
+        let place = "place:ws-1";
+        assert!(stays_on_machine(Some(place), Some(place)).is_ok());
+        assert!(stays_on_machine(Some(place), Some(" place:ws-1 ")).is_ok());
+        let off = stays_on_machine(Some(place), Some("anthropic")).unwrap_err();
+        assert!(off.contains("machines") && off.contains("new chat"), "{off}");
+        assert!(stays_on_machine(Some(place), None).is_err(), "the laptop's active brain is off the machine too");
+        assert!(stays_on_machine(Some(place), Some("place:ws-2")).is_err(), "nor onto another workspace's chat");
+        assert!(stays_on_machine(None, Some(place)).is_ok(), "a chat is put on its machine freely");
+        assert!(stays_on_machine(Some("anthropic"), Some("openai")).is_ok());
+        assert!(stays_on_machine(Some("anthropic"), None).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "brain_acp")]
+    fn a_machine_chat_is_switchable_only_while_connected() {
+        let id = format!("{PLACE_PREFIX}ws-switchable-test");
+        assert!(!is_switchable(&id), "not connected from this laptop");
+        let made: Arc<dyn Brain> = Arc::new(super::super::acp::AcpBrain::new(
+            "registry-test",
+            "true",
+            vec![],
+            super::super::gate::for_agent("registry-test"),
+        ));
+        hold(&id, made);
+        assert!(is_switchable(&id));
+        release(&id);
+        assert!(!is_switchable("not-a-brain"));
     }
 }

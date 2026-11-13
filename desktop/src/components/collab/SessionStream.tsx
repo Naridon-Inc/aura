@@ -7,13 +7,14 @@
 // sitting exactly there. Splitting people into a side channel would throw
 // that away.
 
-import { useEffect, useMemo, useRef } from "react";
+import { Fragment, useEffect, useMemo, useRef } from "react";
 import type { JSX } from "react";
 
 import type { MsgIntent, Participant, SessionLiveRef } from "../../lib/sessionLive";
 import type { SessionStreamItem } from "./collabTypes";
 import { findParticipant, itemAt, itemKey } from "./collabTypes";
-import { AsciiSpinner } from "../ui/ascii-spinner";
+import { ChatEmpty } from "../ui/chat-surface";
+import { ErrorState, LoadingState } from "../ui/state";
 import { SessionMessageRow } from "./SessionMessageRow";
 import { AgentStandDownNotice } from "./AgentStandDownNotice";
 import { ownerOf } from "./collabPresence";
@@ -73,38 +74,28 @@ export function SessionStream({
 
   if (error) {
     return (
-      <div className={`flex flex-col items-center justify-center gap-2 py-8 ${className ?? ""}`}>
-        <div className="text-xs text-red">{error}</div>
-        {onRetry && (
-          <button
-            type="button"
-            onClick={onRetry}
-            className="px-2 py-0.5 rounded border border-red/30 text-red hover:bg-red/10 text-2xs"
-          >
-            Try again
-          </button>
-        )}
-      </div>
+      <ErrorState
+        title="The conversation didn’t load"
+        message={error}
+        onRetry={onRetry}
+        className={className}
+      />
     );
   }
 
   if (loading) {
     return (
-      <div className={`flex items-center justify-center gap-2 py-8 text-xs text-text-3 ${className ?? ""}`}>
-        <AsciiSpinner size={12} />
-        <span>Catching up on the conversation…</span>
-      </div>
+      <LoadingState size="md" label="Catching up on the conversation…" className={className} />
     );
   }
 
   if (ordered.length === 0) {
     return (
-      <div className={`flex flex-col items-center justify-center gap-1 py-10 text-center ${className ?? ""}`}>
-        <div className="text-xs text-text-2">Nothing has been said in here yet.</div>
-        <div className="text-2xs text-text-4 max-w-[260px]">
-          Type below to talk to the room, or use “@” to send it to one person
-          or one agent.
-        </div>
+      <div className={className}>
+        <ChatEmpty
+          title="Nothing has been said in here yet."
+          description="Type below to talk to the room, or use “@” to send it to one person or one agent."
+        />
       </div>
     );
   }
@@ -113,7 +104,9 @@ export function SessionStream({
   let prevAt = 0;
 
   return (
-    <div className={`flex flex-col ${className ?? ""}`}>
+    // Block flow, not a flex column: the rows' own margins collapse into the
+    // chat's rhythm, and a grouped row tucks under the one above it.
+    <div className={className}>
       {ordered.map((item) => {
         const row = describe(item, participants);
         const grouped =
@@ -130,7 +123,7 @@ export function SessionStream({
             : null;
 
         return (
-          <div key={row.key}>
+          <Fragment key={row.key}>
             <SessionMessageRow
               from={row.from}
               fromName={row.fromName}
@@ -154,7 +147,7 @@ export function SessionStream({
                 youId={youId}
               />
             )}
-          </div>
+          </Fragment>
         );
       })}
       <div ref={bottom} />

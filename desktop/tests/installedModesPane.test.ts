@@ -38,34 +38,47 @@ describe("modes pane", () => {
     expect(src).not.toContain("PaneHeader");
   });
 
-  test("is hairline rows, not a stack of cards", async () => {
+  test("is settings rows, not a stack of cards", async () => {
     const src = await readSrc(PANE);
-    expect(src).toContain("Section");
+    expect(src).toContain("<SettingsSection");
+    expect(src).toContain("<SettingsRow");
     expect(src).not.toContain("ModeCard");
   });
 
-  test("the row shows which mode is in use", async () => {
+  test("no row claims a mode is in use while no chat reads one", async () => {
+    // The switch saved a slug nothing ever read: every chat ran the same
+    // whichever mode was "in use". A switch that changes nothing goes, and
+    // the intro says plainly that chats don't start in a mode yet.
     const src = await readSrc(PANE);
-    expect(src).toContain("row-selected");
-    expect(src).toContain("text-accent");
-    expect(src).toContain("in use");
-    // A toggle, not a radio: clearing back to no mode is a real answer,
-    // and a radio group has no way to express it.
-    expect(src).toContain("aria-pressed");
-    expect(src).not.toContain('role="radio"');
+    expect(src).not.toContain("in use</Badge>");
+    expect(src).not.toContain("<Switch");
+    expect(src).not.toContain("setActiveMode");
+    expect(src).toContain("Chats don't start in a mode yet.");
+    const store = await readSrc("lib/modesStore.ts");
+    expect(store).not.toContain("activeSlug");
+  });
+
+  test("loading modes redraws the list", async () => {
+    // The store mutated one object in place and handed React the same
+    // object back, so useSyncExternalStore never redrew: the list stayed
+    // empty after modes loaded.
+    const store = await readSrc("lib/modesStore.ts");
+    const emit = store.slice(store.indexOf("function emit()"));
+    expect(emit.slice(0, emit.indexOf("}\n"))).toContain("state = { ...state }");
   });
 
   test("publish belongs to a mode, not to the gap between two", async () => {
     const src = await readSrc(PANE);
     // Publish, Update and Uninstall sit in one cluster on the row.
-    const cluster = src.slice(src.indexOf("shrink-0 items-center"));
+    const row = src.slice(src.indexOf("function ModeRow"));
+    const cluster = row.slice(row.indexOf("<SettingsActions>"));
     expect(cluster).toContain("onPublish");
     expect(cluster).toContain("onUninstall");
   });
 
   test("one publish control, not a pencil that opens the same dialog", async () => {
     const src = await readSrc(PANE);
-    expect((src.match(/onClick=\{onPublish\}/g) ?? []).length).toBe(1);
+    expect((src.match(/onSelect=\{onPublish\}/g) ?? []).length).toBe(1);
     // PublishModeDialog publishes to a Gist; there is no YAML editor
     // behind the pencil that used to claim one.
     expect(src).not.toContain("Edit YAML");
@@ -79,7 +92,7 @@ describe("modes pane", () => {
 
   test("the intro says what a mode is without naming the plumbing", async () => {
     const src = await readSrc(PANE);
-    expect(src).toContain("PaneIntro");
+    expect(src).toContain("<SettingsIntro>");
     expect(src).not.toContain("tool ACL");
     expect(src).not.toContain("system prompt");
   });

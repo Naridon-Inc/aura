@@ -14,11 +14,13 @@
 // what this component adds, so a caller gets a finished mark for ANY ref and
 // no surface has to invent one again.
 
+import { GitPullRequest, MessageSquareDashed } from "lucide-react";
 import { AgentIcon } from "./agent/AgentIcon";
 import { FileIcon } from "./FileIcon";
 import * as Icons from "./Icons";
 import { tabGlyph } from "./tabGlyphs";
 import type { WorkPaneRef } from "../lib/editorStore";
+import { chatTabMarkKind } from "../lib/chatTabMark";
 
 export function TabMark({
   refr,
@@ -34,6 +36,14 @@ export function TabMark({
   agentId?: string;
   size?: number;
 }) {
+  // An Aura chat's mark follows what it turned out to be about: an outline
+  // bubble until it has a subject, the pull-request mark if that subject is a
+  // review, and Aura's own mark otherwise.
+  if (refr.kind === "manager") {
+    const kind = chatTabMarkKind(label);
+    if (kind === "pending") return <MessageSquareDashed size={size} className="opacity-80" />;
+    if (kind === "review") return <GitPullRequest size={size} className="opacity-80" />;
+  }
   if (agentId) return <AgentIcon agentId={agentId} size={size} />;
   if (refr.kind === "terminal")
     return <Icons.Terminal size={size} className="opacity-80" />;
@@ -44,6 +54,18 @@ export function TabMark({
   // destinations that genuinely have none — the caller renders an empty slot
   // rather than a stand-in character that means nothing.
   return <span className="opacity-80">{tabGlyph(refr, size)}</span>;
+}
+
+/** A word for WHICH mark `TabMark` draws for this tab — what the mark-swap
+ *  reveal compares, so re-rendering the same mark never reads as a swap. */
+export function tabMarkKey(refr: WorkPaneRef, label: string, agentId?: string): string {
+  if (refr.kind === "manager") {
+    const kind = chatTabMarkKind(label);
+    if (kind !== "named") return kind;
+  }
+  if (agentId) return `agent:${agentId}`;
+  if (refr.kind === "file") return `file:${label.split(".").pop() ?? ""}`;
+  return refr.kind;
 }
 
 /** The project a foreign tab belongs to, in the words the project switcher

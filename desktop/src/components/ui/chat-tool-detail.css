@@ -1,0 +1,165 @@
+/* What opens under a step row: the facts a step carries, its output, its diff.
+   Everything sits inside the row's indented, left-ruled content and takes that
+   content's 13px muted voice unless it is the thing being read. */
+
+.ui-chat-transcript .ui-tool-trigger > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-tool-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+.ui-tool-meta > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-tool-content .ui-message-markdown {
+  font-size: inherit;
+  line-height: inherit;
+}
+.ui-tool-content .ui-file-diff,
+.ui-tool-content .ui-code-message {
+  margin-block: 8px;
+}
+
+.ui-tool-fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 12px;
+  margin: 6px 0;
+}
+.ui-tool-fields > div {
+  display: contents;
+}
+.ui-tool-fields dt {
+  color: var(--ui-faint);
+}
+.ui-tool-fields dd {
+  margin: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.ui-tool-body {
+  margin: 6px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ui-tool-plan {
+  color: var(--ui-fg);
+}
+
+.ui-tool-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 6px 0;
+}
+.ui-tool-ask p {
+  margin: 0;
+  color: var(--ui-fg);
+}
+.ui-tool-ask ul {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ui-tool-ask li strong {
+  font-weight: 500;
+  color: var(--ui-fg);
+}
+.ui-tool-ask li span {
+  display: block;
+  font-size: 12px;
+}
+.ui-tool-ask small {
+  color: var(--ui-faint);
+  font-size: 12px;
+}
+
+.ui-tool-steps {
+  list-style: none;
+  margin: 6px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ui-tool-steps li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-tool-steps li[data-status="in_progress"] {
+  color: var(--ui-fg);
+}
+.ui-tool-steps li[data-status="completed"] {
+  color: var(--ui-faint);
+}
+.ui-tool-steps li > svg {
+  flex-shrink: 0;
+}
+
+.ui-tool-lines > span {
+  display: block;
+  min-height: 20px;
+}
+.ui-tool-lines[data-numbered] {
+  counter-reset: tool-line;
+}
+.ui-tool-lines[data-numbered] > span::before {
+  counter-increment: tool-line;
+  content: counter(tool-line);
+  display: inline-block;
+  width: 3ch;
+  margin-right: 12px;
+  text-align: right;
+  color: var(--ui-faint);
+}
+.ui-tool-output[data-tone="error"] pre {
+  color: var(--ui-red);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ui-tool-terminal pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ui-tool-prompt {
+  color: var(--ui-green);
+  user-select: none;
+}
+.ui-tool-quiet {
+  color: var(--ui-faint);
+}
+
+.ui-file-diff-editor {
+  height: 280px;
+}
+.ui-file-diff-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ui-faint);
+}

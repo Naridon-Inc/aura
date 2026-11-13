@@ -8,14 +8,20 @@
 // Hand-over is on the same row rather than in a second menu, because handing
 // a thread to a teammate is a *recipient* decision — you are already naming
 // them, and making that a separate step is how it never gets used.
+//
+// The list is the composer's own suggestion list, so "@" here opens the same
+// panel it opens in the chat; the faces, the two groups and "Hand over" are
+// what a room adds to it.
 
 import { useEffect, useMemo, useState } from "react";
 import type { JSX } from "react";
 import { ArrowRightLeft } from "lucide-react";
 
 import type { MsgIntent, Participant } from "../../lib/sessionLive";
-import { AsciiSpinner } from "../ui/ascii-spinner";
-import { MENU_LABEL, MENU_PANEL, MENU_ROW, MENU_SEP } from "../ui/menuSurface";
+import { cn } from "../../lib/utils";
+import { Button } from "../ui/button";
+import { MENU_LABEL } from "../ui/menuSurface";
+import { LoadingState } from "../ui/state";
 import { ParticipantFace } from "./ParticipantsStrip";
 import {
   STATE_PHRASE,
@@ -124,17 +130,16 @@ export function MentionPicker({
     <div
       role="listbox"
       aria-label="Address this message to"
-      className={`${MENU_PANEL} w-[300px] max-h-[280px] overflow-y-auto ${className ?? ""}`}
+      className={cn("ui-composer-suggestions ui-session-mentions", className)}
     >
       {error ? (
-        <div className="px-2 py-2 text-xs text-red">{error}</div>
-      ) : loading ? (
-        <div className="flex items-center gap-2 px-2 py-2 text-xs text-text-3">
-          <AsciiSpinner size={12} />
-          <span>Loading who's in this session…</span>
+        <div className="ui-session-mentions-state" data-tone="error" role="alert">
+          {error}
         </div>
+      ) : loading ? (
+        <LoadingState label="Loading who's in this session…" className="ui-session-mentions-state" />
       ) : matches.length === 0 ? (
-        <div className="px-2 py-2 text-xs text-text-4">
+        <div className="ui-session-mentions-state">
           Nobody in this session matches “{query}”.
         </div>
       ) : (
@@ -151,7 +156,6 @@ export function MentionPicker({
               onPick={onPick}
             />
           ))}
-          {people.length > 0 && agents.length > 0 && <div className={MENU_SEP} />}
           {agents.length > 0 && <div className={MENU_LABEL}>Agents</div>}
           {agents.map((p) => (
             <MentionRow
@@ -166,8 +170,7 @@ export function MentionPicker({
           ))}
         </>
       )}
-      <div className={MENU_SEP} />
-      <div className="px-2 py-1 text-2xs text-text-5">
+      <div className="ui-session-mentions-hint">
         Enter to address · Shift+Enter to hand the thread over
       </div>
     </div>
@@ -189,37 +192,43 @@ function MentionRow({
   onHover: () => void;
   onPick: (p: Participant, intent: MsgIntent) => void;
 }): JSX.Element {
+  // Both buttons keep the caret in the box: picking a name is part of typing
+  // the message, not a trip away from it.
   return (
     <div
       role="option"
       aria-selected={activeRow}
-      tabIndex={-1}
-      data-highlighted={activeRow ? "" : undefined}
+      className="ui-session-mention"
       onMouseEnter={onHover}
-      onClick={() => onPick(p, defaultIntentFor(p))}
-      className={`${MENU_ROW} group/mention cursor-pointer`}
     >
-      <ParticipantFace p={p} size={20} />
-      <span className="min-w-0 flex-1 leading-tight">
-        <span className="block truncate text-text-1">
-          {participantLabel(p, participants, youId)}
-        </span>
-        <span className="block truncate text-2xs text-text-4">
-          {STATE_PHRASE[p.state]}
-        </span>
-      </span>
       <button
         type="button"
+        tabIndex={-1}
+        className="ui-session-mention-pick"
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => onPick(p, defaultIntentFor(p))}
+      >
+        <ParticipantFace p={p} size={20} />
+        <span className="ui-session-person">
+          <span>{participantLabel(p, participants, youId)}</span>
+          <small>{STATE_PHRASE[p.state]}</small>
+        </span>
+      </button>
+      <Button
+        variant="ghost"
+        size="xs"
+        tabIndex={-1}
+        className="ui-session-mention-handover"
+        onMouseDown={(e) => e.preventDefault()}
         onClick={(e) => {
           e.stopPropagation();
           onPick(p, "handoff");
         }}
-        className="opacity-0 group-hover/mention:opacity-100 focus:opacity-100 inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-accent/25 text-accent hover:bg-accent/10 text-2xs leading-none"
         title="Hand this thread over"
       >
-        <ArrowRightLeft size={10} />
+        <ArrowRightLeft />
         Hand over
-      </button>
+      </Button>
     </div>
   );
 }

@@ -28,12 +28,19 @@
 // drag of any length costs one settled probe after the user lets go.
 
 import { useEffect, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export function useIsFullscreen(): boolean {
   const [fullscreen, setFullscreen] = useState(false);
 
   useEffect(() => {
+    if (!isTauri()) {
+      const syncBrowser = () => setFullscreen(document.fullscreenElement != null);
+      syncBrowser();
+      document.addEventListener("fullscreenchange", syncBrowser);
+      return () => document.removeEventListener("fullscreenchange", syncBrowser);
+    }
     let alive = true;
     const win = getCurrentWindow();
 

@@ -1,0 +1,107 @@
+/* Settings › Cloud computer › Environment variables. */
+.ui-cloud-env {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ui-cloud-env-actions {
+  display: flex;
+  gap: 8px;
+}
+.ui-cloud-env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-cloud-env-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+}
+.ui-cloud-env-key {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.ui-cloud-env-value {
+  max-width: 160px;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-cloud-env-quiet,
+.ui-cloud-env-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ui-muted-fg);
+}
+.ui-cloud-env-hint {
+  font-size: 12px;
+}
+.ui-cloud-env-mono input,
+input.ui-cloud-env-mono {
+  font-family: var(--font-mono);
+}
+.ui-sheet.ui-cloud-env-sheet {
+  width: min(520px, calc(100vw - 24px));
+}
+.ui-cloud-env-sheet > .ui-dialog-header {
+  margin-bottom: 16px;
+  padding-right: 32px;
+}
+.ui-cloud-env-sheet form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.ui-cloud-env-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-cloud-env-pending-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 500;
+}
+.ui-cloud-env-pending ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+}
+.ui-cloud-env-pending li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 36px;
+  padding: 0 8px 0 12px;
+}
+.ui-cloud-env-pending li + li {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-cloud-env-warning {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ui-yellow);
+}
+.ui-cloud-env-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ui-red);
+}

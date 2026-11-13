@@ -1,0 +1,160 @@
+/* Find in files. The page header, fields, toggles, alerts and the grouped
+   list are the shared parts; this is how they sit together, plus the match
+   row — one line of code under its file, not a 44px run. */
+
+.ui-repo-search {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-repo-search-glyph {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-repo-search-root {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ui-faint);
+  font: 12px/16px var(--font-mono);
+}
+.ui-repo-search-alert {
+  flex-shrink: 0;
+  margin: 8px 12px 0;
+}
+
+.ui-repo-search-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* ── the query column ──────────────────────────────────────────────── */
+
+.ui-repo-search-side {
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--ui-border);
+  background: var(--ui-sidebar);
+}
+.ui-repo-search-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-repo-search-query,
+.ui-repo-search-query input {
+  font-family: var(--font-mono);
+}
+.ui-repo-search-flags {
+  display: inline-flex;
+  gap: 2px;
+}
+.ui-repo-search-flags .ui-toggle {
+  min-width: 24px;
+  padding: 0 4px;
+  font-family: var(--font-mono);
+}
+.ui-repo-search-replace {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-repo-search-replace .ui-input {
+  flex: 1;
+  min-width: 0;
+}
+.ui-repo-search-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── what it found ─────────────────────────────────────────────────── */
+
+.ui-repo-search-results {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.ui-repo-search-results .ui-trace-list {
+  min-height: 0;
+}
+.ui-repo-search-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-repo-search-base {
+  color: var(--ui-fg);
+  white-space: nowrap;
+}
+.ui-repo-search-dir {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-faint);
+  font: 11px/16px var(--font-mono);
+}
+
+/* One match: the line number in a fixed column, then the line itself. The
+   left inset lands the number under the file name, past the fold chevron. */
+.ui-repo-search-hit {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  width: 100%;
+  padding: 2px 16px 2px 36px;
+  border: 0;
+  background: transparent;
+  color: var(--ui-muted-fg);
+  text-align: left;
+  cursor: pointer;
+}
+.ui-repo-search-hit:hover {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-repo-search-hit:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+.ui-repo-search-line {
+  width: 36px;
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--ui-faint);
+  font: 12px/20px var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.ui-repo-search-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+  font: 12px/20px var(--font-mono);
+}
+.ui-repo-search-mark {
+  border-radius: 3px;
+  padding: 0 1px;
+  background: color-mix(in srgb, var(--ui-yellow) 30%, transparent);
+  color: var(--ui-fg);
+}

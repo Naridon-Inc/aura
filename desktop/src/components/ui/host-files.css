@@ -1,0 +1,45 @@
+/* The host's project, read over a shared session: the file browser's own
+   parts (the details toolbar, the file tree, its captions and problem line,
+   the file view) in a column beside the session. Added here: the column, the
+   path in the toolbar scrolling sideways when it is deeper than the column is
+   wide, the folder you are in reading brighter than the ones above it, and
+   the watcher's empty state centred in the column. */
+
+.ui-host-files {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.ui-host-files > .ui-details-toolbar {
+  gap: 8px;
+  padding: 0 8px;
+}
+.ui-host-files .ui-cloud-routine-breadcrumb {
+  flex: 1;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ui-host-files .ui-cloud-routine-breadcrumb::-webkit-scrollbar {
+  display: none;
+}
+.ui-host-files .ui-cloud-routine-breadcrumb > * {
+  flex-shrink: 0;
+}
+.ui-host-files .ui-cloud-routine-breadcrumb > button {
+  white-space: nowrap;
+}
+.ui-host-files .ui-cloud-routine-breadcrumb > button:hover,
+.ui-host-files .ui-cloud-routine-breadcrumb > button[aria-current] {
+  color: var(--ui-fg);
+}
+.ui-host-files > .ui-file-view {
+  flex: 1;
+  height: auto;
+}
+.ui-host-files-watching {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 0 16px;
+}

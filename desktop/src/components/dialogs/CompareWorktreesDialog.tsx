@@ -10,18 +10,25 @@
 // not the worktree's working tree — agents commit before completion,
 // so what we want is "the work the branch committed since diverging."
 //
-// The dialog stays light: file list per pane + click-to-expand unified
-// diff per file. For a richer side-by-side editor we'd reach for
+// The dialog stays light: file list per pane + click-to-expand diff per
+// file, drawn as the shared file diff. For a richer side-by-side editor we'd reach for
 // CodeMirror's MergeView, but that's overkill for "scan two attempts
 // before promoting one."
 
 import { useEffect, useMemo, useState } from "react";
 import { Dialog } from "../Dialog";
-import { Button } from "../ui/button";
+import { Alert, AlertDescription } from "../ui/alert";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { Select } from "../ui/select";
+import { DiffCount } from "../ui/sidebar";
+import { FileDiff } from "../ui/workspace-patterns";
 import { api } from "../../lib/api";
 import type { BranchDiffFile, WorktreeEntry } from "../../lib/api";
+import { parseUnifiedDiff } from "../../lib/diff";
+import "../ui/log-note.css";
+import "../ui/compare-copies.css";
 
 type Props = {
   open: boolean;
@@ -116,77 +123,77 @@ export function CompareWorktreesDialog({ open, repoRoot, onClose }: Props) {
       title="Compare parallel copies"
       width={selected.length >= 2 ? 1100 : 640}
       footer={
-        <Button variant="ghost" size="xs" onClick={onClose}>
+        <Button variant="outline" onClick={onClose}>
           Close
         </Button>
       }
     >
-      <div className="space-y-3 text-sm">
-        <div className="flex items-center gap-2">
-          <span className="text-text-3">Compare against</span>
+      <div className="ui-compare">
+        <div className="ui-compare-base">
+          <span>Compare against</span>
           <Select
             value={baseRef}
             onChange={setBaseRef}
             options={baseOptions}
             aria-label="Compare against"
-            className="w-auto min-w-[180px]"
           />
-          <span className="text-text-4">
-            pick up to {MAX_PANES} parallel copies ({selected.length}/{MAX_PANES})
-          </span>
         </div>
 
-        {busy ? (
-          <div className="flex items-center gap-1.5 text-text-4" role="status">
-            <AsciiSpinner className="text-xs leading-none" />
-            Looking for parallel copies…
+        <section className="ui-log-note-files">
+          <div className="ui-log-note-files-head">
+            <span>Parallel copies</span>
+            <span className="ui-log-note-count">
+              {selected.length} of up to {MAX_PANES} picked
+            </span>
           </div>
-        ) : candidates.length === 0 ? (
-          <div className="text-text-4 italic">
-            no other parallel copies on this project yet. Aura creates one
-            per task; try running a task to populate them.
-          </div>
-        ) : (
-          <ul className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-            {candidates.map((w) => {
-              const checked = selected.includes(w.branch);
-              const disabled = !checked && selected.length >= MAX_PANES;
-              return (
-                <li
-                  key={w.path}
-                  onClick={() => !disabled && toggle(w.branch)}
-                  className={`flex items-center gap-2 px-2 py-1.5 rounded border cursor-pointer ${
-                    checked
-                      ? "bg-bg-3 border-line"
-                      : disabled
-                        ? "bg-bg-1 border-line-soft opacity-50 cursor-not-allowed"
-                        : "bg-bg-1 border-line-soft hover:bg-state-hover"
-                  }`}
-                  title={w.path}
-                >
-                  <span
-                    className={`inline-block rounded-sm border ${
-                      checked
-                        ? "bg-violet border-violet"
-                        : "border-line bg-transparent"
-                    }`}
-                    style={{ width: 11, height: 11 }}
-                  />
-                  <span className="font-mono text-text-1 truncate">
-                    {w.branch}
-                  </span>
-                  <span className="text-text-4 font-mono text-2xs ml-auto">
-                    {w.head.slice(0, 7)}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        )}
+          {busy ? (
+            <p className="ui-log-note-state" role="status">
+              <AsciiSpinner />
+              Looking for parallel copies…
+            </p>
+          ) : candidates.length === 0 ? (
+            <p className="ui-pattern-empty ui-compare-empty">
+              No other parallel copies of this repository yet. Aura makes one per
+              task, so running a task fills this list.
+            </p>
+          ) : (
+            <ul className="ui-log-note-list">
+              {candidates.map((w) => {
+                const checked = selected.includes(w.branch);
+                const disabled = !checked && selected.length >= MAX_PANES;
+                return (
+                  <li key={w.path}>
+                    <label
+                      className="ui-check-label"
+                      title={w.path}
+                      data-unpicked={checked ? undefined : ""}
+                      data-disabled={disabled ? "" : undefined}
+                    >
+                      <Checkbox
+                        checked={checked}
+                        disabled={disabled}
+                        onCheckedChange={() => toggle(w.branch)}
+                      />
+                      <span className="ui-log-note-name ui-compare-branch">
+                        {w.branch}
+                      </span>
+                      <span className="ui-log-note-dir">{w.head.slice(0, 7)}</span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          {selected.length < 2 && candidates.length > 0 && (
+            <p className="ui-log-note-help">
+              Pick two or three to see what each one changed side by side.
+            </p>
+          )}
+        </section>
 
         {selected.length >= 2 && (
           <div
-            className="grid gap-3 mt-2"
+            className="ui-compare-panes"
             style={{
               gridTemplateColumns: `repeat(${selected.length}, minmax(0, 1fr))`,
             }}
@@ -205,14 +212,18 @@ export function CompareWorktreesDialog({ open, repoRoot, onClose }: Props) {
         )}
 
         {mergeMsg && (
-          <pre className="bg-bg-1 border border-line-soft rounded px-2 py-1.5 text-xs text-text-2 whitespace-pre-wrap max-h-32 overflow-auto">
-            {mergeMsg}
-          </pre>
+          <Alert className="ui-compare-result">
+            <AlertDescription>
+              <pre>{mergeMsg}</pre>
+            </AlertDescription>
+          </Alert>
         )}
         {mergeErr && (
-          <pre className="bg-red/10 border border-red/40 rounded px-2 py-1.5 text-xs text-red whitespace-pre-wrap max-h-32 overflow-auto">
-            {mergeErr}
-          </pre>
+          <Alert variant="destructive" className="ui-compare-result">
+            <AlertDescription>
+              <pre>{mergeErr}</pre>
+            </AlertDescription>
+          </Alert>
         )}
       </div>
     </Dialog>
@@ -235,7 +246,8 @@ function ComparePane({
   const [files, setFiles] = useState<BranchDiffFile[]>([]);
   const [loading, setLoading] = useState(false);
   const [openFile, setOpenFile] = useState<string | null>(null);
-  const [diffText, setDiffText] = useState<string>("");
+  // null while the open file's diff is still being read.
+  const [diffText, setDiffText] = useState<string | null>("");
 
   useEffect(() => {
     setLoading(true);
@@ -254,6 +266,7 @@ function ComparePane({
       return;
     }
     let cancelled = false;
+    setDiffText(null);
     api
       .gitBranchDiffFile(repoRoot, baseRef, headRef, openFile)
       .then((t) => {
@@ -276,69 +289,64 @@ function ComparePane({
   );
 
   return (
-    <div className="bg-bg-1 border border-line-soft rounded flex flex-col min-h-0">
-      <div className="flex items-center gap-2 px-2 py-1.5 border-b border-line-soft">
-        <span className="font-mono text-text-1 truncate flex-1" title={headRef}>
-          {headRef}
-        </span>
-        <span className="text-accent-green font-mono text-2xs">
-          +{totals.add}
-        </span>
-        <span className="text-red font-mono text-2xs">−{totals.del}</span>
-      </div>
-      <div className="overflow-y-auto" style={{ maxHeight: 300 }}>
+    <section className="ui-compare-pane">
+      <header>
+        <strong title={headRef}>{headRef}</strong>
+        <DiffCount added={totals.add} removed={totals.del} />
+      </header>
+      <div className="ui-compare-pane-body">
         {loading ? (
-          <div className="flex items-center gap-1.5 px-2 py-2 text-text-4" role="status">
-            <AsciiSpinner className="text-xs leading-none" />
+          <p className="ui-log-note-state" role="status">
+            <AsciiSpinner />
             Comparing the two copies…
-          </div>
+          </p>
         ) : files.length === 0 ? (
-          <div className="px-2 py-2 text-text-4 italic">no changes</div>
+          <p className="ui-log-note-state">No changes</p>
         ) : (
-          <ul>
-            {files.map((f) => (
-              <li key={f.path}>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setOpenFile((cur) => (cur === f.path ? null : f.path))
-                  }
-                  className={`w-full text-left flex items-center gap-2 px-2 py-1 font-mono text-xs hover:bg-state-hover ${
-                    openFile === f.path ? "bg-bg-3" : ""
-                  }`}
-                >
-                  <span
-                    className="inline-block w-3 text-center text-text-4"
-                    title={statusName(f.status)}
+          <ul className="ui-compare-files">
+            {files.map((f) => {
+              const expanded = openFile === f.path;
+              return (
+                <li key={f.path}>
+                  <button
+                    type="button"
+                    className="ui-compare-file"
+                    aria-expanded={expanded}
+                    onClick={() => setOpenFile((cur) => (cur === f.path ? null : f.path))}
                   >
-                    {f.status[0]}
-                  </span>
-                  <span className="truncate flex-1 text-text-1">{f.path}</span>
-                  <span className="text-accent-green">+{f.additions}</span>
-                  <span className="text-red">−{f.deletions}</span>
-                </button>
-                {openFile === f.path && (
-                  <pre className="bg-bg-0 border-y border-line-soft px-2 py-1.5 text-2xs font-mono whitespace-pre overflow-x-auto max-h-64 leading-snug">
-                    {colorizeDiff(diffText)}
-                  </pre>
-                )}
-              </li>
-            ))}
+                    <span className="ui-log-note-tag" title={statusName(f.status)}>
+                      {f.status[0]}
+                    </span>
+                    <span className="ui-log-note-name">{f.path}</span>
+                    <DiffCount added={f.additions} removed={f.deletions} />
+                  </button>
+                  {expanded &&
+                    (diffText === null ? (
+                      <p className="ui-log-note-state" role="status">
+                        <AsciiSpinner />
+                        Reading the change…
+                      </p>
+                    ) : diffText ? (
+                      <FileDiff name={f.path} lines={parseUnifiedDiff(diffText)} />
+                    ) : (
+                      <p className="ui-log-note-state">No diff to show</p>
+                    ))}
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
-      <div className="border-t border-line-soft p-1.5">
+      <footer>
         <Button
-          variant="default"
-          size="xs"
+          size="sm"
           onClick={onPromote}
           disabled={merging || files.length === 0}
-          className="w-full"
         >
-          {merging ? "keeping…" : "Keep this copy"}
+          {merging ? "Keeping…" : "Keep this copy"}
         </Button>
-      </div>
-    </div>
+      </footer>
+    </section>
   );
 }
 
@@ -357,25 +365,4 @@ function statusName(s: string): string {
     default:
       return s;
   }
-}
-
-// Minimal +/-/@@ syntax tinting on the unified diff. Real syntax
-// highlighting would need a proper parser; this is enough for a
-// dialog meant for triage.
-function colorizeDiff(text: string): React.ReactNode {
-  if (!text) return "no diff";
-  const lines = text.split("\n");
-  return lines.map((line, i) => {
-    let cls = "text-text-2";
-    if (line.startsWith("+++") || line.startsWith("---"))
-      cls = "text-text-3 font-semibold";
-    else if (line.startsWith("@@")) cls = "text-violet";
-    else if (line.startsWith("+")) cls = "text-accent-green";
-    else if (line.startsWith("-")) cls = "text-red";
-    return (
-      <div key={i} className={cls}>
-        {line || " "}
-      </div>
-    );
-  });
 }

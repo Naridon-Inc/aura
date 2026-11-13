@@ -1,0 +1,23 @@
+<!doctype html>
+<!--
+  Visual harness for the "What changed" block over the editor's diff: the real
+  block on a stand-in for the desktop's git, outline, reason-log and
+  explanation commands.
+
+  Dev-server only: Vite's build input is index.html, so this page never
+  reaches a bundle. `bun run dev` serves it at
+  /file-insight-harness.html?scene=<name>; the scenes are listed in
+  src/components/fileInsight/__harness__/scenes.ts. Add `&theme=light` for
+  the light palette.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>What changed harness</title>
+  </head>
+  <body>
+    <div id="file-insight-harness"></div>
+    <script type="module" src="/src/components/fileInsight/__harness__/main.tsx"></script>
+  </body>
+</html>

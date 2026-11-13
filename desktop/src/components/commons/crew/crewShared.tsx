@@ -14,10 +14,13 @@ import { relativeAgeAuto } from "../../../lib/relativeTime";
 import { monogram } from "../../../lib/monogram";
 import { AgentIcon } from "../../agent/AgentIcon";
 import { agentDisplayLabel, canonicalAgentId } from "../../../lib/agentIdentity";
-import { StatusChip, type ChipTone } from "../../ui/statusChip";
+import type { ChipTone } from "../../ui/statusChip";
+import { Avatar, AvatarFallback } from "../../ui/avatar";
+import { Badge } from "../../ui/badge";
 import { StateGlyph } from "../../tasks/StatePill";
 import { proofLabel, type CrewProof } from "./crewProof";
 import { WORK_STATE } from "../../../lib/workState";
+import "../../ui/crew-bits.css";
 
 // One palette, used as a left-border accent everywhere — the crew's key names
 // for the app's work-state ramp. Green and red are status-only, never
@@ -119,17 +122,13 @@ export function AgentBit({
   const canonical = agentKind ? canonicalAgentId(agentKind) : null;
   if (!canonical) {
     return (
-      <span
-        className="grid shrink-0 place-items-center rounded-full bg-bg-2 text-2xs font-medium text-text-4"
-        style={{ width: size, height: size }}
-        title="No agent assigned yet"
-      >
-        ?
-      </span>
+      <Avatar className="ui-crew-avatar" style={{ width: size, height: size }} title="No agent assigned yet">
+        <AvatarFallback>?</AvatarFallback>
+      </Avatar>
     );
   }
   return (
-    <span className={dim ? "opacity-60" : undefined}>
+    <span className="ui-crew-agent" data-dim={dim ? "" : undefined}>
       <AgentIcon
         agentId={canonical}
         label={agentDisplayLabel(canonical)}
@@ -155,13 +154,9 @@ export function AssigneeBit({
   size?: number;
 }) {
   return (
-    <span
-      className="grid shrink-0 place-items-center rounded-full bg-bg-2 font-semibold text-text-3 ring-1 ring-line-soft"
-      style={{ width: size, height: size, fontSize: size * 0.42 }}
-      title={`Assigned to ${name}`}
-    >
-      {initials(name)}
-    </span>
+    <Avatar className="ui-crew-avatar" style={{ width: size, height: size }} title={`Assigned to ${name}`}>
+      <AvatarFallback style={{ fontSize: size * 0.42 }}>{initials(name)}</AvatarFallback>
+    </Avatar>
   );
 }
 
@@ -173,14 +168,14 @@ export function ProvenanceChips({ task }: { task: LoopTask }) {
   return (
     <>
       {isJira ? (
-        <StatusChip tone="blue" dense>
-          JIRA {task.external_id}
-        </StatusChip>
+        <Badge variant="outline" className="ui-crew-badge" data-tone="blue">
+          Jira {task.external_id}
+        </Badge>
       ) : null}
       {isBeads ? (
-        <StatusChip tone="neutral" dense>
+        <Badge variant="outline" className="ui-crew-badge">
           Beads {task.external_id}
-        </StatusChip>
+        </Badge>
       ) : null}
     </>
   );
@@ -189,20 +184,17 @@ export function ProvenanceChips({ task }: { task: LoopTask }) {
 export function PriorityChip({ priority }: { priority: string }) {
   if (!priority || priority === "low") return null;
   return (
-    <StatusChip tone={PRIORITY_TONE[priority] ?? "neutral"} dense dot>
+    <Badge variant="outline" className="ui-crew-badge" data-tone={PRIORITY_TONE[priority] ?? "neutral"}>
       {priority}
-    </StatusChip>
+    </Badge>
   );
 }
 
 /** The commit a done node landed (short, copy-friendly title). */
 export function CommitChip({ sha }: { sha: string }) {
   return (
-    <span
-      className="inline-flex items-center gap-1 text-xs text-text-4"
-      title={sha}
-    >
-      <GitCommitHorizontal size={11} />
+    <span className="ui-crew-commit" title={sha}>
+      <GitCommitHorizontal />
       {sha.slice(0, 7)}
     </span>
   );
@@ -218,10 +210,10 @@ export function ProofPill({ proof }: { proof: CrewProof }) {
         ? "amber"
         : "neutral";
   return (
-    <StatusChip tone={tone} dense>
-      <ShieldCheck size={10} className="mr-1 inline-block" />
+    <Badge variant="outline" className="ui-crew-badge" data-tone={tone}>
+      <ShieldCheck />
       {proofLabel(proof)}
-    </StatusChip>
+    </Badge>
   );
 }
 
@@ -229,7 +221,7 @@ export function ProofPill({ proof }: { proof: CrewProof }) {
 export function WorkingLine({ agentKind }: { agentKind?: string | null }) {
   const canonical = agentKind ? canonicalAgentId(agentKind) : null;
   return (
-    <span className="inline-flex items-center gap-1 text-xs text-text-4">
+    <span className="ui-crew-working">
       <AsciiSpinner />
       running on {canonical ? agentDisplayLabel(canonical) : "the Aura brain"}
     </span>

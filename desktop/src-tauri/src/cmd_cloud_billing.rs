@@ -13,15 +13,51 @@ use crate::cloud_org::OrgScoped;
 /// insist on a 2xx — and the interesting part of each is only which path it
 /// asks for. Sharing the plumbing keeps the difference visible.
 async fn get_billing_json(path: &str) -> Result<Value, String> {
-    let creds = read_credentials().map_err(|e| e.to_string())?;
-    let token = cloud_token(&creds).ok_or_else(|| "no cloud_api_token".to_string())?;
+    match get_once(path).await {
+        // A 403 with the org header is how the cloud refuses a token minted for
+        // another org. Mend the token and ask once more, so a plan read after
+        // an org switch on an older build reads instead of locking Home.
+        Err(Refused::Forbidden) if crate::cloud_org_token::mend().await.is_ok() => {
+            get_once(path).await.map_err(Refused::said)
+        }
+        other => other.map_err(Refused::said),
+    }
+}
+
+enum Refused {
+    Forbidden,
+    Other(String),
+}
+
+impl Refused {
+    fn said(self) -> String {
+        match self {
+            Refused::Forbidden => "HTTP 403 Forbidden: this sign-in can't act in the organization picked".into(),
+            Refused::Other(why) => why,
+        }
+    }
+}
+
+async fn get_once(path: &str) -> Result<Value, Refused> {
+    get_json(path).await.map_err(|(status, why)| {
+        if status == Some(reqwest::StatusCode::FORBIDDEN) {
+            Refused::Forbidden
+        } else {
+            Refused::Other(why)
+        }
+    })
+}
+
+async fn get_json(path: &str) -> Result<Value, (Option<reqwest::StatusCode>, String)> {
+    let creds = read_credentials().map_err(|e| (None, e.to_string()))?;
+    let token = cloud_token(&creds).ok_or_else(|| (None, "no cloud_api_token".to_string()))?;
     let origin = cloud_origin(&creds);
     let url = format!("{origin}{path}");
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-        .map_err(|e| format!("client build: {e}"))?;
+        .map_err(|e| (None, format!("client build: {e}")))?;
 
     let resp = client
         .get(&url)
@@ -29,20 +65,20 @@ async fn get_billing_json(path: &str) -> Result<Value, String> {
         .org_scoped()
         .send()
         .await
-        .map_err(|e| format!("GET {url}: {e}"))?;
+        .map_err(|e| (None, format!("GET {url}: {e}")))?;
 
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("read body: {e}"))?;
+    let body = resp.text().await.map_err(|e| (Some(status), format!("read body: {e}")))?;
     if !status.is_success() {
-        return Err(format!("HTTP {status}: {body}"));
+        return Err((Some(status), format!("HTTP {status}: {body}")));
     }
-    serde_json::from_str::<Value>(&body).map_err(|e| format!("parse: {e}"))
+    serde_json::from_str::<Value>(&body).map_err(|e| (Some(status), format!("parse: {e}")))
 }
 
 /// GET /api/v1/billing/status — which plan the caller's organization is on.
 ///
-/// This is what the sidebar's plan chip reads. It used to read the Aura Pro
-/// brain's `/v1/brain/quota` instead, which answers a different question — how
+/// This is what the sidebar's plan chip reads. It used to read the retired
+/// managed brain's `/v1/brain/quota` instead, which answers a different question — how
 /// many tokens are left in the managed-brain bucket — and answers it only for
 /// people using that brain. Everyone else got no tier at all and the chip fell
 /// back to printing their handle, so the app never told anyone their plan.

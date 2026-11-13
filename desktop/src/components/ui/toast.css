@@ -1,0 +1,413 @@
+/* The toast stack, bottom-right. Toasts sit on top of one another — the newest
+   in front, the two behind it peeking out 14px above, each 5% smaller — and fan
+   out into a column while the pointer is over them or focus is inside. The
+   values here are the design's own; the stacking variables (`--toast-index`,
+   `--toast-offset-y`, `--toast-height`, `--toast-frontmost-height`, the swipe
+   movement) are written by `Toaster.tsx` as it measures. */
+
+.aura-toast-viewport {
+  --aura-toast-width: 356px;
+  --aura-toast-gap: 14px;
+  --aura-toast-offset: 24px;
+  --aura-toast-mobile-offset: 16px;
+  --aura-toast-bg: #fff;
+  --aura-toast-border: hsl(0deg 0% 93%);
+  --aura-toast-text: hsl(0deg 0% 9%);
+  --aura-toast-muted: #8e8885;
+  --aura-toast-button-bg: var(--aura-toast-text);
+  --aura-toast-button-text: var(--aura-toast-bg);
+  --aura-toast-cancel-bg: rgb(0 0 0 / 8%);
+  --aura-toast-direction: -1;
+  position: fixed;
+  right: var(--aura-toast-offset);
+  bottom: var(--aura-toast-offset);
+  /* Above every surface the app draws, one under the menu portal layer
+     (--z-menu-portal in styles.css): a menu opened over a toast still wins. */
+  z-index: 99999;
+  width: var(--aura-toast-width);
+  margin: 0;
+  padding: 0;
+  outline: 0;
+  list-style: none;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    Segoe UI,
+    sans-serif;
+}
+:root.dark .aura-toast-viewport {
+  --aura-toast-bg: #000;
+  --aura-toast-border: hsl(0deg 0% 20%);
+  --aura-toast-text: hsl(0deg 0% 99%);
+  --aura-toast-muted: #a5a09c;
+  --aura-toast-cancel-bg: rgb(255 255 255 / 30%);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .aura-toast-viewport {
+    --aura-toast-bg: #000;
+    --aura-toast-border: hsl(0deg 0% 20%);
+    --aura-toast-text: hsl(0deg 0% 99%);
+    --aura-toast-muted: #a5a09c;
+    --aura-toast-cancel-bg: rgb(255 255 255 / 30%);
+  }
+}
+
+.aura-toast {
+  --toast-scale: max(0, 1 - (var(--toast-index) * 0.05));
+  --toast-shrink: calc(1 - var(--toast-scale));
+  --toast-height-resolved: var(--toast-frontmost-height, var(--toast-height));
+  --toast-expanded-offset: calc(
+    (var(--toast-offset-y) + (var(--toast-index) * var(--aura-toast-gap))) *
+      var(--aura-toast-direction)
+  );
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: var(--aura-toast-width);
+  max-height: 300px;
+  height: var(--toast-height-resolved);
+  z-index: calc(1000 - var(--toast-index));
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+  opacity: 1;
+  outline: 0;
+  touch-action: none;
+  transform: translate(var(--toast-swipe-movement-x))
+    translateY(
+      calc(
+        var(--toast-swipe-movement-y) +
+          (var(--toast-index) * var(--aura-toast-gap) * var(--aura-toast-direction)) +
+          (var(--toast-shrink) * var(--toast-height-resolved) * var(--aura-toast-direction))
+      )
+    )
+    scale(var(--toast-scale));
+  transition:
+    transform 0.4s,
+    opacity 0.4s,
+    height 0.4s,
+    box-shadow 0.2s,
+    clip-path 0s;
+  transform-origin: bottom;
+}
+.aura-toast[data-swiping] {
+  transition: none;
+}
+.aura-toast:not([data-front="true"]) {
+  clip-path: inset(-20px -20px 0 -20px);
+}
+.aura-toast[data-expanded],
+.aura-toast-viewport[data-expanded="true"] .aura-toast {
+  height: var(--toast-height);
+  transform: translate(var(--toast-swipe-movement-x))
+    translateY(calc(var(--toast-expanded-offset) + var(--toast-swipe-movement-y)));
+  clip-path: inset(calc(-20px - var(--aura-toast-gap)));
+  transition-delay: 0s, 0s, 0s, 0s, 0.4s;
+}
+/* Bridges the gap to the toast above, so the stack doesn't fold shut while
+   the pointer crosses it. */
+.aura-toast[data-expanded]::after,
+.aura-toast-viewport[data-expanded="true"] .aura-toast::after {
+  content: "";
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  width: 100%;
+  height: calc(var(--aura-toast-gap) + 1px);
+}
+.aura-toast-viewport[data-keyboard-collapsed="true"] .aura-toast {
+  height: var(--toast-height-resolved);
+  transform: translate(var(--toast-swipe-movement-x))
+    translateY(
+      calc(
+        var(--toast-swipe-movement-y) +
+          (var(--toast-index) * var(--aura-toast-gap) * var(--aura-toast-direction)) +
+          (var(--toast-shrink) * var(--toast-height-resolved) * var(--aura-toast-direction))
+      )
+    )
+    scale(var(--toast-scale));
+}
+.aura-toast-viewport[data-keyboard-collapsed="true"]
+  .aura-toast:not([data-front="true"])
+  [data-content] {
+  opacity: 0;
+}
+.aura-toast[data-limited] {
+  opacity: 0;
+  pointer-events: none;
+}
+.aura-toast[data-starting-style],
+.aura-toast[data-ending-style] {
+  opacity: 0;
+}
+.aura-toast[data-starting-style],
+.aura-toast[data-ending-style]:not([data-swipe-direction]) {
+  transform: translateY(150%);
+}
+.aura-toast[data-ending-style][data-swipe-direction="right"] {
+  transform: translate(calc(var(--toast-swipe-movement-x) + 150%))
+    translateY(calc(var(--toast-expanded-offset) + var(--toast-swipe-movement-y)));
+}
+.aura-toast[data-ending-style][data-swipe-direction="down"] {
+  transform: translateY(calc(var(--toast-swipe-movement-y) + 150%));
+}
+
+.aura-toast[data-styled="true"] {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--aura-toast-border);
+  border-radius: 8px;
+  color: var(--aura-toast-text);
+  background: var(--aura-toast-bg);
+  box-shadow: 0 4px 12px #0000001a;
+  font-size: 13px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.aura-toast[data-styled="true"]:focus-visible {
+  box-shadow:
+    0 4px 12px #0000001a,
+    0 0 0 2px #0003;
+}
+.aura-toast[data-styled="true"] > [data-icon] {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  flex-shrink: 0;
+}
+.aura-toast[data-styled="true"] > [data-icon] svg {
+  margin-left: -1px;
+}
+.aura-toast[data-styled="true"] > [data-content] {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 100%;
+  flex-direction: column;
+  gap: 2px;
+  width: 100% !important;
+  max-height: 250px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 8px;
+  cursor: text;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.aura-toast[data-styled="true"] > [data-content] * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+.aura-toast[data-styled="true"]:has(> [data-icon]) > [data-content] {
+  flex-basis: calc(100% - 24px);
+}
+.aura-toast [data-title] {
+  color: inherit;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.aura-toast[data-styled="true"] [data-description] {
+  color: var(--aura-toast-muted);
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: pre-line;
+}
+.aura-toast:not([data-front="true"]) > * {
+  transition:
+    opacity 0.25s,
+    visibility 0.25s;
+}
+.aura-toast [data-content][data-behind] {
+  opacity: 0;
+}
+.aura-toast [data-content][data-expanded] {
+  opacity: 1;
+}
+.aura-toast-viewport:not([data-expanded="true"])
+  .aura-toast:not([data-front="true"]):not([data-expanded]):not([data-exiting-front="true"])
+  > * {
+  opacity: 0;
+  visibility: hidden;
+}
+.aura-toast-viewport[data-front-exiting="true"]:not([data-expanded="true"])
+  .aura-toast[data-front="true"]:not([data-expanded]) {
+  clip-path: inset(-20px -20px 0 -20px);
+}
+.aura-toast-viewport[data-expanded="true"] .aura-toast [data-content] {
+  opacity: 1;
+}
+
+/* Whatever follows the text — the buttons — sits on its own line under it,
+   lined up with the title when there is a glyph. */
+.aura-toast[data-styled="true"] > [data-content] ~ :not([data-close-button]) {
+  flex: 0 0 auto;
+  margin: 4px 0 0;
+}
+.aura-toast[data-styled="true"]:has(> [data-icon]) > [data-content] ~ :not([data-close-button]) {
+  margin-left: 24px;
+}
+.aura-toast[data-styled="true"]:has(> [data-icon])
+  > [data-content]
+  ~ :not([data-close-button])
+  + :not([data-close-button]) {
+  margin-left: 0;
+}
+.aura-toast[data-styled="true"] [data-button] {
+  display: flex;
+  height: 24px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  outline: 0;
+  color: var(--aura-toast-button-text);
+  background: var(--aura-toast-button-bg);
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 500;
+}
+.aura-toast[data-styled="true"] [data-button]:focus-visible {
+  box-shadow: 0 0 0 2px #0006;
+}
+.aura-toast[data-styled="true"] [data-button]:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.aura-toast[data-styled="true"] [data-cancel] {
+  color: var(--aura-toast-text);
+  background: var(--aura-toast-cancel-bg);
+}
+
+.aura-toast [data-close-button] {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  width: 20px;
+  height: 20px;
+  z-index: 1;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--aura-toast-border);
+  border-radius: 50%;
+  color: var(--aura-toast-text);
+  background: var(--aura-toast-bg);
+  cursor: pointer;
+  transform: translate(-35%, -35%);
+}
+.aura-toast-close-icon {
+  position: relative;
+  display: flex;
+  width: 12px;
+  height: 12px;
+  align-items: center;
+  justify-content: center;
+}
+.aura-toast-close-glyph {
+  width: 12px;
+  height: 12px;
+  transform: translate(-0.5px);
+}
+.aura-toast-close-progress {
+  position: absolute;
+  inset: -5px;
+  width: 22px;
+  height: 22px;
+  overflow: visible;
+  opacity: 0;
+  pointer-events: none;
+  transform: rotate(-90deg);
+}
+.aura-toast-close-progress-circle {
+  fill: none;
+  stroke: currentcolor;
+  stroke-dasharray: 50.27;
+  stroke-dashoffset: 50.27;
+  stroke-linecap: round;
+  stroke-width: 1.5;
+}
+.aura-timed-toast [data-close-button] .aura-toast-close-progress {
+  opacity: 0.35;
+}
+.aura-timed-toast [data-close-button] .aura-toast-close-progress-circle {
+  animation: aura-toast-close-progress var(--aura-toast-progress-duration, 5s) linear forwards;
+}
+/* The ring stops exactly when the timer does, because it reads the timer's own
+   answer: `data-paused` (Toaster.tsx — the pointer on the stack, focus inside
+   it, or the window in the background), or the toast still waiting behind the
+   three on show. Asking the page here instead (`:hover`, `:focus-within`) let
+   the two part: the ring filled while the timer waited, and nothing closed. */
+.aura-toast-viewport[data-paused="true"] .aura-timed-toast [data-close-button] .aura-toast-close-progress-circle,
+.aura-toast[data-limited] [data-close-button] .aura-toast-close-progress-circle {
+  animation-play-state: paused;
+}
+@keyframes aura-toast-close-progress {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@media (max-width: 600px) {
+  .aura-toast-viewport {
+    right: var(--aura-toast-mobile-offset);
+    bottom: var(--aura-toast-mobile-offset);
+    left: var(--aura-toast-mobile-offset);
+    width: auto;
+  }
+  .aura-toast {
+    width: 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .aura-toast,
+  .aura-toast [data-content] {
+    transition: none;
+  }
+  .aura-timed-toast [data-close-button] .aura-toast-close-progress-circle {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+}
+
+/* A download's bar inside a toast (the update toast): thin, the app's green,
+   under the line that counts it. With no size from the server there is no end
+   to fill toward, so the bar slides instead and still visibly moves. */
+.aura-toast-progress.ui-progress {
+  display: block;
+  height: 4px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+.aura-toast-progress .ui-progress-indicator {
+  border-radius: inherit;
+  /* The app's green itself: `--color-accent-green` is re-pointed at the
+     interface's lighter status green inside the ui layer. */
+  background: #4dc1a4;
+}
+.aura-toast-progress[data-state="indeterminate"] .ui-progress-indicator {
+  animation: aura-toast-progress-slide 1.4s ease-in-out infinite;
+}
+@keyframes aura-toast-progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .aura-toast-progress[data-state="indeterminate"] .ui-progress-indicator {
+    animation: none;
+  }
+}

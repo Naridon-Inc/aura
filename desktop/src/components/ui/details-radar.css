@@ -1,0 +1,28 @@
+/* Team Radar at the foot of the details panel's Changes tab: the panel's
+   group caption with its controls on the right, and one muted line when
+   nobody else has been in the project. */
+.ui-details-radar {
+  flex-shrink: 0;
+  min-width: 0;
+  border-top: 1px solid var(--ui-border);
+}
+.ui-details-radar > .ui-details-group-caption {
+  gap: 4px;
+}
+.ui-details-radar-ripple {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+.ui-details-radar-quiet {
+  margin: 0;
+  padding: 0 8px 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 1.4;
+}

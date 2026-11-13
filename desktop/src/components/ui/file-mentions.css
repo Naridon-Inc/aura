@@ -1,0 +1,36 @@
+/* "@" in a pull request's review comment: the composer's suggestions panel
+   listing the files the pull request changed. A row is the panel's own row,
+   the file's name over its folder. Added here: long names and folders end
+   in an ellipsis rather than wrapping, the folder is set in mono, and the
+   panel's loading/empty line and key hint (the same quiet lines the session
+   room's "@" list ends with). */
+
+.ui-file-mentions button > span,
+.ui-file-mentions button > small {
+  overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-file-mentions button > small {
+  font-family: var(--font-mono);
+}
+.ui-file-mentions-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-file-mentions-state.ui-state-row {
+  padding: 8px;
+}
+.ui-file-mentions-hint {
+  margin-top: 4px;
+  padding: 6px 8px 2px;
+  border-top: 1px solid var(--ui-border);
+  color: var(--ui-faint);
+  font-size: 11px;
+}

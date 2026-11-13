@@ -1,0 +1,23 @@
+/* The loop in the manager's side aside, on the task-detail sections: the two
+   verbs in the section head, the counts line, and task rows that read like the
+   dependency rows but are not links. */
+
+.ui-loop-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.ui-tasks-detail-section .ui-loop-note,
+.ui-tasks-detail-section .ui-loop-loading {
+  margin-top: 8px;
+}
+.ui-task-dependency.ui-loop-row {
+  margin-inline: -8px;
+  width: calc(100% + 16px);
+}
+.ui-task-dependency.ui-loop-row:hover {
+  background: none;
+}
+.ui-loop-row .ui-tasks-dependency-label > span {
+  color: var(--ui-fg);
+}

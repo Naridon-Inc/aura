@@ -33,7 +33,8 @@ import { describe, expect, test } from "bun:test";
 
 import { readSrc } from "./support/code";
 
-const PANE = "components/dialogs/SettingsDialog.tsx";
+const PANE = "components/settings/pages/SecurityPolicyPage.tsx";
+const SECTIONS = "components/settings/pages/PolicySections.tsx";
 const API = "lib/api.ts";
 const CLI = "../../aura-cli/src/pr.rs";
 const TAURI = "../src-tauri/src/cmd_settings.rs";
@@ -110,21 +111,18 @@ describe("rule packs — the library knows what this repo already has", () => {
   });
 
   test("the pane reads that flag instead of remembering clicks", async () => {
-    const src = await readSrc(PANE);
+    const src = await readSrc(SECTIONS);
     const sect = src.slice(src.indexOf("function TemplatesSection("));
     expect(sect).not.toContain("useState<Set<string>>(new Set())");
     expect(sect).not.toContain("re-install");
-    expect(sect).toContain("{p.installed ? (");
+    expect(sect).toContain("p.installed ? (");
     // A fresh read after a successful add, because the file is the authority.
     expect(sect).toContain("await load();");
   });
 
   test("a failed load stops the spinner instead of running it forever", async () => {
-    const src = await readSrc(PANE);
-    const sect = src.slice(
-      src.indexOf("function TemplatesSection("),
-      src.indexOf("function TelemetryTab("),
-    );
+    const src = await readSrc(SECTIONS);
+    const sect = src.slice(src.indexOf("function TemplatesSection("));
     expect(sect.split("setPacks([]);").length - 1).toBe(2);
   });
 });

@@ -1,0 +1,113 @@
+/* The crash screen. It is drawn from the shared parts, but a theme that
+   wrote broken colours onto the page root is the usual reason it shows,
+   so it pins the library's own colour values here instead of reading
+   them from the root. Keep these in step with interface.css. */
+.ui-crash-screen {
+  --ui-bg: #141110;
+  --ui-sheet: #1c1917;
+  --ui-muted: #211e1c;
+  --ui-card: #2c2826;
+  --ui-fg: #eae8e6;
+  --ui-secondary-fg: #f3f2f1;
+  --ui-muted-fg: #a5a09c;
+  --ui-faint: #766f6b;
+  --ui-border: #ffffff1a;
+  --ui-input: #ffffff33;
+  --ui-hover: #ffffff0d;
+  --ui-primary: #f3f2f1;
+  --ui-primary-fg: #2c2826;
+  --ui-highlight: #2a1e1d;
+  --ui-highlight-fg: #f3ece7;
+  --ui-link: #cca694;
+  --ui-ring: #bcb6b3;
+  --ui-green: #4ade80;
+  --ui-red: #f87272;
+  --ui-yellow: #ffea80;
+  --ui-blue: #61a6fa;
+  --ui-switch: #eae8e6;
+  --ui-switch-thumb: #2c2826;
+  --ui-sidebar: #211e1c;
+  --ui-sidebar-fg: #ffffffe6;
+  --ui-sidebar-muted: #ffffff99;
+  --ui-composer: #211e1c;
+  --ui-popover: #2c2826;
+  --button-neutral: var(--ui-muted);
+  --button-inverted: var(--ui-primary);
+  --border-interactive: var(--ui-ring);
+  position: fixed;
+  inset: 0;
+  /* The screen replaces the app rather than covering it, so it only has
+     to clear stray fixed layers, and stays under the menu layer. */
+  z-index: 90000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+  padding: 32px 16px;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+html.light .ui-crash-screen {
+  --ui-bg: #ffffff;
+  --ui-sheet: #fdfcfc;
+  --ui-muted: #fafaf9;
+  --ui-card: #ffffff;
+  --ui-fg: #2c2826;
+  --ui-secondary-fg: #2c2826;
+  --ui-muted-fg: #8e8885;
+  --ui-faint: #a5a09c;
+  --ui-border: #eae8e6;
+  --ui-input: #14100f1a;
+  --ui-hover: #14100f0d;
+  --ui-primary: #413030;
+  --ui-primary-fg: #f3f2f1;
+  --ui-highlight: #faf7f5;
+  --ui-highlight-fg: #594545;
+  --ui-link: #a4847f;
+  --ui-ring: #2c2826;
+  --ui-green: #16a249;
+  --ui-red: #dc2828;
+  --ui-yellow: #ffdc2e;
+  --ui-blue: #2463eb;
+  --ui-switch: #2c2826;
+  --ui-switch-thumb: #ffffff;
+  --ui-sidebar: #fafaf9;
+  --ui-sidebar-fg: #14100fb3;
+  --ui-sidebar-muted: #14100f99;
+  --ui-composer: #fafaf980;
+  --ui-popover: #ffffff;
+}
+
+.ui-crash-screen > .ui-state {
+  max-width: 560px;
+}
+/* What happened: the error's own words, in the mono face, left-aligned
+   so a long message reads as text rather than a centred block. */
+.ui-crash-what {
+  width: 100%;
+  text-align: left;
+}
+.ui-crash-what code {
+  font: 12px/18px var(--font-mono);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.ui-crash-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+.ui-crash-details {
+  width: 100%;
+  text-align: left;
+}
+.ui-crash-details pre {
+  max-height: 280px;
+  margin: 0;
+  overflow: auto;
+  color: var(--ui-muted-fg);
+  font: 11px/16px var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

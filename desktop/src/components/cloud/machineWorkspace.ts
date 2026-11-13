@@ -18,6 +18,7 @@
 // component imports these and holds no second opinion.
 
 import type { BoxSession, CloudRunner, Machine } from "../../lib/api";
+import { findMachine } from "../../lib/machineRef";
 
 /** Stable per-machine, per-tab session key, so re-entering a workspace lands
  *  back in the session you left rather than opening a second one beside it.
@@ -36,12 +37,18 @@ export function instanceIdFor(machine: Pick<Machine, "id">, tabId: string): stri
  * a list arriving late must not move you. Otherwise the first of the book,
  * which is most-recently-used — because that is what "my machine" means to
  * someone who has two.
+ *
+ * A request made under a name the machine has since left behind — the address
+ * it was keyed by before ids stopped carrying one, or the id it had before it
+ * was reconnected somewhere new — comes back as the id it goes by now, so
+ * everything keyed below this agrees on one spelling of it.
  */
 export function machineToOpen(
   current: string | null,
-  book: Pick<Machine, "id">[],
+  book: Pick<Machine, "id" | "aliases">[],
 ): string | null {
-  return current ?? book[0]?.id ?? null;
+  if (current) return findMachine(book, current)?.id ?? current;
+  return book[0]?.id ?? null;
 }
 
 /**
@@ -58,11 +65,11 @@ export function machineToOpen(
  * flashes an error at someone whose machine is perfectly fine.
  */
 export function missingMachine(
-  book: Pick<Machine, "id">[] | null,
+  book: Pick<Machine, "id" | "aliases">[] | null,
   wanted: string | null,
 ): string | null {
   if (!book || !wanted) return null;
-  return book.some((m) => m.id === wanted) ? null : wanted;
+  return findMachine(book, wanted) ? null : wanted;
 }
 
 /**

@@ -20,6 +20,7 @@
 // hierarchy, generous spacing, no jargon walls.
 
 import type { ReactNode } from "react";
+import { ArrowRight, Lock, LockOpen, ShieldX } from "lucide-react";
 import type { IntentRow, IntentChangesetFile } from "../../lib/api";
 import type { IntentProvenance } from "../../lib/sessionMeta";
 import { IntentProse, splitIntent } from "./IntentProse";
@@ -32,105 +33,19 @@ import {
   whereItHappened,
   type ReviewScope,
 } from "../../lib/reviewScope";
-import { LockGlyph, UnlockGlyph, TrustBadge, shortBlockId } from "./SessionAttestation";
+import { shortBlockId } from "./SessionAttestation";
 import { Button } from "../ui/button";
+import { TraceFact } from "../ui/trace-detail";
+import {
+  TraceFileRow,
+  TraceReport,
+  TraceSection,
+  TraceVerdict,
+} from "../ui/trace-report";
 
-function SectionLabel({ children }: { children: ReactNode }) {
-  return (
-    <h2 className="section-label">
-      {children}
-    </h2>
-  );
-}
-
-/** One compact label/value row in the Details card — horizontal, divider
- *  separated, so the facts read as a tidy spec block. */
+/** One label/value line in a Details section. */
 function MetaRow({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="flex items-start gap-3 border-b border-line-soft px-3.5 py-2.5 last:border-b-0">
-      <span className="section-label w-[84px] shrink-0 pt-px">
-        {label}
-      </span>
-      <span className="min-w-0 flex-1 text-base leading-relaxed text-text-1">
-        {children}
-      </span>
-    </div>
-  );
-}
-
-function FileIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      aria-hidden
-      className="shrink-0 text-text-4"
-    >
-      <path
-        d="M4 1.6h5L13 5.6v8.8H4z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinejoin="round"
-      />
-      <path d="M9 1.6V5.6h4" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function ChevronRight() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 16 16"
-      fill="none"
-      aria-hidden
-      className="shrink-0 text-text-4 opacity-0 transition-opacity group-hover:opacity-100"
-    >
-      <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-/** A changed-file row — the whole row is a shortcut into the Changes tab at
- *  this file. Directory dimmed, name emphasised, churn on the right. */
-function FileRow({
-  file,
-  onOpen,
-}: {
-  file: IntentChangesetFile;
-  onOpen: (path: string) => void;
-}) {
-  const p = file.path;
-  const slash = p.lastIndexOf("/");
-  const dir = slash >= 0 ? p.slice(0, slash + 1) : "";
-  const name = slash >= 0 ? p.slice(slash + 1) : p;
-  const adds = file.additions ?? 0;
-  const dels = file.deletions ?? 0;
-  return (
-    <button
-      type="button"
-      onClick={() => onOpen(p)}
-      title={`Open ${p} in Changes`}
-      className="group flex w-full items-center gap-2.5 border-b border-line-soft px-3.5 py-2.5 text-left transition-colors last:border-b-0 hover:bg-state-hover"
-    >
-      <FileIcon />
-      <span className="min-w-0 flex-1 truncate font-mono text-base">
-        {dir ? <span className="text-text-4">{dir}</span> : null}
-        <span className="text-text-1">{name}</span>
-      </span>
-      {adds || dels ? (
-        <span className="shrink-0 font-mono text-xs tabular-nums">
-          {adds ? <span className="text-accent-green">+{adds}</span> : null}
-          {adds && dels ? <span className="text-text-4"> </span> : null}
-          {dels ? <span className="text-text-3">−{dels}</span> : null}
-        </span>
-      ) : null}
-      <ChevronRight />
-    </button>
-  );
+  return <TraceFact label={label}>{children}</TraceFact>;
 }
 
 /** The trust floor for the whole report, woven in at the top rather than
@@ -148,64 +63,24 @@ function GenuineRecordSeal({
   const signed = !!row.signed_block_id;
   if (!signed) {
     return (
-      <div className="flex items-start gap-2.5 rounded-lg border border-line-soft bg-bg-1 px-3.5 py-2.5">
-        <span className="mt-px shrink-0 text-text-4">
-          <UnlockGlyph />
-        </span>
-        <div className="min-w-0 flex-1">
-          <span className="text-base font-medium text-text-2">Not sealed</span>
-          <p className="mt-0.5 text-sm leading-relaxed text-text-3">
-            This change wasn't locked with a tamper-proof seal, so Aura can't
-            promise the record below is exactly as it happened.
-          </p>
-        </div>
-      </div>
+      <TraceVerdict tone="muted" icon={<LockOpen />} title="Not sealed">
+        This change wasn't locked with a tamper-proof seal, so Aura can't
+        promise the record below is exactly as it happened.
+      </TraceVerdict>
     );
   }
-  const green = "var(--color-accent-green)";
   return (
-    <div
-      className="flex items-start gap-2.5 rounded-lg px-3.5 py-2.5"
-      style={{
-        border: `1px solid color-mix(in oklab, ${green} 30%, transparent)`,
-        background: `color-mix(in oklab, ${green} 6%, transparent)`,
-      }}
-    >
-      <span className="mt-px shrink-0" style={{ color: green }}>
-        <LockGlyph />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-base font-medium text-text-1">Genuine record</span>
-          <TrustBadge ok label="Sealed" tone="green" />
-        </div>
-        {/* "locked exactly what the AI changed and why" was true of the change
-            and only sometimes true of the why. The seal is tamper-evidence: it
-            proves nothing here moved after the fact. It cannot make a sentence
-            Aura's own model wrote from the diff into a reason somebody gave,
-            and stating it in one breath is what turned the weakest row in the
-            log into the most reassuring thing on the page. */}
-        <p className="mt-0.5 text-sm leading-relaxed text-text-3">
-          {provenance === "stated"
-            ? "Aura locked exactly what the AI changed and why. Nothing in this record has been altered since."
-            : "Aura locked exactly what the AI changed. Nothing in this record has been altered since, but the “why” below wasn’t stated by whoever made the change."}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function ShieldStop() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden className="shrink-0">
-      <path
-        d="M8 1.5l5 1.8v4.1c0 3.1-2.1 5.3-5 6.1-2.9-.8-5-3-5-6.1V3.3z"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinejoin="round"
-      />
-      <path d="M5.6 8.1h4.8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-    </svg>
+    <TraceVerdict tone="good" icon={<Lock />} title="Genuine record">
+      {/* "locked exactly what the AI changed and why" was true of the change
+          and only sometimes true of the why. The seal is tamper-evidence: it
+          proves nothing here moved after the fact. It cannot make a sentence
+          Aura's own model wrote from the diff into a reason somebody gave,
+          and stating it in one breath is what turned the weakest row in the
+          log into the most reassuring thing on the page. */}
+      {provenance === "stated"
+        ? "Aura locked exactly what the AI changed and why. Nothing in this record has been altered since."
+        : "Aura locked exactly what the AI changed. Nothing in this record has been altered since, but the “why” below wasn’t stated by whoever made the change."}
+    </TraceVerdict>
   );
 }
 
@@ -224,53 +99,27 @@ function BlockedReport({
   rel: string;
 }) {
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto flex max-w-[720px] flex-col gap-5 px-4 py-4">
-        {/* Verdict banner — the whole point, up top and unmistakably red. */}
-        <div
-          className="flex items-start gap-2.5 rounded-lg border border-red px-3.5 py-3"
-          style={{ background: "color-mix(in oklab, var(--color-red) 7%, transparent)" }}
-        >
-          <span className="mt-px text-red">
-            <ShieldStop />
-          </span>
-          <div className="min-w-0 flex-1">
-            <span className="text-base font-medium text-red">
-              Blocked. This change never landed
-            </span>
-            <p className="mt-0.5 text-sm leading-relaxed text-text-2">
-              Aura stopped the commit before it reached your history. Your code
-              was left exactly as it was.
-            </p>
-          </div>
-        </div>
+    <TraceReport>
+      {/* The verdict — the whole point, up top and in the danger colour. */}
+      <TraceVerdict tone="bad" icon={<ShieldX />} title="Blocked. This change never landed">
+        Aura stopped the commit before it reached your history. Your code was
+        left exactly as it was.
+      </TraceVerdict>
 
-        {/* Why it was stopped — the plain-language reason. */}
-        {bodyText ? (
-          <section>
-            <div className="mb-2.5">
-              <SectionLabel>Why Aura stopped it</SectionLabel>
-            </div>
-            <p className="text-md leading-relaxed text-text-1">{bodyText}</p>
-          </section>
-        ) : null}
+      {/* Why it was stopped — the plain-language reason. */}
+      {bodyText ? (
+        <TraceSection title="Why Aura stopped it">
+          <p className="ui-trace-report-prose">{bodyText}</p>
+        </TraceSection>
+      ) : null}
 
-        {/* Details — the facts on demand. */}
-        <section>
-          <div className="mb-2.5">
-            <SectionLabel>Details</SectionLabel>
-          </div>
-          <div className="overflow-hidden rounded-lg border border-line-soft bg-bg-1">
-            <MetaRow label="When">
-              {whenAbsolute} <span className="text-text-3">({rel})</span>
-            </MetaRow>
-            <MetaRow label="Outcome">
-              <span className="text-text-2">Commit halted. No code was changed.</span>
-            </MetaRow>
-          </div>
-        </section>
-      </div>
-    </div>
+      <TraceSection title="Details">
+        <MetaRow label="When">
+          {whenAbsolute} <span className="ui-trace-fact-aside">({rel})</span>
+        </MetaRow>
+        <MetaRow label="Outcome">Commit halted. No code was changed.</MetaRow>
+      </TraceSection>
+    </TraceReport>
   );
 }
 
@@ -341,161 +190,142 @@ export function SessionSummary({
     revision: atCommit ?? null,
   };
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto flex max-w-[720px] flex-col gap-5 px-4 py-4">
-        {/* 0 · Trust floor — is this record genuine? Woven in at the top so it
-            frames the whole story, not buried in a separate verification tab. */}
-        <GenuineRecordSeal row={row} provenance={provenance} />
+    <TraceReport>
+      {/* 0 · Trust floor — is this record genuine? Woven in at the top so it
+          frames the whole story, not buried in a separate verification tab. */}
+      <GenuineRecordSeal row={row} provenance={provenance} />
 
-        {/* 1 · What happened — plain-language body with live entities. */}
-        {bodyText ? (
-          <section>
-            <div className="mb-2.5">
-              <SectionLabel>{bodyLabel}</SectionLabel>
-            </div>
-            <IntentProse
-              source={bodyText}
-              files={files}
-              symbols={symbols}
-              onOpenFile={onOpenFile}
+      {/* 1 · What happened — plain-language body with live entities. */}
+      {bodyText ? (
+        <TraceSection title={bodyLabel}>
+          <IntentProse
+            source={bodyText}
+            files={files}
+            symbols={symbols}
+            onOpenFile={onOpenFile}
+            className="ui-trace-report-prose"
+          />
+          {/* Who wrote the sentence above. Absent for a stated reason —
+              that's the ordinary case. Present when the words came from
+              somewhere the heading alone doesn't make obvious, which until
+              now was every case: a prompt, a model's read of the diff and a
+              genuine logged reason all appeared here as "Reason". */}
+          {bodyNote ? <p className="ui-trace-report-note">{bodyNote}</p> : null}
+        </TraceSection>
+      ) : null}
+
+      {/* 2 · Files changed — each a shortcut into Changes. */}
+      {files.length ? (
+        <TraceSection
+          title="Files changed"
+          count={files.length}
+          trailing={
+            <Button variant="ghost" size="sm" type="button" onClick={() => onOpenFile()}>
+              Review changes
+              <ArrowRight />
+            </Button>
+          }
+        >
+          {files.map((f) => (
+            <TraceFileRow
+              key={f.path}
+              path={f.path}
+              added={f.additions ?? 0}
+              removed={f.deletions ?? 0}
+              onOpen={onOpenFile}
             />
-            {/* Who wrote the sentence above. Absent for a stated reason —
-                that's the ordinary case. Present when the words came from
-                somewhere the heading alone doesn't make obvious, which until
-                now was every case: a prompt, a model's read of the diff and a
-                genuine logged reason all appeared here as "Reason". */}
-            {bodyNote ? (
-              <p className="mt-2 text-sm leading-relaxed text-text-4">
-                {bodyNote}
-              </p>
-            ) : null}
-          </section>
-        ) : null}
+          ))}
+        </TraceSection>
+      ) : null}
 
-        {/* 2 · Files changed — each a shortcut into Changes. */}
-        {files.length ? (
-          <section>
-            <div className="mb-2.5 flex items-baseline justify-between gap-3">
-              <SectionLabel>
-                Files changed
-                <span className="ml-1.5 font-normal text-text-4">{files.length}</span>
-              </SectionLabel>
-              <Button
-                variant="link"
-                size="xs"
-                type="button"
-                onClick={() => onOpenFile()}
-                className="px-0 text-xs text-accent"
-              >
-                Open in Changes →
-              </Button>
-            </div>
-            <div className="overflow-hidden rounded-lg border border-line-soft bg-bg-1">
-              {files.map((f) => (
-                <FileRow key={f.path} file={f} onOpen={onOpenFile} />
-              ))}
-            </div>
-          </section>
-        ) : null}
+      {/* 3 · Goals — what this run was meant to achieve, proven against the
+          code. Bound to the run's key, so the same verdict shows on any task
+          this goal is linked to. */}
+      <SessionGoals
+        repoRoot={repoRoot}
+        row={row}
+        hasChanges={files.length > 0}
+        atCommit={atCommit}
+      />
 
-        {/* 3 · Goals — what this run was meant to achieve, proven against the
-            code. Bound to the run's key, so the same verdict shows on any task
-            this goal is linked to. */}
-        <SessionGoals
-          repoRoot={repoRoot}
-          row={row}
-          hasChanges={files.length > 0}
-          atCommit={atCommit}
-        />
+      {/* 4 · What the run left owing. The agent stopping is a fact about a
+          process, and it was reading as a fact about the work: a failed
+          check, a check nobody ran and a test only a person can do all
+          disappeared the moment the session went grey. Each item here names
+          what it needs and carries the one action that settles it. */}
+      <SessionOutstanding
+        repoRoot={repoRoot}
+        runKey={runKeyForIntent(row)}
+        runLabel={splitIntent(row.intent).headline || row.intent}
+        agentId={row.agent_id}
+        signed={signed}
+        scope={scope}
+        codeChangedAt={row.timestamp * 1000}
+        fileCount={files.length}
+        alignment={alignment}
+        onOpenMatch={onOpenMatch}
+      />
 
-        {/* 4 · What the run left owing. The agent stopping is a fact about a
-            process, and it was reading as a fact about the work: a failed
-            check, a check nobody ran and a test only a person can do all
-            disappeared the moment the session went grey. Each item here names
-            what it needs and carries the one action that settles it. */}
-        <SessionOutstanding
-          repoRoot={repoRoot}
-          runKey={runKeyForIntent(row)}
-          runLabel={splitIntent(row.intent).headline || row.intent}
-          agentId={row.agent_id}
-          signed={signed}
-          scope={scope}
-          codeChangedAt={row.timestamp * 1000}
-          fileCount={files.length}
-          alignment={alignment}
-          onOpenMatch={onOpenMatch}
-        />
+      {/* 5 · What each of the results above is actually worth. The seal, the
+          goal verdict and the commit are drawn alike and read as one claim
+          getting stronger; this says once, per kind, what each establishes
+          and what it doesn't — and marks any result measured against a
+          different version of the code as out of date. */}
+      <SessionEvidence
+        repoRoot={repoRoot}
+        runKey={runKeyForIntent(row)}
+        signed={signed}
+        scope={scope}
+        codeChangedAt={row.timestamp * 1000}
+        fileCount={files.length}
+        alignment={alignment}
+      />
 
-        {/* 5 · What each of the results above is actually worth. The seal, the
-            goal verdict and the commit are drawn alike and read as one claim
-            getting stronger; this says once, per kind, what each establishes
-            and what it doesn't — and marks any result measured against a
-            different version of the code as out of date. */}
-        <SessionEvidence
-          repoRoot={repoRoot}
-          runKey={runKeyForIntent(row)}
-          signed={signed}
-          scope={scope}
-          codeChangedAt={row.timestamp * 1000}
-          fileCount={files.length}
-          alignment={alignment}
-        />
-
-        {/* 6 · Details — facts on demand. */}
-        <section>
-          <div className="mb-2.5">
-            <SectionLabel>Details</SectionLabel>
-          </div>
-          <div className="overflow-hidden rounded-lg border border-line-soft bg-bg-1">
-            <MetaRow label="When">
-              {whenAbsolute} <span className="text-text-3">({rel})</span>
-            </MetaRow>
-            {/* Which work this page is about. Read weeks later, from another
-                branch or another machine, "where" and "which version" are the
-                difference between a fact about this run and a fact about
-                whatever happens to be checked out. A record that carries
-                neither says so — it is never filled in from the surroundings. */}
-            <MetaRow label="Where">
-              <span className="text-text-2">{whereItHappened(scope)}</span>
-              {!scope.branch && !scope.worktree ? (
-                <span className="ml-1.5 text-text-4">
-                  The branch and folder weren&apos;t recorded.
-                </span>
-              ) : null}
-            </MetaRow>
-            <MetaRow label="Version">
-              {scope.revision ? (
-                <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
-                  <span className="font-mono text-xs text-text-2">
-                    {versionWords(scope.revision)}
-                  </span>
-                  <span className="text-text-3">
-                    Everything above is about the code at this version.
-                  </span>
-                </span>
-              ) : (
-                <span className="text-text-3">
-                  {versionWords(null)}, so there&apos;s no fixed version to check against.
-                </span>
-              )}
-            </MetaRow>
-            <MetaRow label="Record">
-              {signed ? (
-                <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
-                  <span className="text-text-2">
-                    Sealed. The full proof is on the Genuine record tab.
-                  </span>
-                  <span className="font-mono text-xs text-text-4">
-                    {shortBlockId(row.signed_block_id ?? "")}
-                  </span>
-                </span>
-              ) : (
-                <span className="text-text-3">Not sealed.</span>
-              )}
-            </MetaRow>
-          </div>
-        </section>
-      </div>
-    </div>
+      {/* 6 · Details — facts on demand. */}
+      <TraceSection title="Details">
+        <MetaRow label="When">
+          {whenAbsolute} <span className="ui-trace-fact-aside">({rel})</span>
+        </MetaRow>
+        {/* Which work this page is about. Read weeks later, from another
+            branch or another machine, "where" and "which version" are the
+            difference between a fact about this run and a fact about
+            whatever happens to be checked out. A record that carries
+            neither says so — it is never filled in from the surroundings. */}
+        <MetaRow label="Where">
+          {whereItHappened(scope)}
+          {!scope.branch && !scope.worktree ? (
+            <span className="ui-trace-fact-aside">
+              The branch and folder weren&apos;t recorded.
+            </span>
+          ) : null}
+        </MetaRow>
+        <MetaRow label="Version">
+          {scope.revision ? (
+            <>
+              <span className="ui-trace-fact-code">{versionWords(scope.revision)}</span>
+              <span className="ui-trace-fact-aside">
+                Everything above is about the code at this version.
+              </span>
+            </>
+          ) : (
+            <span className="ui-trace-fact-aside">
+              {versionWords(null)}, so there&apos;s no fixed version to check against.
+            </span>
+          )}
+        </MetaRow>
+        <MetaRow label="Record">
+          {signed ? (
+            <>
+              Sealed. The full proof is on the Genuine record tab.
+              <span className="ui-trace-fact-code">
+                {shortBlockId(row.signed_block_id ?? "")}
+              </span>
+            </>
+          ) : (
+            <span className="ui-trace-fact-aside">Not sealed.</span>
+          )}
+        </MetaRow>
+      </TraceSection>
+    </TraceReport>
   );
 }

@@ -7,10 +7,10 @@
 // the A2A task and rewrites the local file buffer so the file syncs
 // on save.
 //
-// The "Edit raw" toggle drops into the standard CodeMirror editor for
-// users who want to hand-edit headings or notes. Checkbox edits made
-// in raw mode are still picked up by the parser on switch-back, since
-// the source of truth is the markdown text in the open buffer.
+// Drawn as the shared file view. Its Preview / Edit / Split switch drops
+// into the editor for users who want to hand-edit headings or notes.
+// Checkbox edits made in Edit are still picked up by the parser on
+// switch-back, since the source of truth is the open buffer.
 
 import { useMemo, useState } from "react";
 import { MonacoEditor as Editor } from "../MonacoEditor";
@@ -19,13 +19,15 @@ import {
   type ParsedCheckbox,
 } from "../../lib/planMarkdown";
 import { api } from "../../lib/api";
-import { planIdFromMarkdownPath } from "../../lib/editorStore";
-import { Button } from "../ui/button";
+import { planIdFromMarkdownPath, type OpenFile } from "../../lib/editorStore";
+import { Checkbox } from "../ui/checkbox";
+import { FileModeSwitch, TextFileView, type MdView } from "./FileTabView";
+import "../ui/file-tab.css";
 
 type Props = {
-  filePath: string;
-  buffer: string;
-  language: string;
+  file: OpenFile;
+  dirty: boolean;
+  onSave: () => Promise<void>;
   onChange: (text: string) => void;
   repoRoot: string;
   /** Optional: surface to refresh after a checkbox toggle persists. */
@@ -34,26 +36,17 @@ type Props = {
 
 const TASK_ID_RE = /<!--\s*task:[^\s]+\s*-->/;
 
-export function PlanMarkdownTab({
-  filePath,
-  buffer,
-  language,
-  onChange,
-  repoRoot,
-  onTaskPatched,
-}: Props) {
-  const [raw, setRaw] = useState(false);
-  const planId = planIdFromMarkdownPath(filePath);
+export function PlanMarkdownTab({ file, dirty, onSave, onChange, repoRoot, onTaskPatched }: Props) {
+  // A plan opens read: its items are the point, the markdown is the source.
+  const [view, setView] = useState<MdView>("rendered");
+  const buffer = file.current;
+  const planId = planIdFromMarkdownPath(file.path);
   const parsed = useMemo(() => parsePlanCheckboxes(buffer), [buffer]);
   const title = useMemo(() => extractTitle(buffer) ?? planId ?? "Plan", [buffer, planId]);
   const groups = useMemo(() => groupByHeading(buffer, parsed), [buffer, parsed]);
 
   async function toggle(c: ParsedCheckbox) {
     const nextChecked = !c.checked;
-    // Optimistic local buffer rewrite — flip the `[ ]` ↔ `[x]` on that
-    // line. The A2A patch happens in the background; if it fails we
-    // leave the buffer in the "user wanted this state" form so they
-    // can retry by saving.
     const lines = buffer.split("\n");
     if (lines[c.lineNo]) {
       lines[c.lineNo] = lines[c.lineNo].replace(
@@ -74,48 +67,43 @@ export function PlanMarkdownTab({
       ]);
       onTaskPatched?.(c.taskId, newStatus);
     } catch {
-      // Silent — the local buffer already reflects the user's intent.
-      // A future "Plan sync failed" toast goes here.
+      // The buffer already shows the tick; the task store catches up on the
+      // next save of the plan, so a failed patch isn't worth an alert.
     }
   }
 
+  const editor = (
+    <Editor
+      key={file.path}
+      value={buffer}
+      language={file.language}
+      onChange={onChange}
+      filePath={file.path}
+    />
+  );
+  const rendered = <RenderedPlan groups={groups} onToggle={toggle} />;
+
   return (
-    <div className="h-full w-full flex flex-col bg-bg-content">
-      <div className="h-9 px-3 border-b border-line-soft bg-bg-chrome flex items-center gap-2 flex-shrink-0">
-        <div className="min-w-0 flex-1 flex items-baseline gap-1.5">
-          <span className="text-text-5 text-2xs font-mono">Plans</span>
-          <span className="text-text-5 text-2xs">›</span>
-          <span className="text-text-2 text-sm font-medium truncate">
-            {title}
-          </span>
+    <TextFileView
+      file={file}
+      label={`Plans › ${title}`}
+      dirty={dirty}
+      onSave={onSave}
+      actions={<FileModeSwitch value={view} onChange={setView} />}
+    >
+      {view === "raw" ? (
+        editor
+      ) : view === "split" ? (
+        <div className="ui-file-split">
+          <div>{editor}</div>
+          <div>{rendered}</div>
         </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="xs"
-          onClick={() => setRaw((v) => !v)}
-          className="text-xs text-text-4 hover:text-text-1"
-        >
-          {raw ? "Rendered" : "Edit raw"}
-        </Button>
-      </div>
-      <div className="flex-1 min-h-0 overflow-hidden">
-        {raw ? (
-          <Editor
-            value={buffer}
-            language={language}
-            onChange={onChange}
-            filePath={filePath}
-          />
-        ) : (
-          <RenderedPlan groups={groups} onToggle={toggle} />
-        )}
-      </div>
-    </div>
+      ) : (
+        rendered
+      )}
+    </TextFileView>
   );
 }
-
-// ─── rendered markdown ─────────────────────────────────────────────
 
 type HeadingGroup = {
   heading: string | null;
@@ -174,89 +162,51 @@ function RenderedPlan({
   onToggle: (c: ParsedCheckbox) => void;
 }) {
   return (
-    <div className="h-full w-full overflow-y-auto px-4 py-4 text-md leading-6 text-text-2">
-      {groups.map((g, idx) => (
-        <div key={idx} className="mb-4">
-          {g.heading && (
-            <Heading level={g.level} text={g.heading} />
-          )}
-          {g.body.map((line, i) => {
-            const cb = g.checkboxes.find((c) => c.line === line);
-            if (cb) {
-              const indent = checkboxIndent(line);
-              const label = line
-                .replace(/^\s*-\s*\[[ xX]\]\s+/, "")
-                .replace(TASK_ID_RE, "")
-                .trimEnd();
-              return (
-                <label
-                  key={i}
-                  className={`flex items-baseline gap-2 py-0.5 cursor-pointer hover:bg-state-hover rounded px-1 -mx-1`}
-                  style={{ paddingLeft: 6 + indent * 18 }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={cb.checked}
-                    onChange={() => onToggle(cb)}
-                    className="mt-0.5"
-                  />
-                  <span
-                    className={
-                      cb.checked
-                        ? "text-text-4 line-through"
-                        : "text-text-2"
-                    }
+    <div className="ui-file-markdown">
+      <div className="ui-message-markdown">
+        {groups.map((g, idx) => (
+          <section key={idx}>
+            {g.heading && <Heading level={g.level} text={g.heading} />}
+            {g.body.map((line, i) => {
+              const cb = g.checkboxes.find((c) => c.line === line);
+              if (cb) {
+                const indent = checkboxIndent(line);
+                const label = line
+                  .replace(/^\s*-\s*\[[ xX]\]\s+/, "")
+                  .replace(TASK_ID_RE, "")
+                  .trimEnd();
+                return (
+                  <label
+                    key={i}
+                    className="ui-plan-item"
+                    data-done={cb.checked || undefined}
+                    style={{ paddingLeft: 4 + indent * 18 }}
                   >
-                    {label}
-                  </span>
-                </label>
-              );
-            }
-            if (line.trim() === "") {
-              return <div key={i} className="h-2" />;
-            }
-            if (line.startsWith(">")) {
-              return (
-                <div
-                  key={i}
-                  className="text-text-4 italic border-l-2 border-line-soft pl-2 my-1"
-                >
-                  {stripTaskComment(line.replace(/^>\s*/, ""))}
-                </div>
-              );
-            }
-            return (
-              <div key={i} className="text-text-3">
-                {stripTaskComment(line)}
-              </div>
-            );
-          })}
-        </div>
-      ))}
+                    <Checkbox checked={cb.checked} onCheckedChange={() => onToggle(cb)} />
+                    <span>{label}</span>
+                  </label>
+                );
+              }
+              if (line.trim() === "") return <div key={i} style={{ height: 8 }} />;
+              if (line.startsWith(">")) {
+                return (
+                  <blockquote key={i}>{stripTaskComment(line.replace(/^>\s*/, ""))}</blockquote>
+                );
+              }
+              return <div key={i}>{stripTaskComment(line)}</div>;
+            })}
+          </section>
+        ))}
+      </div>
     </div>
   );
 }
 
 function Heading({ level, text }: { level: number; text: string }) {
-  if (level === 1) {
-    return (
-      <div className="text-xl font-semibold text-text-1 mb-2 mt-1">
-        {text}
-      </div>
-    );
-  }
-  if (level === 2) {
-    return (
-      <div className="text-md font-semibold text-text-1 mt-3 mb-1">
-        {text}
-      </div>
-    );
-  }
-  return (
-    <div className="text-base font-medium text-text-2 mt-2 mb-1">
-      {text}
-    </div>
-  );
+  if (level === 1) return <h1>{text}</h1>;
+  if (level === 2) return <h2>{text}</h2>;
+  if (level === 3) return <h3>{text}</h3>;
+  return <h4>{text}</h4>;
 }
 
 function extractTitle(md: string): string | null {

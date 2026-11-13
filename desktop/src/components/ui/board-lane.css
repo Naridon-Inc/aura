@@ -1,0 +1,39 @@
+/* A board lane folded to a strip: the task board column's header turned on
+   its side, so a pipeline keeps every stage on screen while one is out of
+   the way. The open lane is the task board column itself. */
+
+.ui-board-lane-folded {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  width: 44px;
+  min-height: 0;
+  padding: 5px 0 8px;
+  border-radius: 8px;
+  background: var(--ui-muted);
+}
+.ui-board-lane-folded > svg {
+  flex-shrink: 0;
+}
+.ui-board-lane-folded > h2 {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--ui-fg);
+  font-size: 14px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  writing-mode: vertical-lr;
+}
+.ui-board-lane-count {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-state-row.ui-board-lane-loading {
+  padding: 12px 8px;
+}

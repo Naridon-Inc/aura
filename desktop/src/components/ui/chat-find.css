@@ -1,0 +1,19 @@
+/* Find in a conversation: the search bar floats over the top right of the
+   transcript, and the words it finds are marked in place. */
+.ui-chat-find {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  z-index: 20;
+  width: min(420px, calc(100% - 32px));
+  box-shadow: var(--ui-shadow-md, 0 4px 16px rgb(0 0 0 / 0.18));
+  border-radius: 6px;
+}
+::highlight(aura-chat-find) {
+  background-color: color-mix(in srgb, var(--ui-yellow, #e5c07b) 35%, transparent);
+  color: inherit;
+}
+::highlight(aura-chat-find-current) {
+  background-color: color-mix(in srgb, var(--ui-yellow, #e5c07b) 75%, transparent);
+  color: var(--ui-fg);
+}

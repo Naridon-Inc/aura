@@ -55,6 +55,10 @@ describe("which brains host an agent", () => {
     expect(hostsLiveAgent("acp:opencode")).toBe(true);
   });
 
+  test("an agent on one of the org's machines does too", () => {
+    expect(hostsLiveAgent("place:ws-01hx")).toBe(true);
+  });
+
   test("brains that are an API key and a model id do not", () => {
     expect(hostsLiveAgent("anthropic_native")).toBe(false);
     expect(hostsLiveAgent("openai_compat:kimi")).toBe(false);
@@ -71,6 +75,10 @@ describe("badging an agent's own commands", () => {
 
   test("an agent added to the Rust table first still badges readably", () => {
     expect(liveAgentLabel("acp:aardvark")).toBe("Aardvark");
+  });
+
+  test("a machine chat is badged by the label its workspace gave it, not its id", () => {
+    expect(liveAgentLabel("place:ws-01hx")).toBeNull();
   });
 
   test("a brain with no agent behind it has no badge", () => {

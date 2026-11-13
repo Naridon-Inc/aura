@@ -1,0 +1,48 @@
+/* The pull request's review footer and its two dialogs: the written review
+   and the merge. Built from the shared dialog, field, toggle and alert parts;
+   only the spacing between them and the checkbox rows live here. */
+
+.ui-pr-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-pr-review-actions > [role="alert"] {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ui-red);
+}
+.ui-pr-review-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ui-fg);
+  cursor: pointer;
+  user-select: none;
+}
+.ui-pr-merge-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.ui-pr-merge-body .ui-alert-description .ui-pr-review-check {
+  margin-top: 4px;
+}
+.ui-pr-merge-error {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--ui-red);
+}
+.ui-dialog-description code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}

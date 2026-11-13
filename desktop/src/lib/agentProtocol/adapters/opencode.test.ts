@@ -416,7 +416,7 @@ describe("the fields only OpenCode's own store can supply", () => {
   });
 
   test("the session names the provider and model it is actually bound to", () => {
-    // The complaint that sent people away from Conductor was never knowing
+    // The complaint that sends people away from a runner is never knowing
     // whether their own plan was in play. This is that fact, read from the
     // session row rather than from our catalog.
     const out = normalizeOpencode(

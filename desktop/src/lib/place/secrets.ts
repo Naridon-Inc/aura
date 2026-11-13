@@ -144,7 +144,7 @@ export function secretSentence(secret: SecretRef): string {
  *  over directly. Neither is a warning. */
 export function bootSentence(boot: SecretBoot): string {
   if (boot.names.length === 0) {
-    return `${boot.member} has nothing kept for this project, so work on ${boot.place} starts with no extra environment.`;
+    return `${boot.member} has nothing kept for this repository, so work on ${boot.place} starts with no extra environment.`;
   }
   const named = boot.names.join(", ");
   return boot.installed

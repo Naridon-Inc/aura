@@ -44,6 +44,12 @@ pub struct ShadowedCli {
     /// Its version. Only ever `Some` — we don't report a shadow we
     /// couldn't read, because "can't read it" isn't evidence it's stale.
     pub installed: String,
+    /// Whether the folder holding it is writable by this user. When it is
+    /// (`~/.cargo/bin`, `~/.local/bin`), replacing the copy needs no password,
+    /// so the app does it on its own at launch instead of leaving the user's
+    /// terminal on an old CLI after every update. Only a root-owned folder
+    /// (`/usr/local/bin` from an old installer) has to ask.
+    pub writable: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -371,7 +377,12 @@ fn shadowing_cli(running: &str) -> Option<ShadowedCli> {
     if runs_this_build(&installed, EXPECTED_AURA_CLI_VERSION) {
         return None;
     }
-    Some(ShadowedCli { path, installed })
+    let writable = Path::new(&path).parent().is_some_and(dir_writable);
+    Some(ShadowedCli {
+        path,
+        installed,
+        writable,
+    })
 }
 
 /// Tauri command — invoked on shell startup and from the footer chip's

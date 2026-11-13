@@ -1,0 +1,80 @@
+/* A selectable timeline. The marker sits inside an 8px button padding, so the
+   connector moves in by the same 8px: 8 + the marker's 5px centre = 13px. It
+   runs on 12px past the entry so it meets the next marker, which starts 8px of
+   padding plus its own 4px offset below the next entry's top edge. */
+
+.ui-timeline.ui-trace-timeline {
+  padding: 8px;
+}
+/* Doubled with the library class so these win over its own rules whatever
+   order the two sheets load in. */
+.ui-timeline.ui-trace-timeline li {
+  padding: 0;
+}
+.ui-timeline.ui-trace-timeline li:not(:last-child)::before {
+  left: 13px;
+  top: 20px;
+  bottom: -12px;
+}
+.ui-trace-timeline-entry {
+  display: flex;
+  flex: 1;
+  gap: 12px;
+  min-width: 0;
+  padding: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ui-trace-timeline-entry:hover,
+.ui-trace-timeline li[data-tone="active"] .ui-trace-timeline-entry {
+  background: var(--ui-hover);
+}
+.ui-trace-timeline-entry[data-static] {
+  cursor: default;
+}
+.ui-trace-timeline-entry[data-static]:hover {
+  background: none;
+}
+.ui-trace-timeline-entry:disabled {
+  cursor: not-allowed;
+}
+.ui-trace-timeline-entry:disabled:hover {
+  background: none;
+}
+.ui-trace-timeline-entry:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+.ui-trace-timeline-entry > div {
+  flex: 1;
+  min-width: 0;
+}
+/* Two lines of title: enough for most reasons to read whole, short enough that
+   a day of moments still fits on one screen. */
+.ui-trace-timeline-entry strong {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-weight: 450;
+  line-height: 18px;
+}
+.ui-trace-timeline-entry > div > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin-top: 4px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-trace-timeline-entry > div > div svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}

@@ -1,0 +1,22 @@
+<!doctype html>
+<!--
+  Visual harness for the Checks tab and the Dashboard's pull requests: the
+  real panels on a stand-in for the desktop's git and GitHub commands.
+
+  Dev-server only: Vite's build input is index.html, so this page never
+  reaches a bundle. `bun run dev` serves it at
+  /checks-harness.html?scene=<name>; the scenes are listed in
+  src/components/rightrail/__harness__/main.tsx. Add `&theme=light` for the
+  light palette.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Checks harness</title>
+  </head>
+  <body>
+    <div id="checks-harness"></div>
+    <script type="module" src="/src/components/rightrail/__harness__/main.tsx"></script>
+  </body>
+</html>

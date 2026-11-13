@@ -1,0 +1,21 @@
+<!doctype html>
+<!--
+  Visual harness for the Machines page: who can use the team's machines, and
+  every machine across your accounts, on a stand-in for the desktop's commands.
+
+  Dev-server only: Vite's build input is index.html, so this page never
+  reaches a bundle. `bun run dev` serves it at
+  /machines-harness.html?scene=<name>; the scenes are listed in
+  src/components/workspaces/__harness__/machines.tsx.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Machines harness</title>
+  </head>
+  <body>
+    <div id="machines-harness"></div>
+    <script type="module" src="/src/components/workspaces/__harness__/machines.tsx"></script>
+  </body>
+</html>

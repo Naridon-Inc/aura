@@ -6,7 +6,10 @@
 // linked to this task) — the composer only captures the sentence.
 
 import { useEffect, useRef, useState } from "react";
+import { Plus } from "lucide-react";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import "./goals.css";
 
 export function GoalComposer({
   prefill,
@@ -52,21 +55,18 @@ export function GoalComposer({
 
   if (!open) {
     return (
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="flex items-center gap-1.5 rounded-md border border-dashed border-line-soft px-2.5 py-1.5 text-sm text-text-3 transition-colors hover:border-line hover:text-text-1"
-      >
-        <span className="text-base leading-none">+</span>
+      <Button type="button" variant="ghost" size="sm" className="ui-goal-add" onClick={() => setOpen(true)}>
+        <Plus aria-hidden />
         {cta}
-      </button>
+      </Button>
     );
   }
 
   return (
-    <div className="flex items-center gap-1.5 rounded-md border border-line-soft bg-bg-1 px-1.5 py-1">
-      <input
+    <div className="ui-goal-composer">
+      <Input
         ref={ref}
+        size="small"
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
@@ -74,25 +74,12 @@ export function GoalComposer({
           else if (e.key === "Escape") setOpen(false);
         }}
         placeholder={placeholder}
-        className="min-w-0 flex-1 bg-transparent px-1.5 py-1 text-base text-text-1 placeholder:text-text-5 focus:outline-none"
+        aria-label={placeholder}
       />
-      <Button
-        type="button"
-        variant="subtle"
-        size="xs"
-        onClick={submit}
-        disabled={busy || !text.trim()}
-        className="shrink-0 text-text-2"
-      >
-        {busy ? "…" : "Add"}
+      <Button type="button" variant="secondary" size="sm" onClick={submit} disabled={busy || !text.trim()}>
+        {busy ? "Adding…" : "Add"}
       </Button>
-      <Button
-        type="button"
-        variant="ghost"
-        size="xs"
-        onClick={() => setOpen(false)}
-        className="shrink-0 text-text-5 hover:text-text-2"
-      >
+      <Button type="button" variant="ghost" size="sm" onClick={() => setOpen(false)}>
         Cancel
       </Button>
     </div>

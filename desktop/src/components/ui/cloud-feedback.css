@@ -1,0 +1,409 @@
+/* Comments under the turns of a shared chat. Small and quiet: a turn's ⋯
+   only shows where the pointer or the keyboard is, and threads hang off a
+   thin rule rather than sitting in cards. Yours is drawn in the accent. */
+
+:root {
+  --ui-feedback-accent: #4dc1a4;
+  --ui-feedback-accent-soft: color-mix(in srgb, #4dc1a4 14%, transparent);
+}
+
+/* ── Where the ⋯ sits ───────────────────────────────────────────────────
+   Under the bubble, on the bubble's side: your own turns sit on the right,
+   so their ⋯ does too; everyone else's, and the agent's, on the left. The
+   turn says which with `data-side`. It only shows while the pointer or the
+   keyboard is on the turn, or while its menu is open. On a turn with no
+   comments it floats at the bubble's corner and the turn keeps no space
+   under it; on a turn with comments it sits beside the folded thread's line,
+   on the side away from the bubble's edge. */
+.ui-cloud-turn,
+.ui-feedback-turn {
+  position: relative;
+}
+.ui-feedback-turn-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.ui-cloud-turn-actions,
+.ui-feedback-turn-actions {
+  position: relative;
+}
+.ui-cloud-turn[data-side="end"] > .ui-cloud-turn-actions,
+.ui-feedback-turn[data-side="end"] .ui-feedback-turn-actions {
+  justify-content: flex-end;
+}
+.ui-cloud-turn-actions:has(> .ui-feedback-bar:only-child),
+.ui-feedback-turn-actions:has(> .ui-feedback-bar:only-child) {
+  z-index: 2;
+  height: 0;
+  margin: 0;
+  overflow: visible;
+}
+.ui-feedback-bar {
+  display: inline-flex;
+  align-items: center;
+  order: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.ui-feedback-bar[hidden] {
+  display: none;
+}
+.ui-cloud-turn[data-side="end"] .ui-feedback-bar,
+.ui-feedback-turn[data-side="end"] .ui-feedback-bar {
+  order: -1;
+}
+.ui-feedback-bar[data-place="float"] {
+  position: absolute;
+  top: -12px;
+  left: 8px;
+  z-index: 2;
+  padding: 1px;
+  border: 1px solid var(--ui-border);
+  border-radius: 999px;
+  background: var(--ui-popover);
+  box-shadow: 0 2px 8px #0000001f;
+}
+.ui-cloud-turn[data-side="end"] .ui-feedback-bar[data-place="float"],
+.ui-feedback-turn[data-side="end"] .ui-feedback-bar[data-place="float"] {
+  right: 8px;
+  left: auto;
+}
+.ui-feedback-bar[data-place="float"] .ui-turn-menu {
+  border-radius: 999px;
+}
+.ui-cloud-turn:hover .ui-feedback-bar,
+.ui-cloud-turn:focus-within .ui-feedback-bar,
+.ui-feedback-turn:hover .ui-feedback-bar,
+.ui-feedback-turn:focus-within .ui-feedback-bar,
+.ui-feedback-bar:has([data-state="open"]) {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* A prompt's own row of actions stays up while its ⋯ menu is open. */
+.ui-chat-user-stack > .ui-message-actions:has(.ui-turn-menu[data-state="open"]) {
+  opacity: 1;
+}
+.ui-thread-fold:focus-visible,
+.ui-thread-reply:focus-visible,
+.ui-comments-goto:focus-visible {
+  outline: 2px solid var(--ui-feedback-accent);
+  outline-offset: 1px;
+}
+
+/* ── A turn's threads ──────────────────────────────────────────────────── */
+.ui-feedback-threads {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 2px;
+  padding-left: 12px;
+  border-left: 2px solid var(--ui-border);
+  text-align: left;
+}
+.ui-feedback-threads[data-focused] {
+  border-left-color: var(--ui-feedback-accent);
+}
+.ui-thread-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 4px;
+  border-radius: 4px;
+  color: var(--ui-muted-fg);
+  font: 12px/16px var(--font-sans);
+  cursor: pointer;
+}
+.ui-thread-fold:hover {
+  color: var(--ui-fg);
+}
+.ui-thread-fold svg {
+  width: 13px;
+  height: 13px;
+}
+.ui-feedback-folded {
+  flex-basis: 100%;
+  display: flex;
+}
+.ui-cloud-turn[data-side="end"] .ui-feedback-folded,
+.ui-feedback-turn[data-side="end"] .ui-feedback-folded {
+  justify-content: flex-end;
+}
+/* With the ⋯ beside it, the folded line shares its row. */
+.ui-feedback-bar[data-place="inline"] ~ .ui-feedback-folded {
+  flex-basis: auto;
+}
+
+.ui-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-thread[data-resolved] .ui-comment-body {
+  color: var(--ui-muted-fg);
+}
+.ui-thread-replies {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 28px;
+}
+.ui-thread-reply {
+  align-self: flex-start;
+  margin-left: 28px;
+  padding: 0 2px;
+  border-radius: 4px;
+  color: var(--ui-muted-fg);
+  font: 12px/18px var(--font-sans);
+  cursor: pointer;
+}
+.ui-thread-reply:hover {
+  color: var(--ui-feedback-accent);
+}
+.ui-thread-resolved-line {
+  color: var(--ui-muted-fg);
+  font: 12px/16px var(--font-sans);
+}
+
+/* ── One comment ───────────────────────────────────────────────────────── */
+.ui-comment {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-comment .ui-comment-face {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 600;
+}
+.ui-comment-face .ui-avatar-fallback {
+  background: transparent;
+  color: #fff;
+  font-size: 9px;
+  text-transform: uppercase;
+}
+.ui-comment .ui-comment-face-gone {
+  display: inline-block;
+  border: 1px dashed var(--ui-border);
+}
+.ui-comment-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ui-comment-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 20px;
+}
+/* A narrow column cuts a long name short; it never breaks the name or the
+   time onto a second line. */
+.ui-comment-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-fg);
+  font: 500 13px/18px var(--font-sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-comment-when,
+.ui-comment-box-note {
+  color: var(--ui-muted-fg);
+  font: 12px/16px var(--font-sans);
+}
+.ui-comment-head .ui-comment-when {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+/* Hidden tools take no room, so the name and time get the whole row until
+   the pointer or keyboard focus arrives. */
+.ui-comment-tools {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  max-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.ui-comment:hover .ui-comment-tools,
+.ui-comment:focus-within .ui-comment-tools {
+  max-width: none;
+  overflow: visible;
+  opacity: 1;
+}
+.ui-comment-tools svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-comment-body {
+  margin: 0;
+  color: var(--ui-fg);
+  font: 13px/19px var(--font-sans);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ui-comment-gone {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font: italic 13px/19px var(--font-sans);
+}
+.ui-comment-mention {
+  color: var(--ui-feedback-accent);
+  font-weight: 500;
+}
+
+/* ── The box ───────────────────────────────────────────────────────────── */
+.ui-comment-box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 6px 6px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-composer);
+}
+.ui-comment-box:focus-within {
+  border-color: color-mix(in srgb, var(--ui-feedback-accent) 60%, var(--ui-border));
+}
+.ui-comment-box textarea {
+  width: 100%;
+  min-height: 32px;
+  max-height: 160px;
+  padding: 4px 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--ui-fg);
+  font: 13px/19px var(--font-sans);
+}
+.ui-comment-box textarea::placeholder {
+  color: var(--ui-faint);
+}
+.ui-comment-box-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ui-comment-box .ui-comment-suggestions {
+  bottom: calc(100% + 4px);
+  width: min(320px, 100%);
+}
+.ui-comment-suggestions button {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+/* ── The Comments tab ──────────────────────────────────────────────────── */
+.ui-comments-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 12px;
+}
+.ui-comments-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ui-comments-section > h3,
+.ui-comments-section > summary {
+  margin: 0;
+  color: var(--ui-muted-fg);
+  font: 500 12px/16px var(--font-sans);
+  cursor: default;
+}
+.ui-comments-section > summary {
+  cursor: pointer;
+  list-style: none;
+}
+.ui-comments-section > summary::-webkit-details-marker {
+  display: none;
+}
+.ui-comments-section[open] > summary {
+  margin-bottom: 10px;
+}
+.ui-comments-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-comments-item:last-child {
+  border-bottom: 0;
+}
+.ui-comments-anchor {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ui-muted-fg);
+  font: 12px/16px var(--font-sans);
+}
+.ui-comments-anchor > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-comments-goto {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 0 2px;
+  border-radius: 4px;
+  color: var(--ui-feedback-accent);
+  font: 500 12px/16px var(--font-sans);
+  cursor: pointer;
+}
+.ui-comments-goto:hover {
+  text-decoration: underline;
+}
+.ui-comments-empty {
+  color: var(--ui-muted-fg);
+  font: 13px/19px var(--font-sans);
+}
+
+/* A turn just reached from a notification or the Comments tab. */
+@keyframes ui-feedback-flash {
+  from {
+    background: var(--ui-feedback-accent-soft);
+  }
+  to {
+    background: transparent;
+  }
+}
+[data-feedback-flash] {
+  border-radius: 8px;
+  animation: ui-feedback-flash 1.6s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-feedback-flash] {
+    animation: none;
+  }
+  .ui-feedback-bar,
+  .ui-comment-tools {
+    transition: none;
+  }
+}

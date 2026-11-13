@@ -11,13 +11,9 @@ import { BookOpen, Plus, X } from "lucide-react";
 import { api, type MemoryView } from "../../../lib/api";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
-import {
-  Card,
-  EmptyHint,
-  PaneIntro,
-  PaneScroll,
-  PaneSpinner,
-} from "./customizeShared";
+import { SettingsError } from "../../ui/settings-blocks";
+import { SettingsRow, SettingsSection } from "../../ui/settings-row";
+import { Card, CountPill, EmptyHint, PaneIntro, PaneScroll, PaneSpinner } from "./customizeShared";
 
 // House rules are real memory entries in the `conventions` section, tagged
 // so this pane can tell them apart from machine-learned conventions. The
@@ -86,36 +82,27 @@ export function InstructionsPane({
     <PaneScroll>
       <PaneIntro
         title="Instructions"
-        blurb="Standing rules every agent reads before it works on your project. Write them in plain English. They travel with the project, so your whole team's agents follow the same rules."
+        blurb="Standing rules every agent reads before it works on your repository. Write them in plain English. They travel with the repository, so your whole team's agents follow the same rules."
       />
 
       {/* Add a rule — the one primary action on this pane. */}
-      <div className="mb-4 flex items-center gap-2">
+      <div className="ui-customize-add">
         <Input
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") add();
           }}
+          aria-label="A new house rule"
           placeholder="e.g. Always ask before deleting a file"
-          className="h-9 flex-1"
         />
-        <Button
-          size="sm"
-          onClick={add}
-          disabled={!draft.trim() || busy}
-          className="shrink-0 gap-1"
-        >
-          <Plus size={14} />
+        <Button onClick={add} disabled={!draft.trim() || busy}>
+          <Plus />
           Add rule
         </Button>
       </div>
 
-      {addError && (
-        <div className="mb-3 rounded-md border border-line-soft bg-bg-1 px-3 py-2 text-[12px] text-red">
-          Couldn't add that rule: {addError}
-        </div>
-      )}
+      {addError && <SettingsError>Couldn't add that rule: {addError}</SettingsError>}
 
       {loading && !memory ? (
         <PaneSpinner label="Loading your rules…" />
@@ -127,29 +114,24 @@ export function InstructionsPane({
         />
       ) : (
         <Card>
-          {rules.map((entry, i) => (
-            <div
+          {rules.map((entry) => (
+            <SettingsRow
               key={entry.id}
-              className={`group flex items-start gap-3 px-3.5 py-2.5 ${
-                i > 0 ? "border-t border-line-soft" : ""
-              }`}
-            >
-              <span
-                className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full"
-                style={{ background: "var(--color-accent)" }}
-              />
-              <div className="min-w-0 flex-1 text-base leading-relaxed text-text-1">
-                {entry.content}
-              </div>
-              <button
-                type="button"
-                onClick={() => remove(entry.id)}
-                aria-label="Remove rule"
-                className="shrink-0 text-text-4 opacity-0 transition-opacity hover:text-text-1 group-hover:opacity-100"
-              >
-                <X size={14} />
-              </button>
-            </div>
+              className="ui-customize-rule"
+              title={entry.content}
+              control={
+                <Button
+                  variant="ghost"
+                  size="iconSm"
+                  className="ui-customize-remove"
+                  onClick={() => remove(entry.id)}
+                  aria-label="Remove rule"
+                  title="Remove rule"
+                >
+                  <X />
+                </Button>
+              }
+            />
           ))}
         </Card>
       )}
@@ -157,30 +139,22 @@ export function InstructionsPane({
       {/* What the agent already knows — read-only context, so the picture is
           honest and complete without inviting edits to machine-kept notes. */}
       {others.length > 0 ? (
-        <div className="mt-6">
-          <div className="section-label mb-2">
-            Also known about this project
-          </div>
-          <div className="space-y-3">
-            {others.map((s) => (
-              <Card key={s.name} className="px-3.5 py-3">
-                <div className="mb-1.5 text-sm font-medium capitalize text-text-2">
-                  {s.name}
-                </div>
-                <ul className="space-y-1">
+        <SettingsSection title="Also known about this repository">
+          {others.map((s) => (
+            <SettingsRow
+              key={s.name}
+              title={<span className="ui-customize-section-name">{s.name}</span>}
+              control={<CountPill>{s.entries.length}</CountPill>}
+              help={
+                <ul className="ui-customize-known">
                   {s.entries.map((e) => (
-                    <li
-                      key={e.id}
-                      className="text-sm leading-relaxed text-text-3"
-                    >
-                      {e.content}
-                    </li>
+                    <li key={e.id}>{e.content}</li>
                   ))}
                 </ul>
-              </Card>
-            ))}
-          </div>
-        </div>
+              }
+            />
+          ))}
+        </SettingsSection>
       ) : null}
     </PaneScroll>
   );

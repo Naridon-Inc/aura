@@ -1,74 +1,62 @@
-import * as React from "react";
-import { Tooltip as MedusaTooltip, TooltipProvider } from "@medusajs/ui";
-
+import {
+  createContext,
+  useContext,
+  forwardRef,
+  isValidElement,
+  type ComponentPropsWithoutRef,
+  type ElementRef,
+  type ReactNode,
+} from "react";
+import { Root, Trigger, Content, Portal, Provider } from "@radix-ui/react-tooltip";
 import { cn } from "../../lib/utils";
-
-type MedusaTooltipProps = React.ComponentPropsWithoutRef<typeof MedusaTooltip>;
-
-type TooltipProps = Omit<MedusaTooltipProps, "children" | "content"> & {
-  children?: React.ReactNode;
-  content?: React.ReactNode;
-};
-
-type TooltipTriggerProps = React.HTMLAttributes<HTMLElement> & {
-  asChild?: boolean;
-  children?: React.ReactNode;
-};
-
-type TooltipContentProps = Omit<MedusaTooltipProps, "children" | "content"> & {
-  children?: React.ReactNode;
-};
-
-function TooltipTrigger({ children }: TooltipTriggerProps) {
-  return <>{children}</>;
+const TooltipProviderContext = createContext(false);
+export function TooltipProvider({ children, ...props }: ComponentPropsWithoutRef<typeof Provider>) {
+  return <TooltipProviderContext.Provider value={true}><Provider {...props}>{children}</Provider></TooltipProviderContext.Provider>;
 }
-TooltipTrigger.displayName = "TooltipTrigger";
-
-function TooltipContent(_props: TooltipContentProps) {
-  return null;
-}
-TooltipContent.displayName = "TooltipContent";
-
-function isElementOfType<P>(child: React.ReactNode, type: React.ComponentType<P>): child is React.ReactElement<P> {
-  return React.isValidElement(child) && child.type === type;
-}
-
-function Tooltip({ children, content: explicitContent, className, side, sideOffset, ...props }: TooltipProps) {
-  let trigger: React.ReactNode = null;
-  let content = explicitContent;
-  let contentClassName = className;
-  let contentSide = side;
-  let contentSideOffset = sideOffset;
-
-  React.Children.forEach(children, (child) => {
-    if (isElementOfType<TooltipTriggerProps>(child, TooltipTrigger)) {
-      trigger = child.props.children;
-      return;
-    }
-    if (isElementOfType<TooltipContentProps>(child, TooltipContent)) {
-      content = child.props.children;
-      contentClassName = cn(contentClassName, child.props.className);
-      contentSide = child.props.side ?? contentSide;
-      contentSideOffset = child.props.sideOffset ?? contentSideOffset;
-      return;
-    }
-    if (trigger == null) trigger = child;
-  });
-
-  if (content == null) return <>{trigger}</>;
-
-  return (
-    <MedusaTooltip
-      content={content}
-      className={contentClassName}
-      side={contentSide}
-      sideOffset={contentSideOffset}
-      {...props}
-    >
-      {trigger}
-    </MedusaTooltip>
+type ContentProps = ComponentPropsWithoutRef<typeof Content>;
+type TooltipProps = ComponentPropsWithoutRef<typeof Root> &
+  Pick<ContentProps, "side" | "sideOffset" | "align" | "alignOffset" | "className"> & {
+    content?: ReactNode;
+  };
+export function Tooltip({
+  children,
+  content,
+  className,
+  side,
+  sideOffset,
+  align,
+  alignOffset,
+  ...props
+}: TooltipProps) {
+  const hasProvider = useContext(TooltipProviderContext);
+  const tooltip = content === undefined ? <Root {...props}>{children}</Root> : (
+    <Root {...props}>
+      <Trigger asChild>{isValidElement(children) ? children : <span>{children}</span>}</Trigger>
+      <TooltipContent
+        className={className}
+        side={side}
+        sideOffset={sideOffset}
+        align={align}
+        alignOffset={alignOffset}
+      >
+        {content}
+      </TooltipContent>
+    </Root>
   );
+  return hasProvider ? tooltip : <TooltipProvider delayDuration={250}>{tooltip}</TooltipProvider>;
 }
-Tooltip.displayName = "Tooltip";
-
-export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider };
+export const TooltipTrigger = Trigger;
+export const TooltipContent = forwardRef<ElementRef<typeof Content>, ContentProps>(
+  ({ className, sideOffset = 4, collisionPadding = 8, ...props }, ref) => (
+    <Portal>
+      <Content
+        ref={ref}
+        className={cn("ui-tooltip", className)}
+        sideOffset={sideOffset}
+        collisionPadding={collisionPadding}
+        {...props}
+      />
+    </Portal>
+  ),
+);
+TooltipContent.displayName = "TooltipContent";

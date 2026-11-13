@@ -75,12 +75,17 @@ import {
   RemoveFormatting,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { monogram } from "../../lib/monogram";
+import { Avatar, AvatarFallback } from "../ui/avatar";
+import { MENU_PANEL, MENU_ROW, MENU_ROW_DANGER, MENU_SHORTCUT } from "../ui/menuSurface";
+import { Separator } from "../ui/separator";
+import { Toggle } from "../ui/toggle";
+import "../ui/rich-editor.css";
 import { SectionScrollIndicator } from "./SectionScrollIndicator";
 import { MermaidAwareCodeBlock } from "./MermaidCodeBlock";
 import { CodeHighlight } from "./tiptap/codeHighlight";
 import { blockExtensions } from "./tiptap/extensions";
 import { registerUndoTarget } from "../../lib/undoRouter";
-import { Avatar } from "../team/presentation/Avatar";
 import {
   searchMentions,
   flattenMentionResults,
@@ -224,61 +229,61 @@ const SLASH_ITEMS: SlashItem[] = [
   {
     id: "p",
     label: "Text",
-    icon: <Type className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Type strokeWidth={1.5} />,
     command: (e) => e.chain().focus().setParagraph().run(),
   },
   {
     id: "h1",
     label: "Heading 1",
-    icon: <Heading1 className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Heading1 strokeWidth={1.5} />,
     command: (e) => e.chain().focus().toggleHeading({ level: 1 }).run(),
   },
   {
     id: "h2",
     label: "Heading 2",
-    icon: <Heading2 className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Heading2 strokeWidth={1.5} />,
     command: (e) => e.chain().focus().toggleHeading({ level: 2 }).run(),
   },
   {
     id: "h3",
     label: "Heading 3",
-    icon: <Heading3 className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Heading3 strokeWidth={1.5} />,
     command: (e) => e.chain().focus().toggleHeading({ level: 3 }).run(),
   },
   {
     id: "ul",
     label: "Bullet list",
-    icon: <List className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <List strokeWidth={1.5} />,
     command: (e) => e.chain().focus().toggleBulletList().run(),
   },
   {
     id: "ol",
     label: "Ordered list",
-    icon: <ListOrdered className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <ListOrdered strokeWidth={1.5} />,
     command: (e) => e.chain().focus().toggleOrderedList().run(),
   },
   {
     id: "todo",
     label: "Todo list",
-    icon: <ListChecks className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <ListChecks strokeWidth={1.5} />,
     command: (e) => e.chain().focus().toggleTaskList().run(),
   },
   {
     id: "quote",
     label: "Quote",
-    icon: <Quote className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Quote strokeWidth={1.5} />,
     command: (e) => e.chain().focus().toggleBlockquote().run(),
   },
   {
     id: "code",
     label: "Code block",
-    icon: <Code className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Code strokeWidth={1.5} />,
     command: (e) => e.chain().focus().toggleCodeBlock().run(),
   },
   {
     id: "mermaid",
     label: "Diagram (mermaid)",
-    icon: <GitBranch className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <GitBranch strokeWidth={1.5} />,
     command: (e) =>
       e
         .chain()
@@ -290,19 +295,19 @@ const SLASH_ITEMS: SlashItem[] = [
   {
     id: "callout",
     label: "Callout",
-    icon: <Info className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Info strokeWidth={1.5} />,
     command: (e) => e.chain().focus().toggleCallout({ type: "info" }).run(),
   },
   {
     id: "toggle",
     label: "Toggle list",
-    icon: <ChevronRight className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <ChevronRight strokeWidth={1.5} />,
     command: (e) => e.chain().focus().setDetails().run(),
   },
   {
     id: "table",
     label: "Table",
-    icon: <TableIcon className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <TableIcon strokeWidth={1.5} />,
     command: (e) =>
       e
         .chain()
@@ -313,13 +318,13 @@ const SLASH_ITEMS: SlashItem[] = [
   {
     id: "columns",
     label: "Columns",
-    icon: <Columns2 className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Columns2 strokeWidth={1.5} />,
     command: (e) => e.chain().focus().setColumns(2).run(),
   },
   {
     id: "image",
     label: "Image",
-    icon: <ImageIcon className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <ImageIcon strokeWidth={1.5} />,
     command: (e) => {
       void (async () => {
         const url = await askText({
@@ -338,7 +343,7 @@ const SLASH_ITEMS: SlashItem[] = [
   {
     id: "hr",
     label: "Divider",
-    icon: <Minus className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Minus strokeWidth={1.5} />,
     command: (e) => e.chain().focus().setHorizontalRule().run(),
   },
 ];
@@ -357,57 +362,56 @@ const TURN_INTO: TurnIntoItem[] = [
   {
     id: "p",
     label: "Text",
-    icon: <Pilcrow className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Pilcrow strokeWidth={1.5} />,
     run: (e) => e.chain().focus().setParagraph().run(),
   },
   {
     id: "h1",
     label: "Heading 1",
-    icon: <Heading1 className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Heading1 strokeWidth={1.5} />,
     run: (e) => e.chain().focus().setHeading({ level: 1 }).run(),
   },
   {
     id: "h2",
     label: "Heading 2",
-    icon: <Heading2 className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Heading2 strokeWidth={1.5} />,
     run: (e) => e.chain().focus().setHeading({ level: 2 }).run(),
   },
   {
     id: "h3",
     label: "Heading 3",
-    icon: <Heading3 className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Heading3 strokeWidth={1.5} />,
     run: (e) => e.chain().focus().setHeading({ level: 3 }).run(),
   },
   {
     id: "ul",
     label: "Bullet list",
-    icon: <List className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <List strokeWidth={1.5} />,
     run: (e) => e.chain().focus().toggleBulletList().run(),
   },
   {
     id: "todo",
     label: "Todo list",
-    icon: <ListChecks className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <ListChecks strokeWidth={1.5} />,
     run: (e) => e.chain().focus().toggleTaskList().run(),
   },
   {
     id: "quote",
     label: "Quote",
-    icon: <Quote className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Quote strokeWidth={1.5} />,
     run: (e) => e.chain().focus().toggleBlockquote().run(),
   },
   {
     id: "callout",
     label: "Callout",
-    icon: <Info className="w-3.5 h-3.5" strokeWidth={1.5} />,
+    icon: <Info strokeWidth={1.5} />,
     run: (e) => e.chain().focus().toggleCallout({ type: "info" }).run(),
   },
 ];
 
-// Compact icon button for the selection toolbar (bubble menu). Active state
-// uses a subtle filled chip — neutral chrome, no accent (accent is reserved
-// for primary affordances). `onMouseDown` preventDefault keeps the editor
-// selection alive while the command runs.
+// One mark or block toggle in the selection toolbar. `onMouseDown`
+// preventDefault keeps the editor selection alive while the command runs, so
+// the press runs the command itself rather than flipping the toggle.
 function ToolButton({
   icon,
   label,
@@ -420,25 +424,18 @@ function ToolButton({
   onRun: () => void;
 }) {
   return (
-    <button
-      type="button"
+    <Toggle
+      size="sm"
+      pressed={!!active}
       aria-label={label}
-      aria-pressed={active}
       title={label}
       onMouseDown={(e) => {
         e.preventDefault();
         onRun();
       }}
-      className={cn(
-        "inline-flex items-center justify-center w-7 h-7 rounded",
-        "transition-colors",
-        active
-          ? "bg-bg-2 text-text-1"
-          : "text-text-3 hover:bg-state-hover hover:text-text-1",
-      )}
     >
       {icon}
-    </button>
+    </Toggle>
   );
 }
 
@@ -535,11 +532,7 @@ export function TiptapEditor({
         // CodeHighlight paints Prism syntax tokens as inline decorations.
         MermaidAwareCodeBlock,
         CodeHighlight,
-        Placeholder.configure({
-          placeholder,
-          emptyEditorClass:
-            "before:content-[attr(data-placeholder)] before:text-text-5 before:float-left before:h-0 before:pointer-events-none",
-        }),
+        Placeholder.configure({ placeholder }),
         TaskList,
         TaskItem.configure({ nested: true }),
         // Underline mark — serializes to `<u>…</u>` via tiptap-markdown's
@@ -594,6 +587,21 @@ export function TiptapEditor({
     [placeholder, collab],
   );
 
+  // The editor is built inside this component's first render, and building it
+  // can already change the document: a plugin dispatches a meta-only
+  // transaction as its view mounts and a normalizing appendTransaction rides
+  // along with it, so `onUpdate` fires before React has finished rendering us.
+  // Calling the parent's setter there is a setState on another component in
+  // the middle of a render. Until this component has mounted, the change goes
+  // to the parent on a microtask instead — same value, after the render.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const editor = useEditor({
     extensions,
     editable,
@@ -603,17 +611,14 @@ export function TiptapEditor({
     autofocus: autoFocus ? "end" : false,
     editorProps: {
       attributes: {
-        class: cn(
-          "tiptap-pane prose prose-invert max-w-none",
-          "min-h-full focus:outline-none",
-          dense
-            ? "px-2 py-1.5 text-base leading-5 text-text-1"
-            : bare
-              ? "px-4 py-3 text-base leading-[1.65] text-text-2"
-              : noPadding
-                ? "text-lg leading-[1.7] text-text-2"
-                : "px-8 py-6 text-lg leading-[1.7] text-text-2",
-        ),
+        class: "ui-message-markdown ui-rich-editor-prose",
+        "data-pad": dense
+          ? "dense"
+          : bare
+            ? "bare"
+            : noPadding
+              ? "none"
+              : "page",
       },
       handleKeyDown(_view, event) {
         // A host that owns Enter gets it first — "commit this one and start the
@@ -667,7 +672,9 @@ export function TiptapEditor({
       const md =
         (editor.storage as { markdown?: { getMarkdown: () => string } })
           .markdown?.getMarkdown() ?? "";
-      onChange(deflateWikilinks(md));
+      const next = deflateWikilinks(md);
+      if (mountedRef.current) onChange(next);
+      else queueMicrotask(() => onChange(next));
     },
   });
 
@@ -1069,23 +1076,13 @@ export function TiptapEditor({
   return (
     <div
       ref={containerRef}
-      className={cn(
-        "relative w-full overflow-y-auto",
-        dense
-          ? "bg-bg-content border border-line-soft rounded"
-          : bare
-            ? "h-full bg-transparent"
-            : "h-full bg-bg-content",
-        className,
-      )}
+      className={cn("ui-rich-editor", className)}
+      data-variant={dense ? "dense" : bare ? "bare" : "page"}
     >
       {editor && editor.isEditable && (
         <BubbleMenu
           editor={editor}
-          className={cn(
-            "z-50 flex items-center gap-0.5 p-1",
-            "rounded-md bg-bg-1 border border-line shadow-lg",
-          )}
+          className="ui-rich-editor-bubble"
           options={{ placement: "top", offset: 8 }}
           shouldShow={({ editor: ed, state, from, to }) => {
             // Hide for empty/collapsed selections, in read-only mode, and
@@ -1104,146 +1101,144 @@ export function TiptapEditor({
             label="Bold"
             active={editor.isActive("bold")}
             onRun={() => editor.chain().focus().toggleBold().run()}
-            icon={<Bold className="w-3.5 h-3.5" strokeWidth={2} />}
+            icon={<Bold strokeWidth={2} />}
           />
           <ToolButton
             label="Italic"
             active={editor.isActive("italic")}
             onRun={() => editor.chain().focus().toggleItalic().run()}
-            icon={<Italic className="w-3.5 h-3.5" strokeWidth={2} />}
+            icon={<Italic strokeWidth={2} />}
           />
           <ToolButton
             label="Underline"
             active={editor.isActive("underline")}
             onRun={() => editor.chain().focus().toggleUnderline().run()}
-            icon={<UnderlineIcon className="w-3.5 h-3.5" strokeWidth={2} />}
+            icon={<UnderlineIcon strokeWidth={2} />}
           />
           <ToolButton
             label="Strikethrough"
             active={editor.isActive("strike")}
             onRun={() => editor.chain().focus().toggleStrike().run()}
-            icon={<Strikethrough className="w-3.5 h-3.5" strokeWidth={2} />}
+            icon={<Strikethrough strokeWidth={2} />}
           />
           <ToolButton
             label="Highlight"
             active={editor.isActive("highlight")}
             onRun={() => editor.chain().focus().toggleHighlight().run()}
-            icon={<Highlighter className="w-3.5 h-3.5" strokeWidth={2} />}
+            icon={<Highlighter strokeWidth={2} />}
           />
           <ToolButton
             label="Inline code"
             active={editor.isActive("code")}
             onRun={() => editor.chain().focus().toggleCode().run()}
-            icon={<Code className="w-3.5 h-3.5" strokeWidth={2} />}
+            icon={<Code strokeWidth={2} />}
           />
           <ToolButton
             label="Link"
             active={editor.isActive("link")}
             onRun={toggleLink}
-            icon={<LinkIcon className="w-3.5 h-3.5" strokeWidth={2} />}
+            icon={<LinkIcon strokeWidth={2} />}
           />
-          <span className="w-px h-4 bg-line-soft mx-0.5" aria-hidden />
+          <Separator orientation="vertical" />
           <ToolButton
             label="Heading 1"
             active={editor.isActive("heading", { level: 1 })}
             onRun={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
-            icon={<Heading1 className="w-3.5 h-3.5" strokeWidth={1.75} />}
+            icon={<Heading1 strokeWidth={1.75} />}
           />
           <ToolButton
             label="Heading 2"
             active={editor.isActive("heading", { level: 2 })}
             onRun={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
-            icon={<Heading2 className="w-3.5 h-3.5" strokeWidth={1.75} />}
+            icon={<Heading2 strokeWidth={1.75} />}
           />
           <ToolButton
             label="Heading 3"
             active={editor.isActive("heading", { level: 3 })}
             onRun={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
-            icon={<Heading3 className="w-3.5 h-3.5" strokeWidth={1.75} />}
+            icon={<Heading3 strokeWidth={1.75} />}
           />
           <ToolButton
             label="Paragraph"
             active={editor.isActive("paragraph")}
             onRun={() => editor.chain().focus().setParagraph().run()}
-            icon={<Pilcrow className="w-3.5 h-3.5" strokeWidth={1.75} />}
+            icon={<Pilcrow strokeWidth={1.75} />}
           />
-          <span className="w-px h-4 bg-line-soft mx-0.5" aria-hidden />
+          <Separator orientation="vertical" />
           <ToolButton
             label="Bullet list"
             active={editor.isActive("bulletList")}
             onRun={() => editor.chain().focus().toggleBulletList().run()}
-            icon={<List className="w-3.5 h-3.5" strokeWidth={1.75} />}
+            icon={<List strokeWidth={1.75} />}
           />
           <ToolButton
             label="Ordered list"
             active={editor.isActive("orderedList")}
             onRun={() => editor.chain().focus().toggleOrderedList().run()}
-            icon={<ListOrdered className="w-3.5 h-3.5" strokeWidth={1.75} />}
+            icon={<ListOrdered strokeWidth={1.75} />}
           />
           <ToolButton
             label="Blockquote"
             active={editor.isActive("blockquote")}
             onRun={() => editor.chain().focus().toggleBlockquote().run()}
-            icon={<Quote className="w-3.5 h-3.5" strokeWidth={1.75} />}
+            icon={<Quote strokeWidth={1.75} />}
           />
           {!documentPadding && (
             <>
-              <span className="w-px h-4 bg-line-soft mx-0.5" aria-hidden />
+              <Separator orientation="vertical" />
               <ToolButton
                 label="Align left"
                 active={editor.isActive({ textAlign: "left" })}
                 onRun={() => editor.chain().focus().setTextAlign("left").run()}
-                icon={<AlignLeft className="w-3.5 h-3.5" strokeWidth={1.75} />}
+                icon={<AlignLeft strokeWidth={1.75} />}
               />
               <ToolButton
                 label="Align center"
                 active={editor.isActive({ textAlign: "center" })}
                 onRun={() => editor.chain().focus().setTextAlign("center").run()}
-                icon={<AlignCenter className="w-3.5 h-3.5" strokeWidth={1.75} />}
+                icon={<AlignCenter strokeWidth={1.75} />}
               />
               <ToolButton
                 label="Align right"
                 active={editor.isActive({ textAlign: "right" })}
                 onRun={() => editor.chain().focus().setTextAlign("right").run()}
-                icon={<AlignRight className="w-3.5 h-3.5" strokeWidth={1.75} />}
+                icon={<AlignRight strokeWidth={1.75} />}
               />
             </>
           )}
-          <span className="w-px h-4 bg-line-soft mx-0.5" aria-hidden />
+          <Separator orientation="vertical" />
           <ToolButton
             label="Clear formatting"
             onRun={() =>
               editor.chain().focus().unsetAllMarks().clearNodes().run()
             }
-            icon={<RemoveFormatting className="w-3.5 h-3.5" strokeWidth={1.75} />}
+            icon={<RemoveFormatting strokeWidth={1.75} />}
           />
         </BubbleMenu>
       )}
       {documentPadding ? (
-        // Full-width document canvas: readable blocks self-clamp to a centered
-        // ~760px measure (CSS under `.pages-doc`), while wide blocks — tables,
-        // code, images — get the full document width. Don't hard-clamp the
-        // wrapper, or a wide table can never break past the text column.
-        <div className="w-full px-5 py-5 sm:px-8">
-          <EditorContent editor={editor} className="min-h-full" />
+        // Full-width document canvas: the page inset sits on the wrapper, not
+        // on the text, so a wide table can still use the whole width.
+        <div className="ui-rich-editor-page">
+          <EditorContent editor={editor} className="ui-rich-editor-content" />
         </div>
       ) : (
-        <EditorContent editor={editor} className="h-full" />
+        <EditorContent editor={editor} className="ui-rich-editor-content" data-fill="" />
       )}
       {editor && showHandle && (
         <DragHandle
           editor={editor}
-          className="tiptap-drag-handle-portal"
+          className="ui-rich-editor-handle-portal"
           onNodeChange={({ pos }) => {
             // Freeze the target while the menu is open (see ref above).
             if (blockMenuOpenRef.current) return;
             setBlockPos(pos);
           }}
         >
-          <div className="tiptap-handle-wrap" data-drag-handle>
+          <div className="ui-rich-editor-handle" data-drag-handle>
             <button
               type="button"
-              className="tiptap-handle-add"
+              data-handle="add"
               aria-label="Insert block below"
               onClick={(e) => {
                 e.preventDefault();
@@ -1251,11 +1246,11 @@ export function TiptapEditor({
                 insertBelow();
               }}
             >
-              <Plus className="w-4 h-4" strokeWidth={1.75} />
+              <Plus strokeWidth={1.75} />
             </button>
             <button
               type="button"
-              className="tiptap-handle-grip"
+              data-handle="grip"
               aria-label="Block actions"
               onClick={(e) => {
                 e.preventDefault();
@@ -1274,7 +1269,7 @@ export function TiptapEditor({
                 setBlockMenuOpen((v) => !v);
               }}
             >
-              <GripVertical className="w-4 h-4" strokeWidth={1.75} />
+              <GripVertical strokeWidth={1.75} />
             </button>
           </div>
         </DragHandle>
@@ -1284,71 +1279,66 @@ export function TiptapEditor({
           data-block-menu
           role="menu"
           aria-label="Block actions"
-          className={cn(
-            "absolute z-40 w-[184px] p-1 rounded-lg",
-            "bg-bg-1 border border-line-soft shadow-[var(--shadow-flyout)]",
-          )}
+          className={cn(MENU_PANEL, "ui-rich-editor-menu")}
+          data-menu="block"
           style={{ top: blockMenuPos.top, left: blockMenuPos.left }}
         >
           <button
             type="button"
-            className="tiptap-menu-row"
+            className={MENU_ROW}
             onMouseEnter={() => setTurnIntoOpen(true)}
             onClick={(e) => {
               e.preventDefault();
               setTurnIntoOpen((v) => !v);
             }}
           >
-            <Type className="w-3.5 h-3.5" strokeWidth={1.5} />
-            <span className="flex-1 text-left">Turn into</span>
-            <ChevronRight className="w-3.5 h-3.5" strokeWidth={1.5} />
+            <Type strokeWidth={1.5} />
+            <span className="ui-rich-editor-row-label">Turn into</span>
+            <ChevronRight strokeWidth={1.5} />
           </button>
           {turnIntoOpen && (
             <div
               data-block-menu
-              className={cn(
-                "absolute left-[180px] top-0 w-[176px] p-1 rounded-md",
-                "bg-bg-1 border border-line-soft shadow-[var(--shadow-flyout)]",
-                "max-h-[280px] overflow-y-auto",
-              )}
+              className={cn(MENU_PANEL, "ui-rich-editor-menu")}
+              data-menu="turn-into"
             >
               {TURN_INTO.map((item) => (
                 <button
                   key={item.id}
                   type="button"
-                  className="tiptap-menu-row"
+                  className={MENU_ROW}
                   onClick={(e) => {
                     e.preventDefault();
                     turnInto(item);
                   }}
                 >
-                  <span className="text-text-5">{item.icon}</span>
-                  <span className="flex-1 text-left">{item.label}</span>
+                  {item.icon}
+                  <span className="ui-rich-editor-row-label">{item.label}</span>
                 </button>
               ))}
             </div>
           )}
           <button
             type="button"
-            className="tiptap-menu-row"
+            className={MENU_ROW}
             onClick={(e) => {
               e.preventDefault();
               duplicateBlock();
             }}
           >
-            <Copy className="w-3.5 h-3.5" strokeWidth={1.5} />
-            <span className="flex-1 text-left">Duplicate</span>
+            <Copy strokeWidth={1.5} />
+            <span className="ui-rich-editor-row-label">Duplicate</span>
           </button>
           <button
             type="button"
-            className="tiptap-menu-row tiptap-menu-row-danger"
+            className={cn(MENU_ROW, MENU_ROW_DANGER)}
             onClick={(e) => {
               e.preventDefault();
               deleteBlock();
             }}
           >
-            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-            <span className="flex-1 text-left">Delete</span>
+            <Trash2 strokeWidth={1.5} />
+            <span className="ui-rich-editor-row-label">Delete</span>
           </button>
         </div>
       )}
@@ -1359,11 +1349,8 @@ export function TiptapEditor({
         <div
           role="menu"
           aria-label="Slash menu"
-          className={cn(
-            "absolute z-30 w-[200px] p-1 rounded-lg",
-            "bg-bg-1 border border-line-soft shadow-[var(--shadow-flyout)]",
-            "max-h-[260px] overflow-y-auto",
-          )}
+          className={cn(MENU_PANEL, "ui-rich-editor-menu")}
+          data-menu="slash"
           style={{ top: slashPos.top, left: slashPos.left }}
         >
           {filteredItems.map((item, i) => (
@@ -1375,15 +1362,10 @@ export function TiptapEditor({
                 pickSlash(item);
               }}
               onMouseEnter={() => setSlashIndex(i)}
-              className={cn(
-                "w-full text-left px-2 py-1.5 text-sm rounded",
-                "flex items-center gap-2",
-                i === slashIndex
-                  ? "bg-bg-2 text-text-1"
-                  : "text-text-3 hover:bg-state-hover hover:text-text-1",
-              )}
+              className={MENU_ROW}
+              data-highlighted={i === slashIndex ? "" : undefined}
             >
-              <span className="text-text-5">{item.icon}</span>
+              {item.icon}
               {item.label}
             </button>
           ))}
@@ -1393,11 +1375,8 @@ export function TiptapEditor({
         <div
           role="menu"
           aria-label="Mention"
-          className={cn(
-            "absolute z-40 w-[256px] p-1 rounded-lg",
-            "bg-bg-1 border border-line-soft shadow-[var(--shadow-flyout)]",
-            "max-h-[280px] overflow-y-auto",
-          )}
+          className={cn(MENU_PANEL, "ui-rich-editor-menu")}
+          data-menu="mention"
           style={{ top: mentionPos.top, left: mentionPos.left }}
         >
           {mentionResults.map((item, i) => (
@@ -1409,41 +1388,29 @@ export function TiptapEditor({
                 pickMention(item);
               }}
               onMouseEnter={() => setMentionIndex(i)}
-              className={cn(
-                "w-full text-left px-2 py-1.5 rounded flex items-center gap-2",
-                i === mentionIndex
-                  ? "bg-bg-2 text-text-1"
-                  : "text-text-2 hover:bg-state-hover hover:text-text-1",
-              )}
+              className={MENU_ROW}
+              data-highlighted={i === mentionIndex ? "" : undefined}
             >
               {item.kind === "person" ? (
-                <Avatar name={item.avatarHandle || item.label} size={18} />
+                <Avatar>
+                  <AvatarFallback>{monogram(item.avatarHandle || item.label)}</AvatarFallback>
+                </Avatar>
               ) : (
-                <span
-                  className={cn(
-                    "inline-flex items-center justify-center w-[18px] h-[18px] rounded-sm text-2xs font-medium flex-shrink-0",
-                    item.kind === "task"
-                      ? "bg-bg-2 text-accent aura-ident"
-                      : item.kind === "pr"
-                        ? "bg-bg-2 text-violet"
-                        : "bg-bg-2 text-text-3",
-                  )}
-                  aria-hidden
-                >
+                <span className="ui-rich-editor-glyph" data-kind={item.kind} aria-hidden>
                   {item.kind === "task" ? "#" : item.kind === "pr" ? "PR" : "¶"}
                 </span>
               )}
-              <span className="flex flex-col min-w-0 leading-tight">
-                <span className="text-sm truncate">
+              <span className="ui-rich-editor-row-label" data-stacked="">
+                <span>
                   {item.kind === "person" ? `@${item.label}` : item.label}
                 </span>
                 {item.sublabel && (
-                  <span className="text-xs text-text-4 truncate">
+                  <small>
                     {item.sublabel}
-                  </span>
+                  </small>
                 )}
               </span>
-              <span className="section-label ml-auto flex-shrink-0">
+              <span className={MENU_SHORTCUT}>
                 {item.kind}
               </span>
             </button>

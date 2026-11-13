@@ -1,0 +1,149 @@
+/* The app switcher's panel. Sizes are the store's (lib/appSwitcher.ts):
+   110px columns, 88px tiles, 24px side and 28px top/bottom padding. */
+
+.ui-app-switcher {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 9999;
+  transform: translate(-50%, -50%);
+}
+
+/* Frosted glass behind the tiles: a light wash, a blur of what is under it,
+   a soft drop shadow and a hairline edge. */
+.ui-app-switcher-glass {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  border-radius: 40px;
+  background: rgba(255, 255, 255, 0.202);
+  -webkit-backdrop-filter: blur(4px) saturate(1.8);
+  backdrop-filter: blur(4px) saturate(1.8);
+  box-shadow:
+    0 4.11px 13.152px rgba(0, 0, 0, 0.185),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.ui-app-switcher-panel {
+  position: relative;
+  padding: 28px 24px;
+  animation: ui-app-switcher-in 150ms ease-out;
+}
+@keyframes ui-app-switcher-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-app-switcher-panel {
+    animation: none;
+  }
+}
+
+.ui-app-switcher-grid {
+  display: grid;
+}
+
+.ui-app-switcher-cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 110px;
+  height: 88px;
+}
+
+/* The selection: a tile 4px larger than the icon on every side. */
+.ui-app-switcher-ring {
+  position: absolute;
+  width: 78px;
+  height: 78px;
+  border-radius: 21px;
+  background: color-mix(in srgb, var(--ui-fg) 30%, transparent);
+  pointer-events: none;
+  transition: background-color 150ms;
+}
+.ui-app-switcher-ring[data-close] {
+  width: 84px;
+  height: 84px;
+}
+
+.ui-app-switcher-tile {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 88px;
+  height: 88px;
+  padding: 0;
+  border: 0;
+  border-radius: 26px;
+  background: transparent;
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+}
+
+.ui-app-switcher-icon {
+  width: 88px;
+  height: 88px;
+  object-fit: contain;
+  border-radius: 16px;
+  user-select: none;
+}
+
+.ui-app-switcher-mark {
+  width: 64px;
+  height: 64px;
+  color: var(--ui-fg);
+}
+
+.ui-app-switcher-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 76px;
+  height: 76px;
+  border: 1px solid color-mix(in srgb, var(--ui-fg) 4%, transparent);
+  border-radius: 18px;
+  background: var(--ui-muted);
+  transition: border-color 150ms;
+}
+.ui-app-switcher-close[data-selected] {
+  border-color: color-mix(in srgb, var(--ui-fg) 10%, transparent);
+}
+.ui-app-switcher-close svg {
+  width: 36px;
+  height: 36px;
+  color: color-mix(in srgb, var(--ui-muted-fg) 60%, transparent);
+  transition: color 150ms;
+}
+.ui-app-switcher-close[data-selected] svg {
+  color: var(--ui-muted-fg);
+}
+
+/* The selected app's name, centred under its tile. */
+.ui-app-switcher-caption {
+  position: absolute;
+  bottom: 6px;
+  left: 24px;
+  height: 18px;
+  pointer-events: none;
+}
+.ui-app-switcher-caption span {
+  position: absolute;
+  width: max-content;
+  margin-inline: auto;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  color: var(--ui-fg);
+}

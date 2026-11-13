@@ -17,6 +17,8 @@ import {
 } from "lucide-react";
 
 import { api } from "../../../lib/api";
+import { Skeleton } from "../../ui/skeleton";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { relativeAgeFromSecs } from "../../../lib/relativeTime";
 import { compactNumber } from "../../../lib/compactNumber";
 
@@ -174,7 +176,7 @@ export function RedditApp() {
           aria-label="Refresh"
           className="h-7 w-7 flex-shrink-0 inline-flex items-center justify-center rounded-md text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors order-last sm:order-none"
         >
-          <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
+          {loading ? <AsciiSpinner size={13} /> : <RefreshCw size={13} />}
         </button>
         <div className="flex items-center gap-0.5 flex-shrink-0">
           {SORTS.map((s) => (
@@ -298,15 +300,15 @@ function PostRow({ post }: { post: Post }) {
 
 function SkeletonList() {
   return (
-    <ul className="divide-y divide-line-soft animate-pulse">
+    <ul className="divide-y divide-line-soft" aria-hidden>
       {Array.from({ length: 8 }).map((_, i) => (
         <li key={i} className="flex items-start gap-3 px-3.5 py-2.5">
-          <div className="w-9 h-8 rounded bg-bg-2" />
-          <div className="h-11 w-11 rounded bg-bg-2" />
+          <Skeleton className="w-9 h-8" />
+          <Skeleton className="h-11 w-11" />
           <div className="flex-1 space-y-1.5 pt-0.5">
-            <div className="h-2.5 w-24 rounded bg-bg-2" />
-            <div className="h-3 w-3/4 rounded bg-bg-2" />
-            <div className="h-2.5 w-16 rounded bg-bg-2" />
+            <Skeleton className="h-2.5 w-24" />
+            <Skeleton className="h-3 w-3/4" />
+            <Skeleton className="h-2.5 w-16" />
           </div>
         </li>
       ))}

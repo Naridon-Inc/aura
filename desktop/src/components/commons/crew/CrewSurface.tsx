@@ -4,19 +4,20 @@
 // commit — and the proof — that delivered it.
 //
 // This file is the SHELL only: it owns the surface state (the selected task),
-// loads the one unified `ready_view` + the proof ledger,
-// and draws the page's ONE bar of chrome — the lens tabs on the left, verbs on
-// the right (Add to queue and Run). You only ever hand the crew WORK — there is
-// no "add an agent" step: Run puts an agent on each ready task on its own. The
-// body is `CrewWorkspace`: the work, drawn, with a task's detail as a docked
-// sheet. Each piece is its own module so none grows into a mammoth file. Cloud
-// + automations moved to Settings.
+// loads the one unified `ready_view` + the proof ledger, and hands the page's
+// chrome to `tasks/CrewViewBars` — the Dashboard's view strip and toolbar, with
+// Find, the repository, and the verbs (Add to queue and Run). You only ever
+// hand the crew WORK — there is no "add an agent" step: Run puts an agent on
+// each ready task on its own. The body is `CrewWorkspace`: the work, drawn,
+// with a task's detail as a docked sheet. Each piece is its own module so none
+// grows into a mammoth file. Cloud + automations moved to Settings.
 //
-// WHICH PROJECT is the place rail's, not this surface's. It used to draw a
-// strip of project chips of its own across the top of the body — a second
-// picker for a question the rail beside it was already asking — and the two
-// disagreed: the rail's pick moved List and Board and left this where it was.
-// One picker, in the rail; `repoRoot` is its answer. See tasks/TasksPlace.
+// WHICH REPOSITORY is the place's, not this surface's. It used to draw a strip
+// of chips of its own across the top of the body — a second picker for a
+// question the rail beside it was already asking — and the two disagreed: the
+// rail's pick moved List and Board and left this where it was. One choice
+// now, made the same way from the rail or the toolbar's repository menu (see
+// tasks/taskScope); `repoRoot` is its answer. See tasks/TasksPlace.
 //
 // WHICH GOAL and WHICH CREW are not this surface's state any more. This page is
 // reached from the Tasks place's rail, and the place has one rail: it lists the
@@ -27,7 +28,7 @@
 // going back instead of being re-made in whichever panel happened to be mounted.
 //
 // WHICH DRAWING is the place's, and this page is one cell of it: Graph. The
-// strip in this header is the SAME element the task board renders — same three
+// strip on this page is the SAME element the task board renders — same three
 // cells, same order, same widths — so picking List or Board here is a
 // navigation back to the board rather than a second control that happens to
 // look like the first. That is also the way out: a page whose only exit is Esc
@@ -44,11 +45,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Cloud,
   ListTree,
-  MoreHorizontal,
-  Play,
-  Plus,
   RefreshCw,
   Users,
   X,
@@ -72,17 +69,10 @@ import { FullscreenOverlay } from "../../FullscreenOverlay";
 import { PageFrame } from "../../ui/PageFrame";
 import { EmptyState } from "../../ui/state";
 import { Button } from "../../ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../../ui/dropdown-menu";
-import { Input } from "../../ui/input";
 import { loadCrewProof, type CrewProof } from "./crewProof";
 import { scopeViewToCrew, scopeViewToGoal } from "./crewControl";
 import { CrewWorkspace, type CrewMainView } from "./CrewWorkspace";
-import { WorkLensTabs } from "../../tasks/WorkLensTabs";
+import { CrewViewBars } from "../../tasks/CrewViewBars";
 import { notifyCrewMutated } from "../../tasks/WorkRailGroups";
 import {
   clearTasksSharedFilters,
@@ -119,14 +109,25 @@ function boardStepsFromTasks(rows: Task[]): Map<string, TaskStep[]> {
   return m;
 }
 
+/** The details panel's Tasks tab, where the board's rows are watched as the
+ *  agents move them. */
+function openTasksPanel(): void {
+  window.dispatchEvent(new Event("aura:open-tasks"));
+}
+
 export function CrewSurface({
   repoRoot,
+  openRoot,
   onClose,
   asPage = false,
   lens: lensProp,
   onLens,
 }: {
   repoRoot: string;
+  /** The checkout the app has open, when it differs from `repoRoot` (the
+   *  place's pick). The toolbar's repository menu folds it the way the
+   *  Dashboard's does. Defaults to `repoRoot`. */
+  openRoot?: string;
   /** Leave — back to the work list you came from. Also on Esc. */
   onClose: () => void;
   /** The lens the host is showing, when the host owns it. The Tasks
@@ -402,12 +403,12 @@ export function CrewSurface({
       say(
         r.dispatched.length === 0
           ? "Nothing ready to start. Add some work, or Sync from your board first to fill the queue."
-          : `Your crew is on ${r.dispatched.length} task${r.dispatched.length === 1 ? "" : "s"}. An agent on each${r.ready_remaining > 0 ? ` · ${r.ready_remaining} more ready and waiting` : ""}. Watch the board.`,
+          : `Your crew is on ${r.dispatched.length} task${r.dispatched.length === 1 ? "" : "s"}. An agent on each${r.ready_remaining > 0 ? ` · ${r.ready_remaining} more ready and waiting` : ""}. Watch them in Tasks.`,
       );
-      // The crew just put an agent on each — the work list is where you watch
-      // those tasks move as they land, so snap back to it. The cards the agents
-      // are moving ARE the rows on it, joined by `board_task_id`.
-      goToWork("list");
+      // The crew just put an agent on each — the task list is where you watch
+      // those tasks move as they land, so open it. The rows the agents are
+      // moving ARE the board's, joined by `board_task_id`.
+      openTasksPanel();
       await refresh();
       notifyCrewMutated();
     } catch (e) {
@@ -530,7 +531,7 @@ export function CrewSurface({
               : `Re-queued ${ids.length} tasks.`,
         );
         if (dispatched > 0) {
-          goToWork("list");
+          openTasksPanel();
         }
       } catch (e) {
         warn(`Couldn't retry: ${String(e)}`);
@@ -638,148 +639,48 @@ export function CrewSurface({
   // Page or modal — same header + body, different frame.
   const Frame = asPage ? PageFrame : FullscreenOverlay;
 
-  // What Run is about to do, said on Run itself. The cap and the ready count
-  // used to be a sentence of their own beside the button — "up to [ ] of 24
-  // ready" — which is the button's own subject printed twice, once as a label
-  // and once as a verb that didn't mention it.
-  const capNum = Number.parseInt(cap, 10);
-  const cappedRun =
-    Number.isFinite(capNum) && capNum > 0 && capNum < readyCount;
+  // How much of the queue the page is drawing — the strip's trailing fact,
+  // the same one the List and Board lenses print there.
+  const countText = !view
+    ? "Counting…"
+    : total !== allTasks.length
+      ? `${total} of ${allTasks.length} tasks`
+      : `${total} task${total === 1 ? "" : "s"}`;
 
   return (
-    <Frame
-      onClose={onClose}
-      /* ONE bar, at the top, split the way the work is: scope on the left,
-         verbs on the right.
-         This page used to carry a second forty-pixel strip pinned to the bottom
-         of the window — nine hundred pixels below the work it acted on — with a
-         project switcher, a crew chip, two unlabelled icons, three buttons and a
-         number spinner all in one undivided row. Nothing in it said which
-         controls changed what you were looking at and which ones set agents
-         running, and the one control that chose the drawing on screen wasn't
-         even in it: that floated over the canvas, on top of the last run. */
-      /* The lens leads, exactly as it does on the board: that surface never
-         prints a title either, and the strip reading as the heading — with its
-         siblings as quiet alternatives — says where you are with one fewer word
-         on screen. Both pages carry the same furniture in the same places now:
-         lens top-left, verbs top-right, what you're scoped to in a thin strip
-         underneath.
-         It is the app's common tab strip — the SAME element the List and Board
-         lenses render, labelled cells and all — so it doesn't move, change
-         width or change vocabulary at the moment you press it. That makes it
-         the way out as well: this page is one cell of a three-cell switch, not
-         a room you have to find the door of. */
-      tabs={<WorkLensTabs lens={workLens} onLens={chooseLens} />}
-      actions={
-        <>
-          {/* Look again, and the cloud machine. Both are about the page rather
-              than about the work on it, so they sit behind one glyph instead of
-              spending two of the header's five slots — the same trim Workspaces
-              made when it got down to a lens and a single button.
-              One refresh, not two: there used to be a pair of identical
-              circling arrows four hundred pixels apart ("Re-scan every
-              project's crew" and "Re-read the queue") with no way to tell from
-              the screen which was which. */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="subtle"
-                size="icon-sm"
-                title="More"
-                aria-label="More"
-              >
-                {loading ? (
-                  <RefreshCw size={13} className="animate-spin" />
-                ) : (
-                  <MoreHorizontal size={13} />
-                )}
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56">
-              <DropdownMenuItem
-                disabled={busy !== null}
-                onSelect={() => void refresh()}
-              >
-                <RefreshCw size={13} className="text-text-4" />
-                Look again
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setCloudOpen(true)}>
-                <Cloud size={13} className="text-text-4" />
-                Cloud machine
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => setComposeOpen(true)}
-            disabled={busy !== null}
-            className="gap-1.5"
-            title="Hand the crew a job. Plan a goal into connected tasks, or drop in a single task. The crew runs an agent on it for you."
-          >
-            <Plus size={13} />
-            Add to queue
-          </Button>
-          {/* The cap, only when capping is a real choice — one ready task can't
-              be trimmed to fewer. It sits against Run because Run is the only
-              thing it changes, and it no longer repeats the ready count: the
-              button says that. */}
-          {readyCount > 1 ? (
-            <label
-              className="flex items-center gap-1.5 text-sm text-text-4"
-              title="Cap how many tasks the crew takes this pass. Leave it blank to work the whole ready queue."
-            >
-              up to
-              <Input
-                type="number"
-                min={1}
-                max={readyCount}
-                value={cap}
-                onChange={(e) => setCap(e.target.value)}
-                placeholder="all"
-                className="h-7 w-12 px-1 text-center text-sm"
-              />
-            </label>
-          ) : null}
-          {/* Says what pressing it does, in the numbers on screen. "Run crew"
-              was a name for the machine, not a description of the act. */}
-          <Button
-            variant="accentSoft"
-            size="sm"
-            onClick={onRun}
-            disabled={busy !== null || readyCount === 0}
-            className="gap-1.5"
-            title="Set the crew going. It runs an agent on each ready task on its own, in order. Watch them land on the Board."
-          >
-            {busy === "run" ? (
-              <AsciiSpinner className="text-sm" />
-            ) : (
-              <Play size={13} />
-            )}
-            {readyCount === 0
-              ? "Run crew"
-              : cappedRun
-                ? `Run ${capNum} of ${readyCount}`
-                : `Run all ${readyCount}`}
-          </Button>
-        </>
-      }
-    >
-      {/* The body is CrewWorkspace — the work, drawn, with a task's detail as
-          a sheet over it. Scope and verbs both live in the header above;
-          nothing floats over the work. */}
+    <Frame onClose={onClose}>
+      {/* No header of the frame's own: the strip and toolbar below are the
+          Dashboard's, drawn by every lens in the same place. Scope and verbs
+          both live there; nothing floats over the work. */}
       <div className="relative flex h-full min-h-0 flex-col">
-        {/* Under "All projects" the rail is counting more than this can draw.
-            A dependency graph belongs to one project — there is no aggregate to
-            show — so this names the one on screen instead of leaving the rail's
-            "All projects · 32" standing over a single project's work. */}
+        <CrewViewBars
+          lens={workLens}
+          onLens={chooseLens}
+          openRoot={openRoot ?? repoRoot}
+          countText={countText}
+          view={scoped}
+          onFind={openDetail}
+          loading={loading}
+          busy={busy !== null}
+          running={busy === "run"}
+          readyCount={readyCount}
+          cap={cap}
+          onCap={setCap}
+          onRefresh={() => void refresh()}
+          onCloud={() => setCloudOpen(true)}
+          onCompose={() => setComposeOpen(true)}
+          onRun={() => void onRun()}
+        />
+        {/* Under "All repositories" the rail is counting more than this can
+            draw. A dependency graph belongs to one repository — there is no
+            aggregate to show — so this names the one on screen instead of
+            leaving the rail's total standing over a single repository's work. */}
         {allProjects ? (
-          <div className="flex shrink-0 items-center gap-2 border-b border-line-soft px-4 py-1.5 text-xs text-text-4">
-            <ListTree size={12} className="shrink-0" aria-hidden />
-            <span className="min-w-0 truncate">
-              The crew's run is one project at a time, this is{" "}
-              <span className="text-text-2">{projectName}</span>. Pick a project
-              in the rail to change it.
+          <div className="ui-tasks-notice">
+            <ListTree size={12} aria-hidden />
+            <span>
+              The crew runs one repository at a time. This is {projectName}; pick
+              another in the menu above to change it.
             </span>
           </div>
         ) : null}
@@ -958,25 +859,31 @@ export function CrewSurface({
               }}
             >
               <div
-                className="absolute inset-0 bg-black/25"
+                className="ui-cloud-runner-scrim"
                 aria-hidden
                 onClick={() => setCloudOpen(false)}
               />
-              <div className="absolute inset-y-0 right-0 flex w-full max-w-[480px] flex-col overflow-hidden border-l border-line bg-bg-content shadow-[var(--shadow-modal)]">
-                <div className="flex shrink-0 items-center justify-end border-b border-line px-2 py-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setCloudOpen(false)}
-                    className="grid h-6 w-6 place-items-center rounded text-text-4 transition-colors hover:bg-state-hover hover:text-text-1"
-                    title="Close (Esc)"
-                    aria-label="Close"
-                  >
-                    <X size={13} />
-                  </button>
+              {/* The library's right-hand sheet, kept in the surface: its
+                  header, its close button, its scroll. */}
+              <div
+                className="ui-sheet ui-cloud-runner-sheet"
+                data-side="right"
+                role="dialog"
+                aria-label="Cloud machine"
+              >
+                <div className="ui-dialog-header">
+                  <h2 className="ui-dialog-title">Cloud machine</h2>
                 </div>
-                <div className="min-h-0 flex-1 overflow-hidden">
-                  <CloudRunnerPanel repoRoot={repoRoot} />
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setCloudOpen(false)}
+                  className="ui-dialog-close"
+                  title="Close (Esc)"
+                  aria-label="Close"
+                >
+                  <X size={16} />
+                </button>
+                <CloudRunnerPanel repoRoot={repoRoot} queue />
               </div>
             </div>
           ) : null}
@@ -1014,7 +921,7 @@ function CrewEmpty({
       <EmptyState
         icon={Users}
         title="Nothing in what you've picked"
-        body="The rest of this project's work is under other goals and crews. Widen back to all of it from the rail, or hand this one a job with Add to queue."
+        body="The rest of this repository's work is under other goals and crews. Widen back to all of it from the rail, or hand this one a job with Add to queue."
         action={{
           label: "Show all the work",
           onClick: onWiden,

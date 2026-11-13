@@ -9,6 +9,8 @@
 //! (resume/override/complete_manual). `manager_start` only stages the
 //! plan — actual agent spawning waits for `manager_resume`.
 
+pub(crate) mod task_worktree;
+
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -96,6 +98,19 @@ pub struct ManagerSummary {
     /// it, so a row that can't say where it runs is a row you have to open to
     /// find out — and a surface that adopts one can't tell whether it belongs.
     pub machine_id: Option<String>,
+    /// How many projects the conversation is bound to. One is a workspace
+    /// chat; several is Aura's own conversation, which is about every project
+    /// — the Home panel lists those and not the chats of whichever workspace
+    /// is open. Defaulted so a row written before this field reads as 0
+    /// ("unknown") rather than failing to load.
+    #[serde(default)]
+    pub project_count: usize,
+    /// Every project root the conversation is bound to, in binding order —
+    /// `repo_root` is the first of them. Aura's history names each chat by the
+    /// projects it covers, which a single root (or a bare count) can't say.
+    /// Defaulted for the same reason as `project_count`.
+    #[serde(default)]
+    pub projects: Vec<String>,
 }
 
 impl From<&ManagerSession> for ManagerSummary {
@@ -115,6 +130,8 @@ impl From<&ManagerSession> for ManagerSummary {
             done_count: done,
             repo_root: s.projects.first().map(|p| p.root.clone()),
             machine_id: s.machine_id.clone(),
+            project_count: s.projects.len(),
+            projects: s.projects.iter().map(|p| p.root.clone()).collect(),
         }
     }
 }
@@ -143,6 +160,8 @@ impl From<&persist::SessionHead> for ManagerSummary {
             done_count: done,
             repo_root: s.projects.first().map(|p| p.root.clone()),
             machine_id: s.machine_id.clone(),
+            project_count: s.projects.len(),
+            projects: s.projects.iter().map(|p| p.root.clone()).collect(),
         }
     }
 }
@@ -170,6 +189,11 @@ pub struct ManagerStartArgs {
     /// overwhelming default — is a chat about the code on this disk.
     #[serde(default)]
     pub machine_id: Option<String>,
+    /// The brain the conversation is born with, when it isn't the default.
+    /// A chat on one of the org's machines must be born with its machine's
+    /// agent: whether the cloud is told about it is decided at birth.
+    #[serde(default)]
+    pub brain: Option<String>,
 }
 
 /// User-facing task spec used by `manager_start`. Stripped down compared
@@ -225,12 +249,20 @@ pub async fn manager_chat_start(
     prompt: String,
     machine_id: Option<String>,
     projects: Option<Vec<String>>,
+    brain: Option<String>,
 ) -> Result<String, String> {
+    let brain = brain.map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
+    if let Some(id) = brain.as_deref() {
+        if !brain::registry::is_switchable(id) {
+            return Err(format!("unknown brain `{id}`: a chat can't be started on it"));
+        }
+    }
     let args = ManagerStartArgs {
         objective: prompt,
         projects: project_refs(&repo_root, projects.unwrap_or_default()),
         tasks: vec![],
         machine_id,
+        brain,
     };
     start_session(&app, &runtime, args).await
 }
@@ -337,6 +369,7 @@ pub async fn manager_import_agent_session(
         // An imported CLI transcript is a record of work that ran on this
         // laptop; continuing it continues here.
         machine_id: None,
+        brain: None,
     };
     let id = start_session(&app, &runtime, args).await?;
 
@@ -367,6 +400,8 @@ pub async fn manager_import_agent_session(
                 model: None,
                 cost_usd: None,
                 cost_estimated: None,
+                cloud_key: None,
+                cloud_id: None,
             },
         );
     }
@@ -405,7 +440,7 @@ pub async fn manager_fork_session(
     // Snapshot the source under its lock: objective, project list, and the
     // chat prefix through the chosen turn. Drop the guard before starting the
     // new session so there's no nested-lock hazard.
-    let (objective, projects, machine_id, prefix) = {
+    let (objective, projects, machine_id, brain, prefix) = {
         let sessions = runtime.sessions.lock().unwrap();
         let live = sessions
             .get(&session_id)
@@ -419,6 +454,9 @@ pub async fn manager_fork_session(
             // machine. Dropping it would quietly move the branch home, where
             // the same questions have different answers.
             state.machine_id.clone(),
+            // A branch of a chat on one of the org's machines is kept the
+            // same way: off the cloud's session list.
+            state.brain_override.clone().filter(|b| brain::registry::on_a_machine(b)),
             state.chat[..end].to_vec(),
         )
     };
@@ -431,6 +469,7 @@ pub async fn manager_fork_session(
         projects,
         tasks: vec![],
         machine_id,
+        brain,
     };
     let id = start_session(&app, &runtime, args).await?;
     let forked = if let Some(live) = runtime.sessions.lock().unwrap().get(&id) {
@@ -514,7 +553,7 @@ fn trim_value_for_import(v: &mut serde_json::Value, max: usize) {
     }
 }
 
-fn map_preroll_turns(
+pub(crate) fn map_preroll_turns(
     turns: Vec<crate::cmd_agent_history::PrerollTurn>,
     agent_id: &str,
 ) -> Vec<ChatTurn> {
@@ -596,6 +635,8 @@ fn map_preroll_turns(
             model: None,
             cost_usd: None,
             cost_estimated: None,
+            cloud_key: None,
+            cloud_id: None,
         });
     }
     out
@@ -611,7 +652,7 @@ fn humanize_agent(agent_id: &str) -> &'static str {
     }
 }
 
-fn project_label(root: &str) -> String {
+pub(crate) fn project_label(root: &str) -> String {
     root.trim_end_matches('/')
         .rsplit('/')
         .next()
@@ -657,30 +698,33 @@ async fn start_session(
     // that changed machines mid-thread would have half its transcript about
     // one copy of the code and half about another.
     session.machine_id = args.machine_id;
+    session.brain_override = args.brain;
     let to_save = session.clone();
     crate::blocking::run(move || persist::save(&to_save)).await?;
     let _ = app.emit(&format!("manager:{id}"), &session);
 
-    // Best-effort: surface this session to aura-cloud so paired mobile
-    // + dashboard surfaces show it under Workspaces. One push per
-    // project root the session touches — if multiple projects are
-    // involved the cloud just ends up with one row per repo.
-    for project in &session.projects {
-        crate::cloud_session_sync::spawn_push(
-            project.root.clone(),
-            id.clone(),
-            session.objective.clone(),
-            "manager",
-        );
+    if mirrored(&session) {
+        // Best-effort: surface this session to aura-cloud so paired mobile
+        // + dashboard surfaces show it under Workspaces. One push per
+        // project root the session touches — if multiple projects are
+        // involved the cloud just ends up with one row per repo.
+        for project in &session.projects {
+            crate::cloud_session_sync::spawn_push(
+                project.root.clone(),
+                id.clone(),
+                session.objective.clone(),
+                "manager",
+            );
+        }
+        // Start polling for inbound mobile turns so the user can hand off
+        // mid-conversation between desktop and phone.
+        runtime
+            .cloud_inbox_sessions
+            .lock()
+            .unwrap()
+            .insert(id.clone());
+        crate::cloud_inbox::spawn_inbox_poller(app.clone(), id.clone());
     }
-    // Start polling for inbound mobile turns so the user can hand off
-    // mid-conversation between desktop and phone.
-    runtime
-        .cloud_inbox_sessions
-        .lock()
-        .unwrap()
-        .insert(id.clone());
-    crate::cloud_inbox::spawn_inbox_poller(app.clone(), id.clone());
 
     let (kick_tx, kick_rx) = mpsc::unbounded_channel();
     let live = LiveSession {
@@ -1426,14 +1470,31 @@ pub async fn manager_append_chat(
 ) -> Result<(), String> {
     mutate(&runtime, &session_id, |s| chat::append(s, role, text.clone())).await?;
     save_and_kick(&app, &runtime, &session_id).await;
-    ensure_cloud_session_pushed(&runtime, &session_id);
-    ensure_cloud_inbox_poller(&app, &runtime, &session_id);
-    crate::cloud_session_sync::spawn_push_message(
-        session_id.clone(),
-        chat_role_label(role),
-        text,
-    );
+    if mirrored_live(&runtime, &session_id) {
+        ensure_cloud_session_pushed(&runtime, &session_id);
+        ensure_cloud_inbox_poller(&app, &runtime, &session_id);
+        crate::cloud_session_sync::spawn_push_message(
+            session_id.clone(),
+            chat_role_label(role),
+            text,
+        );
+    }
     Ok(())
+}
+
+/// Whether the cloud keeps a copy of this conversation as a session of its
+/// own: every chat but one on the org's machines. That chat is already a
+/// cloud workspace — its turns go to the workspace's log and the workspace
+/// is the row Home lists — so a session row for it too would list it twice.
+fn mirrored(s: &ManagerSession) -> bool {
+    !s.brain_override.as_deref().is_some_and(brain::registry::on_a_machine)
+}
+
+/// [`mirrored`] for a session in the runtime. One that isn't loaded has
+/// nothing to push, so it answers for the default.
+fn mirrored_live(runtime: &ManagerRuntime, session_id: &str) -> bool {
+    let lock = runtime.sessions.lock().unwrap();
+    lock.get(session_id).map_or(true, |live| mirrored(&live.state.lock().unwrap()))
 }
 
 /// Stringify ChatRole for the cloud / mobile transport. The cloud
@@ -1458,9 +1519,9 @@ fn chat_role_label(role: ChatRole) -> &'static str {
 fn ensure_cloud_session_pushed(runtime: &ManagerRuntime, session_id: &str) {
     let snapshot = {
         let lock = runtime.sessions.lock().unwrap();
-        lock.get(session_id).map(|live| {
+        lock.get(session_id).and_then(|live| {
             let s = live.state.lock().unwrap();
-            (s.objective.clone(), s.projects.clone())
+            mirrored(&s).then(|| (s.objective.clone(), s.projects.clone()))
         })
     };
     if let Some((objective, projects)) = snapshot {
@@ -1493,15 +1554,21 @@ fn ensure_transcript_backfilled(runtime: &ManagerRuntime, session_id: &str) {
         }
     }
     // Prefer the live in-memory chat; fall back to the on-disk copy for a
-    // session that isn't attached to the runtime.
-    let chat = {
+    // session that isn't attached to the runtime. A chat the cloud keeps as
+    // a workspace has its log there already.
+    let live = {
         let lock = runtime.sessions.lock().unwrap();
-        lock.get(session_id)
-            .map(|live| live.state.lock().unwrap().chat.clone())
+        lock.get(session_id).map(|live| {
+            let s = live.state.lock().unwrap();
+            mirrored(&s).then(|| s.chat.clone())
+        })
     };
-    let chat = match chat.or_else(|| persist::load(session_id).ok().map(|s| s.chat)) {
-        Some(c) => c,
-        None => return, // nothing on disk — nothing to backfill
+    let chat = match live {
+        Some(chat) => chat,
+        None => persist::load(session_id).ok().and_then(|s| mirrored(&s).then_some(s.chat)),
+    };
+    let Some(chat) = chat else {
+        return; // nothing to backfill
     };
     let turns: Vec<crate::cloud_session_sync::BackfillTurn> = chat
         .iter()
@@ -1560,6 +1627,9 @@ pub fn spawn_startup_transcript_backfill(app: AppHandle) {
 /// from the runtime, so dup-spawning would just leak a task — we keep
 /// the set in `ManagerRuntime.cloud_inbox_sessions` to gate re-entry.
 fn ensure_cloud_inbox_poller(app: &AppHandle, runtime: &ManagerRuntime, session_id: &str) {
+    if !mirrored_live(runtime, session_id) {
+        return;
+    }
     let mut set = runtime.cloud_inbox_sessions.lock().unwrap();
     if set.insert(session_id.to_string()) {
         crate::cloud_inbox::spawn_inbox_poller(app.clone(), session_id.to_string());
@@ -1649,7 +1719,7 @@ async fn manager_chat_impl(
         .await;
     }
     save_and_kick(&app, &runtime, &session_id).await;
-    if push_to_cloud {
+    if push_to_cloud && mirrored_live(&runtime, &session_id) {
         ensure_cloud_session_pushed(&runtime, &session_id);
         ensure_cloud_inbox_poller(&app, &runtime, &session_id);
         crate::cloud_session_sync::spawn_push_message(session_id.clone(), "user", pushed_message);
@@ -3464,6 +3534,10 @@ pub async fn manager_brain_detect() -> Result<Option<BrainBackendInfo>, String> 
 /// live brain registry so a typo can't strand the session on a dead
 /// brain. `brain_chat_turn` honors the same id per-turn for the native
 /// path; this command is the durable record + the legacy path's source.
+///
+/// A chat on one of the org's machines is recorded here too, once this
+/// laptop is connected to it, and from then on it stays on that machine: a
+/// switch to any other brain is refused (`registry::stays_on_machine`).
 #[tauri::command]
 pub async fn manager_set_brain_override(
     app: AppHandle,
@@ -3475,20 +3549,70 @@ pub async fn manager_set_brain_override(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     if let Some(id) = normalized.as_deref() {
-        let known = brain::registry::descriptors()
-            .iter()
-            .any(|d| d.provider_id == id);
-        if !known {
+        if !brain::registry::is_switchable(id) {
             return Err(format!(
                 "unknown brain `{id}` — not in the registry; pick one from manager_list_brains"
             ));
         }
     }
-    mutate(&runtime, &session_id, |s| {
+    mutate_take(&runtime, &session_id, |s| {
+        brain::registry::stays_on_machine(s.brain_override.as_deref(), normalized.as_deref())?;
         s.brain_override = normalized.clone();
+        Ok::<(), String>(())
     })
-    .await?;
+    .await??;
     save_and_kick(&app, &runtime, &session_id).await;
+    Ok(())
+}
+
+/// Rename a conversation. Its title is the session's objective — the name the
+/// tab strip, the chat list and the history all show — so a rename writes
+/// that. A blank or unchanged name changes nothing.
+///
+/// A conversation that isn't loaded is renamed on disk rather than attached:
+/// attaching starts its loop, and a rename is no reason to wake a session
+/// that was left mid-run.
+#[tauri::command]
+pub async fn manager_rename(
+    app: AppHandle,
+    runtime: State<'_, ManagerRuntime>,
+    session_id: String,
+    title: String,
+) -> Result<(), String> {
+    let Some(title) = crate::manager::clean_chat_title(&title) else {
+        return Ok(());
+    };
+    let live = runtime
+        .sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .map(|l| l.state.clone());
+    let snapshot = match live {
+        Some(state) => {
+            let mut s = state.lock().unwrap();
+            if s.objective == title {
+                return Ok(());
+            }
+            s.objective = title;
+            s.touch();
+            s.clone()
+        }
+        None => {
+            let id = session_id.clone();
+            let loaded = crate::blocking::run(move || persist::load(&id)).await?;
+            if loaded.objective == title {
+                return Ok(());
+            }
+            let mut s = loaded;
+            s.objective = title;
+            s.touch();
+            s
+        }
+    };
+    let to_save = snapshot.clone();
+    crate::blocking::run(move || persist::save(&to_save)).await?;
+    let _ = app.emit(&format!("manager:{session_id}"), &snapshot);
     Ok(())
 }
 
@@ -3607,7 +3731,7 @@ fn attach_or_adopt(
     (state, true)
 }
 
-async fn ensure_attached(
+pub(crate) async fn ensure_attached(
     runtime: &State<'_, ManagerRuntime>,
     session_id: &str,
 ) -> Result<Arc<Mutex<ManagerSession>>, String> {
@@ -4732,5 +4856,58 @@ mod conversation_search_tests {
         let hit = search_snippet(&text, "needle").unwrap();
         assert_eq!(hit.chars().count(), 220);
         assert!(hit.ends_with('…'));
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::{mirrored, mirrored_live, LiveSession, ManagerRuntime, ManagerStartArgs};
+    use crate::manager::ManagerSession;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+
+    fn session(brain: Option<&str>) -> ManagerSession {
+        let mut s = ManagerSession::new("sid".into(), "a chat".into(), vec![], vec![]);
+        s.brain_override = brain.map(str::to_string);
+        s
+    }
+
+    fn runtime_with(id: &str, s: ManagerSession) -> ManagerRuntime {
+        let runtime = ManagerRuntime::new();
+        let (kick_tx, _kick_rx) = mpsc::unbounded_channel();
+        runtime.sessions.lock().unwrap().insert(
+            id.to_string(),
+            LiveSession { state: Arc::new(Mutex::new(s)), in_flight: Arc::new(Mutex::new(HashMap::new())), kick_tx },
+        );
+        runtime
+    }
+
+    #[test]
+    fn a_chat_on_one_of_the_orgs_machines_is_not_listed_twice() {
+        // Its workspace is its row on Home; a session row would be a second.
+        assert!(!mirrored(&session(Some("place:ws-8f1c2d3e"))));
+        // Every other chat is still mirrored, whatever brain it uses.
+        assert!(mirrored(&session(None)));
+        assert!(mirrored(&session(Some("anthropic"))));
+        assert!(mirrored(&session(Some("acp:claude"))));
+    }
+
+    #[test]
+    fn the_runtime_answers_for_the_session_it_holds() {
+        let runtime = runtime_with("box", session(Some("place:ws-1")));
+        assert!(!mirrored_live(&runtime, "box"));
+        let runtime = runtime_with("here", session(None));
+        assert!(mirrored_live(&runtime, "here"));
+        // Not loaded: nothing of it would be pushed anyway.
+        assert!(mirrored_live(&runtime, "elsewhere"));
+    }
+
+    #[test]
+    fn a_start_that_names_no_brain_starts_as_before() {
+        let args: ManagerStartArgs =
+            serde_json::from_value(serde_json::json!({"objective": "o", "projects": [], "tasks": []})).unwrap();
+        assert_eq!(args.brain, None);
+        assert_eq!(args.machine_id, None);
     }
 }

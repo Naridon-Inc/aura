@@ -362,6 +362,10 @@ pub fn render_moved_workspace(v: &Value) -> String {
     }
 }
 
+/// The models a workspace's agent can run, and whether a turn on each can
+/// start. A server that names each model's `agent` says whether you are
+/// signed in to that agent; an older one said whether the org held a
+/// provider key, and is shown the way it meant it.
 pub fn render_models(v: &Value) -> String {
     let rows = match v.get("models").and_then(|m| m.as_array()) {
         Some(r) if !r.is_empty() => r,
@@ -370,13 +374,26 @@ pub fn render_models(v: &Value) -> String {
     let mut out = String::new();
     for m in rows {
         let available = m.get("available").and_then(|a| a.as_bool()).unwrap_or(false);
-        out.push_str(&format!(
-            "  {:<32} {:<10} {:<8} {}\n",
-            s(m, "id"),
-            s(m, "provider"),
-            s(m, "tier"),
-            if available { "key configured" } else { "no key" }
-        ));
+        let agent = s(m, "agent");
+        let line = if agent.is_empty() {
+            format!(
+                "  {:<32} {:<10} {:<8} {}",
+                s(m, "id"),
+                s(m, "provider"),
+                s(m, "tier"),
+                if available { "key configured" } else { "no key" }
+            )
+        } else {
+            let state = if available { "signed in".to_string() } else { format!("not signed in to {agent}") };
+            let new = if m.get("is_new").and_then(|n| n.as_bool()).unwrap_or(false) { " · new" } else { "" };
+            format!("  {:<28} {:<20} {:<7} {state}{new}", s(m, "id"), s(m, "label"), agent)
+        };
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    let default_agent = s(v, "default_agent");
+    if !default_agent.is_empty() {
+        out.push_str(&format!("  default agent: {default_agent}\n"));
     }
     let default = s(v, "default_provider");
     if !default.is_empty() {

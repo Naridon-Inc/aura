@@ -76,6 +76,10 @@ impl Provisioner for ByoProvider {
 
         let stdout = String::from_utf8_lossy(&out.stdout);
         let token = parse_runner_token(&stdout).ok_or(ProvisionError::TokenNotFound)?;
+        // A name already on the board is registered as `name-2`, and the box
+        // answers to that one. Waiting for the typed name would wait on
+        // whichever other machine already holds it.
+        let name = parse_registered_name(&stdout).unwrap_or(name);
 
         Ok(adopted(name, token))
     }
@@ -253,6 +257,17 @@ fn parse_runner_token(stdout: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The name `aura runner register` registered the box under, from its
+/// `✓ runner <name> registered` line.
+fn parse_registered_name(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = &line[line.find("runner ")? + "runner ".len()..];
+        let name = rest.strip_suffix(" registered")?.trim();
+        (!name.is_empty()).then(|| name.to_string())
+    })
 }
 
 /// Map `aura runner status`'s one-line output (`● name · running · task`) to a
@@ -470,6 +485,13 @@ mod tests {
             panic!("tearing down a BYO box must be Unsupported, with a reason");
         };
         assert!(why.contains("stop the runner"), "{why}");
+    }
+
+    #[test]
+    fn the_name_the_cloud_gave_is_the_name_kept() {
+        let out = "✓ runner home-server-2 registered\n\nSave this token — it is shown only once:\n  tok\n";
+        assert_eq!(parse_registered_name(out).as_deref(), Some("home-server-2"));
+        assert_eq!(parse_registered_name("Save this token — it is shown only once:\n  tok\n"), None);
     }
 
     #[test]

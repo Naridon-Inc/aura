@@ -1,0 +1,598 @@
+/* A shared session. The transcript is the shared-message pattern, the box is
+   the chat composer, and "@" opens the composer's suggestion list; what is
+   added here is what a room has that a one-person chat doesn't: faces that
+   say what each person or agent is doing, who a message is for, an agent
+   stepping aside, and hand-over from the "@" list. */
+
+/* ── a face ──────────────────────────────────────────────────────────── */
+
+.ui-session-face {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.ui-session-face-tile {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-muted);
+}
+/* What they are doing: green when it touches the code, yellow for talking,
+   an outline for watching, faint for idle. The ring is the surface the face
+   sits on, so it reads the same in a menu as in the strip. */
+.ui-session-face-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  border-radius: 50%;
+  background: var(--ui-faint);
+  box-shadow: 0 0 0 2px var(--ui-session-face-ring, var(--ui-bg));
+}
+.ui-session-face-dot[data-state="coding"] {
+  background: var(--ui-green);
+  box-shadow:
+    0 0 0 2px var(--ui-session-face-ring, var(--ui-bg)),
+    0 0 0 3.5px color-mix(in srgb, var(--ui-green) 35%, transparent);
+}
+.ui-session-face-dot[data-state="instructing"] {
+  background: var(--ui-green);
+}
+.ui-session-face-dot[data-state="talking"] {
+  background: var(--ui-yellow);
+}
+.ui-session-face-dot[data-state="watching"] {
+  background: var(--ui-session-face-ring, var(--ui-bg));
+  border: 1.5px solid var(--ui-muted-fg);
+}
+.aura-menu-surface,
+.ui-composer-suggestions,
+.ui-hover-card {
+  --ui-session-face-ring: var(--ui-popover);
+}
+.ui-shared-message > div {
+  --ui-session-face-ring: var(--ui-user-message, var(--ui-sidebar));
+}
+
+/* A name over a quieter line — the "+N" menu and the "@" list. */
+.ui-session-person {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.35;
+}
+.ui-session-person > span,
+.ui-session-person > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-session-person > small {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+
+/* ── who is in here ──────────────────────────────────────────────────── */
+
+.ui-session-strip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  height: 28px;
+}
+.ui-session-strip.ui-state-row {
+  padding: 0;
+  font-size: 12px;
+}
+.ui-session-strip-note {
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-session-strip-note[data-tone="error"] {
+  color: var(--ui-red);
+}
+.ui-session-presence-face {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+.ui-session-presence-face:focus-visible {
+  outline: 2px solid var(--ui-ring);
+  outline-offset: 2px;
+}
+.ui-session-presence-more {
+  font-variant-numeric: tabular-nums;
+}
+.ui-hover-card.ui-session-hover-card {
+  width: max-content;
+  max-width: 240px;
+  padding: 8px 10px;
+}
+.ui-session-hover-card > strong {
+  display: block;
+  color: var(--ui-fg);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+.ui-session-hover-card > small {
+  display: block;
+  margin-top: 2px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.ui-menu-panel.ui-session-presence-menu {
+  width: 256px;
+}
+
+/* ── the room ────────────────────────────────────────────────────────── */
+
+.ui-session-room {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+}
+.ui-session-header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-session-header-spacer {
+  flex: 1;
+}
+.ui-session-header > .ui-state-row {
+  padding: 0;
+  font-size: 12px;
+}
+.ui-session-header > .ui-button[aria-pressed="true"] {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-session-notices {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-session-notices > div {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 896px;
+  margin: 0 auto;
+  padding: 10px 28px;
+}
+/* What a guest may do here, said in words beside the box it governs. A
+   strip, not a card: it sits inside a surface that already has edges. */
+.ui-session-access {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  line-height: 20px;
+}
+.ui-session-access > svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+  color: var(--ui-muted-fg);
+}
+.ui-session-access[data-level="drive"] > svg {
+  color: var(--ui-green);
+}
+.ui-session-access > div {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.ui-session-access p {
+  margin: 0;
+}
+.ui-session-access strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-session-access small {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--ui-faint);
+  font-size: 12px;
+  line-height: 18px;
+}
+.ui-session-access small > svg {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  margin-top: 3px;
+}
+.ui-session-access small[data-tone="warning"] {
+  color: var(--ui-yellow);
+}
+.ui-session-access small[data-tone="error"] {
+  color: var(--ui-red);
+}
+.ui-session-tunnels {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.ui-session-tunnels > span {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-session-tunnel {
+  flex-shrink: 1;
+  max-width: 100%;
+  min-width: 0;
+  font-family: var(--font-mono);
+  vertical-align: middle;
+}
+.ui-session-tunnel > svg {
+  width: 12px;
+  height: 12px;
+  color: var(--ui-green);
+}
+/* Unclickable is said by the chip itself — struck through when the port
+   closed, plain when nobody wired a way to open it — not by dimming it. */
+.ui-session-tunnel:disabled {
+  cursor: default;
+  opacity: 1;
+}
+.ui-session-tunnel:not([data-clickable]):not([data-status="closed"]) {
+  color: var(--ui-muted-fg);
+}
+.ui-session-tunnel > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-session-tunnel > small {
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-family: var(--font-sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-session-tunnel[data-status="closed"] {
+  color: var(--ui-faint);
+  text-decoration: line-through;
+}
+.ui-session-tunnel[data-status="closed"] > svg {
+  color: var(--ui-faint);
+}
+.ui-session-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.ui-session-files {
+  flex-shrink: 0;
+  width: 256px;
+  min-height: 0;
+  border-right: 1px solid var(--ui-border);
+}
+.ui-session-room > .ui-chat-composer-area {
+  flex-shrink: 0;
+  padding-top: 0;
+}
+
+/* ── a message ───────────────────────────────────────────────────────── */
+
+/* The shared message draws the face from its own avatar slot; the slot here
+   holds the app's face instead of an initials disc. */
+.ui-shared-message > header .ui-cloud-avatar.ui-session-message-face {
+  background: none;
+  color: inherit;
+}
+.ui-session-message-gone {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-muted);
+}
+.ui-session-message > div {
+  min-width: 0;
+}
+/* The same sender again: the face steps back and the gap closes. */
+.ui-shared-message.ui-session-message[data-grouped] {
+  margin-top: -10px;
+}
+.ui-session-message[data-grouped] > header {
+  visibility: hidden;
+}
+/* An agent's words read like the assistant's in the chat — on the page, not
+   in a bubble — with its face beside them saying whose agent it is. */
+.ui-shared-message.ui-session-message[data-kind="agent"] > div {
+  flex: 1;
+  padding: 2px 0 0;
+  background: none;
+}
+/* Do this / Handed over change what happens next. */
+.ui-shared-message.ui-session-message[data-loud] > div {
+  box-shadow: inset 2px 0 0 var(--ui-green);
+}
+.ui-shared-message.ui-session-message[data-loud][data-kind="agent"] > div {
+  padding-left: 12px;
+}
+.ui-session-message-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 18px;
+}
+.ui-session-message-meta > strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-session-message-to {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  max-width: 180px;
+}
+.ui-session-message-to > svg {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+}
+.ui-session-message-to > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-session-message-empty {
+  color: var(--ui-faint);
+  font-style: italic;
+}
+.ui-session-message-streaming {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-session-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+.ui-session-ref {
+  max-width: 240px;
+}
+.ui-session-ref > code {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-session-ref > small {
+  overflow: hidden;
+  color: var(--ui-faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* "@priya" in a message: a handle that exists in the room. Yours is red, so
+   a message that names you is found at a glance. */
+.ui-session-mention-tag {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ui-link) 14%, transparent);
+  color: var(--ui-link);
+  font-weight: 500;
+}
+.ui-session-mention-tag[data-self] {
+  background: color-mix(in srgb, var(--ui-red) 16%, transparent);
+  color: var(--ui-red);
+}
+
+/* An agent stepping aside, under the message that made it. */
+.ui-session-standdown {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: -8px 0 16px 34px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 18px;
+}
+.ui-session-standdown > svg {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  margin-top: 3px;
+  color: var(--ui-faint);
+}
+.ui-session-standdown > p {
+  min-width: 0;
+  margin: 0;
+}
+.ui-session-standdown strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-session-standdown small {
+  color: var(--ui-faint);
+  font-size: 12px;
+}
+.ui-session-standdown > time {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--ui-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── who is typing ───────────────────────────────────────────────────── */
+
+.ui-cloud-typing.ui-session-typing {
+  min-width: 0;
+  overflow: hidden;
+}
+.ui-cloud-typing > .ui-session-typing-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: inherit;
+  letter-spacing: normal;
+}
+.ui-session-typing-chip > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-session-typing-dots {
+  font-size: 12px;
+  letter-spacing: 2px;
+}
+.ui-session-typing-sep {
+  color: var(--ui-faint);
+}
+/* Outside the composer area — a session band's row — the line sits flush in
+   the row it shares instead of keeping the space above a composer. */
+:not(.ui-chat-composer-area) > .ui-cloud-typing.ui-session-typing {
+  min-height: 0;
+  padding: 0;
+}
+
+/* ── the box ─────────────────────────────────────────────────────────── */
+
+/* The "@" list sits on this wrapper rather than inside the box, which clips
+   whatever leaves its rounded edge. */
+.ui-session-composer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-session-composer > .ui-composer-suggestions {
+  left: 8px;
+  width: min(320px, calc(100% - 16px));
+}
+/* The addressing bar is the context line itself; the box draws its rule. */
+.ui-session-composer .ui-composer > .ui-composer-context {
+  padding: 0;
+}
+.ui-error-note.ui-session-send-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-session-send-error > span {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── the "@" list ────────────────────────────────────────────────────── */
+
+.ui-session-mention {
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+}
+.ui-session-mention[aria-selected="true"] {
+  background: var(--ui-hover);
+}
+.ui-composer-suggestions .ui-session-mention > .ui-session-mention-pick {
+  flex: 1;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+}
+.ui-composer-suggestions .ui-session-mention > .ui-session-mention-handover {
+  flex-direction: row;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  width: auto;
+  margin-right: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+}
+.ui-session-mention:hover > .ui-session-mention-handover,
+.ui-session-mention[aria-selected="true"] > .ui-session-mention-handover,
+.ui-session-mention > .ui-session-mention-handover:focus-visible {
+  opacity: 1;
+}
+.ui-session-mentions-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-session-mentions-state.ui-state-row {
+  padding: 8px;
+}
+.ui-session-mentions-state[data-tone="error"] {
+  color: var(--ui-red);
+}
+.ui-session-mentions-hint {
+  margin-top: 4px;
+  padding: 6px 8px 2px;
+  border-top: 1px solid var(--ui-border);
+  color: var(--ui-faint);
+  font-size: 11px;
+}
+.ui-composer-tools > .ui-state-row.ui-session-sending {
+  padding: 0 4px;
+  font-size: 12px;
+}
+
+/* ── the band a shared terminal grows ─────────────────────────────────── */
+
+.ui-shared-band {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.ui-shared-band-spacer {
+  flex: 1;
+}
+.ui-shared-band-live {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+}
+.ui-session-strip-note[data-tone="quiet"] {
+  opacity: 0.7;
+}

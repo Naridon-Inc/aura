@@ -136,7 +136,7 @@ describe("a project that declares no environment", () => {
     });
     const nothing = { ...bare, declares_environment: false };
     expect(driftHeadline(nothing)).toBe(
-      "This project declares no environment — below is what this place has",
+      "This repository declares no environment — below is what this place has",
     );
     expect(alsoHere(nothing)).toHaveLength(1);
     expect(blocking(nothing)).toEqual([]);

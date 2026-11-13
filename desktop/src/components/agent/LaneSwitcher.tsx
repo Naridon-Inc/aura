@@ -29,9 +29,14 @@ import {
   spawnLane,
   useLanes,
 } from "../../lib/laneStore";
+import { Check, Plus, X } from "lucide-react";
+
 import { AgentIcon } from "./AgentIcon";
-import { Input } from "../ui/input";
+import { Alert, AlertDescription } from "../ui/alert";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import "../ui/launcher.css";
 import { titleCaseName } from "@shared/textCase";
 
 type Props = {
@@ -74,80 +79,58 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
   }
 
   return (
-    <div className="flex flex-col gap-2 p-2 w-[300px] bg-bg-2 border border-line rounded-lg">
-      <div className="flex items-center justify-between px-1">
-        <span className="text-text-1 text-base font-medium">Lanes</span>
-        <span className="text-text-5 text-xs tabular-nums">
-          {lanes.length === 0
-            ? "no lanes yet"
-            : `${lanes.length} running`}
-        </span>
-      </div>
+    <div className="ui-lanes">
+      <header className="ui-lanes-head">
+        <strong>Lanes</strong>
+        <span>{lanes.length === 0 ? "None yet" : `${lanes.length} running`}</span>
+      </header>
 
-      <p className="px-1 text-text-4 text-xs leading-snug">
-        A lane is an isolated copy of your project for one agent. Start a new
+      <p className="ui-launcher-menu-note">
+        A lane is an isolated copy of your repository for one agent. Start a new
         lane to run another agent in parallel. Your files never collide.
       </p>
 
-      {/* Lane list */}
-      <ul className="flex flex-col gap-1">
-        {lanes.map((lane) => {
-          const isActive = lane.id === activeLaneId;
-          return (
-            <li key={lane.id}>
-              <div
-                onClick={() => focus(lane)}
-                className="group flex items-center gap-2 px-2 py-1.5 rounded-md cursor-pointer transition-colors"
-                style={{
-                  background: isActive ? "var(--color-accent)" : "transparent",
-                }}
-              >
-                <AgentIcon agentId={lane.agent} size={16} />
-                <div className="flex-1 min-w-0">
-                  <div
-                    className="text-sm truncate"
-                    style={{ color: isActive ? "var(--color-bg-0)" : "var(--color-text-1)" }}
-                  >
-                    {lane.label || laneTitle(lane)}
-                  </div>
-                  <div
-                    className="text-2xs font-mono truncate"
-                    style={{
-                      color: isActive
-                        ? "color-mix(in srgb, var(--color-bg-0) 70%, transparent)"
-                        : "var(--color-text-5)",
-                    }}
-                    title={`branch ${lane.branch}`}
-                  >
-                    {lane.termId ? "active" : "paused"} · branch {lane.branch}
-                  </div>
-                </div>
+      {lanes.length > 0 && (
+        <ul className="ui-lanes-list">
+          {lanes.map((lane) => {
+            const isActive = lane.id === activeLaneId;
+            return (
+              <li key={lane.id} className="ui-lanes-item">
                 <button
                   type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDiscard(lane, false);
-                  }}
-                  title="Close this lane"
-                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-xs px-1.5 py-0.5 rounded flex-shrink-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
-                  style={{
-                    color: isActive
-                      ? "color-mix(in srgb, var(--color-bg-0) 85%, transparent)"
-                      : "var(--color-text-4)",
-                  }}
+                  className="ui-menu-row ui-where-row"
+                  data-current={isActive ? "" : undefined}
+                  aria-current={isActive ? "true" : undefined}
+                  onClick={() => focus(lane)}
                 >
-                  Close
+                  <AgentIcon agentId={lane.agent} size={14} />
+                  <span className="ui-where-row-text">
+                    <span>{lane.label || laneTitle(lane)}</span>
+                    <small className="ui-launcher-mono" title={`branch ${lane.branch}`}>
+                      {lane.termId ? "active" : "paused"} · branch {lane.branch}
+                    </small>
+                  </span>
                 </button>
-              </div>
-            </li>
-          );
-        })}
-      </ul>
+                <Button
+                  variant="ghost"
+                  size="iconXs"
+                  className="ui-lanes-close"
+                  aria-label={`Close ${lane.label || laneTitle(lane)}`}
+                  title="Close this lane"
+                  onClick={() => void onDiscard(lane, false)}
+                >
+                  <X />
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
 
       {/* Dirty-guard confirmation */}
       {dirtyConfirm && (
-        <div className="flex flex-col gap-2 p-2 rounded-md bg-bg-1 border border-line-soft">
-          <span className="text-text-1 text-sm leading-snug">
+        <Alert variant="destructive" className="ui-lanes-confirm">
+          <AlertDescription>
             This lane has unsaved work
             {dirtyConfirm.changedFiles > 0 && (
               <>
@@ -157,31 +140,26 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
               </>
             )}
             . Discard anyway?
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => onDiscard(dirtyConfirm.lane, true)}
-              className="text-xs px-2 h-6 rounded text-white"
-              style={{ background: "var(--color-red)" }}
+          </AlertDescription>
+          <div className="ui-lanes-actions">
+            <Button
+              variant="destructive"
+              size="xs"
+              onClick={() => void onDiscard(dirtyConfirm.lane, true)}
             >
               Discard anyway
-            </button>
-            <button
-              type="button"
-              onClick={() => setDirtyConfirm(null)}
-              className="text-xs px-2 h-6 rounded text-text-3 hover:bg-state-hover"
-            >
+            </Button>
+            <Button variant="ghost" size="xs" onClick={() => setDirtyConfirm(null)}>
               Keep it
-            </button>
+            </Button>
           </div>
-        </div>
+        </Alert>
       )}
 
       {error && (
-        <div className="px-1 text-red text-xs font-mono break-words">
-          {error}
-        </div>
+        <Alert variant="destructive">
+          <AlertDescription className="ui-launcher-mono">{error}</AlertDescription>
+        </Alert>
       )}
 
       {/* Start a new lane */}
@@ -202,15 +180,10 @@ export function LaneSwitcher({ repoRoot, onFocusLane }: Props) {
           }}
         />
       ) : (
-        <button
-          type="button"
-          onClick={() => setStarting(true)}
-          className="flex items-center justify-center gap-1.5 h-8 rounded-md text-sm font-medium text-white transition-opacity hover:opacity-90"
-          style={{ background: "var(--color-accent)" }}
-        >
-          <span className="text-base leading-none">+</span>
+        <Button className="ui-lanes-start" onClick={() => setStarting(true)}>
+          <Plus />
           Start a new lane
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -254,20 +227,18 @@ function NewLanePicker({
   }, []);
 
   return (
-    <div className="flex flex-col gap-2 p-2 rounded-md bg-bg-1 border border-line-soft">
-      <span className="text-text-1 text-sm font-medium">
-        Start a new lane
-      </span>
+    <section className="ui-lanes-new">
+      <div className="ui-launcher-pop-label">Start a new lane</div>
 
-      <div className="flex flex-col gap-1">
+      <div className="ui-lanes-agents">
         {agents === null && (
-          <span className="flex items-center gap-1.5 text-text-4 text-xs">
+          <span className="ui-launcher-menu-note" data-loading="">
             <AsciiSpinner />
             Finding agents…
           </span>
         )}
         {agents && agents.length === 0 && (
-          <span className="text-text-4 text-xs">
+          <span className="ui-launcher-menu-note">
             No agents found. Install Claude Code, Gemini, or Codex first.
           </span>
         )}
@@ -277,19 +248,16 @@ function NewLanePicker({
             <button
               key={a.id}
               type="button"
+              className="ui-menu-row ui-where-row"
+              data-current={active ? "" : undefined}
+              aria-pressed={active}
               onClick={() => setAgentId(a.id)}
-              className="flex items-center gap-2 px-2 py-1.5 rounded-md text-left transition-colors"
-              style={{
-                background: active ? "var(--color-accent)" : "transparent",
-              }}
             >
-              <AgentIcon agentId={a.id} label={a.label} size={16} />
-              <span
-                className="text-sm flex-1"
-                style={{ color: active ? "var(--color-bg-0)" : "var(--color-text-1)" }}
-              >
-                {a.label}
+              <AgentIcon agentId={a.id} label={a.label} size={14} />
+              <span className="ui-where-row-text">
+                <span>{a.label}</span>
               </span>
+              {active && <Check className="ui-where-check" />}
             </button>
           );
         })}
@@ -299,28 +267,24 @@ function NewLanePicker({
         value={label}
         onChange={(e) => setLabel(e.target.value)}
         placeholder="Name this lane (optional)"
-        className="text-sm placeholder:text-text-5"
+        size="small"
       />
 
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
+      <div className="ui-lanes-actions">
+        <Button
+          size="sm"
+          className="ui-lanes-start"
           disabled={!agentId || busy}
           onClick={() => agentId && onStart(agentId, label.trim())}
-          className="flex-1 h-7 rounded-md text-sm font-medium text-white disabled:opacity-50 transition-opacity hover:opacity-90"
-          style={{ background: "var(--color-accent)" }}
         >
+          {busy ? <AsciiSpinner size={12} /> : null}
           {busy ? "Starting…" : "Start lane"}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="h-7 px-2.5 rounded-md text-sm text-text-3 hover:bg-state-hover"
-        >
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
-    </div>
+    </section>
   );
 }
 

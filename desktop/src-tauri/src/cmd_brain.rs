@@ -19,7 +19,6 @@ use crate::manager::brain::{
     registry::{self, BrainDescriptor},
     settings::{self, BrainSettings, ProviderConfig},
 };
-use crate::cloud_org::OrgScoped;
 
 /// Provider-id prefix for user-registered OpenAI-compatible endpoints.
 /// Mirrors `manager::brain::openai_compat::PROVIDER_PREFIX`, redeclared
@@ -93,10 +92,14 @@ fn kind_of(provider_id: &str) -> String {
 /// from the same `registry::descriptors()` the Settings picker uses —
 /// static singletons plus one entry per user-registered
 /// `openai_compat:<slug>` and per installed CLI wrapper — so the two
-/// surfaces never drift. `active` marks the globally-active brain.
+/// surfaces never drift. `active` marks the brain a turn runs on when the
+/// session picks none: the saved choice, or — when nothing is saved, or the
+/// saved one was retired — the first agent or key the user has set up.
 #[tauri::command]
 pub async fn manager_list_brains() -> Result<Vec<BrainChoice>, String> {
-    let active_id = settings::load().active_provider_id;
+    let active_id = settings::load()
+        .active_provider_id
+        .or_else(|| registry::first_available_fallback_excluding(&[]));
     Ok(registry::descriptors()
         .iter()
         .map(|d| BrainChoice {
@@ -510,140 +513,4 @@ pub async fn brain_cloud_config_get(provider_id: String) -> Result<BrainCloudCon
         extra,
         has_secret,
     })
-}
-
-// ─── Aura Pro brain — sign-in state + quota ──────────────────────────
-//
-// v0.2.31 task #352. The Aura Pro row in the BrainSettings UI doesn't
-// take an API key — instead it surfaces "Signed in as <email>" and a
-// "1.2M / 2M tokens used this period" chip. These two commands back
-// those two pieces of state.
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AuraProSignInState {
-    pub signed_in: bool,
-    /// `cloud_user` from credentials.json — usually an email.
-    pub user: Option<String>,
-    /// `cloud_url` from credentials.json — exposed so the picker can
-    /// label which deployment the user is on (helps when staging vs
-    /// prod sessions get confused).
-    pub cloud_origin: Option<String>,
-}
-
-#[tauri::command]
-pub async fn aura_pro_is_signed_in() -> Result<AuraProSignInState, String> {
-    #[cfg(feature = "brain_aura_pro")]
-    {
-        use crate::manager::brain::aura_pro::read_credentials;
-        let creds = read_credentials();
-        return Ok(AuraProSignInState {
-            signed_in: creds.is_signed_in(),
-            user: creds.cloud_user,
-            cloud_origin: creds.cloud_origin,
-        });
-    }
-    #[cfg(not(feature = "brain_aura_pro"))]
-    Ok(AuraProSignInState {
-        signed_in: false,
-        user: None,
-        cloud_origin: None,
-    })
-}
-
-/// Mirrors the cloud `QuotaView` struct returned by `GET /v1/brain/quota`.
-/// Snake-case matches the wire shape so we can hand the payload straight
-/// to the frontend with no further mapping.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuraProQuota {
-    pub tier: String,
-    pub active: bool,
-    pub monthly_token_limit: Option<i64>,
-    pub tokens_used_current_period: i64,
-    /// ISO-8601 timestamp when the current 30-day window started.
-    pub period_started_at: String,
-}
-
-/// Why a quota read failed, in the shape the panel needs to decide what to
-/// offer the user.
-///
-/// It used to fail as a bare string, and the one case that matters got lost in
-/// it. [`aura_pro_is_signed_in`] proves only that a token *string* is on disk —
-/// never that the cloud still honours it — so an expired session left the panel
-/// saying "Signed in as <email>" beside a Refresh button whose every press
-/// repeats the same 401. The user is told nothing is wrong with their account
-/// and handed the one control that cannot fix it.
-///
-/// `kind` is the machine-readable half; `message` keeps the detail for the
-/// small print. Naming the auth case is what lets the UI offer signing in
-/// again, which is the only thing that helps.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuraProQuotaError {
-    /// `unauthorized` — the cloud rejected this token, or there isn't one.
-    /// `offline` — the request never reached the cloud.
-    /// `server` — it arrived and the answer wasn't usable.
-    /// `unsupported` — this build has no Aura Pro brain compiled in.
-    pub kind: String,
-    pub message: String,
-}
-
-impl AuraProQuotaError {
-    fn new(kind: &str, message: impl Into<String>) -> Self {
-        Self {
-            kind: kind.to_string(),
-            message: message.into(),
-        }
-    }
-}
-
-#[tauri::command]
-pub async fn aura_pro_quota() -> Result<AuraProQuota, AuraProQuotaError> {
-    #[cfg(feature = "brain_aura_pro")]
-    {
-        use crate::manager::brain::aura_pro::read_credentials;
-        let creds = read_credentials();
-        let token = creds.cloud_token.ok_or_else(|| {
-            AuraProQuotaError::new("unauthorized", "Not signed in to Aura Pro")
-        })?;
-        let origin = creds
-            .cloud_origin
-            .unwrap_or_else(|| crate::manager::brain::aura_pro::DEFAULT_CLOUD_ORIGIN.to_string());
-
-        let url = format!("{origin}/v1/brain/quota");
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| AuraProQuotaError::new("offline", format!("http client: {e}")))?;
-        let resp = client
-            .get(&url)
-            .bearer_auth(&token)
-            .org_scoped()
-            .send()
-            .await
-            .map_err(|e| AuraProQuotaError::new("offline", format!("GET {url}: {e}")))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let txt = resp.text().await.unwrap_or_default();
-            // A 401 body is empty, so the status is the whole story — which is
-            // why this case has to be named rather than pasted into a sentence.
-            let kind = if status.as_u16() == 401 || status.as_u16() == 403 {
-                "unauthorized"
-            } else {
-                "server"
-            };
-            return Err(AuraProQuotaError::new(
-                kind,
-                format!("quota HTTP {status}: {txt}"),
-            ));
-        }
-        let quota: AuraProQuota = resp
-            .json()
-            .await
-            .map_err(|e| AuraProQuotaError::new("server", format!("parse quota: {e}")))?;
-        return Ok(quota);
-    }
-    #[cfg(not(feature = "brain_aura_pro"))]
-    Err(AuraProQuotaError::new(
-        "unsupported",
-        "aura_pro brain is not compiled into this build",
-    ))
 }

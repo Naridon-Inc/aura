@@ -12,7 +12,7 @@
 //! told about, on top of whatever the app put there instead. That is how
 //! maximizing the terminal dock (which hides the work body wholesale, see
 //! `Layout.tsx`) left an agent pane's surface sitting over the dock's own
-//! chrome. The native browser hole learned this first — `RailBrowser`'s
+//! chrome. The native browser hole learned this first — `BrowserTab`'s
 //! `visibleRect` returns null for a zero-size rect and hides its webview — and
 //! this is the same rule for the terminal.
 
@@ -99,6 +99,20 @@ export function isPaintable(b: Bounds): boolean {
   return b.w >= MIN_PAINTABLE && b.h >= MIN_PAINTABLE;
 }
 
+/** Has the shell taken this hole's part of the page out of view?
+ *
+ *  `inert` on an ancestor is how the shell says "still mounted, and nobody can
+ *  see or reach it". The work surface carries it while a page (Home, the
+ *  Dashboard, Trace, a machine) is drawn over it, and the agent pane's
+ *  terminal layer carries it while the transcript is shown instead. Without
+ *  it, a page over the hole is known only by hit-testing five points of it,
+ *  which is an inference; the attribute is the shell stating the fact. Every
+ *  native surface, terminal or browser, reads it the same way and steps off.
+ */
+export function isWithheld(el: Element): boolean {
+  return el.closest("[inert]") !== null;
+}
+
 /** Where to sample a hole to ask what is painted over it.
  *
  *  Five points, inset from the edges so a 1px border or a rounded corner on a
@@ -183,8 +197,9 @@ export function isCovered(
 // supposed to hide the part of it the menu is on, and nothing else.
 //
 // So the third way, and the one this module now implements: the surface is
-// placed at the largest sub-rectangle of its hole that no open overlay is
-// sitting on. [`clearRect`] finds that rectangle. The terminal keeps running
+// placed at a sub-rectangle of its hole that no open overlay is sitting on —
+// the largest one that keeps every line whole, where there is a real one.
+// [`clearRect`] finds that rectangle. The terminal keeps running
 // at its full size — the grid and the shell never hear about this, so nothing
 // reflows and no TUI is sent a SIGWINCH for a menu click — and the native
 // side simply shows a window onto it. The menu lands on the part the surface
@@ -216,14 +231,25 @@ export function isCovered(
  *  mid-word. Every `role="menu"` in this app is rendered only while it is
  *  open (`{open && …}`), so presence in the document IS openness, and a role
  *  that means "transient sheet of commands" is the right thing to key on
- *  rather than one attribute of one library. `dialog` and `listbox` stay
- *  state-gated: both can legitimately describe something permanently on
- *  screen, and this list may not clip a terminal for one of those.
+ *  rather than one attribute of one library.
+ *
+ *  `dialog` and `listbox` are matched two ways. A Radix one carries
+ *  `data-state`, stays mounted through its close animation, and counts only
+ *  while that state says `open`. A hand-rolled one carries no state at all,
+ *  and the gate that is right for Radix matched none of them: the composer's
+ *  @/slash suggestions, the usage breakdown, the save-prompt card, the
+ *  soundboard, the cloud machine sheet, first-run setup, Settings, the image
+ *  viewer — every one opened with the terminal painting over it. Like
+ *  `menu`, each is rendered only while it is open, so for these presence is
+ *  openness and the bare role is the right key. The one stateless listbox
+ *  that is NOT transient is the command list (`cmdk-list`), which sits inside
+ *  a dialog or a popover that already counts, or inline in a page — so it is
+ *  left out rather than allowed to clip a terminal on its own.
  *
  *  `[role="alertdialog"]` is bare for the same reason as `menu`, and it is
  *  here because a sweep of every role the app uses turned up two sites that
  *  nothing else in this list matched: the file tree's delete confirmation
- *  (Medusa's `Prompt`, which is Radix `AlertDialog` underneath and so carries
+ *  (the shared `Prompt`, which is Radix `AlertDialog` underneath and so carries
  *  no popper wrapper) and the agent gate's parked request card. Both are
  *  mounted only while they are up. A confirmation you cannot read is worse
  *  than a menu you cannot read, since the thing it is asking about is
@@ -258,10 +284,32 @@ export const OVERLAY_SELECTOR = [
   "[data-radix-popper-content-wrapper]",
   ".aura-menu-surface",
   '[role="dialog"][data-state="open"]',
+  '[role="dialog"]:not([data-state])',
   '[role="menu"]',
   '[role="alertdialog"]',
   '[role="listbox"][data-state="open"]',
+  '[role="listbox"]:not([data-state]):not([cmdk-list])',
 ].join(",");
+
+/** The event an overlay fires when it appears, moves or leaves on its own.
+ *
+ *  A pane re-reads its clip on the gestures that open a sheet — click, keyup,
+ *  contextmenu — because a menu is something somebody opened. A toast is not:
+ *  it arrives from a timer, a finished download or another window, and leaves
+ *  the same way, with no gesture anywhere near it. Without a word from it the
+ *  terminal would paint over a new toast until the next sweep tick (up to
+ *  [`SWEEP_MS`]) and keep a strip clipped for that long after it closed. So
+ *  the toast stack says so, and every pane reads again at once.
+ */
+export const NATIVE_OVERLAYS_CHANGED = "aura:native-overlays-changed";
+
+/** Tell every native pane that an overlay came, went, or changed size. Cheap
+ *  to call more often than needed: a pane whose clip did not change drops the
+ *  read without crossing to the native side. */
+export function announceOverlayChange(): void {
+  if (typeof window === "undefined" || typeof window.dispatchEvent !== "function") return;
+  window.dispatchEvent(new Event(NATIVE_OVERLAYS_CHANGED));
+}
 
 /** Do two boxes share any area at all? */
 export function overlaps(a: Bounds, b: Bounds): boolean {
@@ -360,6 +408,18 @@ const MIN_CLEAR_H = 64;
  */
 const MAX_OVERLAYS = 6;
 
+/** How much of the hole a clip that keeps the terminal's left edge has to
+ *  leave before it is preferred over a bigger one that does not.
+ *
+ *  A third: the roster's right-click menu over a pane leaves a full-width band
+ *  of 39% above it, which is a readable terminal with every line whole, while
+ *  the band beside it is 84% of a terminal with the start of every line
+ *  missing. Below a third the anchored band is a few rows — a sheet running
+ *  most of the pane's height down its left edge — and the wider view beside
+ *  it is the lesser loss.
+ */
+export const ANCHORED_MIN_SHARE = 1 / 3;
+
 /** The candidate edges of a clear rectangle along one axis: the hole's own two,
  *  plus every overlay edge that falls strictly inside them. Sorted, de-duped.
  *
@@ -377,8 +437,9 @@ function clearEdges(lo: number, hi: number, spans: ReadonlyArray<readonly [numbe
   return [...set].sort((p, q) => p - q);
 }
 
-/** The largest part of `hole` that no open overlay is sitting on, or null when
- *  what is left is not worth painting.
+/** The part of `hole` that no open overlay is sitting on — the largest one,
+ *  preferring one that keeps the terminal's left edge — or null when what is
+ *  left is not worth painting.
  *
  *  This is the rule the whole module exists for now, and it is the answer to
  *  the long note above: a menu over a terminal should hide the part of the
@@ -392,12 +453,28 @@ function clearEdges(lo: number, hi: number, spans: ReadonlyArray<readonly [numbe
  *  below the overlay" would hand a pane 30% of its terminal in cases where
  *  the band beside it was 80%, and nobody would ever know why.
  *
+ *  Area is not the only thing that decides, though, because a terminal is not
+ *  a picture. Its text hangs off the LEFT edge: every line starts there, and a
+ *  clip that steps off the left columns shows each line from somewhere in its
+ *  middle. That is what a menu from the sidebar used to do — it overhangs the
+ *  pane's left edge, the full-height band to its right is the biggest clear
+ *  rectangle, and the whole terminal read as shoved sideways with its first
+ *  word gone on every row ("the terminal gets pushed to side"). A band above
+ *  or below the menu hides some ROWS instead, and every row it keeps is
+ *  whole. So a clip that keeps the hole's left edge wins whenever it keeps a
+ *  real share of the hole ([`ANCHORED_MIN_SHARE`]); only a sheet that leaves
+ *  no such band — one tall enough to run most of the pane's height down its
+ *  left edge — falls back to the biggest rectangle of any shape.
+ *
  *  Measured geometries it has to get right, all from the running app at 100%
  *  zoom with an 840×771 hole at (280,100):
  *  * the tab strip's "+" launcher, 360×270 hanging into the hole's top-right
  *    → the full-width band below it, 840×529
  *  * the roster's cursor menu, 224×300 reaching over the hole's left edge
- *    → the full-height band to its right, 698×771
+ *    → the full-width band above it, 840×300 — not the bigger band to its
+ *    right, which would cut the start off every line
+ *  * the workspaces "…" menu's Group-by submenu overhanging the pane
+ *    → the full-width band below it
  *  * an agent tab's context menu dropped from the strip → the band below it
  */
 export function clearRect(hole: Bounds, overlays: readonly Bounds[]): Bounds | null {
@@ -409,8 +486,15 @@ export function clearRect(hole: Bounds, overlays: readonly Bounds[]): Bounds | n
   const xs = clearEdges(hole.x, hole.x + hole.w, over.map((o) => [o.x, o.x + o.w] as const));
   const ys = clearEdges(hole.y, hole.y + hole.h, over.map((o) => [o.y, o.y + o.h] as const));
 
+  // Two winners are kept: the biggest clear rectangle of any shape, and the
+  // biggest one that starts at the hole's left edge (`xs[0]` is that edge, so
+  // those are exactly the candidates with i === 0). An anchored one is also a
+  // candidate for the overall prize, which is why its own record can only be
+  // the smaller of the two.
   let best: Bounds | null = null;
   let bestArea = 0;
+  let anchored: Bounds | null = null;
+  let anchoredArea = 0;
   for (let i = 0; i < xs.length - 1; i += 1) {
     for (let j = xs.length - 1; j > i; j -= 1) {
       const w = xs[j] - xs[i];
@@ -420,15 +504,24 @@ export function clearRect(hole: Bounds, overlays: readonly Bounds[]): Bounds | n
           const h = ys[l] - ys[k];
           if (h < MIN_CLEAR_H) break;
           const area = w * h;
-          if (area <= bestArea) break; // shorter still as l falls
+          // Shorter still as l falls, so nothing further down this run can beat
+          // the record it is competing for.
+          if (area <= (i === 0 ? anchoredArea : bestArea)) break;
           const cand = { x: xs[i], y: ys[k], w, h };
           if (over.some((o) => overlaps(cand, o))) continue;
-          best = cand;
-          bestArea = area;
+          if (i === 0 && area > anchoredArea) {
+            anchored = cand;
+            anchoredArea = area;
+          }
+          if (area > bestArea) {
+            best = cand;
+            bestArea = area;
+          }
         }
       }
     }
   }
+  if (anchored && anchoredArea >= hole.w * hole.h * ANCHORED_MIN_SHARE) return anchored;
   return best;
 }
 
@@ -489,7 +582,7 @@ export function sameBounds(a: Bounds, b: Bounds): boolean {
  *  pinned to an explicit height between a work body and a composer that both
  *  change height on their own, so moving without resizing is its normal
  *  behaviour, not an edge case. This is the safety net for that: a rect read
- *  every few frames, which is also what `RailBrowser` settled on for the
+ *  every few frames, which is also what `BrowserTab` settled on for the
  *  browser hole (400ms there) after the same class of bug.
  */
 export const SWEEP_MS = 400;
@@ -539,6 +632,18 @@ export function dropSurface(termId: string, holder: object): boolean {
   if (surfaceOwner.get(termId) !== holder) return false;
   surfaceOwner.delete(termId);
   return true;
+}
+
+/** Whether any pane is showing `termId` right now.
+ *
+ *  A pane that does not own a surface must leave it alone (`dropSurface`).
+ *  The one exception is a surface nobody owns: it was placed by a call that
+ *  finished after its pane had stepped away (an attach that resolved after
+ *  the pane was parked or unmounted), so it paints over whatever replaced the
+ *  pane and nothing is left to take it down. No pane is showing it, so
+ *  parking it takes nothing from anyone. */
+export function surfaceHeld(termId: string): boolean {
+  return surfaceOwner.has(termId);
 }
 
 /** Test seam: forget all ownership. Nothing in the app calls this — a surface

@@ -69,14 +69,14 @@ describe("an org is named by something a person can read", () => {
 
 describe("what switching to it would get you, in words", () => {
   test("counted, and pluralised", () => {
-    expect(orgSubtitle(org({ repo_count: 3 }))).toBe("3 projects");
-    expect(orgSubtitle(org({ repo_count: 1 }))).toBe("1 project");
+    expect(orgSubtitle(org({ repo_count: 3 }))).toBe("3 repositories");
+    expect(orgSubtitle(org({ repo_count: 1 }))).toBe("1 repository");
   });
 
   test("and zero reads as an invitation, not as a fault", () => {
     // An org you were added to and hold nothing in yet is the common case for
-    // a new hire. "0 projects" reads like something broke.
-    expect(orgSubtitle(org({ repo_count: 0 }))).toBe("No projects yet");
+    // a new hire. "0 repositories" reads like something broke.
+    expect(orgSubtitle(org({ repo_count: 0 }))).toBe("No repositories yet");
   });
 });
 
@@ -122,8 +122,8 @@ describe("the switch is announced once, and everything hears it", () => {
 
 describe("the lists that are supposed to follow, follow", () => {
   const followers: [string, string][] = [
-    ["the fleet page's machines", "components/workspaces/WorkspacesMachinesSection.tsx"],
-    ["the sidebar rail's machines", "components/WorkspaceRoster.tsx"],
+    ["the Machines page", "components/workspaces/MachinesSurface.tsx"],
+    ["the sidebar rail's machines", "components/nav/roster/useRosterPlaces.ts"],
     ["the cloud jobs board", "lib/useCloudJobs.ts"],
   ];
 

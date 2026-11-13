@@ -1,11 +1,11 @@
-// Parity W8 — agent-driven PR flow state machine.
+// Agent-driven PR flow state machine.
 //
 // A PR shepherded by an agent moves through a fixed protocol: gather context,
 // draft, get approval, commit, push, open, review, address, merge. This module
 // is the *pure* heart of that protocol — a reducer with an explicit transition
 // table so every legal hop is auditable and every illegal event is a no-op
-// (never a crash, never a silent jump). UI surfaces (PrRailPanel today, a full
-// flow timeline later) drive whatever observable subset they can see; the full
+// (never a crash, never a silent jump). UI surfaces (the `/pr` chat verb today, a
+// full flow timeline later) drive whatever observable subset they can see; the full
 // state set documents the protocol itself.
 //
 // Also here: the PR context builder — a markdown snapshot of branch + changed

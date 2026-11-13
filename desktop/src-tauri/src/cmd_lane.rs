@@ -273,6 +273,8 @@ pub async fn lane_spawn(
         // A lane is a worktree, and a worktree is a directory on this laptop.
         // The agent's hands have to be where its files are.
         None,
+        // A lane starts in a brand-new worktree, which has no links yet.
+        None,
     )
     .await
     {
@@ -361,7 +363,18 @@ pub async fn lane_discard(
             return Ok(None);
         };
 
-        let dirty = if force { 0 } else { count_dirty(&path)? };
+        // A nested repository's copy inside the lane goes with it, so its
+        // uncommitted edits (or the whole thing, when it only lives here)
+        // count as unsaved work too.
+        let dirty = if force {
+            0
+        } else {
+            let nested: usize = crate::nested_repos::nested_dirty(std::path::Path::new(&path))
+                .iter()
+                .map(|d| d.changed.max(usize::from(d.standalone)))
+                .sum();
+            count_dirty(&path)? + nested
+        };
         Ok(Some((path, branch, dirty)))
     })
     .await?;

@@ -11,14 +11,14 @@ import {
   useRef,
   useState,
   type JSX,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import type { TraceActions } from "./AdeSidebar";
+import type { TraceActions } from "./trace/traceActions";
 import { TraceTabs } from "./trace/TraceTabs";
 import { TraceToolSurface } from "./trace/TraceToolSurface";
 import type { TraceKey } from "./trace/traceDestinations";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { startWindowDrag } from "./TopBar";
 import { AgentTabMark, ManagerTabStatus } from "./TabStatus";
 // AURA-1296 — draft pencil on chat/agent tabs.
@@ -30,11 +30,19 @@ import { MonacoEditor as Editor } from "./MonacoEditor";
 import { DiffView } from "./DiffView";
 import { EditorBreadcrumbs } from "./EditorBreadcrumbs";
 import { EditorInlineComposer } from "./editor/EditorInlineComposer";
-import { MarkdownView } from "./MarkdownView";
-import { SegmentedControl } from "./ui/segmented";
-import { AsciiSpinner } from "./ui/ascii-spinner";
+import {
+  FileModeSwitch,
+  PreviewFileBody,
+  MediaFileView,
+  TextFileView,
+  fileTabLabel,
+  defaultMdView,
+  isPreviewablePath,
+  useMarkdownView,
+  type MdView,
+} from "./workpanes/FileTabView";
+import { Toggle } from "./ui/toggle";
 // AURA-1298
-import { ImageLightbox } from "./media/ImageLightbox";
 import { FileInsightStrip } from "./FileInsightStrip";
 import { AgentSurface, buildAgentTabMenuItems, type AgentTabMenuItem } from "./agent/AgentSurface";
 import {
@@ -42,7 +50,33 @@ import {
   ContextMenuTrigger,
   ContextMenuContent,
 } from "./ui/context-menu";
+import { Button } from "./ui/button";
+import { dropTarget, usePointerDrag, usePointerDragState } from "./ui/use-pointer-drag";
+import {
+  PANE_DRAG_SCOPE,
+  TAB_DRAG_SCOPE,
+  paneDropIndex,
+  tabDropAction,
+  tabDropKey,
+  type TabDrag,
+} from "../lib/workTabDrag";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Columns2,
+  GitCompareArrows,
+  ListTree,
+  PanelBottomOpen,
+  PanelTop,
+  Rows2,
+  SquareSplitHorizontal,
+  X,
+} from "lucide-react";
+import { EmptyState } from "./ui/state";
+import "./ui/log-note.css";
+import "./ui/pane-tools.css";
 import { ManagerSurface, buildManagerTabMenuItems } from "./manager/ManagerSurface";
+import { useUnreadTabs } from "../lib/tabUnread";
 import { ManagerDashboardSurface } from "./manager/ManagerDashboardSurface";
 import { WorkSurfaceEmpty } from "./workpanes/WorkSurfaceEmpty";
 import { WorkspaceSetupFeed } from "./workpanes/WorkspaceSetupFeed";
@@ -81,6 +115,7 @@ import {
   treeAllRefs,
   sessionsViewFromId,
   openBrowserTab,
+  focusOrAppendRef,
   type AgentTab,
   type OpenFile,
   type PlanTabData,
@@ -94,8 +129,9 @@ import {
   isPlanMarkdownPath,
 } from "../lib/editorStore";
 import { traceToolLabel } from "../lib/traceToolLabels";
-import { TabMark, projectName } from "./TabMark";
-import { PaneAddPopover } from "./PaneAddPopover";
+import { TabMark, projectName, tabMarkKey } from "./TabMark";
+import { RevealMark, TitleReveal } from "./ui/title-reveal";
+import { NewTabMenu } from "./workpanes/NewTabMenu";
 import { api, type OutlineNode, type StrictModeInfo } from "../lib/api";
 import { useTeammatePresence } from "../lib/usePresence";
 import {
@@ -105,7 +141,6 @@ import {
 import { useAgentTerminalTitles } from "../lib/agentTerminalTitles";
 import { hostOf } from "../lib/browserEngine";
 import { BrowserTab, reapBrowserTabs } from "./workpanes/BrowserTab";
-import { formatBytes } from "../lib/bytes";
 
 /** Background for a terminal that lives inside a split. A hair cooler +
  *  darker than the editor panes (bg-content ≈ #161618) and the default xterm
@@ -218,8 +253,6 @@ export function WorkSurface({
   const activePlanTab =
     store.planTabs.find((t) => t.id === store.activePlanId) ?? null;
   const [cursorLine, setCursorLine] = useState(1);
-  // The no-layout chrome band's "+" launcher (see chromeBand below).
-  const [bandAddOpen, setBandAddOpen] = useState(false);
   const presenceMarkers = useTeammatePresence(
     repoRoot,
     active?.status === "ok" ? active.path : null,
@@ -363,35 +396,18 @@ export function WorkSurface({
   //
   // This row is still the top edge of the window, so it keeps the shell's
   // chrome at either end and moves the window from the empty middle. It keeps
-  // the same "+" every real tab strip carries: this row appears exactly when
-  // every tab is gone, and a bar with no tabs and no way to open one read as
-  // broken — users reported being stranded with no way to start a terminal or
-  // an agent. One glyph, same launcher, same spot it lives on a full strip.
+  // the same ＋ every real tab strip carries, where the first tab would end:
+  // this row appears exactly when every tab is gone, and a bar with no tabs and
+  // no way to open one read as broken. A start here seeds a fresh layout.
   const chromeBand = (surfaceActions?: ReactNode) => (
-    <div className="flex items-stretch flex-shrink-0">
+    <div className="ui-workspace-tabs">
       {chromeLeading}
+      <NewTabMenu repoRoot={repoRoot} place={focusOrAppendRef} />
       <div
-        className="flex-1 min-w-0 bg-bg-chrome border-b border-line-soft"
-        style={{ height: "var(--topbar-h)" }}
+        className="flex-1 min-w-0 self-stretch"
         data-tauri-drag-region
         onMouseDown={startWindowDrag}
       />
-      <div className="relative flex items-stretch flex-shrink-0 bg-bg-chrome border-b border-line-soft">
-        <button
-          type="button"
-          onClick={() => setBandAddOpen((v) => !v)}
-          title="Open a tab — terminal, agent, files…"
-          className="px-2 h-full text-sm text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors border-l border-line-soft"
-        >
-          +
-        </button>
-        {bandAddOpen && (
-          <PaneAddPopover
-            currentRepoRoot={repoRoot}
-            onClose={() => setBandAddOpen(false)}
-          />
-        )}
-      </div>
       {surfaceActions}
       {chromeTrailing}
     </div>
@@ -526,7 +542,6 @@ export function WorkSurface({
             active={pane ? paneIsActive(pane.ref, activeSplitRef) : false}
             index={idx}
             direction="row"
-            onReorder={store.reorderSplitPanes}
           >
             <div className="h-full w-full flex flex-col">
               <PerPaneTabStrip
@@ -580,7 +595,7 @@ export function WorkSurface({
   }
 
   // Setup-feed gate: the moment you're switched INTO a freshly created copy,
-  // show the Conductor-style provisioning feed full-pane (in place of the
+  // show the provisioning feed full-pane (in place of the
   // empty chat / booting agent) until the launch resolves, then hand off to
   // the live workspace. Matched by the new worktree's own path so it only
   // ever fires in the new copy — never nags the workspace you launched from.
@@ -631,40 +646,24 @@ export function WorkSurface({
                 path puts its editor actions. The band that used to carry them
                 — inside the pane, under this strip — also printed the
                 terminal's name a second time, so it is gone. */}
-            <div className="flex items-center gap-1 px-2 bg-bg-chrome border-b border-line-soft">
+            <div className="ui-pane-tools">
               <ToolbarBtn
                 onClick={() => store.demoteTerminalToPanel(activeTermTab.termId)}
                 title="Move terminal to panel"
               >
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                  <rect x="2.5" y="2.5" width="11" height="11" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-                  <line x1="2.5" y1="9.8" x2="13.5" y2="9.8" stroke="currentColor" strokeWidth="1.2" />
-                  <path
-                    d="M8 4v3.4M6.5 6 8 7.5 9.5 6"
-                    stroke="currentColor"
-                    strokeWidth="1.2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
+                <PanelBottomOpen />
               </ToolbarBtn>
               <ToolbarBtn
                 onClick={() => splitTerminal(activeTermTab, "row")}
                 title="Split right"
               >
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                  <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-                  <line x1="8" y1="3.5" x2="8" y2="12.5" stroke="currentColor" strokeWidth="1.2" />
-                </svg>
+                <Columns2 />
               </ToolbarBtn>
               <ToolbarBtn
                 onClick={() => splitTerminal(activeTermTab, "column")}
                 title="Split down"
               >
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                  <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-                  <line x1="3" y1="8" x2="13" y2="8" stroke="currentColor" strokeWidth="1.2" />
-                </svg>
+                <Rows2 />
               </ToolbarBtn>
             </div>
           </>,
@@ -729,35 +728,27 @@ export function WorkSurface({
             // Native chat is gated off — the dashboard slot becomes the calm
             // empty surface so opening a workspace (and ⌘N) lands here, not in
             // a Manager chat. Coding agents launch from the preset bar above.
-            <WorkSurfaceEmpty
-              repoRoot={repoRoot}
-              projectName={fallbackName}
-              onSearch={() => window.dispatchEvent(new CustomEvent("aura:open-search"))}
-            />
+            <WorkSurfaceEmpty repoRoot={repoRoot} />
           )}
         </div>
       </div>
     );
   }
   if (!active) {
-    const fallbackName = projectName ?? repoRoot.split("/").pop() ?? repoRoot;
     return (
       <div className="h-full w-full flex flex-col bg-bg-content">
         {chromeBand()}
         <div className="flex-1 min-h-0">
-          <WorkSurfaceEmpty
-            repoRoot={repoRoot}
-            projectName={fallbackName}
-            onSearch={() => window.dispatchEvent(new CustomEvent("aura:open-search"))}
-          />
+          <WorkSurfaceEmpty repoRoot={repoRoot} />
         </div>
       </div>
     );
   }
 
-  // File-tab path (unchanged from before).
-  const isMd = isMarkdownPath(active.path);
-  const mdView: MdView = isMd ? mdViewMap[active.path] ?? "raw" : "raw";
+  // File-tab path: the shared file view, its header carrying this tab's
+  // controls (markdown view, changes, split, outline) and Save.
+  const isMd = isPreviewablePath(active.path);
+  const mdView: MdView = isMd ? mdViewMap[active.path] ?? defaultMdView(active.path) : "raw";
   const setMdView = (v: MdView) => {
     setMdViewMap((prev) => {
       const next = { ...prev, [active.path]: v };
@@ -769,200 +760,138 @@ export function WorkSurface({
       return next;
     });
   };
+  const fileLabel = fileTabLabel(active.path, repoRoot);
+  // key={path} — remount a fresh Monaco editor per file, the same way DiffView
+  // is keyed. Reusing one instance and swapping the model in place leaves the
+  // viewport unpainted under WKWebView (the blank-file report: tiny files
+  // blank, the diff editor — which IS keyed — renders the same file fine). A
+  // fresh mount always paints. MonacoEditor still keeps per-file models alive
+  // (keepCurrentModel) so the remount restores cursor/scroll/undo.
+  const editor = (
+    <Editor
+      key={active.path}
+      value={active.current}
+      language={active.language}
+      onChange={(text) => store.updateBuffer(active.path, text)}
+      onCursor={setCursorLine}
+      presenceMarkers={presenceMarkers}
+      filePath={active.path}
+      repoRoot={repoRoot}
+    />
+  );
 
   return (
     <div className="h-full w-full flex flex-col bg-bg-content">
-      {chromeBand(
-        <>
-          <div className="flex items-center gap-1 px-2 bg-bg-chrome border-b border-line-soft">
-            {/* The markdown Raw/Rendered/Split toggle used to live here; it
-                now rides in the breadcrumb row right below (see the
-                EditorBreadcrumbs `trailing` slot), next to the file path. */}
-            <ToolbarBtn
-              active={showDiff}
-              onClick={() => setShowDiff((v) => !v)}
-              title="Show what changed since your last commit"
-            >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                <line x1="8" y1="2" x2="8" y2="14" stroke="currentColor" strokeWidth="1.2" strokeDasharray="2 2" />
-                <rect x="2" y="3" width="4" height="10" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
-                <rect x="10" y="3" width="4" height="10" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
-              </svg>
-            </ToolbarBtn>
-            <ToolbarBtn
-              onClick={() => splitFile(active, "row")}
-              title="Split right"
-            >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-                <line x1="8" y1="3.5" x2="8" y2="12.5" stroke="currentColor" strokeWidth="1.2" />
-              </svg>
-            </ToolbarBtn>
-            <ToolbarBtn
-              onClick={() => splitFile(active, "column")}
-              title="Split down"
-            >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                <rect x="2.5" y="3" width="11" height="10" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-                <line x1="3" y1="8" x2="13" y2="8" stroke="currentColor" strokeWidth="1.2" />
-              </svg>
-            </ToolbarBtn>
-            <ToolbarBtn
-              onClick={() => store.saveActive()}
-              disabled={!store.isDirty(active.path)}
-              title="Save (⌘S)"
-            >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                <path
-                  d="M3 2h8l2 2v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  fill="none"
-                />
-                <rect x="5" y="2" width="6" height="4" stroke="currentColor" strokeWidth="1.2" fill="none" />
-              </svg>
-            </ToolbarBtn>
-            {/* Theme toggle removed — lives in Settings dialog only. */}
-            <ToolbarBtn
-              active={showOutline}
-              onClick={() => setShowOutline((v) => !v)}
-              title="Toggle code outline"
-            >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                <line x1="3" y1="4" x2="13" y2="4" stroke="currentColor" strokeWidth="1.2" />
-                <line x1="5" y1="8" x2="13" y2="8" stroke="currentColor" strokeWidth="1.2" />
-                <line x1="3" y1="12" x2="13" y2="12" stroke="currentColor" strokeWidth="1.2" />
-                <circle cx="2" cy="4" r="0.8" fill="currentColor" />
-                <circle cx="4" cy="8" r="0.8" fill="currentColor" />
-                <circle cx="2" cy="12" r="0.8" fill="currentColor" />
-              </svg>
-            </ToolbarBtn>
-          </div>
-        </>,
-      )}
-
-      {active.status === "ok" && !showDiff && (
-        <EditorBreadcrumbs
-          repoRoot={repoRoot}
-          filePath={active.path}
-          fileLabel={
-            active.path.startsWith(repoRoot + "/")
-              ? active.path.slice(repoRoot.length + 1)
-              : active.name
-          }
-          buffer={active.current}
-          cursorLine={cursorLine}
-        />
-      )}
-
-      {active.status === "ok" && showDiff && (
-        <FileInsightStrip
-          repoRoot={repoRoot}
-          absPath={active.path}
-          fileLabel={
-            active.path.startsWith(repoRoot + "/")
-              ? active.path.slice(repoRoot.length + 1)
-              : active.name
-          }
-          onOpenRewind={onOpenRewind ? () => onOpenRewind(active.path) : undefined}
-          onLogIntent={onLogIntent ? () => onLogIntent(active.path) : undefined}
-          onSnapshot={onSnapshot ? () => onSnapshot(active.path) : undefined}
-        />
-      )}
-
-      <div className="flex-1 min-h-0 flex">
-        <div className="relative flex-1 min-w-0 flex">
-          {/* Floating view switcher for markdown — a pill over the bottom of
-              the pane so Raw / Rendered / Split is reachable from any of the
-              three views without hunting the chrome. Hidden in diff mode
-              (the diff toggle owns the toolbar then). */}
-          {isMd && !showDiff && active.status === "ok" && (
-            <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-10 rounded-md shadow-lg shadow-black/30">
-              <SegmentedControl
-                ariaLabel="Markdown view"
-                value={mdView}
-                onChange={setMdView}
-                options={[
-                  { value: "raw", label: "Raw" },
-                  { value: "rendered", label: "Rendered" },
-                  { value: "split", label: "Split" },
-                ]}
-                className="bg-bg-card"
-              />
-            </div>
-          )}
-          {active.status === "ok" && !showDiff && (
-            <EditorInlineComposer
-              repoRoot={repoRoot}
-              filePath={active.path}
-              fileLabel={
-                active.path.startsWith(repoRoot + "/")
-                  ? active.path.slice(repoRoot.length + 1)
-                  : active.name
-              }
-            />
-          )}
-          {active.status !== "ok" ? (
-            <FilePreviewOrPlaceholder file={active} />
-          ) : showDiff ? (
-            <DiffView
-              key={active.path}
-              repoRoot={repoRoot}
-              path={active.path}
-              current={active.current}
-              baseline={active.baseline}
-              loadOriginal={(root, file) =>
-                active.diffOriginal !== undefined
-                  ? Promise.resolve(active.diffOriginal)
-                  : api.gitShowHead(root, file)
-              }
-            />
-          ) : isMd && mdView === "rendered" ? (
-            <MarkdownView source={active.current} />
-          ) : isMd && mdView === "split" ? (
-            <>
-              <div className="flex-1 min-w-0 border-r border-line-soft">
-                <Editor
-                  key={active.path}
-                  value={active.current}
-                  language={active.language}
-                  onChange={(text) => store.updateBuffer(active.path, text)}
-                  onCursor={setCursorLine}
-                  presenceMarkers={presenceMarkers}
-                  filePath={active.path}
+      {chromeBand()}
+      <div className="flex-1 min-h-0 flex flex-col">
+        {active.status !== "ok" ? (
+          <MediaFileView file={active} label={fileLabel} />
+        ) : (
+          <TextFileView
+            file={active}
+            label={fileLabel}
+            dirty={store.isDirty(active.path)}
+            onSave={() => store.saveFile(active.path)}
+            actions={
+              <>
+                {isMd && !showDiff && <FileModeSwitch value={mdView} onChange={setMdView} />}
+                <Toggle
+                  size="sm"
+                  pressed={showDiff}
+                  onPressedChange={setShowDiff}
+                  aria-label="Show changes"
+                  title="Show what changed since your last commit"
+                >
+                  <GitCompareArrows />
+                </Toggle>
+                <Button
+                  size="iconXs"
+                  variant="ghost"
+                  aria-label="Split right"
+                  title="Split right"
+                  onClick={() => splitFile(active, "row")}
+                >
+                  <Columns2 />
+                </Button>
+                <Button
+                  size="iconXs"
+                  variant="ghost"
+                  aria-label="Split down"
+                  title="Split down"
+                  onClick={() => splitFile(active, "column")}
+                >
+                  <Rows2 />
+                </Button>
+                <Toggle
+                  size="sm"
+                  pressed={showOutline}
+                  onPressedChange={setShowOutline}
+                  aria-label="Code outline"
+                  title="Toggle code outline"
+                >
+                  <ListTree />
+                </Toggle>
+              </>
+            }
+          >
+            <div className="relative flex-1 min-w-0 flex flex-col">
+              {showDiff ? (
+                <FileInsightStrip
                   repoRoot={repoRoot}
+                  absPath={active.path}
+                  fileLabel={fileLabel}
+                  onOpenRewind={onOpenRewind ? () => onOpenRewind(active.path) : undefined}
+                  onLogIntent={onLogIntent ? () => onLogIntent(active.path) : undefined}
+                  onSnapshot={onSnapshot ? () => onSnapshot(active.path) : undefined}
                 />
+              ) : (
+                <>
+                  <EditorBreadcrumbs
+                    repoRoot={repoRoot}
+                    filePath={active.path}
+                    fileLabel={fileLabel}
+                    buffer={active.current}
+                    cursorLine={cursorLine}
+                  />
+                  <EditorInlineComposer
+                    repoRoot={repoRoot}
+                    filePath={active.path}
+                    fileLabel={fileLabel}
+                  />
+                </>
+              )}
+              <div className="flex-1 min-h-0 flex">
+                {showDiff ? (
+                  <DiffView
+                    key={active.path}
+                    repoRoot={repoRoot}
+                    path={active.path}
+                    current={active.current}
+                    baseline={active.baseline}
+                    loadOriginal={(root, file) =>
+                      active.diffOriginal !== undefined
+                        ? Promise.resolve(active.diffOriginal)
+                        : api.gitShowHead(root, file)
+                    }
+                  />
+                ) : isMd ? (
+                  <PreviewFileBody
+                    view={mdView}
+                    path={active.path}
+                    label={fileLabel}
+                    source={active.current}
+                    repoRoot={repoRoot}
+                    editor={editor}
+                  />
+                ) : (
+                  editor
+                )}
               </div>
-              <div className="flex-1 min-w-0">
-                <MarkdownView source={active.current} />
-              </div>
-            </>
-          ) : (
-            // key={path} — remount a fresh Monaco editor per file, the same
-            // way DiffView is keyed. Reusing one instance and swapping the
-            // model in place leaves the viewport unpainted under WKWebView
-            // (the blank-file report: tiny files blank, the diff editor —
-            // which IS keyed — renders the same file fine). A fresh mount
-            // always paints. MonacoEditor still keeps per-file models alive
-            // (keepCurrentModel) so the remount restores cursor/scroll/undo.
-            <Editor
-              key={active.path}
-              value={active.current}
-              language={active.language}
-              onChange={(text) => store.updateBuffer(active.path, text)}
-              onCursor={setCursorLine}
-              presenceMarkers={presenceMarkers}
-              filePath={active.path}
-              repoRoot={repoRoot}
-            />
-          )}
-        </div>
-        {showOutline && active.status === "ok" && (
-          <OutlinePanel
-            repoRoot={repoRoot}
-            file={active.path}
-            text={active.current}
-          />
+            </div>
+            {showOutline && (
+              <OutlinePanel repoRoot={repoRoot} file={active.path} text={active.current} />
+            )}
+          </TextFileView>
         )}
       </div>
     </div>
@@ -983,11 +912,7 @@ export function WorkSurface({
           onClick={() => setSplitDiffOn((prev) => ({ ...prev, [key]: !on }))}
           title="Show what changed since your last commit"
         >
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-            <line x1="8" y1="2" x2="8" y2="14" stroke="currentColor" strokeWidth="1.2" strokeDasharray="2 2" />
-            <rect x="2" y="3" width="4" height="10" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
-            <rect x="10" y="3" width="4" height="10" rx="0.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
-          </svg>
+          <SquareSplitHorizontal />
         </ToolbarBtn>
       );
     }
@@ -997,17 +922,7 @@ export function WorkSurface({
           onClick={() => store.demoteTerminalToPanel(pane.tab.termId)}
           title="Move terminal to panel"
         >
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-            <rect x="2.5" y="2.5" width="11" height="11" rx="1.2" stroke="currentColor" strokeWidth="1.2" />
-            <line x1="2.5" y1="9.8" x2="13.5" y2="9.8" stroke="currentColor" strokeWidth="1.2" />
-            <path
-              d="M8 4v3.4M6.5 6 8 7.5 9.5 6"
-              stroke="currentColor"
-              strokeWidth="1.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+          <PanelBottomOpen />
         </ToolbarBtn>
       );
     }
@@ -1209,6 +1124,8 @@ export function WorkSurface({
         file={pane.file}
         onChange={(text) => store.updateBuffer(pane.file.path, text)}
         showDiff={splitDiffFor(pane.file)}
+        dirty={store.isDirty(pane.file.path)}
+        onSave={() => store.saveFile(pane.file.path)}
         repoRoot={repoRoot}
         onOpenRewind={
           onOpenRewind ? () => onOpenRewind(pane.file.path) : undefined
@@ -1579,7 +1496,6 @@ function SplitPaneShell({
   active,
   index,
   direction,
-  onReorder,
   children,
 }: {
   active: boolean;
@@ -1588,41 +1504,20 @@ function SplitPaneShell({
   /** Layout orientation: "row" → horizontal panes, drop handle on left
    *  edge; "col" → vertical, handle on top edge. */
   direction?: WorkSplitDirection;
-  onReorder?: (srcIndex: number, dstIndex: number) => void;
   children: ReactNode;
 }) {
-  const [over, setOver] = useState(false);
-  const canDrag = typeof index === "number" && !!onReorder;
-  const mime = "application/x-aura-split-pane";
+  // A pane is carried by its tab strip's empty area and lands here; the
+  // strip makes the move (see PerPaneTabStrip), this marks the place and
+  // lights it while another pane is over it.
+  const carried = usePointerDragState<number>(PANE_DRAG_SCOPE);
+  const canDrag = typeof index === "number";
+  const over = canDrag && paneDropIndex(carried.dragged, carried.over) === index;
   // direction "row" → horizontal layout, insertion line on the left
   // edge of the drop target; "column" → vertical, line on the top edge.
   const insertOnLeading = direction !== "column";
   return (
     <div
-      onDragOver={
-        canDrag
-          ? (e) => {
-              if (!Array.from(e.dataTransfer.types).includes(mime)) return;
-              e.preventDefault();
-              e.dataTransfer.dropEffect = "move";
-              if (!over) setOver(true);
-            }
-          : undefined
-      }
-      onDragLeave={canDrag ? () => setOver(false) : undefined}
-      onDrop={
-        canDrag
-          ? (e) => {
-              setOver(false);
-              const raw = e.dataTransfer.getData(mime);
-              if (raw === "") return;
-              const src = parseInt(raw, 10);
-              if (Number.isNaN(src) || src === index) return;
-              e.preventDefault();
-              onReorder!(src, index);
-            }
-          : undefined
-      }
+      {...(canDrag ? dropTarget(PANE_DRAG_SCOPE, String(index)) : {})}
       className={`flex-1 min-h-0 min-w-0 overflow-hidden relative group/pane ${
         active ? "bg-bg-content" : "bg-bg-1"
       } ${
@@ -1634,12 +1529,11 @@ function SplitPaneShell({
       }`}
     >
       {/* No corner grip. The pane's tab strip is itself the drag handle
-          (PerPaneTabStrip makes its empty area draggable and emits this same
-          `application/x-aura-split-pane` mime), which keeps the strip's
-          top-right corner clear for the "+" button — a grip pinned there sat
-          on top of "+" and swallowed its clicks. SplitPaneShell stays the
-          drop target via the onDragOver/onDrop above; `canDrag` still gates
-          that. */}
+          (PerPaneTabStrip carries the pane from its empty area), which keeps
+          the strip's top-right corner clear for the "+" button — a grip
+          pinned there sat on top of "+" and swallowed its clicks.
+          SplitPaneShell stays the place a pane lands, marked above;
+          `canDrag` still gates that. */}
       {children}
     </div>
   );
@@ -1697,14 +1591,17 @@ function TerminalPaneSurface({
 
 /** File pane inside an N-pane split. Mirrors the canonical OpenFile
  *  buffer so `updateBuffer` round-trips through editorStore.files —
- *  each file pane is a *view*, not a copy. The Editor component uses
- *  CodeMirror compartments internally, so multiple panes pointing at
- *  the same file each get their own EditorView without tearing the
- *  shared buffer state. */
+ *  each file pane is a *view*, not a copy. Drawn as the shared file view:
+ *  its header names where the file lives (the half of the path the tab
+ *  can't show), carries the markdown view switch and Save; the diff toggle
+ *  rides at the right end of the pane's tab strip; split / add-pane /
+ *  close-pane live in the tab's right-click menu. */
 function FilePaneSurface({
   file,
   onChange,
   showDiff,
+  dirty,
+  onSave,
   repoRoot,
   onOpenRewind,
   onLogIntent,
@@ -1716,71 +1613,99 @@ function FilePaneSurface({
    *  which draws the toggle — the strip and this body are siblings, so the
    *  state that links them lives above both. */
   showDiff: boolean;
+  dirty: boolean;
+  onSave: () => Promise<void>;
   repoRoot: string;
   onOpenRewind?: () => void;
   onLogIntent?: () => void;
   onSnapshot?: () => void;
 }) {
-  // No header band. It printed the file's icon and the file's basename in a
-  // 36px full-width bar directly under a tab carrying the same icon and the
-  // same name — one file, two titles, 35px apart. Where the file LIVES is
-  // the half of the path a tab can't show, and that now rides in the tab's
-  // own tooltip; the diff toggle rides at the right end of the tab strip;
-  // split / add-pane / close-pane live in the tab's right-click menu.
-  const diffable = file.status === "ok";
+  const label = shortPath(file.path, repoRoot);
+  const isMd = isPreviewablePath(file.path);
+  const [mdView, setMdView] = useMarkdownView(repoRoot, file.path);
+
+  if (file.status !== "ok") {
+    return (
+      <div className="h-full w-full flex flex-col bg-bg-content">
+        <MediaFileView file={file} label={label} />
+      </div>
+    );
+  }
+  if (!showDiff && isPlanMarkdownPath(file.path)) {
+    return (
+      <div className="h-full w-full flex flex-col bg-bg-content">
+        <PlanMarkdownTab
+          file={file}
+          dirty={dirty}
+          onSave={onSave}
+          onChange={onChange}
+          repoRoot={repoRoot}
+        />
+      </div>
+    );
+  }
+  const editor = (
+    <Editor
+      key={file.path}
+      value={file.current}
+      language={file.language}
+      onChange={onChange}
+      filePath={file.path}
+      repoRoot={repoRoot}
+    />
+  );
 
   return (
     <div className="h-full w-full flex flex-col bg-bg-content">
-      {diffable && showDiff && (
-        <FileInsightStrip
-          repoRoot={repoRoot}
-          absPath={file.path}
-          fileLabel={shortPath(file.path, repoRoot)}
-          onOpenRewind={onOpenRewind}
-          onLogIntent={onLogIntent}
-          onSnapshot={onSnapshot}
-        />
-      )}
-
-      <div className="flex-1 min-h-0">
-        {file.status === "ok" ? (
-          showDiff ? (
-            <DiffView
-              key={file.path}
+      <TextFileView
+        file={file}
+        label={label}
+        dirty={dirty}
+        onSave={onSave}
+        actions={
+          isMd && !showDiff ? <FileModeSwitch value={mdView} onChange={setMdView} /> : undefined
+        }
+      >
+        <div className="flex-1 min-w-0 flex flex-col">
+          {showDiff && (
+            <FileInsightStrip
               repoRoot={repoRoot}
-              path={file.path}
-              current={file.current}
-              baseline={file.baseline}
-              loadOriginal={(root, f) =>
-                file.diffOriginal !== undefined
-                  ? Promise.resolve(file.diffOriginal)
-                  : api.gitShowHead(root, f)
-              }
+              absPath={file.path}
+              fileLabel={label}
+              onOpenRewind={onOpenRewind}
+              onLogIntent={onLogIntent}
+              onSnapshot={onSnapshot}
             />
-          ) : isPlanMarkdownPath(file.path) ? (
-            <PlanMarkdownTab
-              filePath={file.path}
-              buffer={file.current}
-              language={file.language}
-              onChange={onChange}
-              repoRoot={repoRoot}
-            />
-          ) : (
-            <Editor
-              key={file.path}
-              value={file.current}
-              language={file.language}
-              onChange={onChange}
-              filePath={file.path}
-              repoRoot={repoRoot}
-            />
-          )
-        ) : file.status === "binary" && isImagePath(file.path) ? (
-          <ImagePreview path={file.path} name={fileBasename(file.path)} />
-        ) : (
-          <FilePreviewOrPlaceholder file={file} />
-        )}
-      </div>
+          )}
+          <div className="flex-1 min-h-0 flex">
+            {showDiff ? (
+              <DiffView
+                key={file.path}
+                repoRoot={repoRoot}
+                path={file.path}
+                current={file.current}
+                baseline={file.baseline}
+                loadOriginal={(root, f) =>
+                  file.diffOriginal !== undefined
+                    ? Promise.resolve(file.diffOriginal)
+                    : api.gitShowHead(root, f)
+                }
+              />
+            ) : isMd ? (
+              <PreviewFileBody
+                view={mdView}
+                path={file.path}
+                label={label}
+                source={file.current}
+                repoRoot={repoRoot}
+                editor={editor}
+              />
+            ) : (
+              editor
+            )}
+          </div>
+        </div>
+      </TextFileView>
     </div>
   );
 }
@@ -1841,25 +1766,17 @@ function OutlinePanel({
   }, [refresh, linesKey]);
 
   return (
-    <aside
-      className="flex-shrink-0 border-l border-line-soft bg-bg-1 overflow-y-auto"
-      style={{ width: 220 }}
-    >
-      <header className="flex items-center h-9 px-3 border-b border-line-soft">
-        <span className="section-label">
-          Outline
-        </span>
-        <span className="ml-auto text-text-4 text-xs">
-          {loading ? "…" : nodes.length}
-        </span>
-      </header>
-      {!loading && nodes.length === 0 && (
-        <div className="text-text-4 text-xs px-3 py-3">No pieces here</div>
-      )}
+    <aside className="ui-outline" aria-label="Outline">
+      <div className="ui-log-note-files-head">
+        <span>Outline</span>
+        <span className="ui-log-note-count">{loading ? "…" : nodes.length}</span>
+      </div>
+      {!loading && nodes.length === 0 && <div className="ui-pattern-empty">No pieces here</div>}
       {nodes.map((n, i) => (
         <button
           key={`${n.line}-${n.name}-${i}`}
           type="button"
+          className="ui-menu-row ui-outline-row"
           onClick={() =>
             window.dispatchEvent(
               new CustomEvent("aura:scroll-to-line", {
@@ -1867,182 +1784,14 @@ function OutlinePanel({
               }),
             )
           }
-          className="w-full text-left flex items-center gap-2 px-3 py-1 hover:bg-state-hover"
           title={`Jump to ${n.kind} · line ${n.line}`}
         >
-          <KindBadge kind={n.kind} />
-          <span className="text-text-1 text-sm font-mono truncate flex-1">
-            {n.name}
-          </span>
-          <span className="text-text-4 text-2xs tabular-nums">{n.line}</span>
+          <small data-kind={n.kind}>{n.kind}</small>
+          <span>{n.name}</span>
+          <small>{n.line}</small>
         </button>
       ))}
     </aside>
-  );
-}
-
-function KindBadge({ kind }: { kind: string }) {
-  const tone =
-    kind === "fn"
-      ? "text-accent-green"
-      : kind === "class"
-        ? "text-violet"
-        : kind === "type"
-          ? "text-amber"
-          : "text-text-3";
-  return (
-    <span className={`text-2xs w-7 ${tone}`}>{kind}</span>
-  );
-}
-
-/** Basename of a path — the file's own name, no directory. */
-function fileBasename(path: string): string {
-  return path.split("/").pop() || path;
-}
-
-// Image extensions we can preview inline. The editor loads these as `binary`
-// (they aren't text), so without this they'd dead-end on "Binary file".
-const IMAGE_EXTS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "bmp",
-  "ico",
-  "avif",
-  "svg",
-]);
-
-/** Does this path point at an image we can render inline? Extension-based —
- *  matches how a file browser decides, and cheap (no byte read). */
-function isImagePath(path: string): boolean {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  return IMAGE_EXTS.has(ext);
-}
-
-/** Inline image preview for a binary image file. Reads the bytes as base64
- *  (`read_file_base64`) and renders the real picture, contained to the pane —
- *  so screenshots, logos and design assets show like they do in any file
- *  browser instead of a "Binary file" dead end. A non-image or unreadable
- *  file falls back to the plain "Binary file" line. */
-function ImagePreview({ path, name }: { path: string; name: string }) {
-  const [src, setSrc] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    setSrc(null);
-    setFailed(false);
-    api
-      .readFileBase64(path)
-      .then((f) => {
-        if (!alive) return;
-        if (f.is_image && f.data_base64) {
-          setSrc(`data:${f.media_type};base64,${f.data_base64}`);
-        } else {
-          setFailed(true);
-        }
-      })
-      .catch(() => {
-        if (alive) setFailed(true);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [path]);
-
-  if (failed) {
-    return (
-      <div className="h-full w-full flex items-center justify-center bg-bg-content text-text-4 text-sm">
-        Binary file
-      </div>
-    );
-  }
-  if (!src) {
-    return (
-      <div className="h-full w-full flex items-center justify-center bg-bg-content">
-        <AsciiSpinner />
-      </div>
-    );
-  }
-  return (
-    <div className="h-full w-full overflow-auto bg-bg-content p-4 flex items-center justify-center">
-      {/* AURA-1298 — click opens full size; right-click copies or saves. */}
-      <ImageLightbox
-        src={src}
-        alt={name}
-        className="max-w-full max-h-full object-contain rounded"
-      />
-    </div>
-  );
-}
-
-type PreviewFile = { status: string; size: number; name: string; path: string };
-
-function previewKind(path: string): "image" | "pdf" | "audio" | "video" | null {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif"].includes(ext)) {
-    return "image";
-  }
-  if (ext === "pdf") return "pdf";
-  if (["mp3", "wav", "m4a", "aac", "ogg", "flac"].includes(ext)) return "audio";
-  if (["mp4", "mov", "webm", "m4v"].includes(ext)) return "video";
-  return null;
-}
-
-/** Preview common design/reference assets directly from disk through Tauri's
- *  scoped asset protocol. Unknown binary formats retain the honest fallback. */
-function FilePreviewOrPlaceholder({ file }: { file: PreviewFile }) {
-  const kind = previewKind(file.path);
-  if (!kind) return <UnreadablePlaceholder file={file} />;
-  const src = convertFileSrc(file.path);
-  if (kind === "image") {
-    return (
-      <div className="h-full w-full overflow-auto flex items-center justify-center bg-bg-content p-6">
-        {/* AURA-1298 — click opens full size; right-click copies or saves. */}
-        <ImageLightbox
-          src={src}
-          alt={file.name}
-          className="max-w-full max-h-full object-contain rounded-md shadow-lg"
-        />
-      </div>
-    );
-  }
-  if (kind === "pdf") {
-    return (
-      <iframe
-        src={src}
-        title={file.name}
-        className="h-full w-full border-0 bg-white"
-      />
-    );
-  }
-  return (
-    <div className="h-full w-full flex items-center justify-center bg-bg-content p-8">
-      {kind === "audio" ? (
-        <audio src={src} controls className="w-full max-w-xl" />
-      ) : (
-        <video src={src} controls className="max-h-full max-w-full rounded-md shadow-lg" />
-      )}
-    </div>
-  );
-}
-
-function UnreadablePlaceholder({ file }: { file: PreviewFile }) {
-  const reason =
-    file.status === "too_large"
-      ? `file is too large (${formatBytes(file.size)} cap is 2 MB)`
-      : file.status === "binary"
-        ? "file looks binary. Won't render in the text editor"
-        : `unreadable (${file.status})`;
-  return (
-    <div className="h-full w-full flex items-center justify-center bg-bg-content">
-      <div className="text-center text-text-3 text-sm max-w-md">
-        <div className="text-text-2 font-medium mb-1">{file.name}</div>
-        <div>{reason}</div>
-      </div>
-    </div>
   );
 }
 
@@ -2060,30 +1809,21 @@ function ToolbarBtn({
   onClick?: () => void;
 }) {
   return (
-    <button
+    <Button
       type="button"
+      variant="ghost"
+      size="icon-sm"
       title={title}
+      aria-label={title}
+      aria-pressed={active === undefined ? undefined : active}
       disabled={disabled}
       onClick={onClick}
-      className={`w-7 h-7 rounded flex items-center justify-center transition-colors ${
-        disabled
-          ? "text-text-5"
-          : active
-            ? "bg-bg-card text-text-1"
-            : "text-text-3 hover:text-text-1 hover:bg-state-hover"
-      }`}
     >
       {children}
-    </button>
+    </Button>
   );
 }
 
-type MdView = "raw" | "rendered" | "split";
-
-function isMarkdownPath(path: string): boolean {
-  const lower = path.toLowerCase();
-  return lower.endsWith(".md") || lower.endsWith(".markdown") || lower.endsWith(".mdx");
-}
 
 // ── Stage 9I — per-pane tab strip ─────────────────────────────────────
 //
@@ -2411,6 +2151,13 @@ function describeRefRaw(
   return { ref, label: "Untitled", sub: "pick something", foreign: false };
 }
 
+/** What a tab IS, for the name reveal: its pane ref, never its label, so the
+ *  same chat renamed is a reveal and a different chat in the same slot is not.
+ *  A tab moving between panes keeps its key, so a split never replays one. */
+function tabRevealKey(ref: WorkPaneRef): string {
+  return `tab:${ref.kind}:${"id" in ref ? ref.id : ref.path}`;
+}
+
 /** Pin rank for the unified tab strip: agent/manager tabs (the Claude
  *  session) sort first so they stay leftmost and are never lost behind a
  *  later-opened page; every other page keeps its open order. Array.sort is
@@ -2445,8 +2192,9 @@ function PerPaneTabStrip({
   chromeTrailing?: ReactNode;
 }) {
   const store = useEditorStore();
-  const [addOpen, setAddOpen] = useState(false);
-  const [overTab, setOverTab] = useState(false);
+  // Each tab's menu is built as the strip renders, so the strip follows the
+  // unread flags: a flagged chat tab's menu says "Mark as read".
+  const unreadTabs = useUnreadTabs();
   const browserTitles = useBrowserTabTitles();
   // What each running agent last called itself, straight off its terminal.
   const agentTitles = useAgentTerminalTitles();
@@ -2454,32 +2202,34 @@ function PerPaneTabStrip({
   // strip hides its scrollbar, so without this a tab is just cut off mid-word.
   const strip = useTabStripScroll(`${leaf.paneId}:${leaf.activeIndex}`);
 
-  // Cross-pane drag mime — encodes `{srcPaneId, srcIndex}` as
-  // `<paneId>:<index>` so a drop on a different pane's strip can call
-  // moveTabBetweenPanes. Independent from the per-strip
-  // `application/x-aura-tab-*` reorder mimes, which are global-strip
-  // scoped and don't speak in pane ids.
-  const CROSS_PANE_MIME = "application/x-aura-cross-pane-tab";
-
-  function onStripDragOver(e: React.DragEvent<HTMLDivElement>) {
-    if (!Array.from(e.dataTransfer.types).includes(CROSS_PANE_MIME)) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    if (!overTab) setOverTab(true);
-  }
-  function onStripDrop(e: React.DragEvent<HTMLDivElement>) {
-    setOverTab(false);
-    const raw = e.dataTransfer.getData(CROSS_PANE_MIME);
-    if (!raw) return;
-    const sep = raw.lastIndexOf(":");
-    if (sep < 0) return;
-    const srcPaneId = raw.slice(0, sep);
-    const srcIndex = parseInt(raw.slice(sep + 1), 10);
-    if (Number.isNaN(srcIndex)) return;
-    if (srcPaneId === leaf.paneId) return;
-    e.preventDefault();
-    store.moveTabBetweenPanes(srcPaneId, srcIndex, leaf.paneId);
-  }
+  // A tab is carried with a pointer drag: to another pane's strip, or, when
+  // it is a terminal, onto the terminal panel's list (lib/workTabDrag.ts).
+  // This strip is one of the places a tab lands, lit while a tab it would
+  // take is over it.
+  const stripKey = tabDropKey.pane(leaf.paneId);
+  const tabDrag = usePointerDrag<TabDrag>(
+    (item, key) => {
+      const action = tabDropAction(item, key);
+      if (action?.kind === "move") {
+        store.moveTabBetweenPanes(action.srcPaneId, action.srcIndex, action.dstPaneId);
+      } else if (action?.kind === "merge") {
+        store.mergeTerminalIntoGroup(action.termId, action.groupId, "row");
+      } else if (action?.kind === "demote") {
+        store.demoteTerminalToPanel(action.termId);
+      }
+    },
+    { scope: TAB_DRAG_SCOPE },
+  );
+  const overTab = tabDrag.over === stripKey && !!tabDropAction(tabDrag.dragged, stripKey);
+  // The strip's empty area carries the whole pane to another place in the
+  // split; the pane it lands on is a SplitPaneShell.
+  const paneDrag = usePointerDrag<number>(
+    (from, key) => {
+      const to = paneDropIndex(from, key);
+      if (to !== undefined) store.reorderSplitPanes(from, to);
+    },
+    { scope: PANE_DRAG_SCOPE },
+  );
 
   // Sibling panes (targets for "Move to pane …") and the total pane count
   // (gates "Close this pane"). Numbered 1-based by their order in the tree.
@@ -2492,10 +2242,11 @@ function PerPaneTabStrip({
 
   // Right-click menu for ANY tab kind. Agent/manager tabs keep their rich
   // surface-specific controls; every kind additionally gets the universal
-  // tab ops (close / close others / move between panes). Only non-specialized
-  // menus append "Close this pane" — the agent/manager builders already have
-  // their own pane-close item, so we don't double it up.
-  const buildTabMenu = (ref: WorkPaneRef, idx: number): AgentTabMenuItem[] => {
+  // tab ops (move between panes, then close / close others, last, as the
+  // reference tab menu ends). Only non-specialized menus add "Close this
+  // pane" — the agent/manager builders already have their own pane-close
+  // item, so we don't double it up.
+  const buildTabMenu = (ref: WorkPaneRef, idx: number, title: string): AgentTabMenuItem[] => {
     const specialized: AgentTabMenuItem[] =
       ref.kind === "agent"
         ? buildAgentTabMenuItems({
@@ -2507,10 +2258,19 @@ function PerPaneTabStrip({
             canClosePane: paneCount > 2,
           })
         : ref.kind === "manager"
-          ? buildManagerTabMenuItems({ sessionId: ref.id })
+          ? buildManagerTabMenuItems({
+              sessionId: ref.id,
+              title,
+              unread: unreadTabs.has(ref.id),
+            })
           : [];
     const single = leaf.tabs.length <= 1;
     const generic: AgentTabMenuItem[] = [];
+    // A separator between groups — never first, never twice in a row.
+    const groupBreak = () => {
+      const last = generic[generic.length - 1];
+      if (last && last.kind !== "separator") generic.push({ kind: "separator" });
+    };
     // Split on any side. Only offered for non-specialized kinds (file,
     // browser, terminal, views) — agent/manager tabs carry their own split
     // controls in the specialized block above. Splitting extracts THIS tab
@@ -2521,25 +2281,10 @@ function PerPaneTabStrip({
         { kind: "item", label: "Split right", onSelect: () => store.splitWithEmpty(ref, "row", "after") },
         { kind: "item", label: "Split up", onSelect: () => store.splitWithEmpty(ref, "column", "before") },
         { kind: "item", label: "Split down", onSelect: () => store.splitWithEmpty(ref, "column", "after") },
-        { kind: "separator" },
       );
     }
-    generic.push(
-      {
-        kind: "item",
-        label: "Close tab",
-        tone: "danger",
-        onSelect: () => store.closeTabInPane(leaf.paneId, idx),
-      },
-      {
-        kind: "item",
-        label: "Close other tabs",
-        disabled: single,
-        onSelect: () => store.closeOtherTabsInPane(leaf.paneId, idx),
-      },
-    );
     if (otherPanes.length > 0) {
-      generic.push({ kind: "separator" });
+      groupBreak();
       for (const op of otherPanes) {
         generic.push({
           kind: "item",
@@ -2570,231 +2315,261 @@ function PerPaneTabStrip({
           onSelect: () => store.removeSplitPane(paneIndex),
         });
       }
-      if (paneOps.length) generic.push({ kind: "separator" }, ...paneOps);
+      if (paneOps.length) {
+        groupBreak();
+        generic.push(...paneOps);
+      }
     }
+    // The close block ends every tab's menu, the two rows together.
+    groupBreak();
+    generic.push(
+      {
+        kind: "item",
+        label: "Close tab",
+        shortcut: "⌘W",
+        onSelect: () => store.closeTabInPane(leaf.paneId, idx),
+      },
+      {
+        kind: "item",
+        label: "Close others",
+        disabled: single,
+        onSelect: () => store.closeOtherTabsInPane(leaf.paneId, idx),
+      },
+    );
     return specialized.length
       ? [...specialized, { kind: "separator" }, ...generic]
       : generic;
   };
 
+  // The library tab strip's keys, on a focused tab: ← → step through the
+  // tabs in the order drawn (wrapping), Home and End jump to the ends, and
+  // Delete closes the tab, leaving focus on the one that takes its place.
+  const onTabKey = (e: ReactKeyboardEvent<HTMLButtonElement>, idx: number) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const list = e.currentTarget.closest('[role="tablist"]');
+    const tabs = Array.from(
+      list?.querySelectorAll<HTMLButtonElement>('[role="tab"][data-tab-index]') ?? [],
+    );
+    const pos = tabs.indexOf(e.currentTarget);
+    if (["ArrowRight", "ArrowLeft", "Home", "End"].includes(e.key)) {
+      e.preventDefault();
+      const to =
+        e.key === "Home"
+          ? 0
+          : e.key === "End"
+            ? tabs.length - 1
+            : pos + (e.key === "ArrowRight" ? 1 : -1);
+      const next = tabs[(to + tabs.length) % tabs.length];
+      if (!next) return;
+      store.setActiveTabInPane(leaf.paneId, Number(next.dataset.tabIndex));
+      next.focus();
+    } else if (e.key === "Delete") {
+      e.preventDefault();
+      store.closeTabInPane(leaf.paneId, idx);
+      requestAnimationFrame(() =>
+        list?.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')?.focus(),
+      );
+    }
+  };
+
   return (
     <div
-      className={`flex items-stretch flex-shrink-0 bg-bg-chrome border-b border-line-soft ${
-        overTab ? "outline outline-1 outline-accent-blue -outline-offset-1" : ""
-      }`}
-      // One height for every strip that starts at y=0 — this one, the
-      // sidebar's header and the review rail's. It used to be h-8 against
-      // their 30px and the global strip's 36px: three numbers for one line
-      // across the top of the window, none of them agreeing.
-      style={{ height: "var(--topbar-h)" }}
-      // This strip is the cross-pane tab DROP target: a tab dragged from
-      // another pane lands anywhere on it → moveTabBetweenPanes. The pane-
-      // REORDER drag SOURCE is the empty spacer after the tabs (below), NOT
-      // this container. A `draggable` container is an ANCESTOR of the tab
-      // buttons, so a tab's `dragstart` bubbles into its handler and corrupts
-      // the drag with the split-pane mime — which silently broke tab moves.
-      // Keeping the reorder source a SIBLING of the tabs keeps the two drags
-      // cleanly separate.
-      onDragOver={onStripDragOver}
-      onDragLeave={() => setOverTab(false)}
-      onDrop={onStripDrop}
+      className="ui-workspace-tabs"
+      style={
+        overTab
+          ? { outline: "1px solid var(--ui-ring)", outlineOffset: -1 }
+          : undefined
+      }
+      {...tabDrag.target(stripKey)}
     >
       {chromeLeading}
+      {strip.edges.start && (
+        <Button
+          size="iconXs"
+          variant="ghost"
+          aria-label="Scroll tabs left"
+          onClick={() => strip.scrollStep(-1)}
+        >
+          <ChevronLeft />
+        </Button>
+      )}
       <div
         ref={strip.scrollRef}
-        style={strip.fadeStyle}
-        className="flex items-stretch min-w-0 overflow-x-auto no-scrollbar"
+        // Hug the tabs, shrink only when they overflow. The library's `flex: 1`
+        // assumes the strip owns the row; here the drag-region filler after it
+        // is flex-1 too, and two flex-1s split the row in half — an
+        // overflowing strip hid tabs behind its chevron with half the row empty.
+        style={{ flex: "0 1 auto" }}
+        className="ui-workspace-tab-scroll"
+        role="tablist"
+        aria-label="Open tabs"
       >
         {leaf.tabs
-          // Unified tab bar: every opened page is a visible tab and nothing is
-          // ever hidden. Agent/manager tabs (the Claude session) pin leftmost so
-          // they're never lost; everything else keeps open order. The mapped
-          // `idx` stays the real leaf index, so click/close/drag stay correct.
           .map((ref, idx) => ({ ref, idx }))
           .sort((a, b) => pinRank(a.ref) - pinRank(b.ref))
           .map(({ ref, idx }) => {
-          const data = describeRef(
-            ref,
-            store,
-            currentRepoRoot,
-            browserTitles,
-            agentTitles,
-          );
-          if (!data) return null;
-          const isActive = idx === leaf.activeIndex;
-          // The one thing a tab most needs to say is whether the thing behind
-          // it wants something from you. Agent and chat tabs carry a live mark
-          // (waiting · working · done) and bold their label while they wait —
-          // shared with the global strip, which is where it used to live and
-          // only live. See TabStatus.tsx.
-          const agentTab =
-            ref.kind === "agent"
-              ? store.agentTabs.find((t) => t.sessionId === ref.id)
-              : undefined;
-          // Built once and handed to both routes into it — the visible ⋯
-          // button inside the pill and the right-click menu around it.
-          const menuItems = buildTabMenu(ref, idx);
-          const tabButton = (
-            <button
-              key={`${leaf.paneId}-${idx}-${data.label}`}
-              ref={isActive ? strip.activeRef : undefined}
-              type="button"
-              draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData(
-                  CROSS_PANE_MIME,
-                  `${leaf.paneId}:${idx}`,
-                );
-                // A terminal tab also speaks the panel list's mime, so it
-                // can be dragged back down into the bottom Terminal panel —
-                // dropped on a group it tiles in; dropped on empty list
-                // space it becomes its own row (TerminalTabsList handles
-                // both via onMerge / onDemote).
-                if (ref.kind === "terminal") {
-                  e.dataTransfer.setData("application/x-aura-term", ref.id);
-                }
-                e.dataTransfer.effectAllowed = "move";
-              }}
-              // macOS WKWebView suppresses the synthetic `click` on elements
-              // with `draggable=true` (it starts drag-tracking on mousedown and
-              // never dispatches the click), so a plain onClick here silently
-              // dropped tab activation — clicking a Pages/Tasks/file tab in a
-              // split pane did nothing. Drive activation off mousedown (left
-              // button only) instead, exactly like the global Tabs strip does;
-              // a real drag still goes through onDragStart untouched.
-              onMouseDown={(e) => {
-                if (e.button === 0) store.setActiveTabInPane(leaf.paneId, idx);
-              }}
-              // `flex-shrink-0`: the strip beneath scrolls, so a tab should
-              // run out of room before it runs out of name. Without it flex
-              // compressed the pills first — and because the label is
-              // `truncate` (overflow:hidden, so its automatic minimum is
-              // zero), it compressed them past the label entirely. Open one
-              // more tab and an existing one silently became a bare icon, with
-              // no ellipsis and no scrollbar to say where its name had gone.
-              className={`group flex items-center gap-1.5 px-2 h-full text-sm border-r border-line-soft flex-shrink-0 transition-colors ${
-                isActive
-                  ? "bg-bg-content text-text-1"
-                  : "text-text-3 hover:text-text-1 hover:bg-state-hover"
-              }`}
-              // The place a foreign tab comes from rides here rather than on a
-              // second line of the strip — and only when it says something the
-              // name doesn't already say.
-              title={
-                data.foreignName && data.foreignName !== data.label
-                  ? `${data.sub} — ${data.foreignName}`
-                  : data.sub
-              }
-            >
-              {/* Each tab wears the mark its destination wears everywhere else
-                  in the app — resolved by `TabMark`, which the "+" picker and
-                  the empty-pane picker now share, because all three used to
-                  draw their own answer to the same question. */}
-              <span className="w-3.5 h-3.5 flex items-center justify-center flex-shrink-0">
-                {agentTab ? (
-                  // An agent tab's mark carries what the agent is DOING — it
-                  // breathes while it works, rings when it wants you. The dot
-                  // and spinner that used to sit beside it said the same thing
-                  // twice more, and the amber one read as an error.
-                  <AgentTabMark tab={agentTab} agentId={data.agentId} />
-                ) : (
-                  <TabMark refr={ref} label={data.label} agentId={data.agentId} />
-                )}
-              </span>
-              {/* One line, always. The project a foreign tab belongs to used
-                  to ride under the name as a caption, which cost the whole
-                  strip a second line of height on every pane — and most of the
-                  time it printed the name a second time, because a tab opened
-                  on a project is usually named after it. */}
-              <span
-                className={`truncate max-w-[140px] min-w-0 ${
-                  agentTab?.attention ? "font-semibold text-text-1" : ""
-                }`}
-              >
-                {data.label}
-              </span>
-              {/* …but not ONLY in the tooltip. A tab from another project that
-                  names that project nowhere you can see reads as this
-                  project's: a Claude running in the Aura repo sat in Mixrank's
-                  strip looking like Mixrank's own. So the place rides on the
-                  same line, muted, whenever it says something the name
-                  doesn't. */}
-              {data.foreignName && data.foreignName !== data.label && (
-                <span className="truncate max-w-[96px] min-w-0 text-[11px] text-text-5">
-                  {data.foreignName}
-                </span>
-              )}
-              {ref.kind === "manager" && (
-                <ManagerTabStatus sessionId={ref.id} />
-              )}
-              {/* AURA-1296 — a pencil on a tab whose message box holds a draft. */}
-              {ref.kind === "manager" && (
-                <DraftMark draftKey={composerKey(MANAGER_DRAFT_PREFIX, ref.id)} />
-              )}
-              {ref.kind === "agent" && (
-                <DraftMark draftKey={composerKey(AGENT_DRAFT_PREFIX, ref.id)} />
-              )}
-              {/* Every action this tab has, on a control you can see. The
-                  right-click menu below carries the same list, but every tab
-                  here is `draggable` and the webview eats context menus on
-                  draggable elements often enough that the codebase says so in
-                  writing — which left this strip with no reliable route to
-                  split, move-to-pane or close-others at all. */}
-              <TabMoreButton items={menuItems} reserveSpace={false} />
-              <span
-                role="button"
-                tabIndex={-1}
-                // Same WKWebView draggable-click drop as the parent button —
-                // the × is inside the draggable tab, so onClick was unreliable.
-                // Fire on mousedown (left button) and stop propagation so the
-                // tab doesn't also activate.
-                onMouseDown={(e) => {
-                  if (e.button !== 0) return;
-                  e.stopPropagation();
-                  store.closeTabInPane(leaf.paneId, idx);
-                }}
-                className="ml-1 w-3.5 h-3.5 inline-flex items-center justify-center rounded text-text-5 opacity-0 group-hover:opacity-100 hover:bg-state-hover hover:text-text-1 transition-opacity"
-                title="Close tab"
-              >
-                ×
-              </span>
-            </button>
-          );
-          // Every tab kind gets a menu (agents/managers keep their
-          // surface-specific controls via the pane-action bridge; all kinds get
-          // the universal close / close-others / move-to-pane ops).
-          return (
-            <ContextMenu key={`${leaf.paneId}-${idx}-${data.label}`}>
-              <ContextMenuTrigger asChild>{tabButton}</ContextMenuTrigger>
-              <ContextMenuContent className="min-w-[12rem]">
-                {tabContextItems(menuItems)}
-              </ContextMenuContent>
-            </ContextMenu>
-          );
-        })}
+            const data = describeRef(
+              ref,
+              store,
+              currentRepoRoot,
+              browserTitles,
+              agentTitles,
+            );
+            if (!data) return null;
+            const isActive = idx === leaf.activeIndex;
+            const agentTab =
+              ref.kind === "agent"
+                ? store.agentTabs.find((t) => t.sessionId === ref.id)
+                : undefined;
+            const menuItems = buildTabMenu(ref, idx, data.label);
+            const revealKey = tabRevealKey(ref);
+            const foreign =
+              data.foreignName && data.foreignName !== data.label
+                ? data.foreignName
+                : null;
+            return (
+              <ContextMenu key={`${leaf.paneId}-${idx}-${data.label}`}>
+                <ContextMenuTrigger asChild>
+                  <div
+                    className="ui-workspace-tab group"
+                    data-selected={isActive}
+                    title={foreign ? `${data.sub} — ${foreign}` : data.sub}
+                    // A middle click closes the tab, as it does a browser's.
+                    onAuxClick={(e) => {
+                      if (e.button !== 1) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      store.closeTabInPane(leaf.paneId, idx);
+                    }}
+                  >
+                    <button
+                      ref={isActive ? strip.activeRef : undefined}
+                      type="button"
+                      role="tab"
+                      data-tab-index={idx}
+                      aria-selected={isActive}
+                      tabIndex={isActive ? 0 : -1}
+                      onKeyDown={(e) => onTabKey(e, idx)}
+                      {...tabDrag.source({
+                        from: { paneId: leaf.paneId, index: idx },
+                        termId: ref.kind === "terminal" ? ref.id : undefined,
+                      })}
+                      onMouseDown={(e) => {
+                        if (e.button === 0)
+                          store.setActiveTabInPane(leaf.paneId, idx);
+                      }}
+                    >
+                      {/* Each tab wears the mark its destination wears
+                          everywhere else in the app — `TabMark` is shared with
+                          the "+" picker and the empty-pane picker. */}
+                      <span className="w-3.5 h-3.5 flex items-center justify-center flex-shrink-0">
+                        {/* When the tab learns what it is about, the mark that
+                            fits builds in on the same beat its name reveals. */}
+                        <RevealMark
+                          revealKey={revealKey}
+                          markKey={tabMarkKey(ref, data.label, data.agentId)}
+                        >
+                          {agentTab ? (
+                            <AgentTabMark tab={agentTab} agentId={data.agentId} />
+                          ) : (
+                            <TabMark
+                              refr={ref}
+                              label={data.label}
+                              agentId={data.agentId}
+                            />
+                          )}
+                        </RevealMark>
+                      </span>
+                      <span
+                        style={
+                          agentTab?.attention
+                            ? { fontWeight: 600, color: "var(--ui-fg)" }
+                            : undefined
+                        }
+                      >
+                        <TitleReveal revealKey={revealKey} text={data.label} />
+                      </span>
+                      {/* A tab from another repository names it on the same
+                          line, muted — otherwise it reads as this one's. */}
+                      {foreign && (
+                        <span
+                          style={{
+                            fontSize: 12,
+                            color: "var(--ui-muted-fg)",
+                            maxWidth: 96,
+                          }}
+                        >
+                          {foreign}
+                        </span>
+                      )}
+                      {ref.kind === "manager" && (
+                        <ManagerTabStatus sessionId={ref.id} />
+                      )}
+                      {/* A pencil on a tab whose message box holds a draft. */}
+                      {ref.kind === "manager" && (
+                        <DraftMark
+                          draftKey={composerKey(MANAGER_DRAFT_PREFIX, ref.id)}
+                        />
+                      )}
+                      {ref.kind === "agent" && (
+                        <DraftMark
+                          draftKey={composerKey(AGENT_DRAFT_PREFIX, ref.id)}
+                        />
+                      )}
+                    </button>
+                    {/* Every action this tab has, on a control you can see:
+                        the webview has eaten context menus on these tabs, so
+                        right-click alone is not a reliable route to split,
+                        move-to-pane or close-others. */}
+                    <TabMoreButton items={menuItems} reserveSpace={false} />
+                    <button
+                      type="button"
+                      className="ui-tab-close"
+                      aria-label={`Close ${data.label}`}
+                      onMouseDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.stopPropagation();
+                        store.closeTabInPane(leaf.paneId, idx);
+                      }}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent className="ui-tab-menu">
+                  {tabContextItems(menuItems)}
+                </ContextMenuContent>
+              </ContextMenu>
+            );
+          })}
       </div>
-      {/* Empty strip background = the pane-REORDER drag handle. It's a SIBLING
-          of the tab buttons (not their ancestor), so dragging a tab never
-          triggers a pane reorder and dragging here never sets the tab mime —
-          the two drags stay cleanly separate. `flex-1` fills the leftover strip
-          width; the tabs row scrolls first when tabs overflow. */}
+      {strip.edges.end && (
+        <Button
+          size="iconXs"
+          variant="ghost"
+          aria-label="Scroll tabs right"
+          onClick={() => strip.scrollStep(1)}
+        >
+          <ChevronRight />
+        </Button>
+      )}
+      {/* The ＋ sits where the tabs end: Chat, Terminal, Browser, and the
+          launcher under "More…". */}
+      <NewTabMenu
+        repoRoot={currentRepoRoot}
+        leaf={leaf}
+        place={(r) => store.addTabToPane(leaf.paneId, r)}
+      />
+      {/* Empty strip background = the pane-REORDER drag handle when there are
+          several panes, the window's drag region when there is one. It is a
+          sibling of the tabs, so the two drags never mix. */}
       {paneCount > 1 ? (
         <div
           className="flex-1 min-w-[16px] self-stretch cursor-grab active:cursor-grabbing"
-          draggable
-          onDragStart={(e) => {
-            e.dataTransfer.setData(
-              "application/x-aura-split-pane",
-              String(paneIndex),
-            );
-            e.dataTransfer.effectAllowed = "move";
-          }}
+          {...paneDrag.source(paneIndex)}
           title="Drag to reorder pane"
         />
       ) : (
-        // Nothing to reorder with one pane, and this strip is now the top edge
-        // of the window — so its empty half does what the empty half of a
-        // title bar does: it moves the window.
         <div
           className="flex-1 min-w-[16px] self-stretch"
           data-tauri-drag-region
@@ -2802,27 +2577,10 @@ function PerPaneTabStrip({
         />
       )}
       {trailing && (
-        <div className="flex items-center gap-1 px-2 flex-shrink-0 border-l border-line-soft">
+        <div className="flex items-center gap-1 px-2 flex-shrink-0">
           {trailing}
         </div>
       )}
-      <div className="relative flex items-stretch flex-shrink-0">
-        <button
-          type="button"
-          onClick={() => setAddOpen((v) => !v)}
-          title="Add tab from any workspace"
-          className="px-2 h-full text-sm text-text-3 hover:text-text-1 hover:bg-state-hover transition-colors border-l border-line-soft"
-        >
-          +
-        </button>
-        {addOpen && (
-          <PaneAddPopover
-            leaf={leaf}
-            currentRepoRoot={currentRepoRoot}
-            onClose={() => setAddOpen(false)}
-          />
-        )}
-      </div>
       {chromeTrailing}
     </div>
   );
@@ -2844,24 +2602,17 @@ function PaneUnavailable({
 } = {}) {
   const gone = reason === "gone";
   return (
-    <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-1 text-center px-6 bg-bg-0">
-      <div className="text-base text-text-2">
-        {gone ? "Nothing open here" : "Not available"}
-      </div>
-      <div className="text-xs text-text-3 max-w-[260px]">
-        {gone
-          ? "This pane's tab was closed somewhere else."
-          : "This surface is turned off. You can close this tab."}
-      </div>
-      {gone && onClosePane ? (
-        <button
-          type="button"
-          onClick={onClosePane}
-          className="mt-3 px-3 py-1.5 rounded-md text-xs text-text-1 bg-bg-2 hover:bg-bg-3 border border-border-1"
-        >
-          Close pane
-        </button>
-      ) : null}
+    <div className="ui-pane-unavailable">
+      <EmptyState
+        icon={PanelTop}
+        title={gone ? "Nothing open here" : "Not available"}
+        body={
+          gone
+            ? "This pane's tab was closed somewhere else."
+            : "This surface is turned off. You can close this tab."
+        }
+        action={gone && onClosePane ? { label: "Close pane", onClick: onClosePane } : undefined}
+      />
     </div>
   );
 }

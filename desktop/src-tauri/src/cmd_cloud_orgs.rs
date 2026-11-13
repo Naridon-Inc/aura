@@ -54,7 +54,13 @@ pub async fn cloud_orgs() -> Result<Vec<CloudOrg>, String> {
     let creds = read_credentials()?;
     let orgs = orgs_from_repos(&repos, &active_org(&creds));
     settle(&orgs, &repos, &creds);
-    Ok(orgs)
+    // The org just settled on has to be one the sign-in token may act in, or
+    // every org-scoped call after this is refused.
+    if let Err(e) = crate::cloud_org_token::mend().await {
+        tracing::warn!(target: "cloud::org", "token and org not reconciled: {e}");
+    }
+    let creds = read_credentials()?;
+    Ok(orgs_from_repos(&repos, &active_org(&creds)))
 }
 
 /// Act as `slug` from now on.
@@ -80,7 +86,8 @@ pub async fn cloud_org_switch(slug: String) -> Result<Vec<CloudOrg>, String> {
             "{slug} isn't one of your orgs — you may have been removed from it."
         ));
     };
-    crate::cloud_org::remember_org(&want)?;
+    // The token is minted for one org; acting as another takes that org's.
+    crate::cloud_org_token::act_as(&want).await?;
     for org in orgs.iter_mut() {
         org.current = org.slug == want.slug;
     }

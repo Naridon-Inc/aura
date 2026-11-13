@@ -6,11 +6,22 @@
 // (auto-hidden) when there's nothing worth interrupting over.
 
 import { CategorySection } from "../CategorySection";
+import { StatusChip, type ChipTone } from "../../ui/statusChip";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../ui/tooltip";
 import type { RadarCollision } from "../../../lib/api";
 import { agoFromMs, actorShort, severityMeta } from "./radarFormat";
 import { baseName } from "../sync/syncFormat";
 import { ActorMark } from "./ActorMark";
+import "../../ui/details-pulls.css";
+import "../../ui/radar-rows.css";
+
+/** Severity in the same tones a zone's claim wears: a direct clash is the
+ *  "locked" red, a likely one the "announced" amber, a possible one quiet. */
+const SEVERITY_TONE: Record<RadarCollision["severity"], ChipTone> = {
+  direct: "red",
+  likely: "amber",
+  possible: "neutral",
+};
 
 type Props = {
   conflicts: RadarCollision[];
@@ -38,57 +49,40 @@ export function CollisionsSection({
         return (
           <Tooltip key={c.event_id}>
             <TooltipTrigger asChild>
+              {/* The details panel's two-line row: who and how hard on the
+                  first line, why under it. */}
               <button
                 type="button"
                 onClick={() => file && onOpenFile?.(file)}
-                className="group w-full flex items-center gap-2 px-2 py-1.5 rounded-sm hover:bg-state-hover transition-colors min-w-0 text-left"
+                className="ui-details-pull ui-radar-row"
               >
-                <span
-                  className="shrink-0 w-1.5 h-1.5 rounded-full"
-                  style={{ background: sev.color }}
-                  aria-hidden
-                />
-                <ActorMark actor={c.peer} isAgent={c.peer_is_agent} size={18} />
-                <span className="flex-1 min-w-0">
-                  <span className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-sm text-text-1 truncate">
-                      {actorShort(c.peer)}
-                    </span>
-                    <span className="text-2xs text-text-4 shrink-0">
-                      {sev.disposition}
-                    </span>
-                    {!c.same_branch && (
-                      <span className="text-2xs text-text-4 font-mono truncate shrink min-w-0">
-                        {c.their_branch}
-                      </span>
-                    )}
-                  </span>
-                  <span className="block text-xs text-text-3 truncate">
-                    {c.reason}
-                  </span>
-                </span>
-                <span className="shrink-0 text-2xs text-text-4 tabular-nums">
-                  {agoFromMs(c.age_ms)}
-                </span>
+                <div>
+                  <ActorMark actor={c.peer} isAgent={c.peer_is_agent} size={16} />
+                  <span className="ui-details-pull-title">{actorShort(c.peer)}</span>
+                  <StatusChip tone={SEVERITY_TONE[c.severity] ?? "neutral"} dense>
+                    {sev.disposition}
+                  </StatusChip>
+                  <span className="ui-radar-age">{agoFromMs(c.age_ms)}</span>
+                </div>
+                <div className="ui-details-pull-meta ui-radar-meta">
+                  <span>{c.reason}</span>
+                  {!c.same_branch && (
+                    <span className="ui-details-pull-branch">{c.their_branch}</span>
+                  )}
+                </div>
               </button>
             </TooltipTrigger>
-            <TooltipContent side="left" className="text-xs">
-              <div className="font-medium mb-0.5 truncate max-w-[260px]">
+            <TooltipContent side="left" className="ui-radar-tip">
+              <strong>
                 {c.peer}
                 {c.peer_is_agent ? " · agent" : ""}
-              </div>
-              <div className="text-text-3 leading-snug max-w-[260px]">
-                {c.reason}
-              </div>
-              <div className="text-text-4 leading-snug mt-0.5">
-                touches your <span className="font-mono">{c.mine}</span>
+              </strong>
+              <p>{c.reason}</p>
+              <p className="ui-radar-tip-quiet">
+                touches your <code>{c.mine}</code>
                 {file ? ` · ${baseName(file)}` : ""}
-              </div>
-              {c.their_intent && (
-                <div className="text-text-4 leading-snug mt-0.5 italic max-w-[260px]">
-                  “{c.their_intent}”
-                </div>
-              )}
+              </p>
+              {c.their_intent && <p className="ui-radar-tip-intent">“{c.their_intent}”</p>}
             </TooltipContent>
           </Tooltip>
         );

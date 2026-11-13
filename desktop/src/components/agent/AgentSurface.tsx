@@ -1,4 +1,4 @@
-import { ChatHeader, ChatViewSwitcher } from "../chat/ChatHeader";
+import { ChatViewSwitcher } from "../chat/ChatViewSwitcher";
 // A live session has two presentations: its native CLI and the shared chat UI.
 import { useEffect, useState } from "react";
 import { api } from "../../lib/api";
@@ -880,18 +880,28 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
           Product context lives in the right-rail Story tab; the optional
           Blocks drawer is raw diagnostic context only. */}
       <div className="flex-1 min-h-0 relative flex">
-        <div className="flex-1 min-w-0 relative">
+        {/* Holds `--composer-overlay-height` for the pane: the composer band
+            publishes what it is standing on, the terminal below reserves it.
+            See `composerOverlay`. */}
+        <div className="flex-1 min-w-0 relative" data-composer-underlay="">
           {/* The terminal stays MOUNTED even when the readable transcript is
               shown — hiding it via CSS keeps the PTY alive and streaming so
               the parsed events keep filling the transcript and answers can be
-              typed the instant the user flips back. */}
+              typed the instant the user flips back.
+              Its bottom edge clears the composer strip floating over it: real
+              padding, not a clip, so the native surface is simply SMALLER and
+              the strip sits in free page. A clip would cost a swapchain
+              reconfigure and `nativeSurfacePlacement`'s 8px overlay margin for
+              something that is there permanently. */}
           <div
             className="absolute inset-0 flex flex-col"
             inert={view === "chat"}
             aria-hidden={view === "chat"}
-            style={{ visibility: view === "chat" ? "hidden" : "visible" }}
+            style={{
+              visibility: view === "chat" ? "hidden" : "visible",
+              paddingBottom: view === "chat" ? undefined : "var(--composer-overlay-height, 0px)",
+            }}
           >
-            <ChatHeader title={tab.agentLabel} workspace={tab.repoRoot} switcher={<ChatViewSwitcher value={view} onChange={setMainView} disabled={paused} />} />
             <div className="flex-1 min-h-0 relative">
             <AgentTerminalView
               sessionId={tab.sessionId}
@@ -911,14 +921,33 @@ function PtySurface({ tab, onClosePane }: AgentSurfaceProps) {
             />
             </div>
           </div>
+          {/* One composer serves both views. The conversation layer is no
+              longer taken away when the terminal is up — it is overlaid: the
+              transcript goes invisible (keeping the scroll position that
+              unmounting would throw away) and its dock stays as a strip you
+              can type a prompt into without leaving the TUI. Which is the
+              point: the default view here is the terminal, and until now that
+              view had the rich composer — model picker, mode, @file mentions,
+              up-arrow recall — one click away rather than to hand.
+              Neither `inert` nor `aria-hidden` applies in that state, because
+              the strip is real UI; the stylesheet is what keeps the invisible
+              transcript out of the way (`[data-chat-overlay]`).
+              Over the terminal this wrapper draws nothing, but a box that draws
+              nothing is still what a hit test finds. The native surface asks
+              `elementFromPoint` at five points of its hole whether anything is
+              in front (`isCovered`), got this wrapper at every one and parked:
+              a blank pane until some click happened to change the answer. So
+              the layer gives the pointer up, and the dock takes it back with
+              its own `pointer-events: auto`. */}
           {!paused && (
-            <div className="absolute inset-0" inert={view !== "chat"} aria-hidden={view !== "chat"} style={{ visibility: view === "chat" ? "visible" : "hidden" }}>
+            <div className={view === "chat" ? "absolute inset-0" : "absolute inset-0 pointer-events-none"}>
               <NormalizedTranscript
                 key={tab.sessionId}
                 channel={transcriptChannel}
                 agentId={tab.agentId}
                 repoRoot={tab.repoRoot}
                 ptySessionId={tab.sessionId}
+                overlay={view !== "chat"}
                 onRespondInTerminal={() => setMainView("terminal")}
                 viewSwitcher={<ChatViewSwitcher value={view} onChange={setMainView} />}
               />

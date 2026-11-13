@@ -17,6 +17,7 @@ import {
   presenceTitle,
   type RailPresenceState,
 } from "./railModel";
+import "../../ui/people-rail.css";
 
 export type PresenceDotProps = {
   state: RailPresenceState;
@@ -37,7 +38,7 @@ export type PresenceDotProps = {
 export function PresenceMark({
   state,
   size = 7,
-  ring = "var(--color-bg-1)",
+  ring = "var(--ui-sidebar)",
   className,
 }: Omit<PresenceDotProps, "name">) {
   const ink = presenceInk(state);
@@ -69,7 +70,7 @@ export function PresenceDot({
   state,
   name,
   size = 7,
-  ring = "var(--color-bg-1)",
+  ring = "var(--ui-sidebar)",
   className,
 }: PresenceDotProps) {
   const label = name ? presenceTitle(name, state) : presenceLabel(state);
@@ -77,8 +78,7 @@ export function PresenceDot({
     <Tooltip>
       <TooltipTrigger asChild>
         <span
-          className={`absolute ${className ?? ""}`}
-          style={{ right: -1, bottom: -1, lineHeight: 0 }}
+          className={className ? `ui-rail-presence ${className}` : "ui-rail-presence"}
           role="img"
           aria-label={label}
         >

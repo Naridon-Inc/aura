@@ -65,8 +65,18 @@ export const placeFsFindFiles = (w: WorkAt) =>
 
 export const placeGitStatusV2 = (w: WorkAt) =>
   invoke<GitStatusEntry[]>("place_git_status_v2", at(w));
-export const placeGitDiff = (w: WorkAt, file: string, sinceBase?: boolean) =>
-  invoke<string>("place_git_diff", { ...at(w), file, sinceBase: sinceBase ?? null });
+export const placeGitDiff = (
+  w: WorkAt,
+  file: string,
+  sinceBase?: boolean,
+  ignoreWhitespace?: boolean,
+) =>
+  invoke<string>("place_git_diff", {
+    ...at(w),
+    file,
+    sinceBase: sinceBase ?? null,
+    ignoreWhitespace: ignoreWhitespace ?? null,
+  });
 export const placeGitDiffAtCommit = (w: WorkAt, sha: string, file: string) =>
   invoke<string>("place_git_diff_at_commit", { ...at(w), sha, file });
 export const placeGitDiffBase = (w: WorkAt, base: string, file: string) =>
@@ -123,3 +133,23 @@ export const placeGitResetFiles = (w: WorkAt) =>
  *  there) when it is not. */
 export const placeWorkReady = (w: WorkAt) =>
   invoke<void>("place_work_ready", at(w));
+
+/** The machine a workspace runs on, as its details show it: cores and how
+ *  busy they were over the last second, memory and how much of it is taken,
+ *  and the disk holding the workspace's folder. Rejects with a sentence when
+ *  the machine didn't say — one with no `/proc` is not a Linux box. */
+export type MachineStats = {
+  cores: number;
+  cpu_used: number;
+  memory_kb: number;
+  memory_used: number;
+  disk_kb: number;
+  disk_used: number;
+};
+export const placeWorkStats = (w: WorkAt) =>
+  invoke<MachineStats>("place_work_stats", at(w));
+
+/** Copy the files git tracks in the workspace's folder on the machine into
+ *  `dest` on this laptop. Overwrites what is there; deletes nothing. */
+export const placeWorkCopyOut = (w: WorkAt, dest: string) =>
+  invoke<{ files: number; folder: string }>("place_work_copy_out", { ...at(w), dest });

@@ -12,16 +12,13 @@
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { readSrc, stripComments } from "./support/code";
+import { readSrc, stripComments, strippedSrcTree } from "./support/code";
 
 describe("who lists conversations", () => {
   it("is only the cache module. Everyone else goes through it", async () => {
-    const glob = new Bun.Glob("**/*.{ts,tsx}");
-    const root = `${import.meta.dir}/../src/`;
     const offenders: string[] = [];
-    for await (const rel of glob.scan(root)) {
+    for (const [rel, body] of await strippedSrcTree()) {
       if (rel === "lib/api.ts" || rel === "lib/managerCache.ts") continue;
-      const body = stripComments(await Bun.file(root + rel).text());
       if (body.includes("api.managerList(")) offenders.push(rel);
     }
     expect(offenders).toEqual([]);

@@ -322,9 +322,9 @@ mod tests {
 
     #[test]
     fn ip_off_by_default_on_under_strict() {
-        let public = "Edge at 51.102.104.41 here";
+        let public = "Edge at 9.9.9.9 here";
         let (out_def, _) = run(public, &RedactionConfig::default());
-        assert!(out_def.contains("51.102.104.41"), "default keeps IPs: {out_def}");
+        assert!(out_def.contains("9.9.9.9"), "default keeps IPs: {out_def}");
 
         let (out_strict, rep) = run(public, &RedactionConfig::strict());
         assert!(out_strict.contains("[REDACTED_IP]"), "strict redacts: {out_strict}");

@@ -1,0 +1,219 @@
+/* The card an agent waits on: the shared permission request, docked just
+   above the composer instead of inline, so it floats over whatever is behind
+   it. The request itself is the shared part; this is only where it sits and
+   the few things a parked agent adds to it. */
+
+.ui-parked-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  pointer-events: none;
+}
+.ui-parked-dock {
+  position: absolute;
+  width: min(430px, calc(100vw - 32px));
+  max-height: 68vh;
+  overflow-y: auto;
+  pointer-events: auto;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-bg);
+  box-shadow: 0 4px 12px #0003;
+  /* Whatever takes focus scrolls clear of the pinned answers. */
+  scroll-padding-bottom: 136px;
+  transition:
+    opacity 200ms ease-out,
+    transform 200ms ease-out;
+}
+/* The composer tint is translucent in the light theme; over the page it
+   reads the same as the inline request does over the chat. */
+.ui-parked-dock > .ui-permission-request {
+  border-radius: 7px;
+}
+.ui-parked-dock .ui-permission-request p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* What is being agreed to is never sliced through a flag: wrap whole words,
+   and only break a token that is longer than the line. */
+.ui-parked-dock .ui-permission-request pre {
+  max-height: 220px;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+/* The answers stay in reach however much the card has to say. */
+.ui-parked-dock .ui-permission-options {
+  position: sticky;
+  bottom: 0;
+  margin: -8px 0 -12px;
+  padding: 8px 0 12px;
+  background: linear-gradient(var(--ui-composer), var(--ui-composer)), var(--ui-bg);
+}
+.ui-parked-dock[data-tone="danger"] .ui-permission-request > header svg {
+  color: var(--ui-red);
+}
+.ui-parked-dock[data-tone="warn"] .ui-permission-request > header svg {
+  color: var(--ui-yellow);
+}
+
+/* "Waiting for you · 42s": the ticker mustn't jitter the line as it counts,
+   and the line keeps to one row — the headline is what wraps. */
+.ui-parked-line {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ui-parked-diff-toggle {
+  margin-left: -8px;
+}
+
+/* ── the meta line: which tool, which file ─────────────────────────────── */
+
+.ui-parked-meta,
+.ui-parked-queue {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  color: var(--ui-faint);
+  font-size: 12px;
+  line-height: 16px;
+}
+.ui-parked-meta > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+.ui-parked-meta code {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-muted-fg);
+  font: 12px/16px var(--font-mono);
+}
+
+/* ── the change, folded ────────────────────────────────────────────────── */
+
+.ui-parked-diff-toggle svg {
+  transition: transform 150ms ease-out;
+}
+.ui-parked-diff-toggle[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+.ui-parked-diff {
+  max-height: 240px;
+  margin: 6px 0 0;
+  overflow: auto;
+  padding: 4px 0;
+  border-radius: 4px;
+  background: var(--ui-bg);
+  font: 12px/18px var(--font-mono);
+}
+.ui-parked-diff-line {
+  padding: 0 12px;
+  color: var(--ui-faint);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.ui-parked-diff-line[data-kind="add"] {
+  background: color-mix(in srgb, var(--ui-green) 12%, transparent);
+  color: var(--ui-green);
+}
+.ui-parked-diff-line[data-kind="del"] {
+  background: color-mix(in srgb, var(--ui-red) 12%, transparent);
+  color: var(--ui-red);
+}
+
+/* ── what it would break ───────────────────────────────────────────────── */
+
+.ui-parked-impact {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-bg);
+}
+.ui-parked-impact[data-tone="danger"] {
+  border-color: color-mix(in srgb, var(--ui-red) 40%, transparent);
+}
+.ui-parked-impact[data-tone="warn"] {
+  border-color: color-mix(in srgb, var(--ui-yellow) 40%, transparent);
+}
+.ui-parked-impact-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.ui-parked-impact-label {
+  color: var(--ui-muted-fg);
+  font-weight: 500;
+}
+.ui-parked-impact-head .ui-badge {
+  margin-left: auto;
+}
+.ui-parked-dock .ui-parked-impact-summary {
+  margin: 0;
+  color: var(--ui-fg);
+  font-size: 13px;
+  line-height: 18px;
+}
+.ui-parked-impact-summary code,
+.ui-parked-impact-callers code {
+  font: 0.92em var(--font-mono);
+}
+.ui-parked-impact-features {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  line-height: 18px;
+}
+.ui-parked-impact-features li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-parked-impact-feature {
+  flex-shrink: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-parked-impact-kind {
+  flex-shrink: 0;
+  color: var(--ui-faint);
+}
+.ui-parked-impact-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ui-muted-fg);
+  font: 11px var(--font-mono);
+}
+.ui-parked-dock .ui-parked-impact-more {
+  color: var(--ui-faint);
+}
+.ui-parked-impact-callers {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 16px;
+}
+.ui-parked-dock .ui-parked-impact-hedge {
+  margin: 0;
+  color: var(--ui-faint);
+  font-size: 11px;
+  line-height: 15px;
+}

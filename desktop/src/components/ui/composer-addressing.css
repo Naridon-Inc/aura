@@ -1,0 +1,66 @@
+/* Who the next message in a shared session is for. It is the composer's
+   context line with the model picker's ghost triggers and the commit-scope
+   menu's two-line items; added here: the line's own rhythm (one row, the
+   sentence taking the slack and the waiting word pinned to the end), a face
+   that keeps its presence dot inside a truncating trigger, the menus' widths,
+   and the loading row sized for a line rather than a pane. */
+
+.ui-composer-context.ui-composer-addressing {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 8px;
+  /* The session composer draws the line between this and the input. */
+  border-bottom: 0;
+}
+.ui-composer-addressing > span {
+  flex-shrink: 0;
+}
+/* Who and what kind keep their room; the sentence gives way first. */
+.ui-composer-addressing > .ui-model-trigger {
+  flex-shrink: 0;
+}
+.ui-composer-addressing > .ui-model-trigger:first-of-type {
+  max-width: 200px;
+}
+.ui-composer-addressing .ui-model-trigger > .ui-composer-addressing-face {
+  display: inline-flex;
+  flex-shrink: 0;
+  overflow: visible;
+}
+.ui-composer-addressing > .ui-composer-addressing-sentence {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-composer-addressing > .ui-composer-addressing-waiting {
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--ui-yellow);
+}
+.ui-composer-addressing > .ui-composer-addressing-error {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-red);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-composer-addressing > .ui-state-row {
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.ui-menu-panel.ui-composer-addressing-menu {
+  width: 280px;
+}
+.ui-composer-addressing-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

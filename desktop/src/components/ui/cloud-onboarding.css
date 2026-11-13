@@ -1,0 +1,329 @@
+.ui-cloud-setup {
+  display: flex;
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: var(--ui-bg);
+  padding: 24px 32px;
+  gap: 32px;
+  overflow: auto;
+}
+.ui-cloud-setup > nav {
+  width: 208px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ui-cloud-setup > nav > button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  text-align: left;
+  border: 0;
+  background: none;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  min-height: 32px;
+}
+.ui-cloud-setup > nav > button > span {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  font-size: 12px;
+}
+.ui-cloud-setup > nav > button[aria-current="step"] {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-cloud-setup > nav > button:disabled {
+  cursor: default;
+}
+.ui-cloud-setup-page {
+  max-width: 672px;
+  width: 100%;
+  min-width: 0;
+  margin: 0 auto;
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 24px;
+  padding-bottom: 96px;
+  animation: ui-cloud-step-in 0.25s cubic-bezier(0.23, 1, 0.32, 1);
+}
+.ui-cloud-setup-page h1 {
+  font-size: 24px;
+  line-height: 32px;
+  font-weight: 600;
+  margin: 0;
+}
+.ui-cloud-setup-page p {
+  font-size: 16px;
+  line-height: 1.6;
+  margin: 0;
+}
+.ui-cloud-setup-page header > p {
+  color: var(--ui-muted-fg);
+  margin-top: 4px;
+}
+.ui-cloud-setup-page ul {
+  padding-left: 20px;
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.8;
+}
+.ui-cloud-setup-page small {
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-cloud-computer-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+.ui-cloud-computer-hero > img {
+  width: 224px;
+  flex-shrink: 0;
+}
+.ui-cloud-computer-hero p {
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+  white-space: nowrap;
+}
+.ui-cloud-computer-hero [role="radiogroup"] {
+  display: flex;
+  gap: 8px;
+  padding: 16px 0 0 28px;
+}
+.ui-cloud-computer-hero [role="radio"] {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 50%;
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  cursor: pointer;
+}
+.ui-cloud-computer-hero [role="radio"][aria-checked="true"] {
+  outline-color: var(--ui-fg);
+}
+.ui-cloud-setup-repo-preview {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.ui-cloud-setup-repo-preview img {
+  width: 128px;
+}
+.ui-cloud-setup-repo-preview pre {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ui-muted-fg);
+}
+.ui-cloud-setup-repo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  font-size: 13px;
+}
+.ui-cloud-setup-repo > button {
+  margin-left: auto;
+}
+.ui-cloud-setup .ui-cloud-repo-select {
+  height: 36px;
+}
+.ui-cloud-agent-connections {
+  width: 100%;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ui-cloud-agent-connections > button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 16px;
+  border: 0;
+  background: none;
+  color: var(--ui-fg);
+  cursor: pointer;
+}
+.ui-cloud-agent-connections > button + button {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-cloud-agent-connections > button:hover {
+  background: var(--ui-hover);
+}
+.ui-cloud-agent-connections > button > span {
+  flex: 1;
+  text-align: left;
+  font-size: 14px;
+}
+.ui-cloud-agent-connections > button > small {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-cloud-setup-build {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  cursor: pointer;
+}
+.ui-cloud-setup-example {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 32px;
+  color: var(--ui-faint);
+  font-size: 10px;
+}
+.ui-cloud-setup-example button {
+  background: none;
+  border: 0;
+  color: var(--ui-muted-fg);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.ui-cloud-repository-dialog {
+  max-width: 760px;
+  width: min(760px, calc(100vw - 32px));
+}
+.ui-cloud-repository-browser {
+  display: flex;
+  min-height: 300px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ui-cloud-repository-browser > aside {
+  width: 192px;
+  padding: 12px;
+  border-right: 1px solid var(--ui-border);
+}
+.ui-cloud-repository-browser > aside > button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  margin-top: 18px;
+  cursor: pointer;
+}
+.ui-cloud-repository-browser > section {
+  flex: 1;
+  min-width: 0;
+  padding: 12px;
+}
+.ui-cloud-repository-browser label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 4px;
+  font-size: 12px;
+}
+.ui-cloud-repository-browser input[type="checkbox"] {
+  accent-color: var(--ui-link);
+}
+.ui-cloud-select-all {
+  background: none;
+  border: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  padding: 10px 4px;
+  cursor: pointer;
+}
+.ui-cloud-setup-command {
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  background: var(--ui-muted);
+  font-size: 12px;
+}
+.ui-cloud-welcome-presence {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 0;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-cloud-welcome-presence > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ui-cloud-setup-missing {
+  padding: 16px;
+  border: 1px solid var(--ui-border);
+  width: 100%;
+  border-radius: 8px;
+}
+.ui-cloud-setup-missing > p {
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+@keyframes ui-cloud-step-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-cloud-setup-page {
+    animation: none;
+  }
+}
+@media (max-width: 1000px) {
+  .ui-cloud-setup {
+    gap: 24px;
+    padding: 24px;
+  }
+  .ui-cloud-setup > nav {
+    width: 180px;
+  }
+  .ui-cloud-computer-hero {
+    flex-wrap: wrap;
+  }
+  .ui-cloud-computer-hero p {
+    white-space: normal;
+  }
+}
+@media (max-width: 700px) {
+  .ui-cloud-setup {
+    flex-direction: column;
+  }
+  .ui-cloud-setup > nav {
+    width: 100%;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .ui-cloud-setup > nav > button {
+    font-size: 12px;
+  }
+  .ui-cloud-setup-page h1 {
+    font-size: 22px;
+  }
+  .ui-cloud-repository-browser > aside {
+    width: 140px;
+  }
+}

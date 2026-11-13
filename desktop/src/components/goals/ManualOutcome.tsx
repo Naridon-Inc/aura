@@ -19,6 +19,10 @@ import {
 import { relativeAge } from "../../lib/relativeTime";
 import { shortRevision } from "../../lib/sessionEvidence";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { TraceMark } from "../ui/trace-list";
+import { TraceLine } from "../ui/trace-report";
+import "./goals.css";
 
 const STATE_WORD: Record<ManualState, string> = {
   awaiting: "Waiting on a person",
@@ -26,26 +30,14 @@ const STATE_WORD: Record<ManualState, string> = {
   failed: "A person tried it — it didn't",
 };
 
-const STATE_COLOR: Record<ManualState, string> = {
-  awaiting: "var(--color-amber)",
-  passed: "var(--color-accent-green)",
-  failed: "var(--color-red)",
+const STATE_TONE: Record<ManualState, "warn" | "good" | "danger"> = {
+  awaiting: "warn",
+  passed: "good",
+  failed: "danger",
 };
 
 export function ManualStateChip({ state }: { state: ManualState }) {
-  const color = STATE_COLOR[state];
-  return (
-    <span
-      className="shrink-0 rounded px-1.5 py-px text-2xs"
-      style={{
-        color,
-        background: `color-mix(in oklab, ${color} 12%, transparent)`,
-        border: `0.5px solid color-mix(in oklab, ${color} 32%, transparent)`,
-      }}
-    >
-      {STATE_WORD[state]}
-    </span>
-  );
+  return <TraceMark tone={STATE_TONE[state]}>{STATE_WORD[state]}</TraceMark>;
 }
 
 /** What a recorded outcome is about: who said so, when, and which version they
@@ -58,10 +50,10 @@ export function ManualOutcomeNote({ check }: { check: ManualCheck }) {
   if (check.revision) parts.push(`on ${shortRevision(check.revision)}`);
   if (parts.length === 0 && !check.note) return null;
   return (
-    <p className="mt-0.5 text-sm leading-snug text-text-4">
+    <TraceLine tone="note">
       {check.note ? `${check.note} · ` : ""}
       {parts.join(" · ")}
-    </p>
+    </TraceLine>
   );
 }
 
@@ -90,7 +82,7 @@ export function ManualOutcomeControl({
 
   if (!open) {
     return (
-      <Button type="button" variant="subtle" size="xs" onClick={() => setOpen(true)}>
+      <Button type="button" variant="secondary" size="sm" onClick={() => setOpen(true)}>
         {check.state === "awaiting" ? cta : "Record it again"}
       </Button>
     );
@@ -98,24 +90,25 @@ export function ManualOutcomeControl({
 
   return (
     <>
-      <input
+      <Input
         autoFocus
+        size="small"
         value={note}
         onChange={(e) => setNote(e.target.value)}
         placeholder="What happened?"
-        className="min-w-0 flex-1 rounded border border-line-soft bg-bg-2 px-2 py-1 text-sm text-text-1 outline-none focus:border-line"
+        aria-label="What happened?"
+        className="ui-goal-note-input"
       />
-      <Button type="button" variant="subtle" size="xs" onClick={() => record("passed")}>
+      <Button type="button" variant="secondary" size="sm" onClick={() => record("passed")}>
         It worked
       </Button>
-      <Button type="button" variant="subtle" size="xs" onClick={() => record("failed")}>
+      <Button type="button" variant="secondary" size="sm" onClick={() => record("failed")}>
         It didn&apos;t
       </Button>
       <Button
         type="button"
-        variant="subtle"
-        size="xs"
-        className="text-text-4"
+        variant="ghost"
+        size="sm"
         onClick={() => {
           setNote("");
           setOpen(false);

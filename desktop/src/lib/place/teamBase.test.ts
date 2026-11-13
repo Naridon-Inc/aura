@@ -2,9 +2,9 @@ import { describe, expect, mock, test } from "bun:test";
 
 import type { BaseBuild, Held, TeamBase, WarmStart } from "./teamBase";
 
-type BaseAsk = { root: string | null; machineId: string | null };
+type BaseAsk = { root: string | null; machineId: string | null; repoPath?: string | null };
 type WarmAsk = {
-  place: { root: string | null; machineId: string | null };
+  place: BaseAsk;
   login?: string;
   force: boolean;
 };
@@ -62,12 +62,12 @@ let warmAnswer: BaseBuild = {
 
 mock.module("../api", () => ({
   api: {
-    placeTeamBase: (place: { root: string | null; machineId: string | null }) => {
+    placeTeamBase: (place: BaseAsk) => {
       baseAsks.push({ ...place });
       return Promise.resolve(baseAnswer);
     },
     placeTeamBaseWarm: (
-      place: { root: string | null; machineId: string | null },
+      place: BaseAsk,
       login: string | undefined,
       force: boolean,
     ) => {
@@ -128,6 +128,23 @@ describe("starting from the team's environment", () => {
     expect(warmAsks[0].force).toBe(false);
   });
 
+  test("a box is read at the folder the place names on it, this laptop never", async () => {
+    // A repository the box holds and this laptop's book has no row for is
+    // reached through another row on the same box, pointed at its own folder.
+    baseAsks.length = 0;
+    warmAsks.length = 0;
+    const there = (machineId: string | null, path: string | null) => {
+      const p = place(machineId);
+      return { ...p, project: { ...p.project, root: null, path } };
+    };
+    await askTeamBase(there("box-1", "/home/ubuntu/aura-workspaces/acme__api"));
+    await askTeamBase(there(null, "/somewhere/else"));
+    expect(baseAsks[0].repoPath).toBe("/home/ubuntu/aura-workspaces/acme__api");
+    expect(baseAsks[1].repoPath).toBeNull();
+    await warmStart(there("box-1", "/home/ubuntu/web"));
+    expect(warmAsks[0].place.repoPath).toBe("/home/ubuntu/web");
+  });
+
   test("a base holding somebody's credential is not one to start from", () => {
     // The one failure worse than a slow install. Everything else here is about
     // minutes; this is about a member's home ending up with a teammate's token
@@ -174,7 +191,7 @@ describe("starting from the team's environment", () => {
 
   test("the first member is told the next person will not pay for it", () => {
     const said = warmSentence({ ...warmAnswer, already_built: false });
-    expect(said).toContain("brought to the project's spec");
+    expect(said).toContain("brought to the repository's spec");
     expect(said).toContain("pays none of that");
   });
 

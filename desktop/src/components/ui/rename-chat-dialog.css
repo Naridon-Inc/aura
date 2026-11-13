@@ -1,0 +1,21 @@
+/* "Rename chat": the small dialog width, the chat mark beside the title. */
+.ui-dialog-content.ui-rename-chat {
+  width: min(384px, calc(100vw - 32px));
+}
+.ui-rename-chat-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* Read to a screen reader, not drawn. */
+.ui-rename-chat-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

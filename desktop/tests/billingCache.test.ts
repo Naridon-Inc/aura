@@ -15,7 +15,7 @@
 
 import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test";
 
-import { readSrc, stripComments } from "./support/code";
+import { readSrc, stripComments, strippedSrcTree } from "./support/code";
 
 let calls: Array<string | undefined> = [];
 let fail: string | null = null;
@@ -141,14 +141,9 @@ describe("billing being unreachable is not a bill of zero", () => {
 
 describe("wiring", () => {
   it("nothing fetches the figure straight from the api", async () => {
-    const glob = new Bun.Glob("**/*.{ts,tsx}");
-    // `import.meta.dir`, not a URL pathname — this repo lives under a path
-    // with a space in it, which a URL would percent-encode into nothing.
-    const root = `${import.meta.dir}/../src/`;
     const offenders: string[] = [];
-    for await (const rel of glob.scan(root)) {
+    for (const [rel, body] of await strippedSrcTree()) {
       if (rel === "lib/api.ts" || rel === "lib/billingCache.ts") continue;
-      const body = stripComments(await Bun.file(root + rel).text());
       if (body.includes("api.cloudBillingUsageByMember(")) offenders.push(rel);
     }
     expect(offenders).toEqual([]);

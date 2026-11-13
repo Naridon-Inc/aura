@@ -4,11 +4,18 @@
 // right-click on any intent row.
 
 import { useEffect, useMemo, useState } from "react";
+import { Check } from "lucide-react";
 import { Dialog } from "../Dialog";
+import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
+import { Textarea } from "../ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "../ui/toggle-group";
+import "../ui/log-note.css";
+import "../ui/intent-edit.css";
 import { api, type IntentRow } from "../../lib/api";
 import { fetchIntentRows } from "../../lib/intentCache";
-import { basename } from "../../lib/paths";
+import { basename, dirname } from "../../lib/paths";
 
 type Mode = "split" | "merge";
 
@@ -64,11 +71,11 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
   async function runSplit() {
     if (!target) return;
     if (moveSet.size === 0) {
-      setErr("pick at least one file to move into the new reason");
+      setErr("Pick at least one file to move into the new reason.");
       return;
     }
     if (!newIntent.trim()) {
-      setErr("type the new reason");
+      setErr("Type the new reason.");
       return;
     }
     const allPaths = targetFiles.map((f) => f.path);
@@ -115,187 +122,153 @@ export function IntentSplitMergeDialog({ open, repoRoot, intentTs, onClose }: Pr
       title="Edit reason"
       footer={
         <>
-          <Button variant="ghost" size="xs" onClick={onClose}>
+          <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
           {mode === "split" ? (
             <Button
-              variant="default"
-              size="xs"
               onClick={runSplit}
               disabled={busy || !target || moveSet.size === 0 || !newIntent.trim()}
             >
-              {busy ? "splitting…" : `Split · ${moveSet.size} file${moveSet.size === 1 ? "" : "s"}`}
+              {busy ? "Splitting…" : `Split · ${moveSet.size} file${moveSet.size === 1 ? "" : "s"}`}
             </Button>
           ) : (
-            <Button
-              variant="default"
-              size="xs"
-              onClick={runMerge}
-              disabled={busy || !target || mergeWithTs === null}
-            >
-              {busy ? "merging…" : "Merge"}
+            <Button onClick={runMerge} disabled={busy || !target || mergeWithTs === null}>
+              {busy ? "Merging…" : "Merge"}
             </Button>
           )}
         </>
       }
     >
-      <div className="space-y-3 text-sm">
-        {!target ? (
-          <div className="text-text-4">no reason selected</div>
-        ) : (
-          <>
-            <div className="border border-line-soft rounded bg-bg-0 px-2 py-1.5">
-              <div className="section-label">
-                Original reason
-              </div>
-              <div className="text-text-1 text-sm leading-snug">{target.intent}</div>
-              <div className="text-text-5 text-xs mt-0.5">
-                {targetFiles.length} file{targetFiles.length === 1 ? "" : "s"} ·{" "}
-                {target.agent_id}
-              </div>
-            </div>
+      {!target ? (
+        <p className="ui-log-note-state">No reason selected.</p>
+      ) : (
+        <>
+          <section className="ui-intent-edit-original" aria-label="Original reason">
+            <h3>Original reason</h3>
+            <p>{target.intent}</p>
+            <small>
+              {targetFiles.length} file{targetFiles.length === 1 ? "" : "s"} · {target.agent_id}
+            </small>
+          </section>
 
-            <div className="flex items-center gap-1">
-              <ModeChip current={mode} id="split" onClick={setMode}>
-                Split
-              </ModeChip>
-              <ModeChip current={mode} id="merge" onClick={setMode}>
-                Merge
-              </ModeChip>
-            </div>
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            className="ui-intent-edit-mode"
+            aria-label="Split or merge this reason"
+            value={mode}
+            // A single group reports "" when the pressed choice is pressed
+            // again; one mode is always chosen.
+            onValueChange={(next) => {
+              if (next === "split" || next === "merge") setMode(next);
+            }}
+          >
+            <ToggleGroupItem value="split">Split</ToggleGroupItem>
+            <ToggleGroupItem value="merge">Merge</ToggleGroupItem>
+          </ToggleGroup>
 
-            {mode === "split" ? (
-              <>
-                <div>
-                  <div className="section-label mb-1">
-                    Move these files into a new reason
-                  </div>
-                  <div className="border border-line-soft rounded bg-bg-0 max-h-[160px] overflow-y-auto">
-                    {targetFiles.length === 0 ? (
-                      <div className="px-2 py-3 text-text-4 text-xs">
-                        this reason covers no files
-                      </div>
-                    ) : (
-                      targetFiles.map((f) => {
-                        const checked = moveSet.has(f.path);
-                        return (
+          {mode === "split" ? (
+            <>
+              <section className="ui-log-note-files" aria-label="Files to move">
+                <div className="ui-log-note-files-head">
+                  <span>Move these files into a new reason</span>
+                  <span className="ui-log-note-count">
+                    {moveSet.size} of {targetFiles.length}
+                  </span>
+                </div>
+                <ul className="ui-log-note-list">
+                  {targetFiles.length === 0 ? (
+                    <li className="ui-log-note-state">This reason covers no files.</li>
+                  ) : (
+                    targetFiles.map((f) => {
+                      const checked = moveSet.has(f.path);
+                      return (
+                        <li key={f.path}>
                           <label
-                            key={f.path}
-                            className={`flex items-center gap-2 px-2 py-1 text-sm cursor-pointer hover:bg-state-hover ${
-                              checked ? "" : "opacity-55"
-                            }`}
+                            className="ui-check-label"
+                            data-unpicked={checked ? undefined : ""}
                           >
-                            <input
-                              type="checkbox"
+                            <Checkbox
                               checked={checked}
-                              onChange={() => toggleMove(f.path)}
+                              onCheckedChange={() => toggleMove(f.path)}
                               disabled={busy}
-                              className="accent-accent-green"
                             />
-                            <span className="w-3 text-2xs font-mono text-text-4">
-                              {(f.status || "M").trim()}
-                            </span>
-                            <span className="text-text-1 truncate" title={f.path}>
+                            <span className="ui-log-note-tag">{(f.status || "M").trim()}</span>
+                            <span className="ui-log-note-name" title={f.path}>
                               {basename(f.path)}
                             </span>
-                            <span className="ml-auto text-text-5 text-xs font-mono truncate">
-                              {f.path}
-                            </span>
+                            <span className="ui-log-note-dir">{dirname(f.path)}</span>
                           </label>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-                <div>
-                  <div className="section-label mb-1">
-                    New reason
-                  </div>
-                  <textarea
-                    value={newIntent}
-                    onChange={(e) => setNewIntent(e.target.value)}
-                    placeholder="What were these files actually for?"
-                    disabled={busy}
-                    rows={3}
-                    className="w-full bg-bg-1 border border-line rounded px-2 py-1.5 text-text-1 text-sm outline-none focus:border-text-4 resize-y leading-relaxed"
-                  />
-                </div>
-              </>
-            ) : (
-              <div>
-                <div className="section-label mb-1">
-                  Merge with
-                </div>
-                <div className="border border-line-soft rounded bg-bg-0 max-h-[220px] overflow-y-auto">
-                  {otherIntents.length === 0 ? (
-                    <div className="px-2 py-3 text-text-4 text-xs">
-                      no other reasons to merge with
-                    </div>
-                  ) : (
-                    otherIntents.map((r) => {
-                      const checked = mergeWithTs === r.timestamp;
-                      const fc = r.changeset?.files?.length ?? 0;
-                      return (
-                        <label
-                          key={r.timestamp}
-                          className={`flex items-start gap-2 px-2 py-1.5 text-sm cursor-pointer hover:bg-state-hover ${
-                            checked ? "bg-state-selected" : ""
-                          }`}
-                        >
-                          <input
-                            type="radio"
-                            name="merge-target"
-                            checked={checked}
-                            onChange={() => setMergeWithTs(r.timestamp)}
-                            disabled={busy}
-                            className="mt-0.5 accent-accent-green"
-                          />
-                          <div className="flex-1 min-w-0">
-                            <div className="text-text-1 truncate">{r.intent}</div>
-                            <div className="text-text-5 text-xs">
-                              {fc} file{fc === 1 ? "" : "s"} · {r.agent_id}
-                            </div>
-                          </div>
-                        </label>
+                        </li>
                       );
                     })
                   )}
-                </div>
-                <div className="text-text-5 text-xs mt-1">
-                  The older reason is dropped; the newer one stays, with both texts joined.
-                </div>
+                </ul>
+              </section>
+              <label className="ui-form-field ui-intent-edit-field">
+                New reason
+                <Textarea
+                  value={newIntent}
+                  onChange={(e) => setNewIntent(e.target.value)}
+                  placeholder="What were these files actually for?"
+                  disabled={busy}
+                  rows={3}
+                />
+              </label>
+            </>
+          ) : (
+            <section className="ui-log-note-files" aria-label="Merge with">
+              <div className="ui-log-note-files-head">
+                <span id="intent-merge-with">Merge with</span>
               </div>
-            )}
-          </>
-        )}
-        {err && <div role="alert" className="text-red text-xs">{err}</div>}
-      </div>
+              <ul
+                className="ui-log-note-list ui-intent-edit-targets"
+                role="radiogroup"
+                aria-labelledby="intent-merge-with"
+              >
+                {otherIntents.length === 0 ? (
+                  <li className="ui-log-note-state">No other reasons to merge with.</li>
+                ) : (
+                  otherIntents.map((r) => {
+                    const checked = mergeWithTs === r.timestamp;
+                    const fc = r.changeset?.files?.length ?? 0;
+                    return (
+                      <li key={r.timestamp}>
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={checked}
+                          className="ui-intent-edit-target"
+                          onClick={() => setMergeWithTs(r.timestamp)}
+                          disabled={busy}
+                        >
+                          <Check aria-hidden />
+                          <span>
+                            <strong>{r.intent}</strong>
+                            <small>
+                              {fc} file{fc === 1 ? "" : "s"} · {r.agent_id}
+                            </small>
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })
+                )}
+              </ul>
+              <p className="ui-log-note-help">
+                The older reason is dropped; the newer one stays, with both texts joined.
+              </p>
+            </section>
+          )}
+        </>
+      )}
+      {err && (
+        <Alert variant="destructive" className="ui-intent-edit-alert">
+          <AlertDescription>{err}</AlertDescription>
+        </Alert>
+      )}
     </Dialog>
-  );
-}
-
-function ModeChip({
-  id,
-  current,
-  onClick,
-  children,
-}: {
-  id: Mode;
-  current: Mode;
-  onClick: (m: Mode) => void;
-  children: React.ReactNode;
-}) {
-  const active = id === current;
-  return (
-    <button
-      type="button"
-      onClick={() => onClick(id)}
-      className={`px-2 h-6 rounded text-xs ${
-        active ? "bg-state-selected text-text-1" : "text-text-4 hover:text-text-2"
-      }`}
-    >
-      {children}
-    </button>
   );
 }

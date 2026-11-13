@@ -1,0 +1,375 @@
+/* The new-tab launcher: the shared command list (search, groups, rows, the
+   cursor and its keys are the library's), hosted three ways — under ＋ as a
+   popover, in an empty split pane, and on the empty work surface. Added here:
+   the list growing to its host instead of the palette's fixed height, the
+   pickers at the end of the search line, a row's icon slot and live dot, the
+   notes the list says when it has nothing, the starts that ask a second
+   question first along the bottom, and the rows and parts of their menus —
+   where it runs, which repository, which profile, which lane. */
+
+/* ── the panel ─────────────────────────────────────────────────────── */
+
+.ui-launcher-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.ui-launcher-command {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  background: transparent;
+  border-radius: 0;
+}
+.ui-launcher-command > .ui-command-search {
+  flex-shrink: 0;
+  padding-right: 6px;
+}
+/* The pickers sit on the same line; the glass keeps its size beside them. */
+.ui-launcher-command > .ui-command-search > svg {
+  flex-shrink: 0;
+}
+.ui-launcher-command .ui-command-list.ui-launcher-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+.ui-launcher-targets {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+}
+.ui-launcher-switch {
+  flex-shrink: 0;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-launcher-switch .ui-tabs-list {
+  width: 100%;
+}
+.ui-launcher-switch .ui-tabs-trigger {
+  flex: 1;
+}
+
+.ui-launcher-row-icon {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--ui-muted-fg);
+}
+.ui-launcher-row-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 45%;
+}
+.ui-launcher-row-sub > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-launcher-live {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ui-green);
+}
+
+.ui-launcher-note {
+  margin: 0;
+  padding: 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ui-launcher-note[data-loading] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-launcher-note code {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.ui-launcher-more {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+
+.ui-launcher-foot {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--ui-border);
+}
+
+/* ── its two hosts ─────────────────────────────────────────────────── */
+
+/* Under ＋ on a tab strip: a popover in every way but its markup. */
+.ui-popover.ui-launcher-popover {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  width: 420px;
+  max-height: 460px;
+  margin-top: 4px;
+  padding: 0;
+  overflow: hidden;
+}
+.ui-launcher-popover > .ui-launcher-panel {
+  flex: 1;
+}
+
+/* An empty pane, after "More…". */
+.ui-launcher-pane {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-launcher-pane-head {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-end;
+  height: 32px;
+  padding: 0 8px;
+}
+.ui-launcher-pane-body {
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  min-height: 0;
+}
+.ui-launcher-in-pane {
+  width: 100%;
+  max-width: 520px;
+}
+
+/* ── pickers and their menus ───────────────────────────────────────── */
+
+.ui-where-trigger {
+  gap: 6px;
+  max-width: 200px;
+  color: var(--ui-muted-fg);
+}
+.ui-where-trigger:hover,
+.ui-where-trigger[data-state="open"],
+.ui-where-trigger[data-remote] {
+  color: var(--ui-fg);
+}
+.ui-where-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-where-trigger svg.ui-where-chevron {
+  width: 12px;
+  height: 12px;
+  opacity: 0.7;
+}
+.ui-where-glyph {
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-where-glyph.ui-where-glyph-remote {
+  color: var(--ui-fg);
+}
+
+.ui-where-menu,
+.ui-launcher-menu {
+  width: 280px;
+}
+.ui-menu-row.ui-where-row {
+  align-items: flex-start;
+  width: 100%;
+  height: auto;
+  padding-block: 6px;
+  background: transparent;
+  text-align: left;
+}
+.ui-menu-row.ui-where-row:hover,
+.ui-menu-row.ui-where-row[data-highlighted] {
+  background: var(--ui-hover);
+}
+.ui-menu-row.ui-where-row > svg:first-child,
+.ui-menu-row.ui-where-row > .ui-where-glyph {
+  margin-top: 3px;
+}
+.ui-where-row-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.ui-where-row-text > span,
+.ui-where-row-text > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-where-row-text > small {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+/* Where it runs is the one menu whose second line explains the choice, so it
+   wraps instead of stopping mid-sentence. */
+.ui-where-menu .ui-where-row-text > small {
+  overflow: visible;
+  white-space: normal;
+}
+.ui-where-row[data-current] .ui-where-row-text > span {
+  font-weight: 500;
+}
+.ui-menu-row.ui-where-row svg.ui-where-check {
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  color: var(--ui-fg);
+}
+.ui-launcher-mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.ui-launcher-menu-note {
+  margin: 0;
+  padding: 4px 8px 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ui-launcher-menu-note[data-loading] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-launcher-menu-note code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* A popover with a form in it: a profile, a lane. */
+.ui-popover.ui-launcher-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 300px;
+}
+.ui-launcher-pop-label {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 450;
+}
+.ui-launcher-pop-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 160px;
+  margin: 0 -8px;
+  overflow-y: auto;
+}
+.ui-launcher-pop-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ui-launcher-pop-add > .ui-input {
+  flex: 1;
+  min-width: 0;
+}
+.ui-launcher-pop-agents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Lanes. */
+.ui-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-lanes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ui-lanes-head > strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+.ui-lanes-head > span {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-lanes .ui-launcher-menu-note {
+  padding: 0;
+}
+.ui-lanes-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0 -8px;
+  padding: 0;
+  list-style: none;
+}
+.ui-lanes-item {
+  position: relative;
+}
+.ui-lanes-item > .ui-where-row {
+  padding-right: 32px;
+}
+.ui-lanes-item > .ui-lanes-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  opacity: 0;
+}
+.ui-lanes-item:hover > .ui-lanes-close,
+.ui-lanes-item > .ui-lanes-close:focus-visible {
+  opacity: 1;
+}
+.ui-lanes-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.ui-lanes-new .ui-lanes-actions {
+  margin-top: 0;
+}
+.ui-lanes-start {
+  flex: 1;
+  width: 100%;
+}
+.ui-lanes-new {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-lanes-agents {
+  display: flex;
+  flex-direction: column;
+  margin: 0 -8px;
+}

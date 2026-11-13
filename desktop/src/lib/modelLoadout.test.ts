@@ -2,16 +2,24 @@
 // position, so any rule that quietly renumbers positions moves somebody's keys
 // under their fingers. These pin the ones that must not.
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import type { BrainChoice } from "./api";
 import type { CatalogModel } from "./modelCatalog";
+import { MODEL_FAVORITES_KEY } from "./modelFavorites";
 import {
   LOADOUT_CHORD_SLOTS,
+  LOADOUT_EFFORTS_KEY,
+  loadLoadoutEfforts,
+  loadoutEffortFor,
+  saveLoadoutEffort,
+  loadModelLoadout,
   loadoutChordLabel,
   loadoutSlotKey,
   moveLoadoutEntry,
   resolveLoadout,
+  saveModelLoadout,
+  subscribeModelLoadout,
   toggleLoadoutEntry,
   type LoadoutRow,
 } from "./modelLoadout";
@@ -130,5 +138,166 @@ describe("resolving against what is installed", () => {
   test("a duplicated catalog row is listed once", () => {
     const rows = [row("claude", "opus"), row("claude", "opus")];
     expect(resolveLoadout(["claude::opus"], rows)).toHaveLength(1);
+  });
+});
+
+// Settings sits over the open chats instead of replacing them, so the chats'
+// pickers are still mounted while the loadout is edited there. They used to
+// read it once on mount, then lead with — and chord to — the old list.
+describe("one live loadout for every reader", () => {
+  let store: Map<string, string>;
+  const scope = globalThis as { localStorage?: unknown; window?: unknown };
+
+  beforeEach(() => {
+    store = new Map();
+    scope.localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+  });
+
+  afterEach(() => {
+    delete scope.localStorage;
+    delete scope.window;
+  });
+
+  test("a save reaches every open reader at once, and is stored", () => {
+    saveModelLoadout([]);
+    const seen: string[][] = [];
+    const stopA = subscribeModelLoadout(() => seen.push(loadModelLoadout()));
+    const stopB = subscribeModelLoadout(() => seen.push(loadModelLoadout()));
+    saveModelLoadout(["opus", "gpt"]);
+    stopA();
+    stopB();
+    expect(seen).toEqual([
+      ["opus", "gpt"],
+      ["opus", "gpt"],
+    ]);
+    expect(store.get(MODEL_FAVORITES_KEY)).toBe(JSON.stringify(["opus", "gpt"]));
+  });
+
+  test("a reader that has gone is not told", () => {
+    let told = 0;
+    const stop = subscribeModelLoadout(() => told++);
+    stop();
+    saveModelLoadout(["a"]);
+    expect(told).toBe(0);
+  });
+
+  test("reading twice between changes gives the same list, so nothing redraws for no reason", () => {
+    saveModelLoadout(["a", "b"]);
+    expect(loadModelLoadout()).toBe(loadModelLoadout());
+  });
+
+  test("the caller's array is not kept, so changing it later changes nothing", () => {
+    const next = ["a", "b"];
+    saveModelLoadout(next);
+    next.push("c");
+    expect(loadModelLoadout()).toEqual(["a", "b"]);
+  });
+
+  test("a change another window writes is picked up; other keys are ignored", () => {
+    const win = new EventTarget();
+    scope.window = win;
+    saveModelLoadout(["a"]);
+    let told = 0;
+    const stop = subscribeModelLoadout(() => told++);
+    store.set(MODEL_FAVORITES_KEY, JSON.stringify(["b", "a"]));
+    const storage = (key: string) => {
+      const event = new Event("storage");
+      Object.defineProperty(event, "key", { value: key });
+      return event;
+    };
+    win.dispatchEvent(storage("aura.something.else"));
+    expect(told).toBe(0);
+    win.dispatchEvent(storage(MODEL_FAVORITES_KEY));
+    stop();
+    expect(told).toBe(1);
+    expect(loadModelLoadout()).toEqual(["b", "a"]);
+  });
+});
+
+// A slot's effort used to live in the settings component, so it was gone the
+// moment Settings closed and no chat ever saw it.
+describe("each slot's effort", () => {
+  let store: Map<string, string>;
+  const scope = globalThis as { localStorage?: unknown; window?: unknown };
+
+  beforeEach(() => {
+    store = new Map();
+    scope.localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+  });
+
+  afterEach(() => {
+    delete scope.localStorage;
+    delete scope.window;
+  });
+
+  test("is stored, and read back by the slot's key", () => {
+    saveLoadoutEffort("claude::opus", "max");
+    expect(loadoutEffortFor("claude::opus")).toBe("max");
+    expect(JSON.parse(store.get(LOADOUT_EFFORTS_KEY) ?? "{}")).toMatchObject({
+      "claude::opus": "max",
+    });
+  });
+
+  test("the model's own depth is an answer, apart from a slot nobody set", () => {
+    saveLoadoutEffort("claude::opus", null);
+    expect(loadoutEffortFor("claude::opus")).toBeNull();
+    expect(loadoutEffortFor("codex::gpt")).toBeUndefined();
+  });
+
+  test("a save tells every open reader", () => {
+    let told = 0;
+    const stop = subscribeModelLoadout(() => told++);
+    saveLoadoutEffort("codex::gpt", "low");
+    stop();
+    expect(told).toBe(1);
+    expect(loadLoadoutEfforts()["codex::gpt"]).toBe("low");
+  });
+
+  test("another window's change is picked up", () => {
+    const win = new EventTarget();
+    scope.window = win;
+    saveLoadoutEffort("a", "low");
+    const stop = subscribeModelLoadout(() => {});
+    store.set(LOADOUT_EFFORTS_KEY, JSON.stringify({ a: "high" }));
+    const event = new Event("storage");
+    Object.defineProperty(event, "key", { value: LOADOUT_EFFORTS_KEY });
+    win.dispatchEvent(event);
+    stop();
+    expect(loadoutEffortFor("a")).toBe("high");
+  });
+
+  test("a level the chat can't send is dropped when read", () => {
+    store.set(LOADOUT_EFFORTS_KEY, JSON.stringify({ a: "extreme", b: "medium", c: 3 }));
+    const win = new EventTarget();
+    scope.window = win;
+    const stop = subscribeModelLoadout(() => {});
+    const event = new Event("storage");
+    Object.defineProperty(event, "key", { value: LOADOUT_EFFORTS_KEY });
+    win.dispatchEvent(event);
+    stop();
+    expect(loadLoadoutEfforts()).toEqual({ b: "medium" });
+  });
+
+  test("a retired brain's slot effort is dropped when read", () => {
+    store.set(
+      LOADOUT_EFFORTS_KEY,
+      JSON.stringify({ "aura_pro::claude-opus-5": "high", "anthropic_native::claude-opus-5": "low" }),
+    );
+    const win = new EventTarget();
+    scope.window = win;
+    const stop = subscribeModelLoadout(() => {});
+    const event = new Event("storage");
+    Object.defineProperty(event, "key", { value: LOADOUT_EFFORTS_KEY });
+    win.dispatchEvent(event);
+    stop();
+    expect(loadLoadoutEfforts()).toEqual({ "anthropic_native::claude-opus-5": "low" });
   });
 });

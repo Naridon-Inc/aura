@@ -15,13 +15,15 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import { useZoom } from "../lib/zoomStore";
 import { ResizablePane, usePaneSize } from "./ui/resizable";
+import { RightColumnSplit } from "./RightColumnSplit";
 
 type LayoutProps = {
   sidebar: ReactNode;
-  /** Top strip of the sidebar column — traffic-light drag region, project
-   *  switcher, search, workspace nav. */
-  sidebarHeader?: ReactNode;
-  statusBar?: ReactNode;
+  /** The work column's header, told whether the sidebar is on screen: with
+   *  the sidebar gone it is the leftmost strip, so it makes room for the
+   *  window buttons and offers the control that brings the sidebar back.
+   *  Absent while a page owns the window — pages draw their own header. */
+  workHeader?: (sidebarShown: boolean) => ReactNode;
   body: ReactNode;
   composer: ReactNode;
   reviewPanel?: ReactNode;
@@ -30,8 +32,13 @@ type LayoutProps = {
    *  (Create PR) lives here, aligned with the work-surface topbar. The main
    *  header therefore stops before the review rail. */
   reviewHeader?: ReactNode;
+  /** The terminal panel. It sits under the git panel in the review column,
+   *  collapsing to its header when closed; only when that column is off
+   *  screen for lack of room does it fall back under the work surface. */
   bottomPane?: ReactNode;
   bottomPaneOpen?: boolean;
+  /** Which workspace the review column's split is remembered for. */
+  bottomPaneKey?: string;
   /** When true the bottom pane fills the whole work-surface height (the
    *  terminal panel's maximize toggle); the body collapses behind it. */
   bottomPaneMaximized?: boolean;
@@ -50,12 +57,14 @@ const BOTTOM_KEY = "aura.bottom.h";
 
 // Every pane bound here is in WINDOW POINTS, not CSS px — see `sidebarCss`
 // for why, and `reviewCss` / `bottomCss` for the two that followed it.
-const SIDEBAR_MIN_PT = 200;
+const SIDEBAR_MIN_PT = 192;
 const SIDEBAR_MAX_PT = 480;
-const SIDEBAR_DEFAULT_PT = 280;
+const SIDEBAR_DEFAULT_PT = 282;
 const REVIEW_MIN_PT = 240;
 const REVIEW_MAX_PT = 560;
-const REVIEW_DEFAULT_PT = 320;
+// 360: room for All files · Changes · Checks plus the Review button without
+// the tab strip scrolling, at the default window size.
+const REVIEW_DEFAULT_PT = 360;
 const BOTTOM_MIN_PT = 160;
 const BOTTOM_MAX_PT = 600;
 const BOTTOM_DEFAULT_PT = 240;
@@ -138,7 +147,7 @@ export function Layout(props: LayoutProps) {
   const reviewCss = reviewPt / zoom;
   const bottomCss = bottomPt / zoom;
 
-  // Responsive guards — at narrow widths the review rail (320 points and up)
+  // Responsive guards — at narrow widths the review rail (360 points by default)
   // on top of the sidebar can crowd the work surface to ~250px or less. Hide
   // the review when the work area would drop below the threshold; the user
   // can still toggle it back via ⌘⌥R. Every term here is CSS px: `winW` is
@@ -152,40 +161,32 @@ export function Layout(props: LayoutProps) {
   const sidebarFitsWide = winW - sidebarCss >= WORK_MIN_CSS;
   const sidebarVisible = (props.sidebarOpen ?? true) && sidebarFitsWide;
 
-  // The work column no longer draws a chrome band of its own.
-  //
-  // It used to: a strip at `--topbar-h` above the body, holding the terminal
-  // and review toggles at its right end and nothing else across the rest of
-  // its width — directly above the tab strip, which has its own controls in
-  // the same corner. Two headers, four controls, one row's worth of content.
-  // The toggles moved into the tab strip (see TopBar's `PaneToggles`) and the
-  // band went with them, so the work column now starts with its own content
-  // at y=0 and the window's top edge is one line across all three columns.
-  //
-  // With one exception, which is why this is not simply deleted. macOS runs
-  // this window with an overlay title bar, so the traffic lights are a native
-  // layer pinned to the top-left corner and nothing in the DOM can move them.
-  // The sidebar header is what normally sits beneath them. With the sidebar
-  // CLOSED they fall onto whatever the work column draws first — and a page
-  // that draws its own header (Workspaces, Trace, any `place`) has no
-  // traffic-light gutter to give them. Tab-bearing surfaces handle this
-  // themselves via `SidebarPeek`, which reserves the gutter and puts the
-  // show-sidebar control in it; a page that owns the window does not, so it
-  // gets a bare drag strip here. The lights always have a surface, and the
-  // window always has somewhere to be dragged.
+  // The work column's header comes from the caller (`workHeader`). While a
+  // page owns the window there is none, and with the sidebar closed the macOS
+  // window buttons — a native layer pinned to the top-left corner — would
+  // fall onto whatever the page draws first. A page that draws its own header
+  // has no gutter to give them, so it gets a bare drag strip here: the lights
+  // always have a surface, and the window always has somewhere to be dragged.
   const topStrip =
-    sidebarVisible || !props.pageOwnsWindow ? null : (
+    sidebarVisible || props.workHeader || !props.pageOwnsWindow ? null : (
       <span data-tauri-drag-region className="h-full flex-1" />
     );
 
   // Shared work surface — body + (optional) bottom pane + composer stacked,
   // each row separated by a border-t hairline. Reused by both shells so the
   // work column stays a single definition.
+  // The terminal panel lives in the review column whenever that column is up.
+  // A review column the user closed takes it along (⌘J reopens both); one
+  // squeezed out by a narrow window leaves it in the bottom slot instead.
+  const bottomInReview = !!props.bottomPane && reviewVisible;
+  const bottomBelowWork =
+    !!props.bottomPane && !reviewVisible && !reviewFitsWide && !!props.bottomPaneOpen;
+
   const workSurface = (
     <div className="ade-shell-work flex flex-col flex-1 min-w-0">
       <div
         className={
-          props.bottomPaneOpen && props.bottomPaneMaximized
+          bottomBelowWork && props.bottomPaneMaximized
             ? "hidden"
             : "flex-1 min-h-0 overflow-hidden"
         }
@@ -193,9 +194,8 @@ export function Layout(props: LayoutProps) {
         {props.body}
       </div>
 
-      {props.bottomPane &&
-        props.bottomPaneOpen &&
-        // Maximized, the pane IS the work surface — there is no boundary left
+      {bottomBelowWork &&
+                // Maximized, the pane IS the work surface — there is no boundary left
         // to drag, so it renders as a plain filling row rather than a pane.
         (props.bottomPaneMaximized ? (
           <div className="flex-1 min-h-0 overflow-hidden border-t border-line-soft">
@@ -222,15 +222,6 @@ export function Layout(props: LayoutProps) {
     </div>
   );
 
-  const statusBarRow = props.statusBar ? (
-    <div
-      className="flex-shrink-0 flex items-center bg-bg-0 border-t border-line-soft"
-      style={{ height: "var(--statusbar-h)" }}
-    >
-      {props.statusBar}
-    </div>
-  ) : null;
-
   // The sidebar column runs edge-to-edge to y=0 and carries its own header
   // strip (traffic-light drag region, project switcher, search, workspace
   // nav); the top header only spans the work surface to the right of it, so
@@ -239,18 +230,11 @@ export function Layout(props: LayoutProps) {
   return (
     <div className="ade-shell-root flex h-screen w-screen text-text-1 select-none overflow-hidden bg-bg-0">
       {sidebarVisible && (
-        /* `.ade-side` so the whole column (header + roster) picks up the
-           macOS vibrancy frost — an opaque bg here would block the blur.
-           Off-vibrancy it falls back to the same solid bg-1, never
-           black/see-through. The AdeSidebar it wraps is itself an
-           `.ade-side`; a nested-tint guard in styles.css blanks the inner
-           layer so the two 66% frosts don't stack into a near-opaque
-           slab. */
         <ResizablePane
           edge="leading"
           size={sidebarCss}
           /* The bounds travel through the same divisor as the size, so the
-             drag clamps to 200–480 POINTS at whatever zoom it happens at —
+             drag clamps to 192–480 POINTS at whatever zoom it happens at —
              and a width dragged at 150% means the same rail at 100%. */
           min={SIDEBAR_MIN_PT / zoom}
           max={SIDEBAR_MAX_PT / zoom}
@@ -261,10 +245,9 @@ export function Layout(props: LayoutProps) {
              a zoom divisor disagreeing about units. */
           onResize={(css) => setSidebarPt(css * zoom)}
           label="Resize sidebar"
-          className="ade-side flex flex-col relative border-r border-line-soft"
+          className="flex flex-col relative"
         >
-          {props.sidebarHeader}
-          <div className="flex-1 min-h-0 overflow-hidden">{props.sidebar}</div>
+          <div className="flex flex-1 min-h-0 overflow-hidden">{props.sidebar}</div>
         </ResizablePane>
       )}
 
@@ -273,6 +256,7 @@ export function Layout(props: LayoutProps) {
             stops before the review rail, which owns its own header (below)
             running to y=0, so the window reads as three full-height
             columns (sidebar · work · review) each with its own header. */}
+        {props.workHeader?.(sidebarVisible)}
         {topStrip && (
           <div
             className="flex-shrink-0 flex items-center bg-bg-1 border-b border-line"
@@ -285,11 +269,9 @@ export function Layout(props: LayoutProps) {
         <div className="ade-shell-mid flex flex-1 min-h-0 bg-bg-0 overflow-hidden">
           {workSurface}
         </div>
-
-        {statusBarRow}
       </div>
 
-      {/* Review rail — a full-height column to y=0 (Conductor pattern),
+      {/* Review rail — a full-height column to y=0,
           with its OWN header strip carrying the rail's primary action
           (Create PR). Aligned with the work-surface topbar so the two
           headers read as one continuous strip broken only by the column
@@ -310,9 +292,19 @@ export function Layout(props: LayoutProps) {
           >
             {props.reviewHeader}
           </div>
-          <div className="flex-1 min-h-0 overflow-hidden">
-            {props.reviewPanel}
-          </div>
+          {bottomInReview ? (
+            <RightColumnSplit
+              top={props.reviewPanel}
+              bottom={props.bottomPane}
+              open={!!props.bottomPaneOpen}
+              maximized={!!props.bottomPaneMaximized}
+              storageKey={props.bottomPaneKey ?? ""}
+            />
+          ) : (
+            <div className="flex-1 min-h-0 overflow-hidden">
+              {props.reviewPanel}
+            </div>
+          )}
         </ResizablePane>
       )}
     </div>

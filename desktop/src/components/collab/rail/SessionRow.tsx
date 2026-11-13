@@ -24,6 +24,7 @@ import { ParticipantPips } from "./ParticipantPips";
 import { RailAvatar } from "./RailAvatar";
 import { pickActivity } from "./railActivity";
 import { isSessionLive, type RailActor, type RailSession } from "./railModel";
+import "../../ui/people-rail.css";
 
 export type SessionRowProps = {
   session: RailSession;
@@ -42,38 +43,29 @@ export type SessionRowProps = {
   onJoin?: (sessionId: string) => void | Promise<void>;
 };
 
-/** The 16px glyph slot: working, live, or quiet. */
+/** The status slot a workspace row's icon takes: working, live, or quiet. */
 function StatusGlyph({ session }: { session: RailSession }) {
   if (session.agentBusy) {
-    // The house loader, for the one thing in this rail that is genuinely
-    // running. Nothing else here spins.
     return (
       <span
-        className="flex-none grid place-items-center"
-        style={{ width: 16, height: 16 }}
+        className="ui-workspace-status"
+        data-status="working"
+        style={{ width: 14, height: 14 }}
         title="An agent is working in here"
       >
-        <AsciiSpinner size={11} />
+        <AsciiSpinner size={14} />
       </span>
     );
   }
   const live = isSessionLive(session);
   return (
     <span
-      className="flex-none grid place-items-center"
-      style={{ width: 16, height: 16 }}
+      className="ui-workspace-status"
+      style={{ width: 14, height: 14 }}
       title={live ? "Someone is in here" : "Nobody is in here right now"}
       aria-hidden
     >
-      <span
-        style={{
-          width: 6,
-          height: 6,
-          borderRadius: 999,
-          background: live ? "var(--color-accent-green)" : "transparent",
-          border: live ? "none" : "1.5px solid var(--color-text-5)",
-        }}
-      />
+      <span className="ui-rail-live-dot" data-live={live || undefined} />
     </span>
   );
 }
@@ -110,30 +102,54 @@ export function SessionRow({
     ? `${session.title} · ${lastActor.name} moved ${agePose}`
     : session.title;
 
+  // A workspace row, with room for a second line. The row is one real button
+  // now: Join sits in the item's actions slot beside it, the way a
+  // workspace's menu does, instead of inside a div standing in for a button.
   return (
     <div
-      role="button"
-      tabIndex={0}
-      className={[
-        "group/row w-full rounded-md px-2 py-[3px] text-left cursor-pointer",
-        "transition-colors",
-        active ? "row-selected" : "hover:bg-bg-2",
-      ].join(" ")}
-      title={rowTitle}
-      onClick={() => onOpen(session.id)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onOpen(session.id);
-        }
-      }}
+      className="ui-sidebar-item ui-rail-session"
+      data-workspace="true"
+      data-selected={active || undefined}
     >
-      <div className="flex items-center gap-2 min-w-0">
-        <StatusGlyph session={session} />
-        <span className="flex-1 min-w-0 truncate text-text-2">
-          {session.title}
+      <button
+        type="button"
+        className="ui-sidebar-item-target"
+        aria-current={active ? "page" : undefined}
+        title={rowTitle}
+        onClick={() => onOpen(session.id)}
+      >
+        <span className="ui-rail-session-line">
+          <StatusGlyph session={session} />
+          <span className="ui-sidebar-item-label">{session.title}</span>
+          {lastActor || age ? (
+            <span className="ui-sidebar-item-trailing ui-rail-session-trailing">
+              {lastActor ? (
+                <RailAvatar
+                  actor={lastActor}
+                  size={16}
+                  title={`${lastActor.name} moved ${agePose}`}
+                />
+              ) : null}
+              {age ? <span>{age}</span> : null}
+            </span>
+          ) : null}
         </span>
-        {!session.joined && onJoin ? (
+
+        {showSecondTier ? (
+          <span className="ui-rail-session-detail">
+            {live ? (
+              <ParticipantPips
+                participants={session.participants}
+                byId={byId}
+                size={14}
+              />
+            ) : null}
+            <ActivityLine activity={activity} byId={byId} />
+          </span>
+        ) : null}
+      </button>
+      {!session.joined && onJoin ? (
+        <div className="ui-sidebar-item-actions">
           <JoinSessionButton
             sessionId={session.id}
             ownerName={ownerName}
@@ -141,38 +157,6 @@ export function SessionRow({
             access={session.access}
             onJoin={onJoin}
           />
-        ) : null}
-        {lastActor ? (
-          <RailAvatar
-            actor={lastActor}
-            size={16}
-            title={`${lastActor.name} moved ${agePose}`}
-          />
-        ) : null}
-        {age ? (
-          <span className="flex-none text-2xs tabular-nums text-text-4">
-            {age}
-          </span>
-        ) : null}
-      </div>
-
-      {showSecondTier ? (
-        // Aligned under the title, not under the glyph — the second tier is
-        // about the session, and the glyph column belongs to the row's state.
-        <div
-          className="flex items-center gap-2 min-w-0"
-          style={{ paddingLeft: 24, marginTop: 1 }}
-        >
-          {live ? (
-            <ParticipantPips
-              participants={session.participants}
-              byId={byId}
-              size={14}
-            />
-          ) : null}
-          <div className="min-w-0 flex-1">
-            <ActivityLine activity={activity} byId={byId} />
-          </div>
         </div>
       ) : null}
     </div>

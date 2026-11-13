@@ -1,15 +1,15 @@
 // The "update this pull request" action — one job id, one hint, no promise of
 // upkeep nobody performs.
 //
-// Three surfaces offer the action: the review rail's header (ChecksPanel), the
-// repo header (CreatePrButton), and an open PR tab (PRDetailPane). Every time
-// this has gone wrong it has gone wrong by one of them quietly disagreeing with
-// the other two:
+// Two surfaces offer the action: the review rail's header (ChecksPanel) and an
+// open PR tab (PRDetailPane); a repo-header button used to be a third. Every
+// time this has gone wrong it has gone wrong by one of them quietly disagreeing
+// with the others:
 //
 //   • The job id forked. On a bare `"update-pr"`, updating #400 from a tab made
 //     the rail spin "Updating…" over #422 — one id, two pull requests.
-//   • The hover forked. Three surfaces, three sentences for one `updatePrPrompt`
-//     run, one of which said "reconciles".
+//   • The hover forked. Three surfaces, three sentences for one update, one
+//     of which said "reconciles".
 //   • The empty state promised something none of them do. "Once a PR is open,
 //     Aura keeps its title and description written for you as work lands" — a
 //     claim of unattended upkeep over an action with three onClick callers and
@@ -20,12 +20,9 @@
 // `bun run build`) only includes src.
 
 import { expect, test, describe } from "bun:test";
-import {
-  updatePrJobId,
-  updatePrPrompt,
-  UPDATE_PR_HINT,
-} from "../src/lib/worktreeActions";
-import { stripComments } from "./support/code";
+import { gitChatFor } from "../src/lib/gitChatPrompts";
+import { updatePrJobId, UPDATE_PR_HINT } from "../src/lib/worktreeActions";
+import { strippedSrcTree } from "./support/code";
 
 const SRC = `${import.meta.dir}/../src`;
 
@@ -34,8 +31,8 @@ const SRC = `${import.meta.dir}/../src`;
 // and reports the corpse as alive.
 
 async function* sources(): AsyncGenerator<[string, string]> {
-  for await (const rel of new Bun.Glob("**/*.{ts,tsx}").scan({ cwd: SRC })) {
-    yield [rel, stripComments(await Bun.file(`${SRC}/${rel}`).text())];
+  for (const [rel, src] of await strippedSrcTree()) {
+    yield [rel, src];
   }
 }
 
@@ -60,7 +57,9 @@ describe("the job id is scoped to one pull request", () => {
   test("no file hard-codes an unscoped update-pr id", async () => {
     const offenders: string[] = [];
     for await (const [rel, src] of sources()) {
-      for (const m of src.matchAll(/["'`]update-pr["'`]/g)) {
+      // `action: "update-pr"` names the kind of chat, not an id; only a bare
+      // literal anywhere else is the bug.
+      for (const m of src.matchAll(/(?<!action: |case )["'`]update-pr["'`]/g)) {
         const line = src.slice(0, m.index).split("\n").length;
         offenders.push(`${rel}:${line}`);
       }
@@ -87,7 +86,7 @@ describe("one hint for one action", () => {
     const offenders: string[] = [];
     for await (const [rel, src] of sources()) {
       if (rel === "lib/worktreeActions.ts") continue;
-      if (!src.includes("updatePrPrompt")) continue;
+      if (!src.includes('action: "update-pr"')) continue;
       // The tell: a title/tooltip literal in a file that dispatches the update.
       for (const m of src.matchAll(
         /(?:title=|TooltipContent[^>]*>)\s*\{?\s*["'`]([^"'`]{20,})/g,
@@ -102,19 +101,19 @@ describe("one hint for one action", () => {
 });
 
 describe("nothing claims the PR keeps itself written", () => {
-  // The prompt is the whole of what the action does, and it is only ever handed
-  // to an agent by a click handler. If a scheduler is ever added, this test
+  // The chat's message is the whole of what the action does, and it is only
+  // ever started by a click handler. If a scheduler is ever added, this test
   // fails and the copy below has to be revisited — which is the point.
-  test("the prompt has no caller outside an event handler", async () => {
+  test("the update chat has no caller outside an event handler", async () => {
     const callers: string[] = [];
     for await (const [rel, src] of sources()) {
-      if (rel === "lib/worktreeActions.ts") continue;
-      if (!src.includes("updatePrPrompt(")) continue;
+      if (rel === "lib/gitChatPrompts.ts") continue;
+      if (!src.includes('action: "update-pr"')) continue;
       callers.push(rel);
       // A timer or an effect that reaches for it is the automation this copy
       // used to promise. Effects here are for subscriptions, not dispatch.
       expect(src).not.toMatch(
-        /setInterval\([\s\S]{0,400}?updatePrPrompt\(|updatePrPrompt\([\s\S]{0,200}?\)[\s\S]{0,200}?setInterval/,
+        /setInterval\([\s\S]{0,400}?action: "update-pr"|action: "update-pr"[\s\S]{0,200}?setInterval/,
       );
     }
     expect(callers.length).toBeGreaterThan(0);
@@ -139,8 +138,8 @@ describe("nothing claims the PR keeps itself written", () => {
 
   // What the prompt actually instructs has to match what the copy says it does,
   // or the honest sentence is honest about the wrong thing.
-  test("the prompt does rewrite the title and description", () => {
-    const p = updatePrPrompt("feat/x", 400);
+  test("the message does rewrite the title and description", () => {
+    const p = gitChatFor({ action: "update-pr", branch: "feat/x", prNumber: 400 }).text;
     expect(p).toMatch(/title/i);
     expect(p).toMatch(/description/i);
     expect(p).toContain("400");

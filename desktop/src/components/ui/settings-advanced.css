@@ -1,0 +1,36 @@
+/* The "Advanced" disclosure: a rule, a quiet chevron line, and the rows it
+   holds once opened. */
+.ui-settings-advanced {
+  margin-top: 8px;
+  border-top: 1px solid var(--ui-border);
+  padding-top: 16px;
+}
+.ui-settings-advanced-trigger {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--ui-muted-fg);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.ui-settings-advanced-trigger:hover,
+.ui-settings-advanced-trigger:focus-visible {
+  color: var(--ui-fg);
+}
+.ui-settings-advanced-trigger > svg {
+  flex-shrink: 0;
+  transition: transform 150ms ease;
+}
+.ui-settings-advanced[data-state="open"] > .ui-settings-advanced-trigger > svg {
+  transform: rotate(90deg);
+}
+.ui-settings-advanced-content {
+  padding-top: 16px;
+}

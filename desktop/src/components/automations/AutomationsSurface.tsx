@@ -29,6 +29,7 @@ import {
 import { useAgents } from "../../lib/agents";
 import { relativeAgeFromSecs } from "../../lib/relativeTime";
 import { Button } from "../ui/button";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import {
   AutomationForm,
   type AgentChoice,
@@ -628,13 +629,17 @@ export function AutomationsSurface({ repoRoot }: { repoRoot: string }) {
                     i > 0 ? "border-t-[0.5px] border-line-soft" : ""
                   }`}
                 >
-                  <span
-                    className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${
-                      r.live ? "animate-pulse" : ""
-                    }`}
-                    style={{ background: runDotColor(r) }}
-                    aria-hidden
-                  />
+                  {/* A run in flight wears the library's activity mark; a
+                      finished one keeps its outcome dot. */}
+                  {r.live ? (
+                    <AsciiSpinner size={10} />
+                  ) : (
+                    <span
+                      className="h-1.5 w-1.5 flex-shrink-0 rounded-full"
+                      style={{ background: runDotColor(r) }}
+                      aria-hidden
+                    />
+                  )}
                   <span className="min-w-0 flex-1 truncate text-base font-medium text-text-1">
                     {r.title}
                   </span>

@@ -15,45 +15,30 @@
 // machine, seen from the board's side instead of the shell's.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  ChevronDown,
-  Eye,
-  LayoutGrid,
-  Plus,
-  Terminal as TerminalIcon,
-  X,
-} from "lucide-react";
+import { PanelTop } from "lucide-react";
 
 import { api, type BoxSession, type CloudRunner, type Machine } from "../../lib/api";
 import { resolveMachine } from "../../lib/activeMachine";
-import { isAsleep, placeOfMachine, projectToFilePlaceUnder } from "../../lib/place";
-import { remotePlaceKey, type RemotePlace } from "../../lib/remotePlaces";
+import { findMachine } from "../../lib/machineRef";
+import {
+  canOpenTerminal,
+  isAsleep,
+  placeOfMachine,
+  projectToFilePlaceUnder,
+} from "../../lib/place";
+import { remotePlaceKey, takeSessionWanted, takeShellWanted, type RemotePlace } from "../../lib/remotePlaces";
 import { remotePlace } from "../../lib/placeRef";
 import { openPopout } from "../../lib/popout";
-import {
-  REMOTE_WORK_KINDS,
-  type RemoteTab,
-  type RemoteWorkKind,
-} from "../../lib/remoteWorkspaceSnapshot";
 import { releaseTerminalSession } from "../Terminal";
-import { AgentIcon } from "../agent/AgentIcon";
-import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
-import { CloudGlyph } from "../ui/cloud-glyph";
-import { Input } from "../ui/input";
+import { CloudStatus, type CloudSessionState } from "../ui/cloud-workspace";
+import { EmptyState } from "../ui/state";
 import { ConnectMachineWizard } from "../commons/crew/ConnectMachineWizard";
-import {
-  MENU_LABEL,
-  MENU_PANEL,
-  MENU_ROW,
-  MENU_SEP,
-} from "../ui/menuSurface";
-import { BoxPanel } from "./BoxPanel";
-import { CloudThreadPane } from "./CloudThreadPane";
-import { MachineChat } from "./MachineChat";
-import { RemoteSessionTerminal } from "./RemoteSessionTerminal";
-import { RemoteWorkPane } from "./RemoteWorkPane";
-import { REMOTE_WORK } from "./remoteWork";
+import { NoMachineScreen } from "./NoMachineScreen";
+import { RemotePanes } from "./RemotePanes";
+import { RemoteTabBody, type RemoteBodyContext } from "./RemoteTabBody";
+import { publishRemoteHeader } from "./remoteHeader";
+import { RemoteTabStrip } from "./RemoteTabStrip";
 import {
   instanceIdFor,
   machineToOpen,
@@ -61,8 +46,12 @@ import {
   runnerFor,
   sessionToGreet,
 } from "./machineWorkspace";
-import { sessionLabel, useBox, type BoxState } from "./useBox";
+import { machineCloudState } from "./machineState";
+import { useBox } from "./useBox";
+import { useOpenOnMachine } from "./openOnMachine";
 import { useRemoteTabs } from "./useRemoteTabs";
+import { useWaking } from "./useWaking";
+import "../ui/remote-workspace.css";
 
 /** How often we re-ask the board whether the box is up. The board is the only
  *  honest source: a machine in another datacentre leaves no trace on this disk
@@ -91,7 +80,6 @@ export function RemoteWorkspace({
     entry.machineId ?? null,
   );
   const [runners, setRunners] = useState<CloudRunner[] | null>(null);
-  const [boardError, setBoardError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -109,7 +97,7 @@ export function RemoteWorkspace({
   }, []);
 
   const machine = useMemo(
-    () => machines?.find((m) => m.id === machineId) ?? null,
+    () => findMachine(machines, machineId),
     [machines, machineId],
   );
 
@@ -191,12 +179,11 @@ export function RemoteWorkspace({
         .then((rs) => {
           if (!alive) return;
           setRunners(rs);
-          setBoardError(null);
         })
-        .catch((e) => {
-          if (!alive) return;
-          setRunners(null);
-          setBoardError(e instanceof Error ? e.message : String(e));
+        .catch(() => {
+          // An unread board names no runner, so the machine's state rests on
+          // the book and its own reads — see `machineState`.
+          if (alive) setRunners(null);
         });
     };
     read();
@@ -225,8 +212,6 @@ export function RemoteWorkspace({
         missingMachineId={missingMachineId}
         onPickMachine={setMachineId}
         runner={runner}
-        boardRead={runners !== null}
-        boardError={boardError}
         onClose={onClose}
         onConnectMachine={() => setConnecting(true)}
         onMachineChanged={(m) =>
@@ -239,6 +224,11 @@ export function RemoteWorkspace({
           // you're in is the project it's for, and the machine you're standing
           // in knows it even when the entry doesn't.
           repoRoot={entry.repoRoot ?? machine?.project_root ?? ""}
+          // "Connect it again" on a machine the book lost. The box that comes
+          // back is that machine, whatever address it answers at now, so it is
+          // saved under the id this workspace — and its chats and tabs — are
+          // holding, rather than as a stranger they can't find.
+          reconnect={missingMachineId}
           onClose={() => {
             setConnecting(false);
             // The wizard writes the address as soon as the box answers, so the
@@ -266,8 +256,6 @@ function RemoteWorkspaceBody({
   missingMachineId,
   onPickMachine,
   runner,
-  boardRead,
-  boardError,
   onClose,
   onConnectMachine,
   onMachineChanged,
@@ -279,8 +267,6 @@ function RemoteWorkspaceBody({
   missingMachineId: string | null;
   onPickMachine: (id: string) => void;
   runner: CloudRunner | null;
-  boardRead: boolean;
-  boardError: string | null;
   onClose: () => void;
   onConnectMachine: () => void;
   onMachineChanged: (m: Machine) => void;
@@ -307,10 +293,24 @@ function RemoteWorkspaceBody({
     [machine],
   );
 
+  // Can a shell be dialled here at all? The saved address has to be one the
+  // terminal can boot on. Without this the strip's ＋ has nothing to go on and
+  // stays disabled on every machine, which is how it sat after this prop was
+  // lost in a merge.
+  const canOpen = useMemo(
+    () => (machine ? canOpenTerminal(placeOfMachine(machine)) : false),
+    [machine],
+  );
+
   // What the box is holding: its projects, and every session working in them.
   // Polled, because the answer changes without this window doing anything —
   // the CLI starts sessions over ssh, and on a shared box so do other people.
   const box = useBox(machine?.id ?? null, asleep);
+
+  // One answer to "is it up", in the cloud status words, for the header, the
+  // details and the banner alike.
+  const waking = useWaking(machine?.id ?? null);
+  const state = machineCloudState({ asleep, waking, runner, unreachable: !!box.error });
 
   // Which project this workspace is standing in. The entry says so when you
   // arrived from a project row or a conversation that named one — and when it
@@ -375,18 +375,10 @@ function RemoteWorkspaceBody({
     ? remotePlaceKey({ machineId: machine.id, repoRoot, remoteRoot })
     : null;
 
-  // The file the Files tab is showing. Held here rather than in the pane so
-  // it survives a look at Changes or a session and back, and so the Changes
-  // tab's "open in the editor" can put a file on it. Reset per place: a file
-  // of one box's project is not a file of the next.
-  const [openFile, setOpenFile] = useState<string | null>(null);
-  useEffect(() => setOpenFile(null), [standingIn]);
-  const openInFiles = useCallback(
-    (path: string) => {
-      setOpenFile(path);
-      strip.openWork("files");
-    },
-    [strip.openWork],
+  // The frame's header and right panel open into this workspace's tabs: a file
+  // as its own tab, a scope's diff as `Uncommitted changes` / `Commit <hash>`.
+  useOpenOnMachine((req) =>
+    req.kind === "file" ? strip.openFile(req.path) : strip.openDiff(req.sha, req.path),
   );
   useEffect(() => {
     if (!machine || !standingIn || entry.threadKey || !box.sessions) return;
@@ -440,719 +432,273 @@ function RemoteWorkspaceBody({
     });
   }, [machineId, threadKey, repoRoot, remoteRoot, machine?.name]);
 
-  const attach = (session: BoxSession, opts?: { readOnly?: boolean }) => {
-    strip.openSession(session, !!opts?.readOnly);
-    setAdding(false);
-  };
+  const attach = useCallback(
+    (session: BoxSession, opts?: { readOnly?: boolean }) => {
+      strip.openSession(session, !!opts?.readOnly);
+      setAdding(false);
+    },
+    [strip.openSession],
+  );
+
+  // A shell on the machine, in the checkout this workspace stands in. Held by
+  // tmux there like every other session, so it is still there tomorrow. With
+  // no checkout to stand in — a box nobody has told us the folder of — the
+  // join panel is the way, because it asks which project.
+  const shellDir = remoteRoot ?? machine?.repo_path ?? null;
+  const openShell = useCallback(async () => {
+    if (!machine) return;
+    if (!shellDir) {
+      box.refresh();
+      setAdding(true);
+      return;
+    }
+    const s = await api.boxStart(machine.id, {
+      project: shellDir,
+      kind: "shell",
+      agent: null,
+      branch: null,
+      title: null,
+      prompt: null,
+    });
+    attach(s);
+    box.refresh();
+  }, [machine, shellDir, box.refresh, attach]);
+  const [shellError, setShellError] = useState<string | null>(null);
+  useEffect(() => setShellError(null), [standingIn]);
+  const openShellFromStrip = useCallback(() => {
+    setShellError(null);
+    openShell().catch((e) => setShellError(e instanceof Error ? e.message : String(e)));
+  }, [openShell]);
+  // "Open via SSH" from a cloud workspace's details lands here: a shell in
+  // the workspace's folder, opened once, the first time the place can.
+  useEffect(() => {
+    if (!machine || !standingIn || !canOpen || !shellDir) return;
+    if (takeShellWanted(standingIn)) openShellFromStrip();
+  }, [machine, standingIn, canOpen, shellDir, openShellFromStrip]);
+  // A session a cloud workspace already started here — its Run command —
+  // opened as a tab, once.
+  useEffect(() => {
+    if (!machine || !standingIn || !canOpen) return;
+    const wanted = takeSessionWanted(standingIn);
+    if (wanted) {
+      attach(wanted);
+      box.refresh();
+    }
+  }, [machine, standingIn, canOpen, attach, box.refresh]);
+  const openJoin = useCallback(() => {
+    box.refresh();
+    setAdding(true);
+  }, [box.refresh]);
+
+  // The machine is the workspace's title, so its details go up to the header.
+  const repository = repoRoot ? repoRoot.split("/").filter(Boolean).pop() ?? null : null;
+  useEffect(() => {
+    publishRemoteHeader({
+      machine,
+      repository,
+      state,
+      onClose,
+      onPopOut: machine ? popOut : undefined,
+      onMachineChanged,
+      onOpenShell: machine && canOpen ? openShell : undefined,
+      onOpenJoin: machine && canOpen ? openJoin : undefined,
+    });
+  });
+  useEffect(() => () => publishRemoteHeader(null), []);
 
   // Closing a tab is closing a *view*. The session keeps running on the box —
   // that is the entire reason for putting work there, and a close button that
   // quietly killed an agent mid-edit would be the worst button in the app.
   // Ending it for real lives in the panel, where it says "Stop" and asks twice.
-  const closeTab = (id: string) => {
-    if (machine) releaseTerminalSession(instanceIdFor(machine, id));
-    strip.closeTab(id);
-  };
+  const closeTab = useCallback(
+    (id: string) => {
+      if (machine) releaseTerminalSession(instanceIdFor(machine, id));
+      strip.closeTab(id);
+    },
+    [machine, strip.closeTab],
+  );
+
+  // Everything a tab needs to draw itself, in one object rather than a dozen
+  // props threaded down through the pane tree. The panes differ only by which
+  // tab they hold — the machine, the project and the handlers are the same for
+  // all of them — and a body that is one tab wide is just the one-pane case of
+  // the same context.
+  // Null only while the book has no machine for this entry, which returns a
+  // screen of its own below — the body never draws without one.
+  const bodyCtx = useMemo<RemoteBodyContext | null>(
+    () => (machine === null ? null : {
+      machine,
+      place: tabPlace,
+      repoRoot,
+      threadKey,
+      onOpenFile: strip.openFile,
+      onCloseTab: closeTab,
+      onAttach: attach,
+      panes: strip.panes,
+      splitWith: strip.splitWith,
+      onShowBeside: strip.showBeside,
+      onShowAlone: strip.showAlone,
+    }),
+    [
+      machine,
+      tabPlace,
+      repoRoot,
+      threadKey,
+      strip.openFile,
+      closeTab,
+      attach,
+      strip.panes,
+      strip.splitWith,
+      strip.showBeside,
+      strip.showAlone,
+    ],
+  );
 
   // No machine in the book at all. This is not an error state — it is the
   // honest first screen for someone who has cloud work but has never told this
   // laptop how to reach the box that ran it.
   if (!machine) {
     return (
-      <div className="flex h-full flex-col">
-        <TabStrip
-          machine={null}
-          machines={machines}
-          onPickMachine={onPickMachine}
-          runner={null}
-          boardRead={boardRead}
-          boardError={boardError}
-          onClose={onClose}
-          onMachineChanged={onMachineChanged}
-        />
-        <div className="flex flex-1 items-center justify-center px-8">
-          <div className="flex max-w-md flex-col items-center gap-3 text-center">
-            <CloudGlyph size={22} />
-            {/* Two ways in, two different first sentences. Arriving from a
-                cloud job, the machine is a fact you're trying to reach;
-                arriving from the fleet page it is a thing you're about to
-                add. Telling someone who clicked "Connect a machine" that
-                "this work ran on a machine" describes work they never sent. */}
-            <p className="text-sm text-text-2">
-              {machines === null
-                ? "Looking for machines you've connected…"
-                : missingMachineId
-                  ? `${missingMachineId} isn’t connected to this laptop any more.`
-                  : entry.threadKey
-                    ? "This work ran on a machine, and this laptop doesn't know how to reach one yet."
-                    : "No machines connected yet."}
-            </p>
-            {/* Gone, but not alone. Offering the machines you do have beats
-                sending someone through the wizard to re-add a box that is
-                sitting one line below — and beats picking one for them, which
-                would open shells on the wrong machine and look right. */}
-            {missingMachineId && !!machines?.length && (
-              <div className="flex w-full flex-col gap-1">
-                <span className="text-xs text-text-5">
-                  Open one of these instead:
-                </span>
-                {machines.map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => onPickMachine(m.id)}
-                    className="flex flex-col items-start rounded-lg border border-line-soft px-2.5 py-1.5 text-left transition-colors hover:bg-state-hover"
-                  >
-                    <span className="text-sm text-text-1">{m.name}</span>
-                    <span className="w-full truncate font-mono text-xs text-text-4">
-                      {m.user}@{m.host}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
-            {machines !== null && (
-              <>
-                <p className="text-xs text-text-5">
-                  Connect a machine once — its address is kept here, never its
-                  key — and it opens as a workspace from then on.
-                </p>
-                <Button variant="accentSoft" onClick={onConnectMachine}>
-                  {missingMachineId ? "Connect it again" : "Connect a machine"}
-                </Button>
-              </>
-            )}
-            {entry.threadKey && repoRoot !== undefined && (
-              <p className="text-xs text-text-5">
-                You can still read and answer the conversation from the cloud
-                list while you do.
-              </p>
-            )}
-          </div>
+      <div className="ui-remote-workspace">
+        <RemoteTabStrip machine={null} onMachineChanged={onMachineChanged} />
+        <div className="ui-remote-body">
+          <NoMachineScreen
+            machines={machines}
+            missingMachineId={missingMachineId}
+            fromThread={!!entry.threadKey}
+            canAnswerInList={repoRoot !== undefined}
+            onPickMachine={onPickMachine}
+            onConnectMachine={onConnectMachine}
+          />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col">
-      {/* One strip, in the same language the local work surface speaks: full
-          `--topbar-h` cells on the chrome ground, a rule between them, the
-          active one lit with the content colour. A machine is a workspace, so
-          it wears the workspace's own top — not a cloud banner over a folder
-          band over a strip of its own invention. What the box *is* (address,
-          liveness, which folder you land in, how to leave) lives in the one
-          quiet control at the end, and everything else is the tabs. */}
-      <TabStrip
+    <div className="ui-remote-workspace">
+      {/* The cloud workspace's tab row. What the box *is* (address,
+          liveness, which folder the chat reads, how to leave) is the title in
+          the header above; everything else is the tabs. */}
+      <RemoteTabStrip
         machine={machine}
-        machines={machines}
-        onPickMachine={onPickMachine}
-        runner={runner}
-        boardRead={boardRead}
-        boardError={boardError}
-        onClose={onClose}
-        onPopOut={popOut}
         onMachineChanged={onMachineChanged}
+        onOpenShell={openShellFromStrip}
         tabs={tabs}
         activeId={active?.id ?? activeId}
         onActivate={strip.focusTab}
         onCloseTab={closeTab}
         adding={adding}
-        onToggleAdd={() => {
+        canOpen={canOpen}
+        onToggleAdd={(open) => {
+          const next = open ?? !adding;
           // Ask the box on the way open rather than showing what it was doing
           // twelve seconds ago — this is the moment someone is deciding what to
           // join, and it is the one moment staleness would actually mislead.
-          if (!adding) box.refresh();
-          setAdding((v) => !v);
+          if (next && !adding) box.refresh();
+          setAdding(next);
         }}
         box={box}
         openSessions={tabs.flatMap((t) =>
           t.kind === "session" ? [t.session.name] : [],
         )}
         onAttach={attach}
-        onOpenWork={strip.openWork}
+      />
+      <MachineBanner
+        state={state}
+        note={state === "starting" ? waking?.note ?? null : state === "reconnecting" ? box.error : null}
+        shellError={shellError}
+        onWake={canOpen ? openJoin : undefined}
+        onDismissError={() => setShellError(null)}
       />
 
-      <div className="min-h-0 flex-1">
-        {!active ? (
-          <div className="grid h-full place-items-center px-8 text-center text-sm text-text-5">
-            Nothing open on this machine. Use ＋ to join something running there
-            or start something new.
+      <div className="ui-remote-body">
+        {!active || !bodyCtx ? (
+          <div className="ui-remote-empty">
+            <EmptyState
+              icon={PanelTop}
+              title="Nothing open on this machine"
+              body="Use ＋ to join something running there, or start something new."
+            />
           </div>
-        ) : active.kind === "cloud" ? (
-          // Arriving *from* a dispatched job, the thread on the board is the
-          // thing you clicked and the thing you want to read — a record of
-          // work that already ran, which the live chat has no way to show.
-          // Entering the machine any other way gives you the real chat.
-          threadKey ? (
-            <CloudThreadPane
-              threadKey={threadKey}
-              repoRoot={repoRoot ?? ""}
-            />
-          ) : (
-            <MachineChat
-              machineId={machine.id}
-              machineName={machine.name}
-              repoRoot={repoRoot ?? ""}
-            />
-          )
-        ) : active.kind === "work" ? (
-          // The local pane of that name, mounted on the project where it
-          // stands. Each of them takes `repoRoot` — the LOCAL root the place
-          // is keyed by — and asks through `lib/place/workApi`, which sends
-          // the question to the box, in the worktree this place works in.
-          <RemoteWorkPane
-            kind={active.work}
-            repoRoot={repoRoot}
-            machineName={machine.name}
-            openFile={openFile}
-            onOpenFile={openInFiles}
+        ) : strip.panes ? (
+          // Two or more of the open tabs at once. Which ones, and how they
+          // divide the body, is persisted with the strip — see
+          // `lib/remotePaneTree`. The arrangement only draws while you are
+          // standing in it, so looking at a tab outside it shows that tab alone
+          // and leaves the split to come back to.
+          <RemotePanes
+            tree={strip.panes}
+            tabs={tabs}
+            activeId={active.id}
+            onFocus={strip.focusTab}
+            ctx={bodyCtx}
           />
         ) : (
-          // Every terminal tab stays mounted-by-id in the Terminal module's own
-          // session cache, so switching tabs — and leaving the workspace and
-          // coming back — reattaches to the same running session rather than
-          // dialling a second one.
-          //
-          // `cwd` is this laptop's, and deliberately not the box's: it is where
-          // the local pty starts before `ssh` replaces it. Where the work
-          // happens is the session's own directory, which the box chose when
-          // the session was started and which we have no business overriding
-          // from here.
-          //
-          // The boot line is ASKED for rather than built here — see
-          // `RemoteSessionTerminal`. One transport, written once in Rust.
-          tabPlace && (
-            <RemoteSessionTerminal
-              key={active.id}
-              place={tabPlace}
-              session={active.session.name}
-              readOnly={active.readOnly}
-              instanceId={instanceIdFor(machine, active.id)}
-              cwd={repoRoot || undefined}
-              repoRoot={repoRoot || undefined}
-            />
-          )
+          <RemoteTabBody key={active.id} tab={active} ctx={bodyCtx} />
         )}
       </div>
     </div>
   );
 }
 
-/** The top of a remote workspace — and it is deliberately the same top a local
- *  one has: `--topbar-h` cells on the chrome ground, a hairline between them,
- *  the open one lit with the content colour. This used to be three stacked
- *  bands (a cloud header naming the box, a "folder on the machine" strip, then
- *  tabs of its own design), which announced at a glance that you had left the
- *  app and entered some cloud console. You hadn't. You opened a workspace that
- *  happens to be somewhere else, so it reads like every other workspace and
- *  gives the height back to the terminal.
- *
- *  Everything the old bands said is still reachable — it moved into the one
- *  control at the end of the strip, where you go when you want to know *about*
- *  the machine rather than work on it. */
-function TabStrip({
-  machine,
-  machines,
-  onPickMachine,
-  runner,
-  boardRead,
-  boardError,
-  onClose,
-  onPopOut,
-  onMachineChanged,
-  tabs = [],
-  activeId = "",
-  onActivate,
-  onCloseTab,
-  adding = false,
-  onToggleAdd,
-  canOpen = false,
-  box,
-  openSessions = [],
-  onAttach,
-  onOpenWork,
+/** The cloud workspace's session banner, for every state in which the machine
+ *  in front of you is not simply there — in the same status words the header
+ *  and the details use, from the same `machineState`. And the one moment a
+ *  shell could not be opened, which is said here rather than in a toast that
+ *  leaves before it is read. Nothing at all while the machine is up. */
+function MachineBanner({
+  state,
+  note,
+  shellError,
+  onWake,
+  onDismissError,
 }: {
-  machine: Machine | null;
-  machines: Machine[] | null;
-  onPickMachine: (id: string) => void;
-  runner: CloudRunner | null;
-  boardRead: boolean;
-  boardError: string | null;
-  onClose: () => void;
-  /** Detach this place into its own OS window. Absent on the no-machine
-   *  screen, where there is no place to open one onto yet. */
-  onPopOut?: () => void;
-  onMachineChanged: (m: Machine) => void;
-  tabs?: RemoteTab[];
-  activeId?: string;
-  onActivate?: (id: string) => void;
-  onCloseTab?: (id: string) => void;
-  adding?: boolean;
-  onToggleAdd?: () => void;
-  canOpen?: boolean;
-  box?: BoxState;
-  openSessions?: string[];
-  onAttach?: (s: BoxSession, opts?: { readOnly?: boolean }) => void;
-  /** Open one of the work surfaces — files, changes, git, PRs, run. */
-  onOpenWork?: (kind: RemoteWorkKind) => void;
+  state: CloudSessionState;
+  /** The engine's own sentence while it starts, or the failed read's words
+   *  while it reconnects. */
+  note: string | null;
+  shellError: string | null;
+  onWake?: () => void;
+  onDismissError: () => void;
 }) {
-  // The work picker, open or not. Its own state because it is a menu of
-  // this strip and nothing else needs to know it is up.
-  const [picking, setPicking] = useState(false);
-  return (
-    <div
-      className="relative flex flex-shrink-0 items-stretch border-b border-line-soft bg-bg-chrome"
-      style={{ height: "var(--topbar-h)" }}
-    >
-      <div className="no-scrollbar flex min-w-0 flex-1 items-stretch overflow-x-auto">
-        {tabs.map((t) => {
-          const on = t.id === activeId;
-          const label =
-            t.kind === "cloud"
-              ? t.label
-              : t.kind === "work"
-                ? REMOTE_WORK[t.work].label
-                : sessionLabel(t.session);
-          const WorkIcon = t.kind === "work" ? REMOTE_WORK[t.work].Icon : null;
-          return (
-            <div
-              key={t.id}
-              className={`group flex h-full flex-shrink-0 items-center gap-1.5 border-r border-line-soft px-2 text-sm transition-colors ${
-                on
-                  ? "bg-bg-content text-text-1"
-                  : "text-text-3 hover:bg-state-hover hover:text-text-1"
-              }`}
-            >
-              <button
-                type="button"
-                onClick={() => onActivate?.(t.id)}
-                title={
-                  t.kind === "cloud"
-                    ? undefined
-                    : t.kind === "work"
-                      ? REMOTE_WORK[t.work].hint
-                      : `${label} — running in ${t.session.project || "the home directory"} on the machine${
-                        t.readOnly
-                          ? ". You are watching: this tab can't type into it."
-                          : ""
-                      }`
-                }
-                className="flex min-w-0 items-center gap-1.5"
-              >
-                <span className="flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center">
-                  {t.kind === "cloud" ? (
-                    <CloudGlyph size={12} />
-                  ) : t.kind === "work" ? (
-                    WorkIcon && <WorkIcon size={12} />
-                  ) : t.readOnly ? (
-                    // Which way you joined changes what the keyboard does, so
-                    // it is on the tab and not only in the panel you came from.
-                    <Eye size={12} />
-                  ) : t.session.agent ? (
-                    <AgentIcon
-                      agentId={t.session.agent}
-                      label={t.session.agent}
-                      size={13}
-                    />
-                  ) : (
-                    <TerminalIcon size={12} />
-                  )}
-                </span>
-                <span className="max-w-[140px] truncate">{label}</span>
-                {/* Someone else is attached to this same session. Worth a mark
-                    on the tab itself, not just in the panel — you are sharing a
-                    keyboard with them the moment you start typing. */}
-                {t.kind === "session" && t.session.attached > 1 && (
-                  <span
-                    className="flex-shrink-0 text-2xs"
-                    style={{ color: "var(--color-accent)" }}
-                    title={`${t.session.attached} people are attached to this session`}
-                  >
-                    ●
-                  </span>
-                )}
-              </button>
-              {/* The conversation is the board's record and closing it here
-                  would imply otherwise, so only the sessions we opened can be
-                  closed. */}
-              {t.kind !== "cloud" && (
-                <button
-                  type="button"
-                  onClick={() => onCloseTab?.(t.id)}
-                  title="Close this tab — the session keeps running on the machine"
-                  className="opacity-0 transition-opacity hover:text-text-1 group-hover:opacity-100"
-                >
-                  <X size={11} />
-                </button>
-              )}
-            </div>
-          );
-        })}
-
-        {machine && (
-          <button
-            type="button"
-            onClick={onToggleAdd}
-            disabled={!canOpen}
-            title={
-              canOpen
-                ? "Join something running on this machine, or start something new"
-                : "This machine's saved address can't be dialled — reconnect it"
-            }
-            className="flex h-full flex-shrink-0 items-center px-2.5 text-text-4 transition-colors hover:bg-state-hover hover:text-text-1 disabled:opacity-40"
-          >
-            <Plus size={13} />
-          </button>
-        )}
-
-        {/* The work surfaces. Beside ＋ rather than inside it: ＋ is about
-            what is RUNNING on the machine, and the file tree of a project
-            is not something that runs. Only when the place has a project —
-            without one there is nothing over there to list. */}
-        {machine && onOpenWork && (
-          <button
-            type="button"
-            onClick={() => setPicking((v) => !v)}
-            title="Open the files, changes, git, pull requests or run scripts of this project on the machine"
-            className="flex h-full flex-shrink-0 items-center px-2.5 text-text-4 transition-colors hover:bg-state-hover hover:text-text-1"
-          >
-            <LayoutGrid size={13} />
-          </button>
-        )}
+  if (shellError)
+    return (
+      <div className="ui-cloud-session-banner" role="alert">
+        <CloudStatus state="unresponsive" />
+        <span>Couldn’t open a terminal on this machine: {shellError}</span>
+        <Button size="xs" variant="secondary" onClick={onDismissError}>
+          Dismiss
+        </Button>
       </div>
-
-      {picking && onOpenWork && (
-        <>
-          <MenuBackdrop onClose={() => setPicking(false)} />
-          <div
-            className={`${MENU_PANEL} absolute left-2 z-50`}
-            style={{ top: "calc(var(--topbar-h) + 2px)" }}
-          >
-            <div className={MENU_LABEL}>On the machine</div>
-            {REMOTE_WORK_KINDS.map((k) => {
-              const { label, Icon, hint } = REMOTE_WORK[k];
-              return (
-                <button
-                  key={k}
-                  type="button"
-                  className={`${MENU_ROW} flex w-full items-center gap-2`}
-                  title={hint}
-                  onClick={() => {
-                    setPicking(false);
-                    onOpenWork(k);
-                  }}
-                >
-                  <Icon size={13} className="text-text-4" />
-                  <span>{label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </>
-      )}
-
-      {/* Keyed on the box, because this control holds a draft OF that box: the
-          folder its conversation reads, half-typed. The workspace around it no
-          longer remounts when you switch machines, so without this the draft
-          would follow you onto the next machine and save one box's path onto
-          another. */}
-      <MachineControl
-        key={machine?.id ?? "no-machine"}
-        machine={machine}
-        machines={machines}
-        onPickMachine={onPickMachine}
-        runner={runner}
-        boardRead={boardRead}
-        boardError={boardError}
-        onClose={onClose}
-        onPopOut={onPopOut}
-        onMachineChanged={onMachineChanged}
-      />
-
-      {adding && machine && box && (
-        <>
-          <MenuBackdrop onClose={() => onToggleAdd?.()} />
-          <BoxPanel
-            place={placeOfMachine(machine)}
-            box={box}
-            openSessions={openSessions}
-            onAttach={(s, opts) => onAttach?.(s, opts)}
-            // Waking rewrites the row — a stopped machine comes back on a
-            // different address — so the woken row goes back through the same
-            // channel the wizard's edits do. Nothing here patches a field in
-            // place; the book stays the one answer to where this box is.
-            onWoke={onMachineChanged}
-            onClose={() => onToggleAdd?.()}
-          />
-        </>
+    );
+  const line = bannerLine(state, note);
+  if (!line) return null;
+  return (
+    <div className="ui-cloud-session-banner" role="status">
+      <CloudStatus state={state} />
+      <span>{line}</span>
+      {state === "sleeping" && onWake && (
+        <Button size="xs" variant="secondary" onClick={onWake}>
+          Wake machine
+        </Button>
       )}
     </div>
   );
 }
 
-/** Click-away for the hand-rolled popovers in this strip. Radix menus get this
- *  for free; these two are plain absolutely-positioned panels, and a menu that
- *  only closes by pressing the same button again is a menu people leave open
- *  over their work. Transparent and behind the panel, above everything else. */
-function MenuBackdrop({ onClose }: { onClose: () => void }) {
-  return (
-    <div
-      className="fixed inset-0 z-40"
-      onClick={onClose}
-      onContextMenu={onClose}
-    />
-  );
-}
-
-/** Which box this is, folded into one control at the end of the strip.
- *
- *  Its name is the label because that is the one word you want on screen while
- *  you work; the address, whether it's up, which folder new tabs land in, the
- *  other machines you could switch to and the way out are all one click away.
- *  A workspace's identity belongs in its chrome, not in a banner above it. */
-function MachineControl({
-  machine,
-  machines,
-  onPickMachine,
-  runner,
-  boardRead,
-  boardError,
-  onClose,
-  onPopOut,
-  onMachineChanged,
-}: {
-  machine: Machine | null;
-  machines: Machine[] | null;
-  onPickMachine: (id: string) => void;
-  runner: CloudRunner | null;
-  boardRead: boolean;
-  boardError: string | null;
-  onClose: () => void;
-  onPopOut?: () => void;
-  onMachineChanged: (m: Machine) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [editingDir, setEditingDir] = useState(false);
-  const [dirDraft, setDirDraft] = useState(machine?.repo_path ?? "");
-  const others = (machines ?? []).filter((m) => m.id !== machine?.id);
-
-  const saveDir = useCallback(async () => {
-    if (!machine) return;
-    const saved = await api.machineSave({
-      name: machine.name,
-      host: machine.host,
-      user: machine.user,
-      key_path: machine.key_path,
-      box_kind: machine.box_kind,
-      repo_path: dirDraft.trim() || null,
-    });
-    onMachineChanged(saved);
-    setEditingDir(false);
-  }, [machine, dirDraft, onMachineChanged]);
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        title={
-          machine
-            ? `${machine.user}@${machine.host} — everything in this workspace runs there, not here`
-            : "No machine connected"
-        }
-        className="flex h-full flex-shrink-0 items-center gap-1.5 border-l border-line-soft px-2.5 text-xs text-text-4 transition-colors hover:bg-state-hover hover:text-text-1"
-      >
-        <CloudGlyph size={12} pulse={!!runner?.online} />
-        <span className="max-w-[160px] truncate">
-          {machine?.name || "No machine"}
-        </span>
-        <ChevronDown size={11} />
-      </button>
-
-      {open && <MenuBackdrop onClose={() => setOpen(false)} />}
-      {open && (
-        <div className={`${MENU_PANEL} absolute right-2 top-full mt-1 flex w-72 flex-col`}>
-          {machine && (
-            <div className="flex flex-col gap-0.5 px-2 py-1.5">
-              <span className="truncate font-mono text-xs text-text-3">
-                {machine.user}@{machine.host}
-              </span>
-              <span className="flex items-center gap-1.5 text-xs text-text-5">
-                <LiveWord
-                  runner={runner}
-                  boardRead={boardRead}
-                  boardError={boardError}
-                />
-                {machine.box_kind === "shared" && (
-                  <>
-                    <span>·</span>
-                    <span>shared machine</span>
-                  </>
-                )}
-              </span>
-            </div>
-          )}
-
-          {/* Which checkout the *conversation* reads. Shells and agents get
-              their directory from the session they attach to — the box chose
-              it when the session was started — but the chat has no session to
-              inherit from, so this is where its read_file, bash and prove act.
-              Blank means the home directory, which is a real answer rather
-              than a missing one. */}
-          {machine && (
-            <>
-              <div className={MENU_SEP} />
-              <div className={MENU_LABEL}>Folder the conversation reads</div>
-              <div className="flex flex-col gap-1 px-2 pb-1.5">
-              {editingDir ? (
-                <div className="flex items-center gap-1">
-                  <Input
-                    value={dirDraft}
-                    onChange={(e) => setDirDraft(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void saveDir();
-                      if (e.key === "Escape") setEditingDir(false);
-                    }}
-                    placeholder="~/workspaces/my-project"
-                    className="h-6 flex-1 font-mono text-xs"
-                    autoFocus
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void saveDir()}
-                    className="rounded px-1.5 py-0.5 text-xs font-medium text-accent hover:bg-state-hover"
-                  >
-                    Save
-                  </button>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDirDraft(machine.repo_path ?? "");
-                    setEditingDir(true);
-                  }}
-                  className="self-start truncate rounded px-1 py-0.5 font-mono text-xs text-text-3 hover:bg-state-hover"
-                >
-                  {machine.repo_path || "~ (home)"}
-                </button>
-              )}
-              {/* Said once, here, rather than on every tab: work you start on
-                  the box lives on the box. That is the whole point, and it is
-                  also the thing that surprises people the first time. */}
-                <span className="text-xs text-text-5">
-                  Everything in this workspace runs on that machine, and keeps
-                  running after you close the window.
-                </span>
-              </div>
-            </>
-          )}
-
-          {others.length > 0 && (
-            <>
-              <div className={MENU_SEP} />
-              <div className={MENU_LABEL}>Other machines</div>
-              {others.map((m) => (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => {
-                    onPickMachine(m.id);
-                    setOpen(false);
-                  }}
-                  className={`${MENU_ROW} flex-col !items-start gap-0`}
-                >
-                  <span>{m.name}</span>
-                  <span className="w-full truncate font-mono text-xs text-text-4">
-                    {m.user}@{m.host}
-                  </span>
-                </button>
-              ))}
-            </>
-          )}
-
-          <div className={MENU_SEP} />
-          {/* The same move a local checkout has had all along ("Open in new
-              window" on its roster row), for the other kind of place. The two
-              rows are deliberately adjacent and deliberately different: one
-              gives you a second window onto this machine, the other gives the
-              machine up. Said in the title, because "open in its own window"
-              reads like a move and people expect a move. */}
-          {onPopOut && (
-            <button
-              type="button"
-              onClick={() => {
-                setOpen(false);
-                onPopOut();
-              }}
-              className={MENU_ROW}
-              title="A second Aura window standing on this machine. This one stays on it too"
-            >
-              Open in its own window
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => {
-              setOpen(false);
-              onClose();
-            }}
-            className={MENU_ROW}
-          >
-            Leave this machine
-          </button>
-        </div>
-      )}
-    </>
-  );
-}
-
-/** Whether the box is up, in the words a person would use — and never a guess.
- *
- *  Three different unknowns get three different sentences, because they send
- *  you to three different places: the board said it's down, the board has no
- *  such machine at all, and we couldn't reach the board to ask. Collapsing them
- *  into one "offline" is how you end up debugging a stopped VM that was
- *  actually a signed-out laptop. */
-function LiveWord({
-  runner,
-  boardRead,
-  boardError,
-}: {
-  runner: CloudRunner | null;
-  boardRead: boolean;
-  boardError: string | null;
-}) {
-  // Two or three words on the line, the whole sentence in the tooltip. These
-  // used to be full clauses, which read well in isolation and then set the
-  // width of the header column — pushing "everything here runs on that
-  // machine" off the right-hand side and clipping themselves mid-word.
-  if (boardError)
-    return <span title={boardError}>couldn’t check</span>;
-  if (!boardRead)
-    return (
-      <span className="flex items-center gap-1">
-        <AsciiSpinner /> checking…
-      </span>
-    );
-  if (!runner)
-    return (
-      <span
-        style={{ color: "var(--color-amber)" }}
-        title="This machine isn't registered as a runner on your board, so nothing can be dispatched to it — but you can still open shells and agents on it here."
-      >
-        not a runner
-      </span>
-    );
-  return runner.online ? (
-    <span style={{ color: "var(--color-accent)" }}>online</span>
-  ) : (
-    <span
-      style={{ color: "var(--color-amber)" }}
-      title="The board hasn't heard from this machine recently. It may be stopped or asleep, in which case a shell won't connect."
-    >
-      not answering
-    </span>
-  );
+/** What the banner says beside the status, or null for no banner. */
+function bannerLine(state: CloudSessionState, note: string | null): string | null {
+  switch (state) {
+    case "sleeping":
+      return "Aura put this machine to sleep. Its sessions and files are kept; wake it to work here again.";
+    case "starting":
+      return note || "This machine is waking up.";
+    case "unresponsive":
+      return "The board hasn’t heard from this machine recently. It may be stopped, or its runner may be down.";
+    case "reconnecting":
+      return note ? `Couldn’t read this machine: ${note}` : "Couldn’t read this machine.";
+    default:
+      return null;
+  }
 }

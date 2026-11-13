@@ -1,0 +1,71 @@
+/* The name reveal (title-reveal.tsx). Present only while a reveal plays. */
+
+/* Fills the label element it is mounted in (a blockified flex item that
+   already truncates), so it is a block: its width is the new name's. Aligned
+   to the start even inside a button, whose own centring would slide a frame
+   narrower than the name off the name's first letter. */
+.ui-title-reveal {
+  position: relative;
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: clip;
+  text-align: start;
+}
+.ui-title-reveal-final {
+  color: transparent;
+}
+.ui-title-reveal-frame {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+/* One pixel per letter still to land: a fixed cell, so the frame's width does
+   not depend on the font — a little under an average letter, so a name half
+   turned over still fits the width its finished self holds. */
+.ui-title-reveal-frame i {
+  display: inline-block;
+  width: 0.4em;
+  height: 0.5em;
+  margin: 0 0.03em;
+  vertical-align: 0;
+  border-radius: 1px;
+  background: currentColor;
+}
+.ui-title-reveal-frame i[data-level="1"] {
+  opacity: 0.22;
+}
+.ui-title-reveal-frame i[data-level="2"] {
+  opacity: 0.5;
+}
+.ui-title-reveal-frame i[data-level="3"] {
+  background: var(--color-accent-green, #4dc1a4);
+}
+
+.ui-reveal-mark {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  opacity: var(--reveal-mark-opacity, 1);
+  transform: scale(var(--reveal-mark-scale, 1));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The component already shows the final name; this covers a reveal caught
+     mid-flight when the setting changes. */
+  .ui-title-reveal-frame {
+    display: none;
+  }
+  .ui-title-reveal-final {
+    color: inherit;
+  }
+  .ui-reveal-mark {
+    opacity: 1;
+    transform: none;
+  }
+}

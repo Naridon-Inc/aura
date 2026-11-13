@@ -1,0 +1,100 @@
+/* Having Aura make a machine: one page in the cloud setup's own rules (its
+   heading, sentence size and hint lines), a name and a size. The sizes are
+   one bordered list of rows, not a card each. */
+
+.ui-make-place {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 32px;
+  background: var(--ui-bg);
+}
+.ui-make-place .ui-cloud-setup-page {
+  max-width: 560px;
+  gap: 20px;
+  padding-bottom: 32px;
+}
+.ui-make-place .ui-cloud-setup-page > .ui-state {
+  align-self: stretch;
+}
+
+.ui-make-place-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.ui-make-place-field > legend {
+  margin-bottom: 8px;
+  padding: 0;
+}
+.ui-make-place-field small[data-tone="error"] {
+  color: var(--ui-red);
+}
+
+.ui-make-place-sizes {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+}
+.ui-make-place-size {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ui-fg);
+  text-align: left;
+  cursor: pointer;
+}
+.ui-make-place-size + .ui-make-place-size {
+  border-top: 1px solid var(--ui-border);
+}
+.ui-make-place-size:hover {
+  background: var(--ui-hover);
+}
+.ui-make-place-size[aria-checked="true"] {
+  background: var(--ui-muted);
+}
+.ui-make-place-size:focus-visible {
+  outline: 2px solid var(--ui-ring);
+  outline-offset: -2px;
+}
+.ui-make-place-size > svg {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  color: var(--ui-faint);
+}
+.ui-make-place-size[aria-checked="true"] > svg {
+  color: var(--ui-green);
+}
+.ui-make-place-size > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ui-make-place-size strong {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+.ui-make-place-size em {
+  color: var(--ui-green);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 400;
+}

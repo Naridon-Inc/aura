@@ -282,17 +282,29 @@ pub struct Client {
     http: reqwest::blocking::Client,
 }
 
+/// The HTTP client every cloud call in this CLI is made with.
+///
+/// Shared rather than rebuilt per call site because two of its three lines are
+/// policy: the 30-second ceiling, and `accept_self_signed` — which a person
+/// running the local staging stack sets once and expects every `aura` verb to
+/// honour. A second builder elsewhere is a verb that ignores it.
+pub fn http_client() -> Result<reqwest::blocking::Client, ApiError> {
+    let cfg = ConfigManager::load();
+    let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30));
+    if cfg.accept_self_signed {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    builder
+        .build()
+        .map_err(|e| ApiError::Network(format!("http client: {e}")))
+}
+
 impl Client {
     pub fn new(auth: Auth) -> Result<Self, ApiError> {
-        let cfg = ConfigManager::load();
-        let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30));
-        if cfg.accept_self_signed {
-            builder = builder.danger_accept_invalid_certs(true);
-        }
-        let http = builder
-            .build()
-            .map_err(|e| ApiError::Network(format!("http client: {e}")))?;
-        Ok(Self { auth, http })
+        Ok(Self {
+            auth,
+            http: http_client()?,
+        })
     }
 
     /// Resolve credentials and build — the one-liner every verb starts with.

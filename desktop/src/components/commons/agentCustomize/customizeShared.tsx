@@ -1,13 +1,16 @@
 // Shared kit for the Agent Customizations surface — the nav model, the one
-// data hook every pane reads from, and the small UI atoms (intro, card,
-// toggle row, deep-link, empty hint) the panes compose. Kept in one place so
-// the seven panes stay tiny and consistent, and so a non-engineer reads the
-// same calm language everywhere: plain "what this is / why you'd touch it",
-// arctic-blue for the one primary action, no jargon walls.
+// data hook every pane reads from, and the page parts the panes compose. Each
+// pane is a settings page: the scroll and measure, the title and the sentence
+// under it, untitled runs of settings rows, count badges, and the app's empty
+// and loading states. Kept in one place so the seven panes stay tiny and
+// consistent, and so a non-engineer reads the same calm language everywhere.
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
+import { Badge } from "../../ui/badge";
+import { SettingsGroup, SettingsIntro } from "../../ui/settings-blocks";
 import { EmptyState, LoadingState } from "../../ui/state";
+import "../../ui/customize-panes.css";
 
 import {
   api,
@@ -18,8 +21,7 @@ import {
 } from "../../../lib/api";
 
 // ── Navigation model ───────────────────────────────────────────────────────
-// Left rail order matches the reference (Overview first, then the things you
-// actually tune). Each item carries a plain-language blurb shown under its
+// Left rail order: Overview first, then the things you actually tune. Each item carries a plain-language blurb shown under its
 // title so the surface explains itself without a manual.
 
 export type CustomizeViewId =
@@ -111,60 +113,34 @@ export function instructionCount(memory: MemoryView | null): number {
 
 // ── UI atoms ────────────────────────────────────────────────────────────────
 
-/** The scroll body every pane lives in — centered, comfortable reading width. */
+/** The scroll body every pane lives in: a settings page at a readable
+ *  measure, scrolling inside its pane. */
 export function PaneScroll({ children }: { children: ReactNode }) {
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-3xl px-8 py-7">{children}</div>
+    <div className="ui-customize-pane">
+      <div className="ui-settings-page">{children}</div>
     </div>
   );
 }
 
 /** Pane heading + plain-language subtitle. No jargon — say what it does. */
-export function PaneIntro({
-  title,
-  blurb,
-  action,
-}: {
-  title: string;
-  blurb: string;
-  action?: ReactNode;
-}) {
+export function PaneIntro({ title, blurb }: { title: string; blurb: string }) {
   return (
-    <div className="mb-5 flex items-start justify-between gap-4">
-      <div className="min-w-0">
-        <h2 className="text-lg font-semibold text-text-1">{title}</h2>
-        <p className="mt-1 text-base leading-relaxed text-text-3">{blurb}</p>
-      </div>
-      {action ? <div className="shrink-0">{action}</div> : null}
-    </div>
+    <>
+      <h1>{title}</h1>
+      <SettingsIntro>{blurb}</SettingsIntro>
+    </>
   );
 }
 
-/** A bordered surface for a row/group of related controls. */
-export function Card({
-  children,
-  className = "",
-}: {
-  children: ReactNode;
-  className?: string;
-}) {
-  return (
-    <div
-      className={`rounded-lg border border-line-soft bg-bg-0 shadow-[var(--shadow-card)] ${className}`}
-    >
-      {children}
-    </div>
-  );
+/** An untitled run of settings rows. */
+export function Card({ children, className }: { children: ReactNode; className?: string }) {
+  return <SettingsGroup className={className}>{children}</SettingsGroup>;
 }
 
-/** A calm count chip (e.g. "3 installed"). Neutral by default. */
+/** A calm count chip (e.g. "3 installed"). */
 export function CountPill({ children }: { children: ReactNode }) {
-  return (
-    <span className="rounded-full bg-bg-2 px-2 py-0.5 text-xs font-medium text-text-3">
-      {children}
-    </span>
-  );
+  return <Badge variant="secondary">{children}</Badge>;
 }
 
 /**

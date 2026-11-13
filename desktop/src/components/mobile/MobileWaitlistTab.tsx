@@ -1,4 +1,4 @@
-// Settings → Connections → "Aura on your phone".
+// Organization › Services › Mobile.
 //
 // The permanent home for the waitlist. The What's New note offers it once
 // after an update; this is where it lives afterwards, so someone who waved
@@ -11,9 +11,7 @@ export function MobileWaitlistTab() {
   return (
     <>
       <PaneIntro text="The iPhone and Android apps are in the works. Join the waitlist and we'll email you an invite when they're ready to try." />
-      <div className="max-w-[460px]">
-        <MobileWaitlistPane />
-      </div>
+      <MobileWaitlistPane layout="rows" />
     </>
   );
 }

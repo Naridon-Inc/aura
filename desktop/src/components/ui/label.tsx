@@ -1,40 +1,34 @@
-import * as React from "react";
-import { IconButton, Label as MedusaLabel, Tooltip } from "@medusajs/ui";
-import { InformationCircle } from "@medusajs/icons";
-
+import { forwardRef, type LabelHTMLAttributes, type ReactNode } from "react";
+import { Info } from "lucide-react";
 import { cn } from "../../lib/utils";
-
-export interface LabelProps extends React.ComponentPropsWithoutRef<typeof MedusaLabel> {
+import { Tooltip, TooltipProvider } from "./tooltip";
+export interface LabelProps extends LabelHTMLAttributes<HTMLLabelElement> {
   optional?: boolean;
-  hint?: React.ReactNode;
+  hint?: ReactNode;
+  size?: "xsmall" | "small" | "base" | "large";
+  weight?: "regular" | "plus";
 }
-
-export const Label = React.forwardRef<HTMLLabelElement, LabelProps>(
+export const Label = forwardRef<HTMLLabelElement, LabelProps>(
   ({ className, children, optional, hint, size = "base", weight = "plus", ...props }, ref) => (
-    <MedusaLabel
+    <label
       ref={ref}
-      size={size}
-      weight={weight}
-      className={cn("inline-flex items-center gap-1.5", className)}
+      className={cn("ui-label", className)}
+      data-size={size}
+      data-weight={weight}
       {...props}
     >
       <span>{children}</span>
-      {optional && <span className="font-normal text-text-3">(Optional)</span>}
+      {optional && <span className="ui-label-optional">(Optional)</span>}
       {hint != null && (
-        <Tooltip content={hint} side="top" className="max-w-[220px]">
-          <IconButton
-            type="button"
-            size="small"
-            variant="transparent"
-            tabIndex={-1}
-            aria-label="More information"
-            className="size-4"
-          >
-            <InformationCircle className="size-3" aria-hidden />
-          </IconButton>
-        </Tooltip>
+        <TooltipProvider>
+          <Tooltip content={hint}>
+            <button type="button" aria-label="More information" className="ui-label-hint">
+              <Info size={12} />
+            </button>
+          </Tooltip>
+        </TooltipProvider>
       )}
-    </MedusaLabel>
+    </label>
   ),
 );
 Label.displayName = "Label";

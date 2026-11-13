@@ -36,9 +36,11 @@
 pub mod brain;
 pub mod host;
 pub mod probe;
+pub mod tap;
 pub mod terminal;
 pub mod wire;
 
-pub use brain::{AcpBrain, PROVIDER_PREFIX, descriptors_for_installed_agents};
+pub use brain::{AcpBrain, HostedAgent, PROVIDER_PREFIX, descriptors_for_installed_agents, hosted_agent, hosted_agents};
 pub use host::{GateDecision, HostPolicy};
 pub use probe::{ProbedAgent, known_agent_ids, probe_installed_agents};
+pub use tap::{AcpSpawn, Tap, TapEvent};

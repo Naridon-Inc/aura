@@ -1,0 +1,16 @@
+/* Standing model defaults in Settings → Models: settings sections of settings
+   rows answered by the shared select. Added here is only the spacing that
+   follows the loadout above it and the fold chevron. */
+
+.ui-model-defaults {
+  padding-top: 24px;
+}
+.ui-model-defaults .ui-settings-section > div > .ui-settings-row:first-child {
+  padding-top: 8px;
+}
+.ui-model-defaults-chevron {
+  transition: transform 120ms ease;
+}
+.ui-model-defaults-chevron[data-open] {
+  transform: rotate(90deg);
+}

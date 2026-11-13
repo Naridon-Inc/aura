@@ -15,8 +15,15 @@
 //
 // So the place is part of the name. `null` means here, and spells exactly the
 // key it always did — pointers written before this still resolve.
+//
+// A machine is named by its id, and a machine can have had more than one: the
+// `user@host:/repo` key rows were named by before ids stopped carrying an
+// address, or the id of a lost machine it was reconnected as. A pointer filed
+// under any of them is that machine's, so it is read through every name the
+// machine answers to and written under the one it goes by now.
 
 import { machineIdForRoot } from "./activeMachine";
+import { canonicalMachineId, carryForward, knownIdsOf } from "./machineRef";
 
 /** Where the pointer for `repoRoot` lives, for work running at `machineId`
  *  (`null`/absent = this laptop). */
@@ -37,7 +44,9 @@ export function readAmbientSid(
 ): string | null {
   if (!repoRoot) return null;
   try {
-    return localStorage.getItem(ambientKey(repoRoot, machineId));
+    const box = machineId?.trim();
+    if (!box) return localStorage.getItem(ambientKey(repoRoot, null));
+    return carryForward(localStorage, (id) => ambientKey(repoRoot, id), knownIdsOf(box));
   } catch {
     return null; // private mode — no pointer is a legal answer
   }
@@ -50,7 +59,7 @@ export function writeAmbientSid(
   sid: string,
 ): void {
   try {
-    localStorage.setItem(ambientKey(repoRoot, machineId), sid);
+    localStorage.setItem(ambientKey(repoRoot, canonicalMachineId(machineId)), sid);
   } catch {
     /* localStorage quota — non-fatal, the pointer is a convenience */
   }
@@ -66,12 +75,16 @@ export function writeAmbientSid(
  * entirely, and a request that came through a form can carry `""`. All three
  * mean "this disk", and a check that treats any of them as a fourth place hands
  * back a chat whose tools are on the wrong computer.
+ *
+ * And one machine can be spelled by more than one id — a session saved before
+ * its row was renamed or reconnected still names it the old way — so each side
+ * is read as the id the machine goes by now.
  */
 export function samePlace(
   a: string | null | undefined,
   b: string | null | undefined,
 ): boolean {
-  return (a?.trim() || null) === (b?.trim() || null);
+  return canonicalMachineId(a) === canonicalMachineId(b);
 }
 
 /**

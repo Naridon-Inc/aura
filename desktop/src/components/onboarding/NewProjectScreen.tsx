@@ -1,31 +1,36 @@
-// Screen 4 — New Project. Three real creation modes, all backed by the
-// git_clone / git_init / scaffold_template Tauri commands:
-//   Empty    -> git init + seeded initial commit
+// First run, the create page of Project. Three real ways to start, all
+// backed by Tauri commands:
+//   Empty    -> git init + a seeded first commit
 //   Clone    -> git clone <url>
 //   Template -> scaffold a built-in starter (Minimal / Node + TS), commit
-// On success the new repo path flows through the same open-repo event the
-// rest of the app uses, and onboarding ends.
+// On success the new repository opens through the same event the rest of the
+// app uses, and first run ends.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AuraWordmark } from "./OnboardingShell";
-import { EmptyRepoIcon, CloneIcon, TemplateIcon, FolderIcon } from "./icons";
+import { ArrowRight, FolderOpen } from "lucide-react";
+import { Alert, AlertDescription } from "../ui/alert";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
+import { Field } from "../ui/field";
 import { Input } from "../ui/input";
+import { Select } from "../ui/select";
 import { api } from "../../lib/api";
+import "../ui/cloud-onboarding.css";
+import "../ui/cloud-patterns.css";
+import "../ui/onboarding.css";
 
 type Mode = "empty" | "clone" | "template";
 type TemplateId = "minimal" | "node-ts";
 
-const MODES: { id: Mode; label: string; hint: string; icon: React.ReactNode }[] = [
-  { id: "empty", label: "Empty", hint: "New git repo from scratch", icon: <EmptyRepoIcon /> },
-  { id: "clone", label: "Clone", hint: "Clone from a remote URL", icon: <CloneIcon /> },
-  { id: "template", label: "Template", hint: "Start from a starter", icon: <TemplateIcon /> },
+const MODES: { id: Mode; label: string; hint: string }[] = [
+  { id: "empty", label: "Empty", hint: "A new repository with nothing in it yet." },
+  { id: "clone", label: "Clone", hint: "A copy of a repository from its URL." },
+  { id: "template", label: "Template", hint: "A small starter to build on." },
 ];
 
-const TEMPLATES: { id: TemplateId; label: string }[] = [
-  { id: "minimal", label: "Minimal" },
-  { id: "node-ts", label: "Node + TypeScript" },
+const TEMPLATES: { value: TemplateId; label: string }[] = [
+  { value: "minimal", label: "Minimal" },
+  { value: "node-ts", label: "Node + TypeScript" },
 ];
 
 export function NewProjectScreen({
@@ -33,7 +38,7 @@ export function NewProjectScreen({
   onBusyChange,
 }: {
   onCreated: (root: string) => void;
-  /** Lets the flow hide its Back affordance while a create is in flight. */
+  /** Lets the flow hold its steps still while a create is in flight. */
   onBusyChange?: (busy: boolean) => void;
 }) {
   const [mode, setMode] = useState<Mode>("empty");
@@ -99,144 +104,128 @@ export function NewProjectScreen({
     }
   }, [canSubmit, mode, url, location, name, template, onCreated, onBusyChange]);
 
+  const hint = MODES.find((m) => m.id === mode)?.hint;
+
   return (
-    <div className="w-full flex justify-center">
-      <div className="w-full max-w-[520px] flex flex-col items-center py-12">
-        <AuraWordmark />
+    <>
+      <header>
+        <h1>New repository</h1>
+        <p>{hint}</p>
+      </header>
 
-        <div className="mt-10 w-full">
-          <div className="text-md font-semibold text-text-1">New Project</div>
+      <form
+        className="ui-onboarding-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+      >
+        <div className="ui-cloud-segments" role="group" aria-label="How to start">
+          {MODES.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              aria-pressed={mode === m.id}
+              disabled={busy}
+              onClick={() => setMode(m.id)}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
 
-          {/* Location */}
-          <div className="mt-5">
-            <FieldLabel>Location</FieldLabel>
-            <div className="flex items-center gap-2">
-              <Input
-                value={location}
-                onChange={(e) => setLocation(e.target.value)}
-                spellCheck={false}
-                className="flex-1 font-mono text-base"
-              />
-              <Button
-                type="button"
-                variant="secondary"
-                size="icon"
-                onClick={browseLocation}
-                aria-label="Choose location"
-                className="h-8 w-8 shrink-0"
-              >
-                <FolderIcon size={16} />
-              </Button>
-            </div>
-          </div>
-
-          {/* Mode tiles */}
-          <div className="mt-4 grid grid-cols-3 gap-2">
-            {MODES.map((m) => {
-              const on = mode === m.id;
-              return (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => setMode(m.id)}
-                  className={[
-                    "flex flex-col items-center text-center gap-1.5 px-2 py-3.5 rounded-md border transition-colors",
-                    on
-                      ? "border-accent bg-accent-soft"
-                      : "border-line-soft bg-bg-2 hover:bg-bg-3 hover:border-line-strong",
-                  ].join(" ")}
-                >
-                  <span className={on ? "text-accent" : "text-text-3"}>{m.icon}</span>
-                  <span className="text-base font-medium text-text-1">{m.label}</span>
-                  <span className="text-xs leading-tight text-text-4">{m.hint}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Mode-specific input */}
-          <div className="mt-4">
-            {mode === "clone" ? (
-              <>
-                <FieldLabel>Repository URL</FieldLabel>
-                <Input
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  spellCheck={false}
-                  placeholder="https:// or git@github.com:user/repo.git"
-                  className="font-mono text-base"
-                />
-                <div className="mt-2">
-                  <FieldLabel>Folder name (optional)</FieldLabel>
-                  <Input
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    spellCheck={false}
-                    placeholder="defaults to the repo name"
-                    className="text-base"
-                  />
-                </div>
-              </>
-            ) : (
-              <>
-                <FieldLabel>Project name</FieldLabel>
-                <Input
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  spellCheck={false}
-                  placeholder="my-project"
-                  className="text-base"
-                />
-                {mode === "template" ? (
-                  <div className="mt-2">
-                    <FieldLabel>Template</FieldLabel>
-                    <div className="flex gap-2">
-                      {TEMPLATES.map((t) => (
-                        <button
-                          key={t.id}
-                          type="button"
-                          onClick={() => setTemplate(t.id)}
-                          className={[
-                            "h-8 px-3 rounded-md border text-sm transition-colors",
-                            template === t.id
-                              ? "border-accent bg-accent-soft text-text-1"
-                              : "border-line-soft bg-bg-2 text-text-3 hover:text-text-1 hover:bg-bg-3",
-                          ].join(" ")}
-                        >
-                          {t.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </>
-            )}
-          </div>
-
-          {error ? (
-            <div className="mt-3 text-sm text-red break-words">{error}</div>
-          ) : null}
-
-          <div className="mt-5 flex items-center justify-end">
+        <Field label="Location" htmlFor="onboarding-location">
+          <div className="ui-cloud-inline">
+            <Input
+              id="onboarding-location"
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+              spellCheck={false}
+              disabled={busy}
+            />
             <Button
               type="button"
-              variant="default"
-              size="lg"
-              disabled={!canSubmit}
-              onClick={submit}
+              variant="outline"
+              size="icon"
+              onClick={browseLocation}
+              disabled={busy}
+              aria-label="Choose location"
+              title="Choose location"
             >
-              {busy ? <AsciiSpinner className="text-sm leading-none" /> : null}
-              {mode === "clone" ? "Clone" : "Create"}
+              <FolderOpen />
             </Button>
           </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+        </Field>
 
-function FieldLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="mb-1.5 text-xs font-medium text-text-3">{children}</div>
+        {mode === "clone" ? (
+          <>
+            <Field label="Repository URL" htmlFor="onboarding-url">
+              <Input
+                id="onboarding-url"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                spellCheck={false}
+                disabled={busy}
+                placeholder="https:// or git@github.com:user/repo.git"
+              />
+            </Field>
+            <Field label="Folder name" htmlFor="onboarding-name" optional>
+              <Input
+                id="onboarding-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                spellCheck={false}
+                disabled={busy}
+                placeholder="Defaults to the repository's name"
+              />
+            </Field>
+          </>
+        ) : (
+          <>
+            <Field label="Repository name" htmlFor="onboarding-name">
+              <Input
+                id="onboarding-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                spellCheck={false}
+                disabled={busy}
+                placeholder="my-repo"
+              />
+            </Field>
+            {mode === "template" ? (
+              <Field label="Template" htmlFor="onboarding-template">
+                <Select
+                  id="onboarding-template"
+                  value={template}
+                  onChange={(v) => setTemplate(v as TemplateId)}
+                  options={TEMPLATES}
+                  disabled={busy}
+                />
+              </Field>
+            ) : null}
+          </>
+        )}
+
+        {error ? (
+          <Alert variant="destructive" className="ui-onboarding-alert">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : null}
+
+        <div>
+          <Button type="submit" disabled={!canSubmit}>
+            {busy ? <AsciiSpinner size={10} /> : null}
+            {busy
+              ? mode === "clone"
+                ? "Cloning…"
+                : "Creating…"
+              : mode === "clone"
+                ? "Clone"
+                : "Create"}
+            {busy ? null : <ArrowRight />}
+          </Button>
+        </div>
+      </form>
+    </>
   );
 }

@@ -16,9 +16,9 @@ describe("the card draws the line the fold computed", () => {
   const readShared = async (rel: string) =>
     code(await Bun.file(`${import.meta.dir}/../../aura-shared/${rel}`).text());
 
-  /** The overview card's own body, not the whole file. `ChangedSection` below
-   *  it reads `n.contains_secret` and `n.is_stub` legitimately — it draws a
-   *  per-symbol badge from a node that carries the flag. Scoping to the
+  /** The overview's own body, not the whole file. The pieces list reads
+   *  `n.contains_secret` and `n.is_stub` legitimately — it draws a
+   *  per-piece mark from a node that carries the flag. Scoping to the
    *  function is the difference between a guard and a nuisance. */
   const overview = async () => {
     const src = await read("components/workpanes/SessionAlignment.tsx");
@@ -53,7 +53,7 @@ describe("the card draws the line the fold computed", () => {
     for (const tone of ["risk", "attention", "calm"]) {
       expect(`${tone}: ${body.includes(tone + ":")}`).toBe(`${tone}: true`);
     }
-    expect(body).toContain("TONE_COLOR[line.tone]");
+    expect(body).toContain("VERDICT_TONE[line.tone]");
     // Every branch of the union has a tone, so an unhandled one is a compile
     // error rather than an unpainted line — but the card must still not draw
     // an empty paragraph for `none`.

@@ -12,7 +12,8 @@
 // hand-rolled a raw <kbd> with their own border, radius and type size, nine
 // of them approximating exactly the bg-2 / line-soft / text-3 combination
 // the theme tokens above already name. So: render the tokens, and the cap
-// follows the theme pack the way everything else in the app does.
+// follows the theme pack the way everything else in the app does. The
+// stylesheet beside this file (kbd.css) is where those tokens are read.
 //
 // Two callers legitimately don't use this and shouldn't:
 //   • a cap sitting INSIDE a filled accent button (the plan card's Build key,
@@ -24,6 +25,7 @@
 import * as React from "react";
 
 import { cn } from "../../lib/utils";
+import "./kbd.css";
 
 export type KbdProps = React.ComponentPropsWithoutRef<"kbd">;
 
@@ -31,12 +33,7 @@ export const Kbd = React.forwardRef<HTMLElement, KbdProps>(
   ({ className, ...props }, ref) => (
     <kbd
       ref={ref}
-      className={cn(
-        "inline-flex h-5 w-fit min-w-[20px] items-center justify-center",
-        "rounded border border-line-soft px-1",
-        "bg-kbd-bg text-kbd-fg font-mono text-2xs leading-none",
-        className,
-      )}
+      className={cn("ui-kbd", className)}
       {...props}
     />
   ),

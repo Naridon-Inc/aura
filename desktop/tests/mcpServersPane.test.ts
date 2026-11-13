@@ -44,6 +44,10 @@ import { describe, expect, test } from "bun:test";
 import { readSrc } from "./support/code";
 
 const PANE = "components/settings/McpServersTab.tsx";
+const TEMPLATES = "components/settings/mcp/mcpTemplates.ts";
+const TEMPLATE_LIST = "components/settings/mcp/McpTemplateList.tsx";
+const ADD_DIALOG = "components/settings/mcp/McpAddDialog.tsx";
+const ROW = "components/settings/mcp/McpServerRow.tsx";
 const TAURI = "../src-tauri/src/cmd_mcp_servers.rs";
 
 /** The `mcp_servers_add` body — up to the discovery section that
@@ -88,7 +92,7 @@ describe("a server with a URL and no command is a real server", () => {
   });
 
   test("the template that needs this still ships command-less", async () => {
-    const src = await readSrc(PANE);
+    const src = await readSrc(TEMPLATES);
     const tpl = src.slice(
       src.indexOf('id: "atlassian-remote"'),
       src.indexOf('id: "atlassian"'),
@@ -101,33 +105,34 @@ describe("a server with a URL and no command is a real server", () => {
 describe("an error prints next to the control that raised it", () => {
   test("the pane keeps three failures apart instead of pooling them", async () => {
     const src = await readSrc(PANE);
-    for (const s of ["listError", "formError", "rowError"]) {
+    for (const s of ["formError", "rowError"]) {
       expect(src).toContain(`const [${s}, set${s[0].toUpperCase()}${s.slice(1)}] = useState<string | null>(null)`);
     }
+    // The list's own failure is the shared cache's: it belongs to the read of
+    // the list and nothing else writes it.
+    expect(src).toContain("const listError = servers.staleError;");
     // No shared bucket left in the tab to fall back into. (The auth
-    // modal below keeps its own `error` — it's one dialog, one place.)
-    const tab = src.slice(
-      src.indexOf("export function McpServersTab({"),
-      src.indexOf("function McpServerRow({"),
-    );
+    // dialog keeps its own `error` — it's one dialog, one place.)
+    const tab = src.slice(src.indexOf("export function McpServersTab({"));
     expect(tab).not.toContain("const [error, setError] = useState<string | null>(null)");
     expect(tab).not.toContain("setError(");
   });
 
   test("a refused Save renders inside the form, above its own buttons", async () => {
-    const src = await readSrc(PANE);
-    const form = src.slice(
-      src.indexOf('<Section title="Add server">'),
-      src.indexOf('{rows && rows.length > 0 && ('),
-    );
-    expect(form).toContain("{formError && <ErrorNote>{formError}</ErrorNote>}");
-    expect(form.indexOf("{formError &&")).toBeLessThan(form.indexOf("Cancel"));
+    const form = await readSrc(ADD_DIALOG);
+    expect(form).toContain("<DialogTitle>Add server</DialogTitle>");
+    expect(form).toContain("{formError && (");
+    expect(form).toContain('<p role="alert" className="ui-field-error">');
+    expect(form.indexOf("{formError &&")).toBeLessThan(form.indexOf("<DialogFooter>"));
+    // And the page hands the form its own error, not a shared one.
+    expect(await readSrc(PANE)).toContain("formError={formError}");
   });
 
   test("a refused toggle or remove renders with the rows", async () => {
     const src = await readSrc(PANE);
-    const list = src.slice(src.indexOf('<Section title="Configured servers">'));
-    expect(list).toContain('{rowError && <ErrorNote className="mb-2">{rowError}</ErrorNote>}');
+    const list = src.slice(src.indexOf('<SettingsSection title="Configured servers">'));
+    expect(list).toContain("{rowError && <SettingsError>{rowError}</SettingsError>}");
+    expect(list.indexOf("{rowError &&")).toBeLessThan(list.indexOf("<McpServerRow"));
     expect(src).toContain("setRowError(String(e))");
   });
 
@@ -144,8 +149,13 @@ describe("an error prints next to the control that raised it", () => {
 describe("a list it never read is not a list with nothing in it", () => {
   test("the failure is kept apart from the empty result", async () => {
     const src = await readSrc(PANE);
-    expect(src).toContain("setListError(String(e))");
-    expect(src).toContain("setListError(null)");
+    // The list comes through the shared cache, whose failed read keeps the
+    // last answer and reports the failure beside it (staleError) rather
+    // than turning into an empty list. A list never read is null, not [].
+    expect(src).toContain("const servers = useCachedResource(");
+    expect(src).toContain("const rows = servers.data ?? null;");
+    expect(src).toContain("const listError = servers.staleError;");
+    expect(src).not.toContain("servers.data ?? []");
   });
 
   test("and it says so, with a way to ask again, instead of spinning", async () => {
@@ -163,46 +173,44 @@ describe("a list it never read is not a list with nothing in it", () => {
 
 describe("a template card says what it needs before you click", () => {
   test("the description isn't clamped", async () => {
-    const src = await readSrc(PANE);
-    const grid = src.slice(
-      src.indexOf('<Section title="Ready to add">'),
-      src.indexOf("{adding && ("),
-    );
-    expect(grid).toContain('<div className="text-xs text-text-3 mt-1">{t.description}</div>');
-    expect(grid).not.toContain("line-clamp-2");
+    const grid = await readSrc(TEMPLATE_LIST);
+    expect(grid).toContain('<SettingsSection title="Ready to add">');
+    expect(grid).toContain("description={t.description}");
+    expect(grid).not.toContain("line-clamp");
   });
 
   test("a command-less template shows its endpoint, not a blank line", async () => {
-    const src = await readSrc(PANE);
+    const src = await readSrc(TEMPLATE_LIST);
     expect(src).toContain("? `${t.command} ${t.args.join(\" \")}`");
     expect(src).toContain(": (t.serverUrl ?? \"\")");
   });
 
   test("one already added is marked, not offered again", async () => {
-    const src = await readSrc(PANE);
+    const src = await readSrc(TEMPLATE_LIST);
     // Adding it can only fail — `mcp_servers_add` refuses to overwrite.
     expect(src).toContain("const added = rows?.some((r) => r.name === t.id) ?? false");
-    expect(src).toContain("disabled={added}");
-    expect(src).toContain('<span className="text-xs text-accent-green">added</span>');
+    // The badge replaces the Add button; there is nothing left to click.
+    expect(src).toContain("added ? (");
+    expect(src).toContain('<Badge variant="highlight">added</Badge>');
+    expect(src.indexOf('<Badge variant="highlight">added</Badge>')).toBeLessThan(
+      src.indexOf("onClick={() => onPick(t)}"),
+    );
     expect(await addFn()).toContain("already exists");
   });
 });
 
 describe("not signed in yet is not broken", () => {
-  /** The row component — from its declaration to the auth modal. */
+  /** The row component. */
   async function row(): Promise<string> {
-    const src = await readSrc(PANE);
-    return src.slice(
-      src.indexOf("function McpServerRow({"),
-      src.indexOf("function AuthSetupModal({"),
-    );
+    return readSrc(ROW);
   }
 
   test("the chip names the state the button next to it fixes", async () => {
     const r = await row();
     expect(r).toContain('? "not signed in"');
-    // Amber — the app's "waiting on you" colour, not red.
-    expect(r).toContain('? "text-amber"');
+    // The "waiting on you" tone, not the error tone.
+    expect(r).toContain('? "tip"');
+    expect(r.indexOf('? "tip"')).toBeLessThan(r.indexOf('? "destructive"'));
     // Checked before the probe verdict, so it wins over "error".
     expect(r.indexOf('? "not signed in"')).toBeLessThan(r.indexOf('? "error"'));
   });
@@ -252,5 +260,29 @@ describe("the pane explains itself to someone who hasn't met MCP", () => {
     expect(src).not.toContain(
       "Connections let an agent reach a tool you already use.",
     );
+  });
+});
+
+// Add server always added globally: the form never sent the repository it
+// was opened in, though the backend has taken one since the server could
+// leak into every project. A server added from a repository now belongs to
+// it unless the form says every repository.
+describe("where an added server is used", () => {
+  test("the repository it was added from travels with the add", async () => {
+    const pane = await readSrc(PANE);
+    expect(pane).toContain(
+      'projectRoot: repoRoot && form.scope === "repository" ? repoRoot : null,',
+    );
+    const api = await readSrc("lib/api.ts");
+    const add = api.slice(api.indexOf("mcpServersAdd:"), api.indexOf("mcpServersRemove:"));
+    expect(add).toContain("projectRoot: input.projectRoot ?? null");
+    expect(await addFn()).toContain("project_root: Option<String>");
+  });
+
+  test("the form starts on this repository and says when it is every one", async () => {
+    expect(await readSrc(TEMPLATES)).toContain('scope: "repository",');
+    const dialog = await readSrc(ADD_DIALOG);
+    expect(dialog).toContain('{ value: "everywhere", label: "Every repository" }');
+    expect(dialog).toContain("for every agent in every repository once it is saved.");
   });
 });

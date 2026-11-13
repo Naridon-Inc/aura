@@ -1,4 +1,4 @@
-// "Your project's in good shape" — over problems the engine had already found.
+// "Your repository's in good shape" — over problems the engine had already found.
 //
 //   bun test
 //
@@ -6,7 +6,7 @@
 //
 //     const attention = items.filter((i) => i.severity === "attention").length;
 //     attention > 0 ? "A couple of things to set up"
-//                   : "Your project's in good shape"
+//                   : "Your repository's in good shape"
 //
 // `items` came from a fold that read four of the report's ten fields, and only
 // two of them could ever produce an "attention" item. The engine counts SEVEN
@@ -65,7 +65,7 @@ describe("the all-clear can't outrun the engine's own count", () => {
   test("a clean report is allowed to say so", () => {
     const v = verdictOf(OK());
     expect(v.tone).toBe("good");
-    expect(v.text).toBe("Your project's in good shape");
+    expect(v.text).toBe("Your repository's in good shape");
     expect(v.chips).toEqual(["Nothing needs your attention"]);
   });
 
@@ -309,10 +309,16 @@ describe("the dialog draws the verdict the fold computed", () => {
   });
 
   test("all three tones can actually be painted", async () => {
+    // The verdict hands its tone to the stylesheet; each tone needs a rule
+    // there, or that verdict renders in the default colour.
     const src = await read("components/dialogs/DoctorDialog.tsx");
+    expect(src).toContain("data-tone={verdict.tone}");
+    const css = await Bun.file(
+      `${import.meta.dir}/../src/components/ui/check-report.css`,
+    ).text();
     for (const tone of ["attention", "good", "unknown"]) {
-      expect(`${tone}: ${src.includes(tone + ":")}`).toBe(`${tone}: true`);
+      const painted = css.includes(`.ui-verdict[data-tone="${tone}"]`);
+      expect(`${tone}: ${painted}`).toBe(`${tone}: true`);
     }
-    expect(src).toContain("VERDICT_FG[verdict.tone]");
   });
 });

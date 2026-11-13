@@ -6,21 +6,15 @@
 import { forwardRef, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { beginWindowDrag } from "../lib/windowDrag";
-import { useWindowControlsInset } from "./topbar/windowControls";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./ui/tooltip";
 import { MENU_PANEL, MENU_ROW } from "./ui/menuSurface";
 import { api, type ResourceSnapshot } from "../lib/api";
-import { applyUpdate, checkForUpdate } from "../lib/updater";
-import { getVersion } from "@tauri-apps/api/app";
+import { requestUpdateCheck } from "../lib/updateToast";
 import { useDismiss } from "../lib/useDismiss";
 import { formatMegabytes } from "../lib/bytes";
 // AURA-1298
 import { DiskLowWarning } from "./topbar/DiskLowWarning";
-import { percent } from "../lib/percent";
-import { askConfirm } from "./ui/ask";
 // AURA-1294
-import { machineIdForRoot, useActiveMachine } from "../lib/activeMachine";
-import { PortsPopover } from "./place/PortsPopover";
 // end AURA-1294
 
 /**
@@ -50,187 +44,6 @@ export function startWindowDrag(e: React.MouseEvent) {
   beginWindowDrag();
 }
 
-// The window's chrome controls. The sidebar owns identity, search, project
-// switching and navigation; the bottom StatusBar owns status and system
-// indicators. What was left here — the three "show/hide a pane" toggles —
-// used to justify a 30px band of its own spanning the whole work column,
-// stacked directly above the tab strip.
-//
-// That band was 95% empty. Two icons at its right end, one at its left, and
-// between them seven hundred pixels of nothing, with the tab strip's own
-// controls sitting 30px below in the SAME corner: four controls in two rows
-// where one row would do. The top of the window read as two headers because
-// it WAS two headers.
-//
-// So the band is gone and its contents moved into the tab strip, which was
-// already a full-width row at the top of the work column with a trailing
-// slot two of its call sites were using. Nothing is on screen that wasn't
-// before; it is on ONE line now, and the sidebar header, the tab strip and
-// the review rail's header all start and end at the same two y values —
-// which is what "one header" has to mean before it can look like anything.
-//
-// The two clusters below are what remains, rendered by whoever owns the row
-// they belong to:
-//   • `SidebarPeek`   — the show-sidebar affordance. Only exists while the
-//     sidebar is collapsed, and it must sit clear of the macOS traffic
-//     lights, which land on whatever the work column draws first in that
-//     state. It carries the gutter itself.
-//   • `PaneToggles`   — terminal + review. The right end of the tab strip.
-
-/** Leading cluster of the tab row while the sidebar is collapsed: the
- *  traffic-light gutter plus the one control that brings the sidebar back.
- *
- *  Renders nothing at all when the sidebar is open — in that state the
- *  sidebar's own header owns the window's top-left corner and the lights sit
- *  over it, so the tab row starts flush against the column divider. */
-export function SidebarPeek({
-  sidebarOpen,
-  onToggleSidebar,
-}: {
-  sidebarOpen?: boolean;
-  onToggleSidebar?: () => void;
-}) {
-  // Before the early return — this component may start rendering the moment
-  // the sidebar closes, and a hook that only runs in one branch is a hook
-  // that changes position between renders.
-  const inset = useWindowControlsInset(true);
-  if (sidebarOpen || !onToggleSidebar) return null;
-  return (
-    <div
-      // The gutter is mostly empty space under the macOS traffic lights, and
-      // with the sidebar closed it's the only chrome left in the window's
-      // top-left corner — so it drags the window, the way the band it
-      // replaced did. `startWindowDrag` steps aside for the button.
-      data-tauri-drag-region
-      onMouseDown={startWindowDrag}
-      className="flex items-center gap-1 bg-bg-chrome border-b border-line-soft text-text-3"
-      style={{ paddingLeft: inset, paddingRight: 4 }}
-    >
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <ChromeBtn title="Show sidebar (⌘B)" onClick={onToggleSidebar} tooltip>
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" />
-              <line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" />
-            </svg>
-          </ChromeBtn>
-        </TooltipTrigger>
-        <TooltipContent side="bottom">Show sidebar (⌘B)</TooltipContent>
-      </Tooltip>
-    </div>
-  );
-}
-
-/** Trailing cluster of the tab row: the terminal and review-rail toggles.
- *
- *  These are window chrome, not tab actions, which is why they sit hard
- *  against the right edge past everything the strip itself owns — and why
- *  they keep the same icons, the same `ChromeBtn` and the same shortcuts
- *  they had in the band. Only the row they live on changed. */
-export function PaneToggles({
-  reviewOpen,
-  terminalOpen,
-  onToggleReview,
-  onToggleTerminal,
-  repoRoot,
-}: {
-  reviewOpen: boolean;
-  terminalOpen: boolean;
-  onToggleReview?: () => void;
-  onToggleTerminal?: () => void;
-  // AURA-1294 — the workspace on screen, so Ports knows which place to ask.
-  repoRoot?: string | null;
-}) {
-  // AURA-1294 — Ports is only offered when the workspace runs on a machine
-  // other than this laptop; here, its ports are already here.
-  const active = useActiveMachine();
-  const portsMachine = machineIdForRoot(repoRoot) ?? active.machineId;
-  // end AURA-1294
-  return (
-    <div className="flex items-center gap-1 px-2 bg-bg-chrome border-b border-line-soft text-text-3">
-      {/* AURA-1294 */}
-      {portsMachine && (
-        <PortsPopover
-          machineId={portsMachine}
-          repoRoot={repoRoot}
-          trigger={({ active: open, onClick, badge, title }) => (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <ChromeBtn
-                  title={title}
-                  active={open}
-                  onClick={onClick}
-                  tooltip
-                  className="relative !w-auto gap-1 px-1.5 text-[11px]"
-                >
-                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-                    <rect x="1.5" y="5.5" width="13" height="6" rx="1.5" stroke="currentColor" />
-                    <line x1="5" y1="5.5" x2="5" y2="2.5" stroke="currentColor" strokeWidth="1.2" />
-                    <line x1="11" y1="5.5" x2="11" y2="2.5" stroke="currentColor" strokeWidth="1.2" />
-                    <line x1="8" y1="11.5" x2="8" y2="14" stroke="currentColor" strokeWidth="1.2" />
-                  </svg>
-                  Ports
-                  {badge > 0 && (
-                    <span className="rounded-full bg-accent/15 px-1 font-mono text-[10px] leading-4 text-accent">
-                      {badge}
-                    </span>
-                  )}
-                </ChromeBtn>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">{title}</TooltipContent>
-            </Tooltip>
-          )}
-        />
-      )}
-      {/* end AURA-1294 */}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <ChromeBtn
-            title="Toggle terminal (⌘J)"
-            active={terminalOpen}
-            onClick={onToggleTerminal}
-            tooltip
-          >
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" />
-              <path d="M4 6l2.5 2L4 10" stroke="currentColor" strokeWidth="1.4" fill="none" />
-              <line x1="8" y1="10.5" x2="12" y2="10.5" stroke="currentColor" strokeWidth="1.2" />
-            </svg>
-          </ChromeBtn>
-        </TooltipTrigger>
-        <TooltipContent side="bottom">Toggle terminal (⌘J)</TooltipContent>
-      </Tooltip>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <ChromeBtn
-            title={reviewOpen ? "Hide review rail (⌘⌥R)" : "Show review rail (⌘⌥R)"}
-            active={reviewOpen}
-            onClick={onToggleReview}
-            tooltip
-          >
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-              <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" />
-              <line x1="10" y1="2.5" x2="10" y2="13.5" stroke="currentColor" />
-            </svg>
-          </ChromeBtn>
-        </TooltipTrigger>
-        <TooltipContent side="bottom">
-          {reviewOpen ? "Hide review rail (⌘⌥R)" : "Show review rail (⌘⌥R)"}
-        </TooltipContent>
-      </Tooltip>
-    </div>
-  );
-}
-
-// Right-side overflow menu.
-//
-// It used to hold five more: Review Changes, Proof trail, Code Map, Memory,
-// Doctor. Every one of them is a destination in Trace, which is a page with
-// its own switcher — so this was a second door to the same five places, and
-// it called them by different names than the page does. Two menus naming the
-// same rooms differently is worse than one menu, and the one that belongs to
-// the room wins. What is left is the update check, which belongs to the app
-// rather than to any repo or page.
 export function MoreMenu({
   placement = "down",
 }: {
@@ -243,50 +56,9 @@ export function MoreMenu({
   placement?: "up" | "down";
 }) {
   const [open, setOpen] = useState(false);
-  const [updateState, setUpdateState] = useState<
-    | { kind: "idle" }
-    | { kind: "checking" }
-    | { kind: "downloading"; done: number; total: number | null }
-    | { kind: "error"; message: string }
-    | { kind: "uptodate"; current: string }
-  >({ kind: "idle" });
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useDismiss(open, () => setOpen(false), wrapRef);
-
-  async function onCheckUpdates() {
-    setUpdateState({ kind: "checking" });
-    try {
-      const info = await checkForUpdate(true);
-      if (!info) {
-        const current = await getVersion().catch(() => "current");
-        setUpdateState({ kind: "uptodate", current });
-        return;
-      }
-      const proceed = await askConfirm({
-        title: `Aura ${info.version} is available`,
-        body: `${info.notes ? `${info.notes}\n\n` : ""}Download and install it now? The app restarts when it's done.`,
-        confirmLabel: "Download and install",
-        cancelLabel: "Not now",
-      });
-      if (!proceed) {
-        setUpdateState({ kind: "idle" });
-        return;
-      }
-      setUpdateState({ kind: "downloading", done: 0, total: null });
-      await applyUpdate(info, (done, total) =>
-        setUpdateState({ kind: "downloading", done, total }),
-      );
-      // relaunch() inside applyUpdate normally fires; if it didn't,
-      // leave the toast as "downloading" so the user knows it's done
-      // and can manually quit.
-    } catch (e) {
-      setUpdateState({
-        kind: "error",
-        message: e instanceof Error ? e.message : String(e),
-      });
-    }
-  }
 
   const items: Array<{
     label: string;
@@ -296,30 +68,11 @@ export function MoreMenu({
     {
       label: "Check for Updates",
       hint: "Look for a newer Aura release",
-      handler: onCheckUpdates,
+      // The answer shows in the update toast, bottom right — the one update
+      // surface — so the menu can close.
+      handler: requestUpdateCheck,
     },
   ];
-
-  const updateStatusLine = (() => {
-    switch (updateState.kind) {
-      case "idle":
-        return null;
-      case "checking":
-        return "Checking for updates…";
-      case "uptodate":
-        return `You're on the latest (v${updateState.current}).`;
-      case "downloading": {
-        if (updateState.total && updateState.total > 0) {
-          const pct = percent(updateState.done, updateState.total);
-          return `Downloading update… ${pct}%`;
-        }
-        const mb = (updateState.done / (1024 * 1024)).toFixed(1);
-        return `Downloading update… ${mb} MB`;
-      }
-      case "error":
-        return `Update failed: ${updateState.message}`;
-    }
-  })();
 
   return (
     <div ref={wrapRef} className="relative">
@@ -349,48 +102,23 @@ export function MoreMenu({
           }`}
           style={{ minWidth: 260 }}
         >
-          {items.map((it) => {
-            const isUpdateItem = it.label === "Check for Updates";
-            const busy =
-              isUpdateItem &&
-              (updateState.kind === "checking" ||
-                updateState.kind === "downloading");
-            return (
-              <button
-                key={it.label}
-                type="button"
-                onClick={() => {
-                  if (isUpdateItem) {
-                    // Keep menu open so the user can watch progress.
-                    it.handler?.();
-                    return;
-                  }
-                  setOpen(false);
-                  it.handler?.();
-                }}
-                disabled={!it.handler || busy}
-                className={`${MENU_ROW} flex-col !items-start gap-0.5`}
-              >
-                <span className="font-medium">{it.label}</span>
-                <span className="text-xs text-text-4 leading-tight">
-                  {it.hint}
-                </span>
-              </button>
-            );
-          })}
-          {updateStatusLine && (
-            <div
-              // A failed update is a real failure, so it keeps red — but on
-              // the app's own `--color-red` token, not a raw Tailwind rose.
-              className={`mt-1 mx-1 px-2.5 py-1.5 rounded text-xs leading-tight border ${
-                updateState.kind === "error"
-                  ? "border-red/30 bg-red/10 text-red"
-                  : "border-line-soft bg-bg-2 text-text-3"
-              }`}
+          {items.map((it) => (
+            <button
+              key={it.label}
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                it.handler?.();
+              }}
+              disabled={!it.handler}
+              className={`${MENU_ROW} flex-col !items-start gap-0.5`}
             >
-              {updateStatusLine}
-            </div>
-          )}
+              <span className="font-medium">{it.label}</span>
+              <span className="text-xs text-text-4 leading-tight">
+                {it.hint}
+              </span>
+            </button>
+          ))}
         </div>
       )}
     </div>

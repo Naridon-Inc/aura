@@ -301,8 +301,8 @@ fn cmd_new(
 /// Create a worktree and immediately run a command inside it — the "spawn a new
 /// agent, it lands in its own isolated workspace" flow (e.g. `aura work claude
 /// fix-login`). The worktree is LEFT in place after the session ends so you can
-/// review and merge it deliberately — same as Conductor leaving the workspace
-/// open for review.
+/// review and merge it deliberately: the workspace stays open for review
+/// rather than being swept up the moment the session ends.
 fn cmd_spawn(
     repo_root: &Path,
     name: Option<&str>,
@@ -811,7 +811,7 @@ fn run_in(dir: &Path, cmd: &str, env: &[(&str, &str)]) -> Result<bool, Box<dyn s
 }
 
 /// Deterministic per-worktree port in `[3000, 3999]` so parallel sessions' dev
-/// servers don't collide — the role Conductor's `CONDUCTOR_PORT` plays. Stable
+/// servers don't collide — the role a per-workspace `*_PORT` plays. Stable
 /// across runs for the same slug (pure FNV-1a hash, no rng, no clock).
 fn port_for(slug: &str) -> u16 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;

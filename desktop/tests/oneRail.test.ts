@@ -317,24 +317,35 @@ describe("railBoardTaskIds. What the board keeps", () => {
   });
 });
 
-describe("one rail for the whole place", () => {
-  test("the place mounts it once, above the lens", async () => {
+describe("the place is the dashboard", () => {
+  test("the place draws the workspaces dashboard, and the crew graph only when linked to", async () => {
     const src = await readSrc("components/tasks/TasksPlace.tsx");
-    // One `PlacePage`, one `TasksSidebar`, and the lens chosen INSIDE it — so
-    // the rail is the same element either side of a lens change and keeps its
-    // scroll, its open groups and its selection across one.
-    expect(src).toContain("<PlacePage");
-    expect(src).toContain("<TasksSidebar");
+    // The board is this computer's workspaces by stage; tasks live in the
+    // right panel now, not on a board of their own.
+    expect(src).toContain("<WorkspacesDashboard");
+    expect(src).not.toContain("TasksDashboard");
     expect(src).toContain("isCrewLens(lens)");
     expect(src).toContain("<CrewSurface");
-    expect(src).toContain("<TasksBoard");
+    // No rail of goals and sprints beside it, and no lens strip over it.
+    expect(src).not.toContain("<PlacePage");
+    expect(src).not.toContain("<TasksSidebar");
+    expect(src).not.toContain("<TasksBoard");
+  });
+
+  test("the rail and its sprint door are deleted, not hidden", async () => {
+    for (const gone of [
+      "components/workpanes/TasksSidebar.tsx",
+      "components/places/PlacePage.tsx",
+      "components/tasks/SprintRailGroup.tsx",
+      "components/dashboard/TasksDashboard.tsx",
+    ]) {
+      expect(await Bun.file(`${import.meta.dir}/../src/${gone}`).exists()).toBe(false);
+    }
   });
 
   test("the host hands Tasks to the place, not to a surface", async () => {
     const app = await readSrc("App.tsx");
     expect(app).toContain("<TasksPlace");
-    // Mounting either surface directly is how the crew lenses ended up with no
-    // rail and their own panel instead.
     expect(app).not.toContain("<CrewSurface");
   });
 
@@ -353,36 +364,7 @@ describe("one rail for the whole place", () => {
 
     const surface = await readSrc("components/commons/crew/CrewSurface.tsx");
     expect(surface).not.toContain("CrewPlanSidebar");
-    // …and no toggle for one, either. A rail you can hide per-lens is two
-    // arrangements of the same place.
     expect(surface).not.toContain("planOpen");
-  });
-
-  test("the rail carries loops and goals, not just the backlog", async () => {
-    // Tasks, loops and goals are one feature to a reader; the rail is where
-    // that shows.
-    const rail = await readSrc("components/workpanes/TasksSidebar.tsx");
-    expect(rail).toContain("<WorkRailGroups");
-
-    const groups = await readSrc("components/tasks/WorkRailGroups.tsx");
-    for (const label of ["Goals", "Crews", "Recent runs"]) {
-      expect(groups).toContain(label);
-    }
-    // The per-goal run controls the deleted sidebar owned came with it.
-    for (const act of ["loopRunNative", "loopPause", "loopResume"]) {
-      expect(groups).toContain(act);
-    }
-    // …as did spawning a crew, which was the only door for it.
-    expect(groups).toContain("loopCrewSpawn");
-  });
-
-  test("the rail is PlaceRail's. No width of its own to fight the shell", async () => {
-    const groups = await readSrc("components/tasks/WorkRailGroups.tsx");
-    expect(groups).toContain("PlaceRailGroup");
-    expect(groups).toContain("PlaceRailRow");
-    // A hard-coded rail width here would survive the shell being made
-    // resizable and quietly pin one group at the old size.
-    expect(groups).not.toMatch(/\bw-\[\d+px\]/);
   });
 });
 

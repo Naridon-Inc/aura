@@ -515,6 +515,7 @@ mod tests {
         Place::Box {
             machine: Box::new(crate::cmd_machines::Machine {
                 id: format!("ubuntu@10.0.0.4:{root}"),
+                aliases: Vec::new(),
                 name: "aura-runner".into(),
                 host: "10.0.0.4".into(),
                 user: "ubuntu".into(),

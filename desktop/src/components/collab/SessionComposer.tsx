@@ -4,16 +4,21 @@
 // bar says where the next message goes and changes it, "@" picks a recipient
 // mid-sentence, and hand-over is a pick rather than a mode. Sending is the
 // same Enter it has always been.
+//
+// The box is the chat's composer, not a lookalike: the addressing bar rides
+// in its context line, and the "@" list opens where the chat's opens.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { JSX, KeyboardEvent } from "react";
-import { SendHorizontal } from "lucide-react";
+import type { FocusEvent, JSX, KeyboardEvent } from "react";
 
 import type { MsgIntent, Participant } from "../../lib/sessionLive";
-import { AsciiSpinner } from "../ui/ascii-spinner";
+import { Button } from "../ui/button";
+import { Composer } from "../ui/composer";
+import { ErrorNote, LoadingState } from "../ui/state";
 import { ComposerAddressingBar, coerceIntent } from "./ComposerAddressingBar";
 import { MentionPicker, mentionQueryAt } from "./MentionPicker";
 import { mentionHandle } from "./collabPresence";
+import "../ui/session-room.css";
 
 /** A client→server `msg` frame, minus the parts the server stamps. */
 export type SessionDraft = {
@@ -163,18 +168,33 @@ export function SessionComposer({
     }
   }, [text, sending, disabled, onSend, to, intent, replyTo, stopTyping]);
 
+  // The picker takes Enter / Tab / Escape before the box sees them; this only
+  // stops a stray Enter from sending while it is open.
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (mention) return; // the picker owns Enter / arrows while it is open
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      void send();
-    }
+    if (mention && e.key === "Enter") e.preventDefault();
   };
 
   const ready = !disabled && !loading && !error;
 
+  const fromBox = (e: { target: EventTarget }) => e.target === boxRef.current;
+
   return (
-    <div className="relative flex flex-col rounded-lg border border-line-soft bg-bg-1">
+    <div
+      className="ui-session-composer"
+      onKeyUp={(e) => {
+        if (!fromBox(e)) return;
+        const el = e.target as HTMLTextAreaElement;
+        syncMention(el.value, el.selectionStart ?? el.value.length);
+      }}
+      onBlur={(e: FocusEvent<HTMLDivElement>) => {
+        if (!fromBox(e)) return;
+        stopTyping();
+        // The picker listens for Enter on the whole window. Left open after
+        // the box loses focus, an Enter pressed anywhere else would quietly
+        // re-address the message.
+        setMention(null);
+      }}
+    >
       {mention && ready && (
         <MentionPicker
           participants={participants}
@@ -182,71 +202,50 @@ export function SessionComposer({
           query={mention.query}
           onPick={pickMention}
           onClose={() => setMention(null)}
-          className="absolute bottom-full left-2 mb-1"
         />
       )}
 
-      <ComposerAddressingBar
-        participants={participants}
-        youId={youId}
-        to={to}
-        intent={intent}
-        hostOnline={hostOnline}
-        disabled={disabled || sending}
-        loading={loading}
-        error={error}
-        onChange={(nextTo, nextIntent) => {
-          setTo(nextTo);
-          setIntent(nextIntent);
-          boxRef.current?.focus();
+      <Composer
+        value={text}
+        onChange={(next) => {
+          setText(next);
+          syncMention(next, boxRef.current?.selectionStart ?? next.length);
+          pulseTyping();
         }}
+        onSend={() => void send()}
+        disabled={disabled || !!error}
+        sendDisabled={!ready || sending}
+        placeholder={placeholder ?? "Type a message. @ to pick who it's for"}
+        ariaLabel="Message to this session"
+        textareaRef={boxRef}
+        onKeyDown={onKeyDown}
+        context={
+          <ComposerAddressingBar
+            participants={participants}
+            youId={youId}
+            to={to}
+            intent={intent}
+            hostOnline={hostOnline}
+            disabled={disabled || sending}
+            loading={loading}
+            error={error}
+            onChange={(nextTo, nextIntent) => {
+              setTo(nextTo);
+              setIntent(nextIntent);
+              boxRef.current?.focus();
+            }}
+          />
+        }
+        actions={sending ? <LoadingState label="Sending" className="ui-session-sending" /> : undefined}
       />
 
-      <div className="flex items-end gap-1 border-t border-line-soft">
-        <textarea
-          ref={boxRef}
-          value={text}
-          rows={2}
-          disabled={disabled || !!error}
-          placeholder={
-            placeholder ?? "Type a message. @ to pick who it's for"
-          }
-          onChange={(e) => {
-            setText(e.target.value);
-            syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
-            pulseTyping();
-          }}
-          onKeyUp={(e) => {
-            const el = e.currentTarget;
-            syncMention(el.value, el.selectionStart ?? el.value.length);
-          }}
-          onKeyDown={onKeyDown}
-          onBlur={stopTyping}
-          className="flex-1 resize-none bg-transparent px-3 py-2 text-xs leading-[17px] text-text-1 placeholder:text-text-5 focus:outline-none disabled:opacity-50"
-        />
-        <button
-          type="button"
-          onClick={() => void send()}
-          disabled={!ready || sending || !text.trim()}
-          className="m-1.5 inline-flex items-center gap-1.5 px-2 h-6 rounded border border-accent/30 bg-accent/12 text-accent text-2xs font-medium hover:bg-accent/20 disabled:opacity-40 disabled:hover:bg-accent/12"
-          title="Send (Enter)"
-        >
-          {sending ? <AsciiSpinner size={11} /> : <SendHorizontal size={12} />}
-          {sending ? "Sending" : "Send"}
-        </button>
-      </div>
-
       {sendError && (
-        <div className="flex items-center gap-2 px-3 py-1 text-2xs text-red border-t border-line-soft">
-          <span className="truncate">{sendError}</span>
-          <button
-            type="button"
-            onClick={() => void send()}
-            className="px-1.5 py-0.5 rounded border border-red/30 hover:bg-red/10"
-          >
+        <ErrorNote className="ui-session-send-error">
+          <span>{sendError}</span>
+          <Button variant="outline" size="xs" onClick={() => void send()}>
             Try again
-          </button>
-        </div>
+          </Button>
+        </ErrorNote>
       )}
     </div>
   );

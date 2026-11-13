@@ -27,6 +27,7 @@ import {
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { ParticipantsStrip } from "./ParticipantsStrip";
 import { SessionTypingLine } from "./SessionTypingLine";
+import "../ui/session-room.css";
 
 export type SharedSessionBandProps = {
   /** The pane's own PTY id. The external session is resolved from it, so a
@@ -49,7 +50,7 @@ export function SharedSessionBand({
   const typing = live.participants.filter((p) => live.typing.has(p.id));
 
   return (
-    <div className="flex items-center gap-2 h-7 px-2 border-b border-line shrink-0">
+    <div className="ui-shared-band">
       <ParticipantsStrip
         participants={live.participants}
         youId={live.you?.id ?? null}
@@ -67,10 +68,10 @@ export function SharedSessionBand({
         />
       )}
 
-      <div className="flex-1" />
+      <div className="ui-shared-band-spacer" />
 
       {connection === "reconnecting" && (
-        <span className="flex items-center gap-1.5 text-2xs text-text-3">
+        <span className="ui-session-strip-note ui-shared-band-live">
           <AsciiSpinner size={11} />
           Reconnecting
         </span>
@@ -79,7 +80,7 @@ export function SharedSessionBand({
       {/* Said where the typing happens, because that is where being wrong
           about it costs something. */}
       {access === "watch" && (
-        <span className="text-2xs text-text-3 whitespace-nowrap">
+        <span className="ui-session-strip-note">
           You're watching. Only {live.participants.find((p) => p.role === "host")?.name ?? "the host"} can type here
         </span>
       )}
@@ -87,7 +88,9 @@ export function SharedSessionBand({
       {/* Everyone else has left, but the session is still shared: the link
           still works and somebody can walk back in. */}
       {access !== "watch" && others.length === 0 && connection === "live" && (
-        <span className="text-2xs text-text-4 whitespace-nowrap">Shared · nobody else here yet</span>
+        <span className="ui-session-strip-note" data-tone="quiet">
+          Shared · nobody else here yet
+        </span>
       )}
     </div>
   );

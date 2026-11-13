@@ -19,6 +19,7 @@ import {
   type ManualCheck,
 } from "../../lib/manualChecks";
 import { stalenessOf, type UnderReview } from "../../lib/evidence";
+import { TraceItem, TraceItems, TraceLine } from "../ui/trace-report";
 import { ManualOutcomeControl, ManualOutcomeNote, ManualStateChip } from "./ManualOutcome";
 
 export function AcceptanceChecklist({
@@ -47,24 +48,23 @@ export function AcceptanceChecklist({
   if (checks.length === 0) return null;
 
   return (
-    <div className="border-t border-line-soft px-3.5 py-2.5">
-      <div className="section-label mb-1.5">How we&apos;ll check this</div>
-      <ul className="flex flex-col gap-2">
+    <section className="ui-goal-part">
+      <h3 className="ui-goal-part-title">How we&apos;ll check this</h3>
+      <TraceItems>
         {checks.map((check) => (
-          <li key={check.id} className="flex flex-col gap-1">
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <span className="min-w-0 flex-1 text-sm leading-snug text-text-2">{check.text}</span>
-              <ManualStateChip state={check.state} />
-            </div>
+          <TraceItem
+            key={check.id}
+            tone={check.state === "passed" ? "good" : check.state === "failed" ? "bad" : "muted"}
+            title={check.text}
+            marks={<ManualStateChip state={check.state} />}
+            actions={<ManualOutcomeControl repoRoot={repoRoot} check={check} revision={revision} />}
+          >
             <ManualOutcomeNote check={check} />
             <StaleLine check={check} underReview={underReview} />
-            <div className="flex flex-wrap items-center gap-2">
-              <ManualOutcomeControl repoRoot={repoRoot} check={check} revision={revision} />
-            </div>
-          </li>
+          </TraceItem>
         ))}
-      </ul>
-    </div>
+      </TraceItems>
+    </section>
   );
 }
 
@@ -82,8 +82,6 @@ function StaleLine({
   const staleness = stalenessOf({ revision: check.revision, at: check.at }, underReview);
   if (!staleness.stale) return null;
   return (
-    <p className="text-sm leading-snug" style={{ color: "var(--color-amber)" }}>
-      {staleness.reason} Try it again on this version.
-    </p>
+    <TraceLine tone="warn">{staleness.reason} Try it again on this version.</TraceLine>
   );
 }

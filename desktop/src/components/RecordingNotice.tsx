@@ -6,66 +6,49 @@
 // story of every change so they can see what happened and undo anything, and
 // they can switch it off whenever they like. No git/AST/hook jargon.
 //
-// Listens for the `aura:recording-on` CustomEvent the auto-enable path fires.
-// Auto-dismisses after a beat; "Manage" deep-links to Settings → Capture.
+// Listens for the `aura:recording-on` CustomEvent the auto-enable path fires
+// and raises one toast in the shared stack; "Recording settings" deep-links to
+// Settings → Capture. Renders nothing itself.
 
-import { useEffect, useState } from "react";
-import { ToastActionButton, ToastCard, ToastStack } from "./ui/toast";
+import { useEffect } from "react";
+import { toast } from "../lib/toast";
 
+/** Long enough to read the two sentences. */
 const AUTO_DISMISS_MS = 11000;
-
-type Notice = { project: string; key: number };
-
-let nextKey = 1;
+const TOAST_ID = "recording-on";
 
 export function RecordingNotice() {
-  const [notice, setNotice] = useState<Notice | null>(null);
-
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const onOn = (e: Event) => {
       const detail = (e as CustomEvent<{ project?: string }>).detail;
-      const project = (detail?.project ?? "").trim() || "this project";
-      setNotice({ project, key: nextKey++ });
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => setNotice(null), AUTO_DISMISS_MS);
+      const project = (detail?.project ?? "").trim() || "this repository";
+      toast.success(
+        "Recording is on",
+        <>
+          Aura is now saving the story of every change in{" "}
+          <span className="text-[var(--aura-toast-text)]">{project}</span>, so you can always
+          see what happened and undo anything. You can turn it off whenever you like.
+        </>,
+        {
+          id: TOAST_ID,
+          durationMs: AUTO_DISMISS_MS,
+          actions: [
+            {
+              label: "Recording settings",
+              variant: "primary",
+              onClick: () => {
+                window.dispatchEvent(
+                  new CustomEvent("aura:open-settings", { detail: { pane: "capture" } }),
+                );
+              },
+            },
+          ],
+        },
+      );
     };
     window.addEventListener("aura:recording-on", onOn);
-    return () => {
-      window.removeEventListener("aura:recording-on", onOn);
-      if (timer) clearTimeout(timer);
-    };
+    return () => window.removeEventListener("aura:recording-on", onOn);
   }, []);
 
-  if (!notice) return null;
-
-  const manage = () => {
-    setNotice(null);
-    window.dispatchEvent(
-      new CustomEvent("aura:open-settings", { detail: { pane: "capture" } }),
-    );
-  };
-
-  return (
-    <ToastStack bottom={44} zIndex={9998}>
-      <ToastCard
-        key={notice.key}
-        tone="success"
-        title="Recording is on"
-        message={
-          <>
-            Aura is now saving the story of every change in{" "}
-            <span className="text-text-2">{notice.project}</span>, so you can always see what
-            happened and undo anything. You can turn it off whenever you like.
-          </>
-        }
-        onDismiss={() => setNotice(null)}
-        actions={
-          <ToastActionButton variant="primary" onClick={manage}>
-            Recording settings
-          </ToastActionButton>
-        }
-      />
-    </ToastStack>
-  );
+  return null;
 }

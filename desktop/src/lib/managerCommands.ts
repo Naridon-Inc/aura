@@ -33,12 +33,12 @@ export const MANAGER_COMMANDS: ManagerCommand[] = [
     name: "capture",
     aliases: ["recording"],
     args: "[on|off]",
-    summary: "Turn change-recording on or off for this project.",
+    summary: "Turn change-recording on or off for this repository.",
   },
   {
     name: "doctor",
     aliases: ["health"],
-    summary: "Check this project's health. Stuck sessions, missing hooks, orphaned snapshots.",
+    summary: "Check this repository's health. Stuck sessions, missing hooks, orphaned snapshots.",
   },
   {
     name: "resume",
@@ -96,7 +96,7 @@ export const MANAGER_COMMANDS: ManagerCommand[] = [
   {
     name: "taste",
     args: "[pending|rule <id>|approve|reject|sync]",
-    summary: "Review and manage the project's learned taste rules.",
+    summary: "Review and manage the repository's learned taste rules.",
   },
   {
     name: "orchestrate",
@@ -154,7 +154,7 @@ export function managerCommandHelp(): string {
     "",
     "**Claude Code's own commands**",
     "",
-    "Your project's and personal Claude commands (`.claude/commands/*.md`) show",
+    "Your repository's and personal Claude commands (`.claude/commands/*.md`) show",
     "up in the `/` menu tagged **Claude**. Pick one and it runs on Claude's CLI",
     "and replies right here. Whichever brain is currently selected.",
     "",

@@ -1,0 +1,9 @@
+/* Settings → Modes: the one piece the page needs beyond the settings rows,
+   a filter over a long list of installed modes. */
+.ui-settings-modes-filter {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-settings-modes-filter .ui-input {
+  width: 100%;
+}

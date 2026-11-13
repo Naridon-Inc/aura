@@ -21,6 +21,8 @@ import { WizardStepTabs } from "../ui/wizard";
 import { Button } from "../ui/button";
 import { SegmentedControl } from "../ui/segmented";
 import { Switch } from "../ui/switch";
+import { TaskDetailHeader, TaskDetailMeta } from "../ui/tasks-detail";
+import { Textarea } from "../ui/textarea";
 import {
   closePlanWizard,
   togglePlanWizardTodo,
@@ -38,6 +40,7 @@ import {
   PlanTasksBody,
   resolveRef,
 } from "./PlanTab";
+import "../ui/plan-wizard.css";
 
 // Mount this once near the app root. It renders nothing until a plan is
 // opened via openPlanWizard(); then it mounts the FullscreenOverlay.
@@ -123,41 +126,30 @@ function PlanWizardOverlay() {
           onOpenChat={sessionId ? onOpenSession : null}
         />
       ) : (
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          <div className="max-w-[760px] mx-auto px-6 py-6 flex flex-col gap-5">
-            {/* The overlay carries no title chrome — render the plan title
-                as the lead of the body so it's always present above both
-                tabs' content. */}
-            <header className="flex flex-col gap-1.5">
-              <div
-                className="t-sm t-ui"
-                style={{ color: "var(--color-text-3)" }}
-              >
-                Plan
-              </div>
-              <h1
-                style={{
-                  fontSize: "23px",
-                  fontWeight: 600,
-                  lineHeight: 1.2,
-                  color: "var(--color-text-1)",
-                  letterSpacing: "var(--letter-spacing-tight)",
-                }}
-              >
-                {plan.title || "Untitled plan"}
-              </h1>
-            </header>
-
-            {tab === 0 ? (
-              <PlanDocumentBody plan={plan} onOpenFile={onOpenFile} />
-            ) : (
-              <PlanTasksBody
-                plan={plan}
-                onToggle={togglePlanWizardTodo}
-                onOpenFile={onOpenFile}
-                onOpenSession={onOpenSession}
+        <div className="ui-tasks-detail">
+          <div className="ui-tasks-detail-scroll">
+            {/* The task detail's reading column. The overlay carries no
+                title chrome, so the plan's title heads the column above both
+                tabs' content, with the line under it saying what this is. */}
+            <article className="ui-task-details ui-tasks-detail-main ui-plan-wizard-main">
+              <TaskDetailHeader>
+                <h1 className="ui-plan-wizard-title">{plan.title || "Untitled plan"}</h1>
+              </TaskDetailHeader>
+              <TaskDetailMeta
+                parts={["Plan", isAwaitingDecision ? "Waiting for your go-ahead" : null]}
               />
-            )}
+
+              {tab === 0 ? (
+                <PlanDocumentBody plan={plan} onOpenFile={onOpenFile} />
+              ) : (
+                <PlanTasksBody
+                  plan={plan}
+                  onToggle={togglePlanWizardTodo}
+                  onOpenFile={onOpenFile}
+                  onOpenSession={onOpenSession}
+                />
+              )}
+            </article>
           </div>
         </div>
       )}
@@ -168,7 +160,7 @@ function PlanWizardOverlay() {
 // The wizard's sticky decision bar — the same Build / Cancel verbs the chat
 // card carries, but rendered with the app's design-system primitives (3D
 // `Button`, `SegmentedControl`, `Switch`) in the overlay's footer, exactly
-// like every other fullscreen wizard (CreateTaskWizard, PRDetailPane). The
+// like the other fullscreen panes (PRDetailPane, SessionDetailPane). The
 // compact chevron-fold cluster that PlanTab uses is a tiny-header
 // affordance; a fullscreen wizard has room to lay the options out flat.
 // Visibility is gated by the caller on the live session's pending_plan, so
@@ -218,23 +210,16 @@ function PlanWizardDecisionBar({
   );
 
   return (
-    <div className="flex w-full flex-col gap-2">
+    <div className="ui-plan-decision">
       {revisionOpen && (
-        <div className="flex items-end gap-2">
-          <textarea
+        <div className="ui-plan-decision-revise">
+          <Textarea
             autoFocus
             value={revisionFeedback}
             onChange={(event) => setRevisionFeedback(event.target.value)}
             rows={2}
             maxLength={8000}
             placeholder="Tell the planning agent what to change…"
-            className="min-w-0 flex-1 resize-y t-xs px-2.5 py-2 outline-none"
-            style={{
-              color: "var(--color-text-1)",
-              background: "var(--color-bg-2)",
-              border: "1px solid var(--color-line)",
-              borderRadius: "var(--radius-sm)",
-            }}
           />
           <Button
             variant="accentSoft"
@@ -246,71 +231,64 @@ function PlanWizardDecisionBar({
           </Button>
         </div>
       )}
-      <div className="flex w-full items-center justify-between gap-4">
-      {/* Build options, low-emphasis, on the left. */}
-      <div className="flex items-center gap-3 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="t-2xs t-ui" style={{ color: "var(--color-text-3)" }}>
-            Run
-          </span>
-          <SegmentedControl
-            value={parallelism}
-            onChange={setParallelism}
-            ariaLabel="Build parallelism"
-            options={[
-              { value: "auto", label: "When safe" },
-              { value: "parallel", label: "All at once" },
-              { value: "serial", label: "One at a time" },
-            ]}
-          />
+      <div className="ui-plan-decision-row">
+        {/* Build options, low-emphasis, on the left. */}
+        <div className="ui-plan-decision-options">
+          <div className="ui-plan-decision-run">
+            <span>Run</span>
+            <SegmentedControl
+              value={parallelism}
+              onChange={setParallelism}
+              ariaLabel="Build parallelism"
+              options={[
+                { value: "auto", label: "When safe" },
+                { value: "parallel", label: "All at once" },
+                { value: "serial", label: "One at a time" },
+              ]}
+            />
+          </div>
+          <label
+            className="ui-plan-decision-notify"
+            title="Let your team know this plan is building."
+          >
+            <Switch
+              checked={notifyTeam}
+              onCheckedChange={setNotifyTeam}
+              disabled={submitting !== null}
+            />
+            Notify team
+          </label>
+          {err && <span className="ui-field-error">{err}</span>}
         </div>
-        <label
-          className="flex items-center gap-2 t-xs t-ui select-none cursor-pointer"
-          style={{ color: "var(--color-text-2)" }}
-          title="Let your team know this plan is building."
-        >
-          <Switch
-            checked={notifyTeam}
-            onCheckedChange={setNotifyTeam}
-            disabled={submitting !== null}
-          />
-          Notify team
-        </label>
-        {err && (
-          <span className="t-2xs t-ui" style={{ color: "var(--color-red, #f87171)" }}>
-            {err}
-          </span>
-        )}
-      </div>
 
-      {/* Primary verbs on the right — same shape as every other wizard. */}
-      <div className="flex items-center gap-2 shrink-0">
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={submitting !== null}
-          onClick={() => setRevisionOpen((value) => !value)}
-        >
-          Request changes
-        </Button>
-        <Button
-          variant="secondary"
-          size="sm"
-          disabled={submitting !== null}
-          onClick={() => void decide("cancel")}
-        >
-          {submitting === "cancel" ? "Cancelling…" : "Cancel plan"}
-        </Button>
-        <Button
-          variant="accentSoft"
-          size="sm"
-          disabled={submitting !== null}
-          onClick={() => void decide("build")}
-          title="Waiting for your go-ahead. Start building this plan"
-        >
-          {submitting === "build" ? "Building…" : "Build"}
-        </Button>
-      </div>
+        {/* Primary verbs on the right — same shape as every other wizard. */}
+        <div className="ui-plan-decision-verbs">
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={submitting !== null}
+            onClick={() => setRevisionOpen((value) => !value)}
+          >
+            Request changes
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={submitting !== null}
+            onClick={() => void decide("cancel")}
+          >
+            {submitting === "cancel" ? "Cancelling…" : "Cancel plan"}
+          </Button>
+          <Button
+            variant="accentSoft"
+            size="sm"
+            disabled={submitting !== null}
+            onClick={() => void decide("build")}
+            title="Waiting for your go-ahead. Start building this plan"
+          >
+            {submitting === "build" ? "Building…" : "Build"}
+          </Button>
+        </div>
       </div>
     </div>
   );

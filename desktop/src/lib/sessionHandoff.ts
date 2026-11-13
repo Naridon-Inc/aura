@@ -104,7 +104,7 @@ export function rewindPath(root: string, rewind: string): string {
 export function handoffProblem(h: Handoff): string {
   if (h.kind === "open") return "";
   if (h.kind === "no-project") {
-    const named = h.repo ? `The ${folderName(h.repo)} project` : "That project";
+    const named = h.repo ? `The ${folderName(h.repo)} repository` : "That repository";
     return `${named} is not open on this machine, so the session cannot be opened here. Open it and follow the link again.`;
   }
   return `This machine has no record of that session in ${folderName(h.root)}. It was most likely run on another computer — the console still holds the whole of it.`;

@@ -1,0 +1,63 @@
+/* A workspace's home: the conversation surface before there is a
+   conversation — the transcript column holding the empty state, the composer
+   band under it — plus the conversations that can be picked back up, listed
+   under the starters at the empty state's own narrow measure. */
+.ui-chat-home {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+}
+.ui-chat-home[data-state="loading"] {
+  align-items: center;
+  justify-content: center;
+}
+/* The empty state ends in its own bottom padding; the list belongs to it, so
+   it starts inside that space rather than a screen further down. */
+.ui-chat-home .ui-chat-empty {
+  padding-bottom: 32px;
+}
+.ui-chat-home-recent {
+  display: flex;
+  flex-direction: column;
+  max-width: 480px;
+  margin: 0 auto 24px;
+}
+.ui-chat-home-recent > .ui-log-note-files-head {
+  padding: 0 8px 4px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-chat-home-recent > .ui-menu-row {
+  align-items: flex-start;
+  width: 100%;
+  height: auto;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  background: none;
+  text-align: left;
+}
+.ui-chat-home-recent > .ui-menu-row:hover,
+.ui-chat-home-recent > .ui-menu-row:focus-visible {
+  background: var(--ui-hover);
+}
+.ui-chat-home-recent > .ui-menu-row > :first-child {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.ui-chat-home-recent-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.ui-chat-home-recent-text > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-chat-home-recent-text > small {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}

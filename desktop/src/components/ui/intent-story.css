@@ -1,0 +1,243 @@
+/* The change story: a report column (the session Summary's sections, items and
+   verdict) narrating one commit. Added here: the commit header with its
+   verdict mark, the byline over a stated line, the per-piece lines under an
+   item, the coverage meter in the verdict's tone, and story prose a step
+   smaller under a row. */
+
+.ui-intent-story {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+.ui-intent-story > .ui-trace-report {
+  flex: 1;
+  min-height: 0;
+}
+.ui-story-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 20px 24px;
+  font-size: 13px;
+  color: var(--ui-muted-fg);
+}
+.ui-story-state[data-tone="error"] {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.ui-story-state .ui-story-error {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ui-faint);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ui-story-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.ui-story-head > div {
+  flex: 1;
+  min-width: 0;
+}
+.ui-story-head h1 {
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+  color: var(--ui-fg);
+  overflow-wrap: anywhere;
+}
+.ui-story-head p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ui-faint);
+}
+.ui-story-head code {
+  font: 11px var(--font-mono);
+}
+.ui-story-head > .ui-trace-mark {
+  margin-top: 4px;
+}
+
+.ui-story-byline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  min-height: 20px;
+  margin-bottom: 4px;
+}
+.ui-story-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 450;
+  color: var(--ui-fg);
+}
+.ui-story-agent > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-story-byline > small {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--ui-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-story-said {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-story-said > li {
+  padding: 10px 0;
+}
+.ui-story-said > li:first-child {
+  padding-top: 0;
+}
+.ui-story-said > li + li {
+  border-top: 1px solid var(--ui-border);
+}
+
+.ui-story-counts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-story-did > .ui-button {
+  margin: 2px 0 0 -8px;
+  color: var(--ui-muted-fg);
+}
+.ui-story-did > .ui-button:hover {
+  color: var(--ui-fg);
+}
+.ui-story-piece-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+/* The session tab leads with the plain name; the exact symbol is the line
+   under it, so the name reads as words rather than code. */
+.ui-story-piece-name[data-plain] {
+  font-family: inherit;
+  font-size: inherit;
+}
+.ui-story-piece-where {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 12px/18px var(--font-mono);
+  color: var(--ui-faint);
+}
+.ui-trace-item-body > .ui-story-markdown {
+  margin-top: 2px;
+}
+
+/* Story prose is the message typography; compact is a step smaller. */
+.ui-story-markdown[data-compact] {
+  font-size: 13px;
+  line-height: 20px;
+}
+.ui-story-markdown[data-compact] :is(p, ul, ol, blockquote, table) {
+  margin-block: 8px;
+}
+.ui-story-markdown pre {
+  margin-block: 12px;
+  padding: 8px 12px;
+  overflow-x: auto;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  font: 12px/20px var(--font-mono);
+}
+
+.ui-story-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* Everything under the verdict lines up with its words, past the glyph. */
+.ui-story-verdict > :not(.ui-trace-verdict) {
+  padding-left: 24px;
+}
+.ui-story-coverage {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--ui-muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+.ui-story-coverage > .ui-progress {
+  flex: 1;
+  max-width: 240px;
+  height: 6px;
+}
+.ui-story-coverage > .ui-progress[data-tone="good"] .ui-progress-indicator {
+  background: var(--ui-green);
+}
+.ui-story-coverage > .ui-progress[data-tone="warn"] .ui-progress-indicator {
+  background: var(--ui-yellow);
+}
+.ui-story-coverage > .ui-progress[data-tone="bad"] .ui-progress-indicator {
+  background: var(--ui-destructive);
+}
+.ui-story-uncovered {
+  font: 12px var(--font-mono);
+  color: var(--ui-yellow);
+}
+
+.ui-story-recover {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* The History detail's Did beat: the files, then the picked file's diff. */
+.ui-story-files {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ui-trace-item-title > strong:has(> .ui-story-piece-name) {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* The session tab's supporting values: real changes, folded under a quiet
+   disclosure so the named pieces read first. */
+.ui-story-supporting {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ui-story-supporting > .ui-button {
+  align-self: flex-start;
+  margin-left: -8px;
+  color: var(--ui-muted-fg);
+}
+.ui-story-supporting > .ui-button:hover {
+  color: var(--ui-fg);
+}
+.ui-story-supporting > .ui-button small {
+  color: var(--ui-faint);
+  font-size: 12px;
+}

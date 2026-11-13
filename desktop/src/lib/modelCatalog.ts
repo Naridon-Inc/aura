@@ -70,22 +70,29 @@ export type SelectedModel = {
   family: ModelFamily;
 };
 
-// The 5 line leads, strongest first. Generation 5 gets ONE row each — its 1M
+// Claude Code's own order: the current family (Opus, Fable, Sonnet, Haiku)
+// first, then the older lines it still serves. This is only the floor — when
+// Claude Code is installed, the app asks it for its list and that wins (see
+// `model_discovery::claude_code`). Generation 5 gets ONE row each — its 1M
 // window is the default rather than a separate beta variant, so a "… 1M" row
 // would be the same model twice (see isLongContextCapable).
 const ANTHROPIC: CatalogModel[] = [
+  { key: "opus-5-5", id: "claude-opus-5-5", label: "Opus 5.5", isNew: true },
   { key: "fable-5-1", id: "claude-fable-5-1", label: "Fable 5.1", isNew: true },
-  { key: "opus-5", id: "claude-opus-5", label: "Opus 5" },
+  { key: "sonnet-5-5", id: "claude-sonnet-5-5", label: "Sonnet 5.5", isNew: true },
+  { key: "haiku-5-5", id: "claude-haiku-5-5", label: "Haiku 5.5", isNew: true },
+  { key: "haiku-4-5", id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
   { key: "sonnet-5", id: "claude-sonnet-5", label: "Sonnet 5" },
+  { key: "opus-5", id: "claude-opus-5", label: "Opus 5" },
   { key: "fable-5", id: "claude-fable-5", label: "Fable 5" },
   { key: "opus-4-8-1m", id: "claude-opus-4-8", label: "Opus 4.8 1M", longContext: true },
   { key: "opus-4-8", id: "claude-opus-4-8", label: "Opus 4.8" },
   { key: "opus-4-7-1m", id: "claude-opus-4-7", label: "Opus 4.7 1M", longContext: true },
   { key: "opus-4-7", id: "claude-opus-4-7", label: "Opus 4.7" },
   { key: "opus-4-6-1m", id: "claude-opus-4-6", label: "Opus 4.6 1M", longContext: true },
+  { key: "opus-4-6", id: "claude-opus-4-6", label: "Opus 4.6" },
   { key: "sonnet-4-6-1m", id: "claude-sonnet-4-6", label: "Sonnet 4.6 1M", longContext: true },
   { key: "sonnet-4-6", id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
-  { key: "haiku-4-5", id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
 ];
 
 // GPT-5.6 ships as three named tiers (verified against codex's
@@ -177,7 +184,6 @@ export function familyOf(brain: BrainChoice): ModelFamily {
     case "pi":
       return "pi";
     case "anthropic_native":
-    case "aura_pro":
       return "anthropic";
     case "openai_native":
       return "openai";
@@ -329,8 +335,8 @@ function familyBrand(
 
 /** The brand mark a model ROW should wear — keyed off the model's vendor
  *  family, NOT the brain it routes through. So an Opus row shows the Claude
- *  mark even under "Aura Pro", a GPT row shows the OpenAI mark, etc. — the
- *  way Conductor brands each row by who actually makes the model. Generic /
+ *  mark whichever brain runs it, a GPT row shows the OpenAI mark, etc. —
+ *  each row is branded by who actually makes the model. Generic /
  *  custom families fall back to the brain's own mark. `AgentIcon` resolves
  *  these ids to the official vendor SVGs. Prefer the brand the Aura catalog
  *  stamped on the model; fall back to the family mark so an offline/static

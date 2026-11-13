@@ -1,6 +1,6 @@
-// Run / Setup script launcher — Conductor "run scripts in the UI" parity.
+// Run / Setup script launcher — a workspace's scripts, run from the UI.
 //
-// Conductor lets you configure per-workspace setup + run commands and fire
+// A workspace can carry per-workspace setup + run commands and fire
 // them with a button, streaming output into a log pane. Aura already stores
 // those commands (`.aura/settings.toml [worktree] setup`/`run`, edited under
 // Settings ▸ Copies & agents) and already has a full terminal — so the Run
@@ -23,6 +23,8 @@ import { Play, Wrench, Plus } from "lucide-react";
 import { repoWorktreeSettingsGet } from "../lib/api";
 import { useEditorStore } from "../lib/editorStore";
 import { bootCommandFor } from "../lib/place/runAt";
+import { Button } from "./ui/button";
+import "./ui/run-scripts.css";
 
 type Props = {
   /** Project root the scripts run in (also the terminal cwd). */
@@ -102,60 +104,54 @@ export function RunScriptButton({ repoRoot }: Props) {
   // Nothing configured — offer a quiet way to set one up.
   if (!run && !setup && namedScripts.length === 0) {
     return (
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="xs"
         onClick={openScriptSettings}
-        title="Set a run or setup script for this project"
-        className="inline-flex items-center gap-1 h-5 px-1.5 rounded text-text-4 hover:text-text-2 hover:bg-state-hover text-xs font-medium transition-colors"
+        title="Set a run or setup script for this repository"
+        className="ui-run-empty"
       >
-        <Plus size={11} strokeWidth={2} aria-hidden />
+        <Plus aria-hidden />
         Run script
-      </button>
+      </Button>
     );
   }
 
+  // Run is the one verb the strip exists for, so it is the filled button;
+  // named scripts and Setup sit beside it in the quieter secondary.
   return (
-    <div className="inline-flex items-center gap-1">
+    <div className="ui-run-scripts">
       {namedScripts.map((script) => (
-        <button
+        <Button
           key={`${script.name}:${script.command}`}
-          type="button"
+          variant="secondary"
+          size="xs"
           onClick={() => void launch(script.command, script.name)}
           title={`${script.name}: ${script.command}`}
-          className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 hover:bg-bg-3 text-text-2 hover:text-text-1 text-xs font-medium transition-colors"
         >
-          <Play size={10} strokeWidth={2.25} aria-hidden />
+          <Play aria-hidden />
           {script.name}
-        </button>
+        </Button>
       ))}
       {run && (
-        <button
-          type="button"
-          onClick={() => void launch(run, "Run")}
-          title={`Run: ${run}`}
-          className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 hover:bg-bg-3 text-[color:var(--color-accent)] text-xs font-medium transition-colors"
-        >
-          <Play size={10} strokeWidth={2.25} aria-hidden />
+        <Button size="xs" onClick={() => void launch(run, "Run")} title={`Run: ${run}`}>
+          <Play aria-hidden />
           Run
-        </button>
+        </Button>
       )}
       {setup && (
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="xs"
           onClick={() => void launch(setup, "Setup")}
           title={`Setup: ${setup}`}
-          className="inline-flex items-center gap-1 h-5 px-1.5 rounded bg-bg-2 text-text-2 hover:bg-bg-3 hover:text-text-1 text-xs font-medium transition-colors"
         >
-          <Wrench size={10} strokeWidth={2} aria-hidden />
+          <Wrench aria-hidden />
           Setup
-        </button>
+        </Button>
       )}
       {launchError && (
-        <span
-          role="alert"
-          title={launchError}
-          className="max-w-[16rem] truncate text-xs text-[color:var(--color-danger)]"
-        >
+        <span role="alert" title={launchError} className="ui-run-error">
           {launchError}
         </span>
       )}

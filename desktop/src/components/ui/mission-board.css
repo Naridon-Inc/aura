@@ -1,0 +1,34 @@
+/* A crew run as a task board card. The card, its handle row, title, summary
+   line, facts and time are the task board's; added here is the one line only
+   a run has — the quiet status line under the title, in the board's yellow
+   while it needs attention and green once proven — and the commit fact set
+   in mono. */
+
+.ui-mission-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+}
+.ui-mission-status[data-tone="attention"] {
+  color: var(--ui-yellow);
+}
+.ui-mission-status[data-tone="ok"] {
+  color: var(--ui-green);
+}
+.ui-mission-status[data-tone="quiet"] {
+  color: var(--ui-faint);
+}
+.ui-mission-status-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.ui-mission-mono {
+  font-family: var(--font-mono);
+}

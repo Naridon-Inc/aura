@@ -328,6 +328,7 @@ mod tests {
     fn byoc() -> Machine {
         Machine {
             id: "ubuntu@10.0.0.4:/srv/alpha".into(),
+            aliases: Vec::new(),
             name: "aura-runner".into(),
             host: "10.0.0.4".into(),
             user: "ubuntu".into(),

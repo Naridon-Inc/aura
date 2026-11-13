@@ -37,6 +37,9 @@ pub mod keychain;
 pub(crate) mod limits;
 // AURA-1296 — maps the composer's Concise chip onto Claude Code's flag.
 pub(crate) mod output_style;
+/// A workspace's linked folders, handed to an agent CLI through its own
+/// extra-directory flag.
+pub(crate) mod linked_dirs;
 pub mod manager;
 /// What an agent run may do, decided from the project's own committed rules
 /// before anyone is prompted. `gate` asks the human; this decides whether the
@@ -51,6 +54,13 @@ pub mod cloud_plane;
 /// cloud work home. Without it "these in the cloud, the rest here" has no
 /// second clause.
 pub mod local_plane;
+/// Aura talking to each project's own Aura: which project a tool call runs
+/// against, and the status / new-workspace tools for any named project.
+pub mod project_plane;
+/// Every plane's contract with a conversation that spans several projects —
+/// the call lands in the project it names, or it is refused — end to end.
+#[cfg(test)]
+mod fleet_routing_tests;
 /// What travels with the work when a conversation moves to another machine —
 /// the transcript digest, and an honest account of what the remote checkout
 /// will be missing.
@@ -139,6 +149,12 @@ mod place_sessions;
 /// What a session at a place printed while nobody was attached — the
 /// scrollback, read back off tmux so a person returning can catch up.
 pub mod place_capture;
+/// A conversation with an agent kept at a place, which the laptop attaches to
+/// and reattaches to at the byte it last saw.
+pub mod place_chat;
+/// The agent protocol, live, over a chat kept at a real machine.
+#[cfg(test)]
+mod place_chat_acp_live;
 /// Which of the projects a place holds belong to the org you opened it as. The
 /// discovery is `place_sessions`'; this narrows what came back.
 pub mod place_projects;
@@ -198,9 +214,6 @@ pub mod openai_native;
 #[cfg(feature = "brain_openai_compat")]
 pub mod openai_compat;
 
-#[cfg(feature = "brain_aura_pro")]
-pub mod aura_pro;
-
 /// Shared Anthropic Messages SSE decoder — used by both the direct
 /// `anthropic_native` brain and Vertex (Anthropic-on-Vertex emits the same
 /// event stream).
@@ -236,7 +249,7 @@ use super::{ChatRole, ChatTurn};
 
 /// Canonical engine family for a brain/provider id, normalised across the
 /// two id formats that reach us: the native `provider_id`
-/// (`cli_wrapper:gemini`, `anthropic_native`, `aura_pro`) and the legacy
+/// (`cli_wrapper:gemini`, `anthropic_native`, `gemini_native`) and the legacy
 /// `BrainBackend::id()` (`cli:gemini`, `anthropic`). Both collapse to the
 /// same family token so "is this the engine answering now?" is a stable
 /// comparison regardless of which path persisted the turn.
@@ -266,8 +279,9 @@ pub(crate) fn engine_label(provider_id: &str) -> String {
         .or_else(|| provider_id.strip_prefix("cli:"))
         .unwrap_or(provider_id);
     match core {
-        "anthropic" | "anthropic_native" => "Claude".to_string(),
-        "aura_pro" => "Aura Pro".to_string(),
+        // `aura_pro` is a retired brain id that still names turns saved
+        // before it went; they were answered by Claude.
+        "anthropic" | "anthropic_native" | "aura_pro" => "Claude".to_string(),
         "bedrock" => "Claude (Bedrock)".to_string(),
         "vertex" => "Claude (Vertex)".to_string(),
         "claude" | "claude_code" => "Claude Code".to_string(),
@@ -526,6 +540,8 @@ mod tests {
             model: None,
             cost_usd: None,
             cost_estimated: None,
+            cloud_key: None,
+            cloud_id: None,
         }
     }
 
@@ -542,6 +558,14 @@ mod tests {
         assert_eq!(engine_family("openai_native"), "codex");
         assert_eq!(engine_family("openai_compat:moonshot"), "openai_compat");
         assert_eq!(engine_family("something_unknown"), "other");
+    }
+
+    #[test]
+    fn a_turn_saved_on_the_retired_managed_brain_is_labelled_claude() {
+        // The brain is gone, but turns it answered are still on disk.
+        assert_eq!(engine_label("aura_pro"), "Claude");
+        assert_eq!(engine_label("anthropic_native"), "Claude");
+        assert_eq!(engine_label("cli_wrapper:claude_code"), "Claude Code");
     }
 
     #[test]

@@ -1,0 +1,30 @@
+/* The bring-back question and its answer: one report item, the piece's diff
+   under the sentence that explains it. */
+
+.ui-bringback .ui-trace-item {
+  padding: 12px 0 4px;
+}
+.ui-bringback-code {
+  font: 12px var(--font-mono);
+  color: var(--ui-fg);
+  overflow-wrap: anywhere;
+}
+.ui-bringback-wait {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+}
+.ui-bringback-error {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  color: var(--ui-destructive);
+}
+/* Sixteen 20px lines plus the header: tall enough to read a short function
+   whole, short enough that the buttons under it stay in view. */
+.ui-bringback-diff {
+  margin-top: 8px;
+}
+.ui-bringback-diff .ui-file-diff [role="table"] {
+  max-height: 320px;
+}

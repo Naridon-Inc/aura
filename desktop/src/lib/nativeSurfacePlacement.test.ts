@@ -12,15 +12,21 @@ import {
   OVERLAY_SELECTOR,
   PARKED,
   SWEEP_MS,
+  ANCHORED_MIN_SHARE,
+  NATIVE_OVERLAYS_CHANGED,
+  OVERLAY_MARGIN,
+  announceOverlayChange,
   clearRect,
   dropSurface,
   isCovered,
   isPaintable,
+  isWithheld,
   openOverlayRects,
   placementFor,
   parseZoom,
   resetSurfaceOwners,
   sameBounds,
+  surfaceHeld,
   takeSurface,
   toWindowPoints,
   webviewZoom,
@@ -186,6 +192,20 @@ describe("surface ownership", () => {
     expect(dropSurface(TERM, agent)).toBe(true);
   });
 
+  it("reports a surface as held only while a pane is showing it", () => {
+    // The one case a pane may park what it does not own: nobody owns it. An
+    // attach that resolves after its pane was parked leaves the surface on
+    // screen with no owner, and without this it painted over the page that
+    // had replaced the pane for as long as the page stayed up.
+    const pane = {};
+    expect(surfaceHeld(TERM)).toBe(false);
+    takeSurface(TERM, pane);
+    expect(surfaceHeld(TERM)).toBe(true);
+    expect(surfaceHeld("dock")).toBe(false);
+    dropSurface(TERM, pane);
+    expect(surfaceHeld(TERM)).toBe(false);
+  });
+
   it("survives a remount: the new loop owns it, the old cleanup cannot park it", () => {
     // A tab switch remounts the pane. React may start the new effect before
     // the old one's cleanup runs, and the cleanup parks on its way out — so
@@ -196,6 +216,20 @@ describe("surface ownership", () => {
     takeSurface(TERM, oldLoop);
     takeSurface(TERM, newLoop);
     expect(dropSurface(TERM, oldLoop)).toBe(false);
+  });
+});
+
+describe("isWithheld", () => {
+  // Without a DOM: the question is only ever `closest("[inert]")`.
+  const at = (inert: boolean) =>
+    ({ closest: (sel: string) => (sel === "[inert]" && inert ? {} : null) }) as unknown as Element;
+
+  it("withholds a hole the shell has made inert, from any ancestor", () => {
+    expect(isWithheld(at(true))).toBe(true);
+  });
+
+  it("leaves an ordinary hole alone", () => {
+    expect(isWithheld(at(false))).toBe(false);
   });
 });
 
@@ -389,16 +423,60 @@ describe("clearRect", () => {
     expect(kept(clip)).toBeGreaterThan(0.69);
   });
 
-  it("keeps the band beside a menu that reaches over the hole's left edge", () => {
+  it("keeps whole lines rather than the bigger band beside a menu over the left edge", () => {
     // Symptom 3: right-clicking a project row in the roster. The sheet is
-    // anchored in the sidebar and overhangs the pane, so the clear band is the
-    // full height of the hole to its right — and it is the bigger of the two
-    // candidates, which is why the search is exhaustive rather than "the band
-    // below".
+    // anchored in the sidebar and overhangs the pane. The biggest clear
+    // rectangle is the full-height band to its right (706x771, 84%) — and
+    // placing the surface there cut the first columns off every line, so the
+    // terminal read as shoved sideways ("the terminal gets pushed to side").
+    // The full-width band above the menu keeps 39% of the hole and every row
+    // in it is whole, which is the one a reader can use.
     const rosterMenu: Bounds = { x: 190, y: 400, w: 224, h: 300 };
     const clip = clearRect(hole, [rosterMenu]);
+    expect(clip).toEqual({ x: 280, y: 100, w: 840, h: 300 });
+    expect(clip && overlapsBox(clip, rosterMenu)).toBe(false);
+    expect(kept(clip)).toBeGreaterThan(ANCHORED_MIN_SHARE);
+  });
+
+  it("keeps the terminal's left edge under the workspaces menu's submenu", () => {
+    // The user's report, in this frame: the sidebar's "…" menu with its
+    // Group-by submenu open. Only the submenu reaches the pane — 120px over
+    // its left edge, a 50px-tall strip near the top. The band to its right
+    // (720x771) is bigger than the band below it (840x556), and it is the one
+    // that hid the start of every line. The band below keeps 72% and every
+    // column.
+    const submenu: Bounds = { x: 249, y: 265, w: 151, h: 50 };
+    const clip = clearRect(hole, [submenu]);
+    expect(clip).toEqual({ x: 280, y: 315, w: 840, h: 556 });
+    expect(clip?.x).toBe(hole.x);
+    expect(clip?.w).toBe(hole.w);
+  });
+
+  it("falls back to the band beside a sheet that leaves only a few whole rows", () => {
+    // A sheet running most of the pane's height down its left edge leaves a
+    // band of a hundred-odd pixels above and below it. Three or four whole
+    // rows is a worse view of a terminal than most of it with the start of
+    // each line hidden, so the anchored preference gives way to plain area.
+    const tall: Bounds = { x: 190, y: 200, w: 224, h: 560 };
+    const clip = clearRect(hole, [tall]);
     expect(clip).toEqual({ x: 414, y: 100, w: 706, h: 771 });
-    expect(kept(clip)).toBeGreaterThan(0.84);
+  });
+
+  it("never cuts the left edge for a sheet that leaves a real band above or below it", () => {
+    // Sweep a roster-sized menu down the pane's left edge. Wherever it lands,
+    // if a full-width band of at least the anchored share is clear, the
+    // surface keeps the hole's left edge — the terminal is never shown from
+    // the middle of its lines for a menu that left room to avoid it.
+    for (let y = 60; y <= 820; y += 20) {
+      const menu: Bounds = { x: 190, y, w: 224, h: 220 };
+      const clip = clearRect(hole, [menu]);
+      expect(clip).not.toBeNull();
+      expect(clip && overlapsBox(clip, menu)).toBe(false);
+      const top = Math.max(0, Math.min(menu.y, hole.y + hole.h) - hole.y);
+      const bottom = Math.max(0, hole.y + hole.h - Math.max(menu.y + menu.h, hole.y));
+      const roomy = Math.max(top, bottom) * hole.w >= hole.w * hole.h * ANCHORED_MIN_SHARE;
+      if (roomy) expect(clip?.x).toBe(hole.x);
+    }
   });
 
   it("clips for an overlay the five hit-test samples all miss", () => {
@@ -491,6 +569,86 @@ function overlapsBox(a: Bounds, b: Bounds): boolean {
   return xs && ys;
 }
 
+describe("a toast over the terminal", () => {
+  // The toast stack sits 24px in from the window's bottom-right corner and is
+  // 356px wide (`ui/toast.css`); a one-line update toast with its buttons is
+  // about 106px tall. Window 1120×895, the pane's terminal flush to its right
+  // edge: the same hole the clearRect cases above were measured on.
+  const win = { w: 1120, h: 895 };
+  const pane: Bounds = { x: 280, y: 100, w: 840, h: 771 };
+  /** The box a stack of `height` px reports, grown the way
+   *  `openOverlayRects` grows it. */
+  const stack = (height: number): Bounds => ({
+    x: win.w - 24 - 356 - OVERLAY_MARGIN,
+    y: win.h - 24 - height - OVERLAY_MARGIN,
+    w: 356 + OVERLAY_MARGIN * 2,
+    h: height + OVERLAY_MARGIN * 2,
+  });
+  const overlap = (a: Bounds, b: Bounds) =>
+    Math.min(a.x + a.w, b.x + b.w) > Math.max(a.x, b.x) &&
+    Math.min(a.y + a.h, b.y + b.h) > Math.max(a.y, b.y);
+
+  it("hides only the rows under one toast", () => {
+    const toast = stack(106);
+    const clip = clearRect(pane, [toast]);
+    // Every column, every line whole: the terminal loses the rows the toast
+    // is on and nothing else.
+    expect(clip).toEqual({ x: pane.x, y: pane.y, w: pane.w, h: toast.y - pane.y });
+    expect(overlap(clip!, toast)).toBe(false);
+  });
+
+  it("still hides only rows when the stack fans out", () => {
+    // Three toasts under the pointer, 106px each with the 14px gap between.
+    const toast = stack(3 * 106 + 2 * 14);
+    const clip = clearRect(pane, [toast]);
+    expect(clip).toEqual({ x: pane.x, y: pane.y, w: pane.w, h: toast.y - pane.y });
+  });
+
+  it("hides only the columns under it when the terminal is a short dock", () => {
+    // A terminal docked under the work body, 171px tall: the toast covers its
+    // whole height, so what is left is the band beside it, left edge kept.
+    const dock: Bounds = { x: 280, y: 700, w: 840, h: 171 };
+    const toast = stack(106);
+    const clip = clearRect(dock, [toast]);
+    expect(clip).toEqual({ x: dock.x, y: dock.y, w: toast.x - dock.x, h: dock.h });
+    expect(overlap(clip!, toast)).toBe(false);
+  });
+
+  it("gives the whole terminal back once the toast is gone", () => {
+    expect(clearRect(pane, [])).toEqual(pane);
+  });
+
+  it("leaves a terminal the toast is nowhere near alone", () => {
+    // A terminal in the left half of a split never meets the stack.
+    const left: Bounds = { x: 280, y: 100, w: 400, h: 771 };
+    expect(clearRect(left, [stack(106)])).toEqual(left);
+  });
+});
+
+describe("announceOverlayChange", () => {
+  it("tells every pane to read its clip again", () => {
+    const g = globalThis as { window?: unknown };
+    const before = g.window;
+    const target = new EventTarget();
+    let heard = 0;
+    target.addEventListener(NATIVE_OVERLAYS_CHANGED, () => {
+      heard += 1;
+    });
+    g.window = target;
+    try {
+      announceOverlayChange();
+      announceOverlayChange();
+    } finally {
+      g.window = before;
+    }
+    expect(heard).toBe(2);
+  });
+
+  it("is a no-op with no window to tell", () => {
+    expect(() => announceOverlayChange()).not.toThrow();
+  });
+});
+
 describe("OVERLAY_SELECTOR", () => {
   // There is no DOM in this suite, so this cannot be asserted by querying —
   // but the selector string itself is the contract that broke, and it is worth
@@ -507,17 +665,33 @@ describe("OVERLAY_SELECTOR", () => {
   });
 
   it("matches a confirmation on its role alone", () => {
-    // Medusa's Prompt is Radix AlertDialog underneath, so it carries neither
+    // The shared Prompt is Radix AlertDialog underneath, so it carries neither
     // role="dialog" nor a popper wrapper — nothing else in the list sees it.
     expect(parts).toContain('[role="alertdialog"]');
   });
 
-  it("keeps dialog and listbox gated on being open", () => {
-    // Both roles can describe something permanently on screen, and clipping a
-    // terminal around a panel that is simply part of the layout would shrink
-    // the surface for the life of the app.
+  it("keeps a Radix dialog or listbox gated on being open", () => {
+    // Radix keeps both mounted through the close animation with
+    // `data-state="closed"`; a terminal must not stay clipped for that.
     expect(parts).toContain('[role="dialog"][data-state="open"]');
     expect(parts).toContain('[role="listbox"][data-state="open"]');
+  });
+
+  it("matches a hand-rolled dialog or listbox on its role when it has no state", () => {
+    // The redesign's hand-rolled panels — the composer's suggestions, the
+    // usage breakdown, first-run setup, Settings — carry a role and no
+    // `data-state`, so the Radix gate saw none of them and the terminal
+    // painted over every one. They mount only while open, like `menu`.
+    expect(parts).toContain('[role="dialog"]:not([data-state])');
+    expect(parts).toContain('[role="listbox"]:not([data-state]):not([cmdk-list])');
+  });
+
+  it("leaves the command list out of the stateless listbox match", () => {
+    // A command list is a listbox with no state that can sit inline in a
+    // page for as long as the page is up; inside a dialog or a popover the
+    // container already counts.
+    const stateless = parts.find((p) => p.startsWith('[role="listbox"]:not('));
+    expect(stateless).toContain(":not([cmdk-list])");
   });
 
   it("keeps the explicit opt-in for sheets with no role to match", () => {

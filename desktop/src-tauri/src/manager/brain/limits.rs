@@ -261,7 +261,7 @@ fn cooldowns() -> &'static Mutex<HashMap<String, Instant>> {
 /// rate-limited / transient-failed, the failover picker skips it until the
 /// window passes. Overwrites any earlier expiry for the same engine (the
 /// freshest failure wins). Keyed by `provider_id` (e.g. `"anthropic_native"`,
-/// `"cli_wrapper:gemini"`, `"aura_pro"`).
+/// `"cli_wrapper:gemini"`, `"gemini_native"`).
 pub fn mark_cooldown(engine: &str, dur: Duration) {
     let expiry = Instant::now() + dur;
     cooldowns()

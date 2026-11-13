@@ -1,28 +1,20 @@
-// Screen 1 — Sign in. Three OAuth providers wired to the aura-cloud
-// device-code flow (GitHub + GitLab are live today; Google goes live once
-// the backend Google OAuth app is provisioned). Sign-in is optional: Skip
-// drops straight to Open Project. Calm, centered, references-grade.
+// First run, step one: sign in. Three providers wired to the aura-cloud
+// device-code flow (GitHub and GitLab are live; Google goes live once the
+// backend Google OAuth app is provisioned). Signing in is optional — Skip
+// goes straight to opening a project.
 
-import { OnboardingCenter } from "./OnboardingShell";
-import {
-  GitHubMark,
-  GitLabMark,
-  GoogleMark,
-  CheckIcon,
-} from "./icons";
-import {
-  useDeviceSignIn,
-  type SignInProvider,
-} from "./useDeviceSignIn";
+import type { ReactNode } from "react";
+import { ArrowUpRight, Check } from "lucide-react";
+import { GitHubMark, GitLabMark, GoogleMark } from "./icons";
+import { useDeviceSignIn, type SignInProvider } from "./useDeviceSignIn";
+import { Alert, AlertDescription } from "../ui/alert";
 import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
-import type { ReactNode } from "react";
+import "../ui/cloud-onboarding.css";
+import "../ui/cloud-patterns.css";
+import "../ui/onboarding.css";
 
-const PROVIDERS: {
-  id: SignInProvider;
-  label: string;
-  icon: ReactNode;
-}[] = [
+const PROVIDERS: { id: SignInProvider; label: string; icon: ReactNode }[] = [
   { id: "github", label: "Continue with GitHub", icon: <GitHubMark /> },
   { id: "gitlab", label: "Continue with GitLab", icon: <GitLabMark /> },
   { id: "google", label: "Continue with Google", icon: <GoogleMark /> },
@@ -39,87 +31,69 @@ export function SignInScreen({
   const busy = signIn.status === "starting" || signIn.status === "waiting";
 
   return (
-    <OnboardingCenter>
-      <div className="text-center">
-        <div className="text-lg font-semibold text-text-1">
-          Welcome to Aura
-        </div>
-        <div className="mt-1.5 text-base text-text-3">
-          Sign in to get started
-        </div>
-      </div>
+    <>
+      <header>
+        <h1>Welcome to Aura</h1>
+        <p>Sign in to get started.</p>
+      </header>
 
-      <div className="mt-7 w-full flex flex-col gap-2">
+      <div className="ui-cloud-agent-connections ui-onboarding-rows">
         {PROVIDERS.map((p) => {
           const active = signIn.activeProvider === p.id && busy;
+          const blocked = busy && !active;
           return (
             <button
               key={p.id}
               type="button"
-              disabled={busy && !active}
+              disabled={blocked}
+              data-blocked={blocked ? "" : undefined}
               onClick={() => (active ? signIn.cancel() : signIn.begin(p.id))}
-              className="group relative h-11 w-full inline-flex items-center justify-center gap-2.5 rounded-md border border-line-soft bg-bg-2 text-base font-medium text-text-1 hover:bg-bg-3 hover:border-line-strong disabled:opacity-40 disabled:pointer-events-none transition-colors"
             >
-              <span className="absolute left-3.5 inline-flex items-center">
-                {active ? <AsciiSpinner className="text-base leading-none" /> : p.icon}
-              </span>
-              {active ? "Waiting for browser…" : p.label}
+              {p.icon}
+              <span>{p.label}</span>
+              {active ? (
+                <small>
+                  <AsciiSpinner size={10} />
+                  Waiting for browser…
+                </small>
+              ) : (
+                <ArrowUpRight size={14} aria-hidden />
+              )}
             </button>
           );
         })}
       </div>
 
       {signIn.status === "waiting" && signIn.userCode ? (
-        <div className="mt-4 text-center text-sm text-text-3">
-          Approve in your browser. Code{" "}
-          <span className="font-mono text-text-1 tracking-wider">
-            {signIn.userCode}
-          </span>
-          {" · "}
-          <button
-            type="button"
-            onClick={signIn.cancel}
-            className="text-text-3 hover:text-text-1 underline underline-offset-2 transition-colors"
-          >
-            cancel
-          </button>
+        <div className="ui-cloud-inline">
+          <small>
+            Approve in your browser. Code{" "}
+            <span className="ui-onboarding-code">{signIn.userCode}</span>
+          </small>
+          <Button type="button" variant="ghost" size="xs" onClick={signIn.cancel}>
+            Cancel
+          </Button>
         </div>
       ) : null}
 
       {signIn.status === "approved" ? (
-        <div className="mt-4 inline-flex items-center gap-1.5 text-sm text-accent-green">
-          <CheckIcon /> Signed in
+        <div className="ui-cloud-inline">
+          <Check size={15} aria-hidden />
+          <small>Signed in</small>
         </div>
       ) : null}
 
       {signIn.status === "error" && signIn.error ? (
-        <div className="mt-4 max-w-[320px] text-center text-sm text-red">
-          {signIn.error}
-        </div>
+        <Alert variant="destructive" className="ui-onboarding-alert">
+          <AlertDescription>{signIn.error}</AlertDescription>
+        </Alert>
       ) : null}
 
-      <Button
-        type="button"
-        variant="ghost"
-        size="lg"
-        onClick={onSkip}
-        disabled={busy}
-        className="mt-7"
-      >
+      <Button type="button" variant="outline" onClick={onSkip} disabled={busy}>
         Skip for now
       </Button>
 
-      <div className="mt-6 max-w-[320px] text-center text-xs leading-relaxed text-text-5">
-        By signing in, you agree to our{" "}
-        <span className="text-text-4 underline underline-offset-2">
-          Terms of Service
-        </span>{" "}
-        and{" "}
-        <span className="text-text-4 underline underline-offset-2">
-          Privacy Policy
-        </span>
-        .
-      </div>
-    </OnboardingCenter>
+      <small>By signing in, you agree to our Terms of Service and Privacy Policy.</small>
+    </>
   );
 }

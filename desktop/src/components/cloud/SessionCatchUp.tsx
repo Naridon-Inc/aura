@@ -10,7 +10,7 @@
 // What "long enough" means, where "seen" is kept, and how the text is trimmed
 // are all in `lib/place/catchUp` and tested there. This is the part that draws.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { api } from "../../lib/api";
 import {
@@ -21,7 +21,8 @@ import {
   shouldCatchUp,
   trimTrailingBlank,
 } from "../../lib/place/catchUp";
-import { AsciiSpinner } from "../ui/ascii-spinner";
+import { ShellNotice } from "../ui/shell-notice";
+import "../ui/catch-up.css";
 
 /** localStorage, when the page has one. A preview or a locked-down browser
  *  throws on the accessor itself, and that has to read as "no store" rather
@@ -103,69 +104,49 @@ export function SessionCatchUp({
     setDismissed(true);
   };
 
+  // The work column's inline notice: one row across the top of the terminal,
+  // sentence, then its button, then dismiss.
+  const strip = (notice: ReactNode) => (
+    <div className="ui-shell-notice-inline ui-catch-up">
+      <div className="ui-shell-notice-stack">{notice}</div>
+    </div>
+  );
+
   if (fetch.state === "reading") {
-    return (
-      <div className="flex items-center gap-2 border-b border-line-soft bg-bg-1 px-3 py-1.5 text-xs text-text-5">
-        <AsciiSpinner size={12} />
-        Reading what {session} did while you were away…
-      </div>
+    return strip(
+      <ShellNotice busy>Reading what {session} did while you were away…</ShellNotice>,
     );
   }
 
   if (fetch.state === "failed") {
     // Said, not hidden: a strip that quietly wasn't there would read as
     // "nothing happened", which is the one thing this must never claim.
-    return (
-      <div className="flex items-center justify-between gap-3 border-b border-line-soft bg-bg-1 px-3 py-1.5 text-xs text-text-5">
-        <span className="min-w-0 truncate">
-          Couldn't read what happened while you were away. {fetch.why}
-        </span>
-        <button
-          type="button"
-          onClick={dismiss}
-          className="shrink-0 rounded px-1.5 py-0.5 font-medium text-text-4 hover:bg-state-hover hover:text-text-2"
-        >
-          Dismiss
-        </button>
-      </div>
+    return strip(
+      <ShellNotice tone="error" onDismiss={dismiss} dismissLabel="Dismiss">
+        Couldn't read what happened while you were away. {fetch.why}
+      </ShellNotice>,
     );
   }
 
   const lines = lineCount(fetch.text);
 
-  return (
-    <div className="border-b border-line-soft bg-bg-1 text-xs">
-      <div className="flex items-center justify-between gap-3 px-3 py-1.5">
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          aria-expanded={open}
-          className="flex min-w-0 items-center gap-2 text-left text-text-3 hover:text-text-2"
-        >
-          <span className="w-3 shrink-0 font-mono text-text-5">
-            {open ? "▾" : "▸"}
-          </span>
-          <span className="font-medium">While you were away</span>
-          <span className="truncate text-text-5">
-            · {awayLabel(seenAt, fetch.capturedAt * 1000)} ·{" "}
-            {lines === 0
-              ? "nothing printed"
-              : `${lines} line${lines === 1 ? "" : "s"}`}
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={dismiss}
-          className="shrink-0 rounded px-1.5 py-0.5 font-medium text-accent hover:bg-state-hover"
-        >
-          Dismiss
-        </button>
-      </div>
-      {open && lines > 0 && (
-        <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words border-t border-line-soft px-3 py-2 font-mono text-[11px] leading-[1.45] text-text-3">
-          {fetch.text}
-        </pre>
-      )}
-    </div>
+  return strip(
+    <ShellNotice
+      onDismiss={dismiss}
+      dismissLabel="Dismiss"
+      action={
+        lines > 0
+          ? {
+              label: open ? "Hide what it printed" : "Show what it printed",
+              onClick: () => setOpen((o) => !o),
+            }
+          : undefined
+      }
+      detail={open && lines > 0 ? <pre>{fetch.text}</pre> : undefined}
+    >
+      <strong>While you were away</strong> ·{" "}
+      {awayLabel(seenAt, fetch.capturedAt * 1000)} ·{" "}
+      {lines === 0 ? "nothing printed" : `${lines} line${lines === 1 ? "" : "s"}`}
+    </ShellNotice>,
   );
 }

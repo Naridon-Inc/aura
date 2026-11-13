@@ -19,11 +19,11 @@
 import type { StreamEvent } from "../../api";
 import type { ToolResult } from "../../../components/manager/chat/types";
 import { asObj, kindFor, norm, titleFor } from "./describe";
+import { createAcpRuns, isAcpBlock, normalizeAcpBlock } from "./acp";
 import type {
   NormalizedEvent,
   NormalizedQuestion,
   ToolContent,
-  ToolKind,
   TodoItem,
 } from "../events";
 
@@ -199,6 +199,8 @@ export function normalizeClaude(
 ): NormalizedEvent[] {
   const out: NormalizedEvent[] = [];
   const counters: Counters = new Map();
+  // Consecutive ACP chunks fold into one block until something else lands.
+  const acpRuns = createAcpRuns();
   // Index tool_use inputs by id so a later tool_result can recover the input
   // (for diff content + humanized title) it doesn't itself carry.
   const toolInputs = new Map<string, { name: string; input: unknown }>();
@@ -238,141 +240,8 @@ export function normalizeClaude(
             kind: "result",
             subtype: "cancelled",
           });
-        } else if (b.type === "acp_update") {
-          const u = asObj(b.update),
-            content = asObj(u.content),
-            type = String(u.sessionUpdate ?? "");
-          if (
-            (type === "agent_message_chunk" || type === "user_message_chunk") &&
-            content.type === "text"
-          ) {
-            out.push({
-              ...base,
-              kind: "text",
-              role: type === "user_message_chunk" ? "user" : "assistant",
-              text: String(content.text ?? ""),
-            });
-          } else if (
-            type === "agent_thought_chunk" &&
-            content.type === "text"
-          ) {
-            out.push({
-              ...base,
-              kind: "reasoning",
-              text: String(content.text ?? ""),
-            });
-          } else if (type === "tool_call" || type === "tool_call_update") {
-            const callId = `${ev.turn_id}:acp-tool:${u.toolCallId}`;
-            const name = String(u.title ?? "tool"),
-              input = asObj(u.rawInput);
-            const status =
-              u.status === "completed"
-                ? "completed"
-                : u.status === "failed"
-                  ? "error"
-                  : u.status === "pending"
-                    ? "pending"
-                    : "running";
-            const kinds = new Set([
-              "read",
-              "edit",
-              "delete",
-              "move",
-              "search",
-              "execute",
-              "think",
-              "fetch",
-              "switch_mode",
-              "other",
-            ]);
-            const parts: ToolContent[] = Array.isArray(u.content)
-              ? u.content.map((p) => {
-                  const c = asObj(p);
-                  if (c.type === "diff")
-                    return {
-                      type: "diff",
-                      path: String(c.path ?? ""),
-                      oldText:
-                        typeof c.oldText === "string" ? c.oldText : undefined,
-                      newText: String(c.newText ?? ""),
-                    } as ToolContent;
-                  const inner = asObj(c.content);
-                  return {
-                    type: "content",
-                    text:
-                      inner.type === "text"
-                        ? String(inner.text ?? "")
-                        : JSON.stringify(p),
-                  } as ToolContent;
-                })
-              : [];
-            out.push({
-              ...base,
-              id: callId,
-              kind: "tool_call",
-              callId,
-              toolName: name,
-              title: u.title ? String(u.title) : "",
-              toolKind: kinds.has(String(u.kind))
-                ? (u.kind as ToolKind)
-                : "other",
-              input,
-              status,
-              partial: status === "pending" || status === "running",
-              content: parts.length ? parts : undefined,
-              output:
-                u.rawOutput != null
-                  ? typeof u.rawOutput === "string"
-                    ? u.rawOutput
-                    : JSON.stringify(u.rawOutput)
-                  : undefined,
-              locations: Array.isArray(u.locations)
-                ? u.locations.map((l) => ({
-                    path: String(asObj(l).path ?? ""),
-                    line:
-                      typeof asObj(l).line === "number"
-                        ? (asObj(l).line as number)
-                        : undefined,
-                  }))
-                : undefined,
-            });
-          } else if (type === "plan") {
-            out.push({
-              ...base,
-              id: `${ev.turn_id}:plan`,
-              kind: "plan",
-              awaitingApproval: false,
-              entries: Array.isArray(u.entries)
-                ? u.entries.map((p) => ({
-                    content: String(asObj(p).content ?? ""),
-                    status:
-                      asObj(p).status === "completed"
-                        ? "completed"
-                        : asObj(p).status === "in_progress"
-                          ? "in_progress"
-                          : "pending",
-                  }))
-                : [],
-            });
-          } else if (
-            content.type === "image" &&
-            typeof content.data === "string"
-          ) {
-            out.push({
-              ...base,
-              kind: "image",
-              role: "assistant",
-              data: content.data,
-              mediaType: String(content.mimeType ?? "image/png"),
-            });
-          } else {
-            out.push({
-              ...base,
-              kind: "raw",
-              label: type.replace(/_/g, " ") || "Agent update",
-              payload: u,
-            });
-          }
+        } else if (isAcpBlock(b.type)) {
+          out.push(...normalizeAcpBlock(b, base, ev.turn_id, acpRuns));
         } else if (b.type === "text" && typeof b.text === "string") {
           out.push({ ...base, kind: "text", role: ev.role, text: b.text });
         } else if (b.type === "thinking" && typeof b.thinking === "string") {

@@ -5,8 +5,7 @@
 // Rather than opening it into a dead app, we ask the one question that fixes
 // it and then do the whole setup in a single step.
 //
-// Where this differs from the tool we're following: it doesn't assume GitHub.
-// Both GitHub and GitLab are offered, always, and each is shown with its real
+// It doesn't assume GitHub. Both GitHub and GitLab are offered, always, and each is shown with its real
 // state read from the machine — installed, signed in, and which accounts and
 // organisations you can actually create under. A host you can't use says why,
 // phrased as the thing to do about it, instead of silently vanishing.
@@ -16,12 +15,18 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { Check } from "lucide-react";
 import { Dialog } from "../../Dialog";
+import { Alert, AlertDescription } from "../../ui/alert";
+import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { Button } from "../../ui/button";
-import { Select } from "../../ui/select";
 import { Checkbox } from "../../ui/checkbox";
-import { AsciiSpinner } from "../../AsciiSpinner";
+import { Input } from "../../ui/input";
+import { Select } from "../../ui/select";
 import { api, type HostProvider, type RepoState } from "../../../lib/api";
+import "../../ui/log-note.css";
+import "../../ui/intent-edit.css";
+import "../../ui/publish-repo.css";
 
 type Props = {
   /** Folder being set up. */
@@ -135,22 +140,29 @@ export function PublishRepoDialog({ dir, onClose, onPublished }: Props) {
       onClose={onClose}
       footer={
         <>
-          <Button variant="ghost" size="xs" onClick={onClose} disabled={busy}>
+          <Button variant="outline" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button size="xs" onClick={publish} disabled={!canPublish}>
+          <Button onClick={publish} disabled={!canPublish}>
             {busy ? "Setting up…" : "Create repository"}
           </Button>
         </>
       }
     >
       {loading ? (
-        <div className="flex items-center gap-2 py-6 text-sm" style={{ color: "var(--color-text-4)" }}>
-          <AsciiSpinner /> Checking this folder and your accounts…
-        </div>
+        error ? (
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : (
+          <p className="ui-log-note-state" role="status">
+            <AsciiSpinner />
+            Checking this folder and your accounts…
+          </p>
+        )
       ) : (
-        <div className="flex flex-col gap-3.5">
-          <p className="text-base leading-relaxed" style={{ color: "var(--color-text-2)" }}>
+        <div className="ui-publish-repo">
+          <p className="ui-publish-repo-intro">
             {state.is_repo
               ? "This folder keeps its own history, but it has nowhere to send it. Aura will create a repository and upload what's here."
               : "Aura will start keeping this folder's history, create a repository for it, and upload what's here, so your work is backed up and you can run several copies of it side by side."}
@@ -158,45 +170,48 @@ export function PublishRepoDialog({ dir, onClose, onPublished }: Props) {
 
           {/* Host. Both are always listed: one of them being unavailable is
               information, not a reason to hide the choice. */}
-          <Field label="Where">
-            <div className="flex gap-1.5">
+          <section className="ui-form-field">
+            <span id="publish-repo-where">Where</span>
+            <ul
+              className="ui-log-note-list ui-publish-repo-hosts"
+              role="radiogroup"
+              aria-labelledby="publish-repo-where"
+            >
               {hosts.map((p) => {
                 const usable = p.installed && p.signed_in;
                 const active = p.id === providerId;
                 return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => {
-                      setProviderId(p.id);
-                      setOwner(p.account ?? p.owners[0]?.login ?? "");
-                    }}
-                    className="flex flex-1 flex-col items-start gap-0.5 rounded-sm px-2.5 py-1.5 text-left transition-colors"
-                    style={{
-                      background: active ? "var(--color-accent-soft)" : "var(--color-bg-2)",
-                      border: `1px solid ${active ? "var(--color-accent)" : "var(--color-line-soft)"}`,
-                      opacity: usable ? 1 : 0.65,
-                    }}
-                  >
-                    <span
-                      className="text-sm font-medium"
-                      style={{ color: active ? "var(--color-accent)" : "var(--color-text-2)" }}
+                  <li key={p.id}>
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      data-unusable={usable ? undefined : ""}
+                      className="ui-intent-edit-target"
+                      onClick={() => {
+                        setProviderId(p.id);
+                        setOwner(p.account ?? p.owners[0]?.login ?? "");
+                      }}
                     >
-                      {p.label}
-                    </span>
-                    <span className="truncate text-xs" style={{ color: "var(--color-text-4)" }}>
-                      {usable ? (p.account ?? "signed in") : (p.hint ?? "not available")}
-                    </span>
-                  </button>
+                      <Check aria-hidden />
+                      <span>
+                        <strong>{p.label}</strong>
+                        <small>
+                          {usable ? (p.account ?? "Signed in") : (p.hint ?? "Not available")}
+                        </small>
+                      </span>
+                    </button>
+                  </li>
                 );
               })}
-            </div>
-          </Field>
+            </ul>
+          </section>
 
           {/* Everything below only means something once a host can be used. */}
           {ready && provider && (
             <>
-              <Field label="Owner">
+              <label className="ui-form-field">
+                Owner
                 <Select
                   value={owner}
                   onChange={setOwner}
@@ -208,53 +223,46 @@ export function PublishRepoDialog({ dir, onClose, onPublished }: Props) {
                   placeholder={provider.owners.length ? "Choose an owner" : "No accounts found"}
                   disabled={provider.owners.length === 0}
                 />
-              </Field>
+              </label>
 
-              <Field label="Name">
-                <input
+              <label className="ui-form-field">
+                Name
+                <Input
                   value={name}
                   onChange={(e) => setName(e.target.value)}
+                  prefix={owner ? `${owner}/` : undefined}
+                  invalid={check.kind === "taken"}
                   spellCheck={false}
                   autoCapitalize="off"
                   autoCorrect="off"
-                  className="w-full rounded-sm px-2 py-1 font-mono text-sm outline-none"
-                  style={{
-                    background: "var(--color-bg-2)",
-                    color: "var(--color-text-1)",
-                    border: `1px solid ${check.kind === "taken" ? "var(--color-red)" : "var(--color-line-soft)"}`,
+                  className="ui-publish-repo-name"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && canPublish) void publish();
                   }}
                 />
-                <div className="mt-1 flex items-center gap-1.5 text-xs">
-                  <span className="font-mono" style={{ color: "var(--color-text-4)" }}>
-                    {owner}/{name.trim() || "…"}
-                  </span>
-                  <NameVerdict check={check} />
-                </div>
-              </Field>
+                <NameVerdict check={check} />
+              </label>
 
-              <label className="flex cursor-pointer items-center gap-2">
+              <label className="ui-check-label">
                 <Checkbox
                   checked={isPrivate}
                   onCheckedChange={(v) => setIsPrivate(v === true)}
-                  aria-label="Keep this repository private"
                 />
-                <span className="text-sm" style={{ color: "var(--color-text-2)" }}>
-                  Private. Only you and people you invite can see it
-                </span>
+                Private. Only you and people you invite can see it
               </label>
             </>
           )}
 
           {!ready && provider && (
-            <p className="text-sm leading-relaxed" style={{ color: "var(--color-text-3)" }}>
+            <p className="ui-publish-repo-help">
               {provider.hint ?? `${provider.label} isn't available on this machine yet.`}
             </p>
           )}
 
           {error && (
-            <p className="text-sm leading-relaxed" style={{ color: "var(--color-red)" }}>
-              {error}
-            </p>
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
           )}
         </div>
       )}
@@ -262,28 +270,24 @@ export function PublishRepoDialog({ dir, onClose, onPublished }: Props) {
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex flex-col gap-1">
-      <span
-        className="section-label"
-        style={{ color: "var(--color-text-4)" }}
-      >
-        {label}
-      </span>
-      {children}
-    </div>
-  );
-}
-
+/** What the host said about the name, under the field. Quiet until asked. */
 function NameVerdict({ check }: { check: NameCheck }) {
-  if (check.kind === "checking")
-    return <span style={{ color: "var(--color-text-5)" }}>checking…</span>;
-  if (check.kind === "free")
-    return <span style={{ color: "var(--color-text-3)" }}>available</span>;
-  if (check.kind === "taken")
-    return <span style={{ color: "var(--color-red)" }}>already taken</span>;
-  if (check.kind === "unknown")
-    return <span style={{ color: "var(--color-text-5)" }}>couldn&rsquo;t check</span>;
-  return null;
+  if (check.kind === "idle") return null;
+  const text =
+    check.kind === "checking"
+      ? "Checking the name…"
+      : check.kind === "free"
+        ? "Available"
+        : check.kind === "taken"
+          ? "Already taken. Pick another name."
+          : "Couldn’t check the name. You can still try.";
+  return (
+    <span
+      className="ui-publish-repo-verdict"
+      data-tone={check.kind}
+      title={check.kind === "unknown" ? check.why : undefined}
+    >
+      {text}
+    </span>
+  );
 }

@@ -136,7 +136,7 @@ describe("every surface reads the narrowed list", () => {
   });
 
   test("the picker draws the notice and what was left out", async () => {
-    const src = await readSrc("components/cloud/BoxPanel.tsx");
+    const src = await readSrc("components/cloud/BoxStartSomething.tsx");
     expect(src).toContain("WithheldNote");
     expect(src).toContain("projectsNotice(offered)");
     expect(src).toContain("withheldProjects(offered)");
@@ -148,9 +148,9 @@ describe("every surface reads the narrowed list", () => {
     // "This machine has no projects" and "none of the projects on this machine
     // are yours" look identical and mean opposite things — and only one of them
     // is answered by cloning something.
-    const src = await readSrc("components/cloud/BoxPanel.tsx");
+    const src = await readSrc("components/cloud/BoxStartSomething.tsx");
     expect(src).toContain("offered.withheld.length > 0");
-    expect(src).toContain("None of the projects on this machine belong to the org");
+    expect(src).toContain("None of the repositories on this machine belong to the org");
   });
 
   test("the workspace composer repeats the reason rather than inventing one", async () => {

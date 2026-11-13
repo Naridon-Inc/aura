@@ -38,7 +38,7 @@ export async function resetChatFromTab(
   const roots = sessionRoots(session);
   const root = roots[0];
   if (!root) {
-    toast.info("Can't reset this chat", "It isn't attached to a project.");
+    toast.info("Can't reset this chat", "It isn't attached to a repository.");
     return null;
   }
 

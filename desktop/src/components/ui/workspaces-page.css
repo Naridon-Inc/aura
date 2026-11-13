@@ -1,0 +1,37 @@
+/* The Workspaces pages: the page ground, and the 40px header the board-style
+   pages wear above their content. Home draws no header of its own; its 40px
+   toolbar is the top edge. */
+.ui-workspaces-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+  font: 14px var(--font-sans);
+}
+.ui-workspaces-header {
+  height: 40px;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--ui-border);
+  padding: 0 12px;
+  background: var(--ui-sidebar);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ui-workspaces-header-space {
+  flex: 1;
+}
+
+/* Past a month a row names the day ("Sep 30"), which is wider than an age. */
+.ui-workspaces-page .ui-home-row time {
+  width: auto;
+  min-width: 40px;
+  white-space: nowrap;
+}

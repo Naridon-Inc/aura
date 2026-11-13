@@ -447,6 +447,7 @@ mod tests {
     fn machine(name: &str, repo: &str) -> Machine {
         Machine {
             id: format!("ubuntu@10.0.0.4:{repo}"),
+            aliases: Vec::new(),
             name: name.into(),
             host: "10.0.0.4".into(),
             user: "ubuntu".into(),

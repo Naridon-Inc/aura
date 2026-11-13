@@ -28,12 +28,16 @@
 //! are `crate::git_parse`, shared with the local twins, which is what keeps
 //! the two arms answering in one shape.
 
+pub mod copy_out;
 pub mod fs;
 pub mod git;
 pub mod git_ops;
+#[cfg(test)]
+mod panel_live;
 mod paths;
 pub mod ready;
 pub mod run;
+pub mod stats;
 
 use std::time::Duration;
 
@@ -145,7 +149,8 @@ impl Work {
 }
 
 /// The same box, standing in `there` instead of the checkout its row records.
-fn rerooted(place: Place, there: &str) -> Result<Place, String> {
+/// Also how `place_boot` opens a shell in a launched worktree.
+pub(crate) fn rerooted(place: Place, there: &str) -> Result<Place, String> {
     let there = there.trim_end_matches('/');
     let there = if there.is_empty() { "/" } else { there };
     if !crate::cloudbox::script::is_abs_path(there) {
@@ -216,6 +221,7 @@ mod tests {
         Place::Box {
             machine: Box::new(Machine {
                 id: "ubuntu@example.invalid:/home/ubuntu/naridon".into(),
+                aliases: Vec::new(),
                 name: "aura-runner".into(),
                 host: "example.invalid".into(),
                 user: "ubuntu".into(),

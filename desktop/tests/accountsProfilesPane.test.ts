@@ -20,12 +20,12 @@ import { describe, expect, test } from "bun:test";
 
 import { readSrc } from "./support/code";
 
-const SETTINGS = "components/dialogs/SettingsDialog.tsx";
+const SETTINGS = "components/settings/pages/AccountsProfiles.tsx";
 
 describe("accounts & profiles pane", () => {
   test("the save-scope choice is named by what it does", async () => {
     const src = await readSrc(SETTINGS);
-    expect(src).toContain("With the project");
+    expect(src).toContain("With the repository");
     expect(src).toContain("Only on this computer");
     // The two filenames were the whole label.
     expect(src).not.toContain("Repo file (.aura/profile.json)");
@@ -35,7 +35,7 @@ describe("accounts & profiles pane", () => {
   test("where it is saved is spelled out, not printed as a keyword", async () => {
     const src = await readSrc(SETTINGS);
     expect(src).toContain(
-      "Saved with the project, so it travels to anyone who clones it.",
+      "Saved with the repository, so it travels to anyone who clones it.",
     );
     expect(src).toContain("Saved on this computer only.");
     expect(src).not.toContain("(loaded from {binding.source})");
@@ -53,18 +53,22 @@ describe("accounts & profiles pane", () => {
 describe("radios wear the brand accent", () => {
   // Tailwind's `accent-*` maps to CSS accent-color; without it macOS paints
   // its own blue, which is the one colour the app never uses.
-  test("every radio input in the app sets an accent colour", async () => {
-    for (const file of [
-      SETTINGS,
-      "components/dialogs/IntentSplitMergeDialog.tsx",
-    ]) {
-      const src = await readSrc(file);
-      const radios = src.split('type="radio"').length - 1;
-      expect(radios).toBeGreaterThan(0);
-      // Count the accent-bearing className attributes near them: every
-      // radio in these files carries one.
-      const accented = (src.match(/accent-accent(-green)?/g) ?? []).length;
-      expect(accented).toBeGreaterThanOrEqual(radios);
-    }
+  test("the save-scope choice is the shared select, not a native radio", async () => {
+    // A native radio is where macOS paints its own blue; the settings page
+    // offers the same two answers through the app's own Select instead.
+    const src = await readSrc(SETTINGS);
+    expect(src).not.toContain('type="radio"');
+    expect(src).toContain("<Select");
+  });
+
+  test("Edit reason picks what to merge with in its own list, not a native radio", async () => {
+    // The merge target used to be a native radio that needed an accent class
+    // to avoid macOS blue; it is now a row in the shared list box that marks
+    // the chosen reason with a tick.
+    const src = await readSrc("components/dialogs/IntentSplitMergeDialog.tsx");
+    expect(src).not.toContain('type="radio"');
+    expect(src).toContain('role="radiogroup"');
+    expect(src).toContain('role="radio"');
+    expect(src).toContain("aria-checked={checked}");
   });
 });

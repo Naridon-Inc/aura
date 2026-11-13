@@ -76,6 +76,13 @@ pub struct Report {
     pub by_dialect: BTreeMap<&'static str, Tally>,
     pub dry_run: bool,
     pub pushed: usize,
+    /// A dialect that was asked and could not answer, in its own words.
+    ///
+    /// A dialect returns lists, so one that is broken and one that has nothing
+    /// to report are the same answer — and "no agent history for this repo
+    /// yet" is then a claim about the repo made on the strength of a program
+    /// that fell over. These are what a run says instead.
+    pub trouble: Vec<String>,
 }
 
 impl Report {
@@ -199,61 +206,21 @@ pub fn run(
         });
     }
 
+    let mut pushed = 0usize;
     for d in dialects {
-        let tally = report.by_dialect.entry(d.id()).or_default();
-        // `index`, not `sessions`: the counts a full read produces are not
-        // used here, and a machine with gigabytes of transcripts should not
-        // read all of them to discover that most have nothing new.
-        for session in d.index(&scope) {
-            let Some(from) = resume_from(&marks, &session) else {
-                tally.already += 1;
-                continue;
-            };
-
-            let prompts: Vec<history::Prompt> = d
-                .prompts(&session)
-                .into_iter()
-                .filter(|p| p.at > from)
-                .filter(|p| since.is_none_or(|s| p.at == 0 || p.at >= s))
-                .collect();
-            if prompts.is_empty() {
-                // Two different reasons to read nothing, and conflating them
-                // would tell someone their history was already imported when
-                // in fact their `--since` excluded it.
-                if from == 0 && since.is_some() {
-                    tally.outside += 1;
-                } else {
-                    tally.already += 1;
-                }
-                continue;
-            }
-
-            tally.sessions += 1;
-            let mut newest = from;
-            for prompt in &prompts {
-                tally.prompts += 1;
-                tally.saw(prompt.at);
-                newest = newest.max(prompt.at);
-                if dry_run {
-                    continue;
-                }
-                let row = row_for(&session, prompt, developer);
-                if let Err(e) = crate::intent_log::append(repo_root, &row) {
-                    return Err(format!("could not write the intent log: {e}"));
-                }
-                if push {
-                    crate::intent_sync::push(&row, repo_root);
-                    report.pushed += 1;
-                }
-            }
-
-            if !dry_run {
-                let entry = marks.entry(mark_key(session.dialect, &session.id)).or_default();
-                entry.through = newest.max(entry.through);
-                entry.rows += prompts.len();
-            }
+        let job = Job { scope: &scope, since, developer, repo_root, dry_run, push };
+        let trouble = {
+            let tally = report.by_dialect.entry(d.id()).or_default();
+            import_from(d.as_ref(), tally, &job, &mut marks, &mut pushed)?
+        };
+        // Asked, and could not answer. Reported rather than swallowed: the
+        // alternative is telling someone this repo has no history on the
+        // strength of a program that fell over.
+        if let Some(t) = trouble {
+            report.trouble.push(format!("{}: {t}", d.display()));
         }
     }
+    report.pushed = pushed;
 
     if !dry_run && report.prompts() > 0 {
         if let Err(e) = save_marks(repo_root, &marks) {
@@ -267,6 +234,87 @@ pub fn run(
     }
 
     Ok(report)
+}
+
+/// What a run is doing, for every dialect in it. One struct rather than seven
+/// arguments, because they do not vary per dialect and a reader should not have
+/// to check whether this one does.
+struct Job<'a> {
+    scope: &'a Scope,
+    since: Option<u64>,
+    developer: Option<(&'a str, &'a str)>,
+    repo_root: &'a Path,
+    dry_run: bool,
+    push: bool,
+}
+
+/// One dialect's half of [`run`]: read what it has, write the rows, and hand
+/// back whatever it could not do.
+///
+/// Split out because the caller needs the dialect's own name for what went
+/// wrong, and a function that borrows one entry of the report while pushing to
+/// another field of it is a function the borrow checker is right about.
+fn import_from(
+    d: &dyn History,
+    tally: &mut Tally,
+    job: &Job,
+    marks: &mut BTreeMap<String, Mark>,
+    pushed: &mut usize,
+) -> Result<Option<String>, String> {
+    // `index`, not `sessions`: the counts a full read produces are not used
+    // here, and a machine with gigabytes of transcripts should not read all of
+    // them to discover that most have nothing new.
+    for session in d.index(job.scope) {
+        let Some(from) = resume_from(marks, &session) else {
+            tally.already += 1;
+            continue;
+        };
+
+        let prompts: Vec<history::Prompt> = d
+            .prompts(&session)
+            .into_iter()
+            .filter(|p| p.at > from)
+            .filter(|p| job.since.is_none_or(|s| p.at == 0 || p.at >= s))
+            .collect();
+        if prompts.is_empty() {
+            // Two different reasons to read nothing, and conflating them
+            // would tell someone their history was already imported when
+            // in fact their `--since` excluded it.
+            if from == 0 && job.since.is_some() {
+                tally.outside += 1;
+            } else {
+                tally.already += 1;
+            }
+            continue;
+        }
+
+        tally.sessions += 1;
+        let mut newest = from;
+        for prompt in &prompts {
+            tally.prompts += 1;
+            tally.saw(prompt.at);
+            newest = newest.max(prompt.at);
+            if job.dry_run {
+                continue;
+            }
+            let row = row_for(&session, prompt, job.developer);
+            if let Err(e) = crate::intent_log::append(job.repo_root, &row) {
+                return Err(format!("could not write the intent log: {e}"));
+            }
+            if job.push {
+                crate::intent_sync::push(&row, job.repo_root);
+                *pushed += 1;
+            }
+        }
+
+        if !job.dry_run {
+            let entry = marks.entry(mark_key(session.dialect, &session.id)).or_default();
+            entry.through = newest.max(entry.through);
+            entry.rows += prompts.len();
+        }
+    }
+
+    Ok(d.last_error())
 }
 
 /// `30d`, `2w`, `6h`, or an ISO date. Returns the unix second to import from.
@@ -365,6 +413,7 @@ fn to_json(report: &Report) -> serde_json::Value {
         "unchanged_sessions": report.already(),
         "outside_since": report.outside(),
         "pushed": report.pushed,
+        "trouble": report.trouble,
         "by_dialect": by_dialect,
     })
 }
@@ -386,8 +435,15 @@ fn render(report: &Report) {
                 "·".dimmed(),
                 report.outside()
             );
-        } else {
+        } else if report.trouble.is_empty() {
             println!("{} no agent history for this repo yet", "·".dimmed());
+        } else {
+            // Not "no history": a dialect was asked and could not answer, and
+            // the repo is not the thing that went wrong.
+            println!("{} nothing could be read", "✗".red());
+        }
+        for t in &report.trouble {
+            println!("  {}", t.yellow());
         }
         return;
     }
@@ -423,6 +479,11 @@ fn render(report: &Report) {
     }
     if report.pushed > 0 {
         println!("  {}", format!("{} row(s) sent to the team", report.pushed).dimmed());
+    }
+    // A partial import is worth saying so: these counts are now a floor, not a
+    // total, and the next run will not know the difference.
+    for t in &report.trouble {
+        println!("  {}", t.yellow());
     }
 
     if report.dry_run {
@@ -471,7 +532,12 @@ pub fn cli(dialect: Option<&str>, since: Option<&str>, dry_run: bool, push: bool
             } else {
                 render(&report);
             }
-            0
+            // A dialect that could not answer makes these counts a floor
+            // rather than a total, and a run that quietly dropped one is a run
+            // a CI step should notice. The rows that were read are still
+            // written and still marked — exiting non-zero reports what
+            // happened, it does not undo it.
+            if report.trouble.is_empty() { 0 } else { 1 }
         }
         Err(e) => fail(e),
     }
@@ -554,6 +620,40 @@ mod tests {
         let _ = run(dir.path(), None, None, true, false);
         assert!(!dir.path().join(".aura").join(MARK_FILE).exists());
         assert!(!dir.path().join(".aura").join("intent_log.jsonl").exists());
+    }
+
+    #[test]
+    fn a_dialect_that_could_not_answer_is_reported_rather_than_read_as_empty() {
+        // A dialect returns lists, so "broken" and "nothing here" arrive as the
+        // same answer. Printing "no agent history for this repo yet" on the
+        // strength of a program that fell over is a claim about the repo, made
+        // from evidence about something else.
+        let dir = tempfile::tempdir().unwrap();
+        let d = crate::history::external::ExternalDialect::new(
+            serde_json::from_value(serde_json::json!({
+                "id": "nope",
+                "display": "Nope",
+                "program": "/nonexistent/aura-dialect-nope",
+            }))
+            .unwrap(),
+        );
+        let mut tally = Tally::default();
+        let mut marks = BTreeMap::new();
+        let mut pushed = 0;
+        let scope = Scope::repo(dir.path());
+        let job = Job {
+            scope: &scope,
+            since: None,
+            developer: None,
+            repo_root: dir.path(),
+            dry_run: true,
+            push: false,
+        };
+        let trouble = import_from(&d, &mut tally, &job, &mut marks, &mut pushed).unwrap();
+
+        assert_eq!(tally, Tally::default(), "nothing can have been read");
+        let why = trouble.expect("the reason must survive the empty list");
+        assert!(why.contains("could not be run"), "{why}");
     }
 
     #[test]

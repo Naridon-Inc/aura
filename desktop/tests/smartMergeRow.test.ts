@@ -23,7 +23,7 @@ import { describe, expect, test } from "bun:test";
 
 import { readSrc } from "./support/code";
 
-const SRC = "components/dialogs/SettingsDialog.tsx";
+const SRC = "components/settings/pages/SmartMergeRow.tsx";
 
 describe("smart merge row", () => {
   test("a failed probe keeps what the CLI actually said", async () => {

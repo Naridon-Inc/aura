@@ -1,0 +1,295 @@
+/* The call stage (chat/ScreenshareTab) and its thread (chat/HuddleThread).
+   Built from the library's buttons, chips, states, segmented switch, chat
+   transcript and composer; this file only lays them out on the stage.
+   Tokens only. */
+
+.ui-call-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+
+.ui-call-stage-header {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 40px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--ui-border);
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-call-stage-header strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-call-stage-fullscreen {
+  position: absolute;
+  right: 10px;
+}
+
+.ui-call-stage-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.ui-call-stage-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 24px;
+}
+.ui-call-stage-body > .ui-state,
+.ui-call-stage-body > .ui-state-row {
+  margin: auto;
+}
+
+/* ── Spotlight + filmstrip ─────────────────────────────────────────── */
+
+.ui-call-share {
+  display: flex;
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+}
+.ui-call-spotlight {
+  position: relative;
+  display: flex;
+  flex: 3;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-sidebar);
+}
+.ui-call-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--ui-sidebar);
+}
+.ui-call-filmstrip {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: 8px;
+  width: 224px;
+  overflow-y: auto;
+}
+
+/* What sits over the picture reads on any frame: the page colour, mostly
+   opaque, under the page's own text. */
+.ui-call-pill {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  max-width: calc(100% - 16px);
+  padding: 0 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--ui-bg) 78%, transparent);
+  color: var(--ui-fg);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.ui-call-pill > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-call-sharer-name {
+  bottom: 12px;
+  left: 12px;
+}
+.ui-call-sharer-name svg {
+  color: var(--ui-green);
+}
+.ui-call-stage-live {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+}
+.ui-call-stage-live > .ui-status-chip {
+  background: color-mix(in srgb, var(--ui-bg) 78%, transparent);
+}
+.ui-call-sharers {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.ui-call-sharer {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-call-stop {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+}
+
+/* ── Participant tiles ─────────────────────────────────────────────── */
+
+.ui-call-grid-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 0;
+}
+.ui-call-grid {
+  display: grid;
+  gap: 12px;
+  width: 100%;
+  max-width: 1024px;
+}
+.ui-call-tile {
+  position: relative;
+  flex-shrink: 0;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: var(--ui-card);
+}
+.ui-call-tile[data-camera] {
+  background: var(--ui-sidebar);
+}
+.ui-call-tile[data-speaking] {
+  box-shadow: inset 0 0 0 2px var(--ui-green);
+}
+.ui-call-tile-face {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+.ui-call-tile-name {
+  bottom: 8px;
+  left: 8px;
+}
+.ui-call-muted {
+  flex-shrink: 0;
+  color: var(--ui-red);
+}
+
+/* ── Controls ──────────────────────────────────────────────────────── */
+
+.ui-call-controls {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 56px;
+  padding: 0 16px;
+  border-top: 1px solid var(--ui-border);
+}
+.ui-call-meta {
+  position: absolute;
+  left: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(50% - 140px);
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.ui-call-meta > i {
+  width: 1px;
+  height: 14px;
+  margin: 0 2px;
+  background: var(--ui-border);
+}
+.ui-call-meta > strong {
+  overflow: hidden;
+  color: var(--ui-fg);
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+.ui-call-control[data-muted] {
+  color: var(--ui-red);
+}
+.ui-call-thread-toggle {
+  position: absolute;
+  right: 16px;
+}
+
+/* ── Thread ────────────────────────────────────────────────────────── */
+
+.ui-call-thread {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 340px;
+  min-height: 0;
+  border-left: 1px solid var(--ui-border);
+  background: var(--ui-sidebar);
+}
+.ui-call-thread-header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  height: 40px;
+  padding: 0 8px 0 16px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 13px;
+}
+.ui-call-thread-header strong {
+  font-weight: 500;
+}
+.ui-call-thread-messages {
+  flex: 1;
+  min-height: 0;
+}
+.ui-call-thread-messages .ui-chat-transcript-inner {
+  padding: 0 16px 12px;
+}
+.ui-call-thread .ui-chat-empty {
+  padding: 24px 4px 8px;
+}
+.ui-call-thread .ui-chat-empty h1 {
+  font-size: 14px;
+}
+.ui-call-thread .ui-chat-empty p {
+  font-size: 13px;
+  line-height: 20px;
+}
+.ui-call-thread .ui-shared-message > div {
+  font-size: 13px;
+  line-height: 20px;
+  padding: 8px 12px;
+}
+.ui-call-thread-reply {
+  flex-shrink: 0;
+  padding: 0 12px 12px;
+}
+.ui-call-thread-reply > .ui-alert {
+  margin-bottom: 8px;
+}
+.ui-call-thread-note {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}

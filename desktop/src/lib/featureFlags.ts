@@ -76,17 +76,6 @@ export const TEAM_ACTIVITY_ENABLED = true;
  *  Flip to `true` to bring the native Aura Manager back. */
 export const AURA_MANAGER_ENABLED = true;
 
-/** Onboarding v2 — the calm Superset-style first-run flow.
- *
- *  Replaces the heavy 9-step `OnboardingDialog` with a four-screen flow:
- *  Sign in (GitHub / GitLab / Google + Skip) -> optional Connect Agent ->
- *  Open Project (drop-zone + recents) -> New Project (Empty / Clone /
- *  Template). Full-bleed, references-grade, built on Aura tokens. Both
- *  share the `aura.onboarding.complete` gate + `aura:open-onboarding`
- *  re-open event, so exactly one first-run surface mounts.
- *
- *  Flip to `false` to fall back to the legacy OnboardingDialog. */
-export const ONBOARDING_V2 = true;
 
 /** Live Sync — the git-alternative collaboration layer, folded into the
  *  right-rail Source Control (Changes) panel.
@@ -221,7 +210,7 @@ export const AURA_RADAR_ENABLED = true;
  *
  *  Gating this flag drops the Graph cell from `WORK_LENSES` — which shrinks
  *  `WORK_LENS_VALUES`, so `readWorkLens` migrates anyone whose last lens was
- *  the map back to the list — makes `isCrewLens` answer no, which is the one
+ *  the map back to the board — makes `isCrewLens` answer no, which is the one
  *  predicate both the host and the two surfaces branch on, and hides the
  *  second door in the Tasks rail's Goals group. The lens value stays in the
  *  `WorkLens` union so the surface still typechecks.

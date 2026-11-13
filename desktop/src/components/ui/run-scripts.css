@@ -1,0 +1,59 @@
+/* A repository's run and setup scripts as buttons, and the Run tab of a
+   workspace on a machine that carries them. The buttons are the library's
+   extra-small ones; added here: their row, the launch error that sits after
+   them, and the tab's caption row and its two lines of explanation. */
+
+.ui-run-scripts {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.ui-run-scripts .ui-button svg,
+.ui-run-empty svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-run-empty {
+  color: var(--ui-muted-fg);
+}
+.ui-run-empty:hover {
+  color: var(--ui-fg);
+}
+.ui-run-error {
+  max-width: 16rem;
+  overflow: hidden;
+  color: var(--ui-red);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-run-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--ui-bg);
+}
+.ui-run-pane-head {
+  flex-shrink: 0;
+  gap: 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.ui-run-pane-body {
+  max-width: 36rem;
+  padding: 12px 16px;
+  color: var(--ui-fg);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.ui-run-pane-body p {
+  margin: 0;
+}
+.ui-run-pane-body p + p {
+  margin-top: 8px;
+}
+.ui-run-pane-quiet {
+  color: var(--ui-muted-fg);
+}

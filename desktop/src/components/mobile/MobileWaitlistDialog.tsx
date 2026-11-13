@@ -1,92 +1,39 @@
-// The waitlist as a moment — a compact centred card, opened from the What's
-// New note. Same bespoke-portal idiom as WhatsNewModal so the two read as one
-// sequence when they appear back to back after an update.
+// The phone waitlist as a dialog, opened from the What's New note. The
+// shared dialog is the frame: title and description in its header, its own
+// close button, Escape and a click outside both close it.
 //
 // Everything about the form itself lives in MobileWaitlistPane; this file is
 // only the frame.
 
-import { useRef } from "react";
-import { createPortal } from "react-dom";
-import { Smartphone, X } from "lucide-react";
-
 import { MobileWaitlistPane } from "./MobileWaitlistPane";
 import { Button } from "../ui/button";
-import { useDismiss } from "../../lib/useDismiss";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog";
 
 export function MobileWaitlistDialog({ onClose }: { onClose: () => void }) {
-  // Escape was written as a React onKeyDown on the backdrop. The backdrop is
-  // not focusable and nothing in the card takes focus when it opens, so the
-  // key never arrived and the only way out was the ✕ or a click away. The
-  // app's shared dismissal covers both, from the document.
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  useDismiss(true, onClose, panelRef);
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[75] flex items-center justify-center p-6 motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-150"
-      style={{ background: "rgba(5,5,5,0.55)", backdropFilter: "blur(3px)" }}
-      role="presentation"
-    >
-      <div
-        ref={panelRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="mobile-waitlist-title"
-        className="w-full max-w-[420px] overflow-hidden rounded-xl shadow-2xl motion-safe:animate-in motion-safe:fade-in-0 motion-safe:zoom-in-95 motion-safe:duration-150"
-        style={{
-          background: "var(--color-bg-1)",
-          border: "1px solid var(--color-line)",
-        }}
-      >
-        <div
-          className="relative px-5 pt-5 pb-4"
-          style={{
-            background:
-              "linear-gradient(180deg, color-mix(in srgb, var(--color-accent) 9%, var(--color-bg-1)) 0%, var(--color-bg-1) 100%)",
-          }}
-        >
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="absolute right-3 top-3 grid h-6 w-6 place-items-center rounded-md text-text-4 transition-colors hover:bg-state-hover hover:text-text-2"
-          >
-            <X className="h-3.5 w-3.5" aria-hidden="true" />
-          </button>
-
-          <span
-            className="grid h-9 w-9 place-items-center rounded-lg"
-            style={{
-              background: "color-mix(in srgb, var(--color-accent) 16%, transparent)",
-              color: "var(--color-accent)",
-            }}
-          >
-            <Smartphone className="h-[18px] w-[18px]" aria-hidden="true" />
-          </span>
-
-          <div className="eyebrow mt-3">
-            Coming soon
-          </div>
-          <h2
-            id="mobile-waitlist-title"
-            className="mt-1.5 text-lg font-semibold leading-snug text-text-1"
-            style={{ textWrap: "balance" }}
-          >
-            Aura on your phone
-          </h2>
-        </div>
-
-        <div className="border-t border-line-soft px-5 py-4">
-          <MobileWaitlistPane
-            footer={
-              <Button variant="ghost" size="sm" onClick={onClose}>
-                Not now
-              </Button>
-            }
-          />
-        </div>
-      </div>
-    </div>,
-    document.body,
+  return (
+    <Dialog open onOpenChange={(next) => !next && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Aura on your phone</DialogTitle>
+          <DialogDescription>
+            Aura is coming to iPhone and Android. Check on what your agents are doing, steer
+            them, and approve work while you&rsquo;re away from your desk.
+          </DialogDescription>
+        </DialogHeader>
+        <MobileWaitlistPane
+          footer={
+            <Button type="button" variant="ghost" size="sm" onClick={onClose}>
+              Not now
+            </Button>
+          }
+        />
+      </DialogContent>
+    </Dialog>
   );
 }

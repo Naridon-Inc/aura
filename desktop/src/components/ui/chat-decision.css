@@ -1,0 +1,119 @@
+/* Plans and questions in the conversation, on the shared plan review and
+   question request. What is added: a status beside the plan's title, a meta
+   caption under it, and the step counter and navigation a run of several
+   questions needs. */
+.chat-plan-review > header {
+  flex-wrap: wrap;
+}
+.chat-plan-review-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.chat-plan-review-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-plan-review-title small,
+.chat-plan-review-meta {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.chat-plan-review .ui-plan-content > p {
+  margin: 0 0 8px;
+  color: var(--ui-muted-fg);
+}
+.chat-plan-review .ui-plan-content > :last-child {
+  margin-bottom: 0;
+}
+.chat-question-request {
+  max-height: min(480px, 52vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.chat-question-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.chat-question-head nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.chat-question-hint {
+  margin-right: auto;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.chat-question-error {
+  color: var(--ui-red);
+  font-size: 12px;
+}
+.chat-plan-review-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.chat-plan-review-open svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+}
+.chat-plan-review-open:hover strong {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+/* "Request changes" opens the note under the plan, where it can be read
+   against the steps it is about. */
+.chat-plan-revision {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.chat-plan-tasks-more {
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+/* A plan document can run long; it scrolls inside the review so the
+   conversation under it stays in reach. */
+.chat-plan-review .ui-plan-content {
+  max-height: 420px;
+  overflow: auto;
+}
+.chat-plan-review .ui-plan-content > ol.chat-plan-tasks {
+  padding-left: 0;
+}
+/* A question from a finished turn is a record: the same request with nothing
+   left to pick. */
+.chat-question-record .ui-question-option {
+  cursor: default;
+}
+/* Docked on the composer, the request is the composer's lip: the box's top
+   corners and tone, and a full border whose bottom edge is the line between
+   them — the box under it drops its own top edge — so the two read as one. */
+.chat-question-request.is-docked,
+.chat-plan-review.is-docked {
+  border: 1px solid var(--ui-border);
+  border-radius: 12px 12px 0 0;
+  background: var(--ui-composer);
+}
+.chat-plan-review.is-docked {
+  padding: 12px 16px;
+}

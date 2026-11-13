@@ -1,4 +1,4 @@
-// The host's project, browsed from a machine that does not have it.
+// The host's repository, browsed from a machine that does not have it.
 //
 // This is the piece that makes a shared session a place you can work rather
 // than a place you can watch. There is no clone, no remote, no pull: every row
@@ -21,7 +21,8 @@
 //  3. **A folder can be bigger than we will send.** Truncation is said out
 //     loud, never implied by a list that just stops.
 
-import { useCallback, useEffect, useState, type JSX } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
+import { ChevronRight, Eye } from "lucide-react";
 
 import {
   errText,
@@ -31,6 +32,14 @@ import {
 import type { AccessLevel, RemoteEntry } from "../../lib/sessionLiveFrames";
 import { canReadHostFiles } from "../../lib/sessionLiveSelectors";
 import { AsciiSpinner } from "../ui/ascii-spinner";
+import { DetailsCaption } from "../ui/details-panel";
+import { FilePreview } from "../ui/file-preview";
+import { FileTree, type FileTreeNode } from "../ui/file-tree";
+import { EmptyState, LoadingState } from "../ui/state";
+import "../ui/cloud-patterns.css";
+import "../ui/details-files.css";
+import "../ui/file-tab.css";
+import "../ui/host-files.css";
 
 export type HostFilesPaneProps = {
   sessionId: string;
@@ -42,6 +51,15 @@ export type HostFilesPaneProps = {
 };
 
 type Opened = { path: string; text: string; size: number };
+
+/** One folder as the host sent it, together with the folder it is OF. A row
+ *  is opened against the folder it was listed from — never against the folder
+ *  you have since asked for, which may not have answered yet. */
+type Listing = { dir: string; entries: RemoteEntry[]; truncated: boolean };
+
+/** No folder in this tree ever opens in place: opening one walks into it, the
+ *  way the path above the rows says. */
+const NONE_OPEN: ReadonlySet<string> = new Set();
 
 /** Split a repo-relative path into the crumbs a person can click back to. */
 function crumbs(path: string): { name: string; path: string }[] {
@@ -73,167 +91,178 @@ export function HostFilesPane({
   hostName,
   hostOnline,
 }: HostFilesPaneProps): JSX.Element {
-  const [dir, setDir] = useState("");
-  const [entries, setEntries] = useState<RemoteEntry[]>([]);
-  const [truncated, setTruncated] = useState(false);
+  // A fresh object per ask, so asking for the same folder again — after a
+  // read that failed, or to see what changed — asks again.
+  const [want, setWant] = useState<{ dir: string }>(() => ({ dir: "" }));
+  const [listing, setListing] = useState<Listing | null>(null);
+  const [listingBusy, setListingBusy] = useState(false);
   const [opened, setOpened] = useState<Opened | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [reading, setReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Only the newest read may open a file: a slow answer for the file you
+  // clicked first must not land on top of the one you clicked second, or
+  // pop open after you have walked to another folder.
+  const reads = useRef(0);
 
   const mayRead = canReadHostFiles(access);
 
   useEffect(() => {
     if (!mayRead) return;
     let live = true;
-    setBusy(true);
-    listHostFiles(sessionId, dir)
-      .then((listing) => {
+    setListingBusy(true);
+    listHostFiles(sessionId, want.dir)
+      .then((answer) => {
         if (!live) return;
-        setEntries(listing.entries);
-        setTruncated(listing.truncated);
+        setListing({ dir: want.dir, entries: answer.entries, truncated: answer.truncated });
         setError(null);
       })
       // The tree on screen is kept: a listing that failed is not a listing
-      // that is empty, and the reason is worth more than a blank pane.
+      // that is empty, and the reason is worth more than a blank pane. The
+      // path above it stays on the folder those rows belong to.
       .catch((e) => live && setError(errText(e)))
-      .finally(() => live && setBusy(false));
+      .finally(() => live && setListingBusy(false));
     return () => {
       live = false;
     };
-  }, [sessionId, dir, mayRead]);
+  }, [sessionId, want, mayRead]);
 
-  const open = useCallback(
-    (entry: RemoteEntry) => {
-      if (entry.dir) {
-        setOpened(null);
-        setDir(join(dir, entry.name));
-        return;
-      }
-      const path = join(dir, entry.name);
-      setBusy(true);
+  const go = useCallback((dir: string) => {
+    reads.current += 1;
+    setReading(false);
+    setOpened(null);
+    setWant({ dir });
+  }, []);
+
+  const read = useCallback(
+    (path: string) => {
+      const ask = ++reads.current;
+      setReading(true);
       readHostFile(sessionId, path)
         .then((file) => {
+          if (ask !== reads.current) return;
           setOpened({ path, text: file.text, size: file.size });
           setError(null);
         })
-        .catch((e) => setError(errText(e)))
-        .finally(() => setBusy(false));
+        .catch((e) => ask === reads.current && setError(errText(e)))
+        .finally(() => ask === reads.current && setReading(false));
     },
-    [sessionId, dir],
+    [sessionId],
+  );
+
+  const here = listing?.dir ?? "";
+  const nodes = useMemo<FileTreeNode[]>(
+    () =>
+      (listing?.entries ?? []).map((entry) => ({
+        id: join(here, entry.name),
+        name: entry.name,
+        children: entry.dir ? [] : undefined,
+      })),
+    [listing, here],
+  );
+  const sizes = useMemo(
+    () => new Map((listing?.entries ?? []).map((e) => [join(here, e.name), e.size])),
+    [listing, here],
   );
 
   if (!mayRead) {
     return (
-      <div className="flex flex-col h-full min-h-0 items-center justify-center px-4 text-center">
-        <p className="text-2xs text-text-3 leading-relaxed">
-          You are watching this session. {hostName} can give you drive access,
-          and their project opens here — no clone, no git.
-        </p>
+      <div className="ui-host-files-watching">
+        <EmptyState
+          size="sm"
+          icon={Eye}
+          title="You are watching this session"
+          body={`${hostName} can give you drive access, and their repository opens here — no clone, no git.`}
+        />
+      </div>
+    );
+  }
+
+  const busy = listingBusy || reading;
+  let body: JSX.Element | null;
+  if (opened) {
+    // Read-only on purpose — see the note at the top of this file.
+    body = (
+      <FilePreview
+        name={opened.path}
+        kind="text"
+        content={opened.text}
+        actions={<small>{size(opened.size)}</small>}
+        onClose={() => setOpened(null)}
+      />
+    );
+  } else if (!listing) {
+    body = listingBusy ? <LoadingState label={`Reading ${hostName}’s files…`} /> : null;
+  } else {
+    body = (
+      <div className="ui-details-files">
+        {nodes.length === 0 ? (
+          <DetailsCaption>This folder is empty.</DetailsCaption>
+        ) : (
+          <FileTree
+            nodes={nodes}
+            label={`${hostName}’s repository`}
+            onSelect={(node) => read(node.id)}
+            expanded={NONE_OPEN}
+            onExpandedChange={(_open, node) => go(node.id)}
+            rowProps={(node) =>
+              node.children ? {} : { title: `${node.name} — ${size(sizes.get(node.id))}` }
+            }
+          />
+        )}
+        {listing.truncated && (
+          <DetailsCaption>
+            Only the first {listing.entries.length} are shown — this folder holds more.
+          </DetailsCaption>
+        )}
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="ui-host-files">
       {/* Where you are. The project root is a crumb like any other, so there
           is always something to click back to. */}
-      <div className="flex items-center gap-1 h-7 px-2 border-b border-line shrink-0 overflow-x-auto">
-        <button
-          type="button"
-          onClick={() => {
-            setOpened(null);
-            setDir("");
-          }}
-          className="text-2xs text-text-3 hover:text-text-1 transition-colors shrink-0"
-          title={`The root of ${hostName}'s project`}
+      <div className="ui-details-toolbar">
+        <nav
+          className="ui-cloud-routine-breadcrumb"
+          aria-label={`Where you are in ${hostName}’s repository`}
         >
-          project
-        </button>
-        {crumbs(dir).map((c) => (
-          <span key={c.path} className="flex items-center gap-1 shrink-0">
-            <span className="text-2xs text-text-4">/</span>
-            <button
-              type="button"
-              onClick={() => {
-                setOpened(null);
-                setDir(c.path);
-              }}
-              className="text-2xs text-text-3 hover:text-text-1 transition-colors"
-            >
-              {c.name}
-            </button>
-          </span>
-        ))}
-
-        <div className="flex-1" />
+          <button
+            type="button"
+            onClick={() => go("")}
+            title={`The root of ${hostName}'s repository`}
+            aria-current={here === "" ? "location" : undefined}
+          >
+            repository
+          </button>
+          {crumbs(here).map((c) => (
+            <Fragment key={c.path}>
+              <ChevronRight size={12} aria-hidden />
+              <button
+                type="button"
+                onClick={() => go(c.path)}
+                aria-current={c.path === here ? "location" : undefined}
+              >
+                {c.name}
+              </button>
+            </Fragment>
+          ))}
+        </nav>
         {busy && <AsciiSpinner size={11} />}
       </div>
 
       {/* A read can fail while the tree is still good. Say which failed and
           leave the tree alone. */}
       {error && (
-        <div className="px-2 py-1 shrink-0 text-2xs text-amber-400/90 border-b border-line">
+        <div role="alert" className="ui-details-files-problem">
           {error}
         </div>
       )}
       {!hostOnline && (
-        <div className="px-2 py-1 shrink-0 text-2xs text-text-4 border-b border-line">
-          {hostName} is offline — these files are whatever was last read.
-        </div>
+        <DetailsCaption>{hostName} is offline — these files are whatever was last read.</DetailsCaption>
       )}
 
-      {opened ? (
-        <>
-          <div className="flex items-center gap-2 h-7 px-2 border-b border-line shrink-0">
-            <span className="text-2xs text-text-2 truncate">{opened.path}</span>
-            <span className="text-2xs text-text-4 shrink-0">{size(opened.size)}</span>
-            <div className="flex-1" />
-            <button
-              type="button"
-              onClick={() => setOpened(null)}
-              className="px-1.5 h-5 rounded text-2xs text-text-3 hover:text-text-1 hover:bg-bg-2 transition-colors shrink-0"
-            >
-              Close
-            </button>
-          </div>
-          {/* Read-only on purpose — see the note at the top of this file. */}
-          <pre className="flex-1 min-h-0 overflow-auto px-2 py-1.5 text-2xs leading-relaxed text-text-2 font-mono whitespace-pre">
-            {opened.text}
-          </pre>
-        </>
-      ) : (
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          {entries.length === 0 && !busy && !error && (
-            <p className="px-2 py-2 text-2xs text-text-4">This folder is empty.</p>
-          )}
-          {entries.map((entry) => (
-            <button
-              key={entry.name}
-              type="button"
-              onClick={() => open(entry)}
-              className="flex items-center gap-1.5 w-full h-6 px-2 text-left hover:bg-bg-2 transition-colors group"
-            >
-              <span
-                className={`text-2xs shrink-0 ${entry.dir ? "text-accent" : "text-text-4"}`}
-              >
-                {entry.dir ? "▸" : "·"}
-              </span>
-              <span className="text-2xs text-text-2 truncate group-hover:text-text-1">
-                {entry.name}
-              </span>
-              <div className="flex-1" />
-              <span className="text-2xs text-text-4 shrink-0 tabular-nums">
-                {size(entry.size)}
-              </span>
-            </button>
-          ))}
-          {truncated && (
-            <p className="px-2 py-1.5 text-2xs text-text-4">
-              Only the first {entries.length} are shown — this folder holds more.
-            </p>
-          )}
-        </div>
-      )}
+      {body}
     </div>
   );
 }

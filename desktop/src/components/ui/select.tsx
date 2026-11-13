@@ -1,29 +1,39 @@
-// Select — thin adapter over @medusajs/ui's REAL <Select>. The app-wide
-// call sites use a flat `value / onChange / options[]` API (priority, status,
-// agent, sprint, parent-epic, model pickers, …); this module maps that API
-// onto Medusa's compound `Select.Trigger / Select.Content / Select.Item`
-// primitives so every one of those dropdowns renders as the genuine Medusa
-// component — its own trigger caret, flyout shadow, row typography and check
-// indicator — not a hand-rolled look-alike. Medusa's classes come from the
-// v3-preset bridge wired in styles.css (`@config ../tailwind.config.cjs`).
-//
-// The exported `SelectOption` / `SelectProps` shape is unchanged, so consumers
-// keep working verbatim.
-
-import * as React from "react";
-import { Select as MedusaSelect } from "@medusajs/ui";
-import { ChevronDown } from "lucide-react";
-
+import { useEffect, useState, type ReactNode } from "react";
+import {
+  Root,
+  Trigger,
+  Value,
+  Icon,
+  Portal,
+  Content,
+  Viewport,
+  Item,
+  ItemText,
+  ItemIndicator,
+  ScrollUpButton,
+  ScrollDownButton,
+} from "@radix-ui/react-select";
+import { Check, ChevronDown, ChevronUp, ChevronsUpDown } from "lucide-react";
 import { cn } from "../../lib/utils";
-
+/** Radix ships Select on a newer copy of its layer stack than Dialog, Sheet,
+ *  Popover and the menus, so neither stack sees the other: one Escape closed an
+ *  open dropdown and the dialog under it, and left the page unclickable. While
+ *  a dropdown is open it takes Escape first, on the window, before either
+ *  stack hears it. */
+export function escapeTaker(close: () => void) {
+  return (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || event.isComposing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+  };
+}
 export interface SelectOption {
   value: string;
-  label: React.ReactNode;
-  /** Optional leading glyph/avatar/colour dot. */
-  icon?: React.ReactNode;
+  label: ReactNode;
+  icon?: ReactNode;
   disabled?: boolean;
 }
-
 export interface SelectProps {
   value: string;
   onChange: (value: string) => void;
@@ -34,17 +44,9 @@ export interface SelectProps {
   id?: string;
   className?: string;
   align?: "start" | "center" | "end";
+  indicator?: "both" | "down" | "none";
   "aria-label"?: string;
 }
-
-// Radix throws on an item whose value is the empty string — it reserves ""
-// for "nothing selected, show the placeholder". Half a dozen call sites use ""
-// as an honest option in their own right ("No sprint", "Start a new flow",
-// "Smart pick", "— none —"), which is the natural way to say it in this flat
-// API, so the adapter carries them over a sentinel instead of making every
-// caller invent one. Callers still hand us "" and still get "" back.
-const EMPTY = "__aura_none__";
-
 export function Select({
   value,
   onChange,
@@ -55,70 +57,83 @@ export function Select({
   id,
   className,
   align = "start",
+  indicator = "both",
   ...aria
 }: SelectProps) {
-  // "" means the empty option when the caller offers one, and "nothing picked
-  // yet" when it doesn't — so the placeholder still works exactly as before.
-  const hasEmptyOption = options.some((o) => o.value === "");
-
+  let empty = "__empty_selection__";
+  while (options.some((option) => option.value === empty)) empty += "_";
+  const hasEmpty = options.some((option) => option.value === "");
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const take = escapeTaker(() => setOpen(false));
+    window.addEventListener("keydown", take, true);
+    return () => window.removeEventListener("keydown", take, true);
+  }, [open]);
   return (
-    <MedusaSelect
-      // Radix requires a matching item or undefined to show the placeholder.
-      value={value === "" ? (hasEmptyOption ? EMPTY : undefined) : value}
-      onValueChange={(v) => onChange(v === EMPTY ? "" : v)}
+    <Root
+      open={open}
+      onOpenChange={setOpen}
+      value={value === "" ? (hasEmpty ? empty : "") : value}
+      onValueChange={(next) => onChange(next === empty ? "" : next)}
       disabled={disabled}
     >
-      <MedusaSelect.Trigger
+      <Trigger
         id={id}
-        aria-label={aria["aria-label"]}
+        className={cn("ui-select-trigger ade-select-trigger", className)}
         aria-invalid={invalid || undefined}
-        className={cn("ade-select-trigger w-full", className)}
+        aria-label={aria["aria-label"]}
       >
-        {/* Select.Value reflects the selected item's own children — glyph
-            included — so it needs no help. Mirroring the icon here drew it
-            twice, and the extra child turned the trigger's space-between into
-            three columns, floating the value in the middle of the control. */}
-        <MedusaSelect.Value placeholder={placeholder} />
-        {/* The house caret. Medusa's trigger appends its own `TrianglesMini` —
-            a stacked up/down pair, which is the glyph a NUMBER STEPPER wears:
-            it says "increment me", so the rail's project picker read as
-            something you nudge through a list rather than something you open.
-            Every other menu in this app opens on a single chevron-down.
-            Medusa's icon is internal to its trigger, so it can't be replaced by
-            a prop: ours renders here and `.ade-select-trigger` hides the one
-            after it (styles.css). The hidden node keeps its layout box out of
-            the flow entirely, so the trigger's space-between still puts the
-            value left and exactly one caret right. */}
-        <ChevronDown
-          size={13}
-          strokeWidth={1.75}
-          className="ade-select-caret shrink-0 text-text-4"
-          aria-hidden
-        />
-      </MedusaSelect.Trigger>
-      {/* `aura-menu` remaps Medusa's flyout design-tokens to our arctic-dark
-          popover palette (same token-scoping trick the composer's effort /
-          Approvals / Mode menus use), so every app-wide Select — priority,
-          status, agent, sprint, model, … — shares one surface instead of
-          Medusa's out-of-the-box neutral. The class rides the portaled
-          Content element itself because Radix portals it out of the app tree. */}
-      <MedusaSelect.Content align={align} className="aura-menu">
-        {options.map((opt) => (
-          <MedusaSelect.Item
-            key={opt.value || EMPTY}
-            value={opt.value === "" ? EMPTY : opt.value}
-            disabled={opt.disabled}
-            // Radix typeahead + the trigger's reflected text need a string;
-            // fall back to the value when the label is a rich node.
-            textValue={typeof opt.label === "string" ? opt.label : opt.value}
-          >
-            <span className="flex min-w-0 items-center gap-2">
-              {opt.icon}
-              <span className="min-w-0 truncate">{opt.label}</span>
-            </span>
-          </MedusaSelect.Item>
-        ))}
-      </MedusaSelect.Content>
-    </MedusaSelect>
+        <Value placeholder={placeholder} />
+        {indicator !== "none" && (
+          <Icon asChild>
+            {indicator === "down" ? (
+              <ChevronDown className="ade-select-caret" size={14} />
+            ) : (
+              <ChevronsUpDown className="ade-select-caret" size={14} />
+            )}
+          </Icon>
+        )}
+      </Trigger>
+      <Portal>
+        <Content
+          position="popper"
+          align={align}
+          sideOffset={4}
+          collisionPadding={8}
+          className="aura-menu-surface ui-select-content"
+        >
+          <ScrollUpButton className="ui-select-scroll">
+            <ChevronUp size={14} />
+          </ScrollUpButton>
+          <Viewport>
+            {options.map((option) => (
+              <Item
+                key={option.value}
+                value={option.value === "" ? empty : option.value}
+                disabled={option.disabled}
+                textValue={
+                  typeof option.label === "string" ? option.label : option.value
+                }
+                className="ui-menu-row ui-select-item"
+              >
+                <ItemText>
+                  <span className="ui-select-label">
+                    {option.icon}
+                    {option.label}
+                  </span>
+                </ItemText>
+                <ItemIndicator className="ui-select-indicator">
+                  <Check size={14} />
+                </ItemIndicator>
+              </Item>
+            ))}
+          </Viewport>
+          <ScrollDownButton className="ui-select-scroll">
+            <ChevronDown size={14} />
+          </ScrollDownButton>
+        </Content>
+      </Portal>
+    </Root>
   );
 }

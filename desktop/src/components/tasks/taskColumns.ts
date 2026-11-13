@@ -7,7 +7,7 @@
 // agree — a due date must read "tomorrow" in every one of those places or the
 // same task looks like two different tasks.
 
-import type { TaskStatus } from "../../lib/api";
+import type { TaskPriority, TaskStatus } from "../../lib/api";
 import { shortDate } from "../../lib/calendarDate";
 import {
   TASK_STATUS,
@@ -24,6 +24,16 @@ export const TASK_COLUMNS = TASK_STATUS_OPTIONS;
 export const TASK_STATUS_LABEL: Record<TaskStatus, string> = Object.fromEntries(
   TASK_STATUS_ORDER.map((id) => [id, TASK_STATUS[id].label]),
 ) as Record<TaskStatus, string>;
+
+/** Plain name for a priority — the sub-task table has a column literally
+ *  headed "Priority" and needs the word beside the bars. */
+export const TASK_PRIORITY_LABEL: Record<TaskPriority, string> = {
+  none: "None",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  urgent: "Urgent",
+};
 
 export function isOverdue(due: string): boolean {
   // Compare YYYY-MM-DD lexically against today's local date — cheaper than

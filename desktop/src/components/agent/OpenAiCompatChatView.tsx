@@ -22,12 +22,16 @@ import {
   accumulateCompletion,
   type CompletionState,
 } from "../../lib/chatCompletion";
-import {
-  ComposerFrame,
-  ComposerToolbar,
-  ChatModePicker,
-} from "../chat/ChatComposer";
-import { ArrowUp, Square } from "lucide-react";
+import { Eraser, RotateCcw } from "lucide-react";
+import { Composer } from "../ui/composer";
+import { ModelPicker } from "../ui/model-picker";
+import { openModelSettings } from "../chat/model/openModelSettings";
+import { ComposerAddMenu } from "../ui/composer-tools";
+import { ChatNotice } from "../ui/chat-surface";
+import "../chat/ChatComposer.css";
+import "../ui/chat-composer.css";
+import { DropdownMenuItem, DropdownMenuSeparator } from "../ui/dropdown-menu";
+import { TimelineMenuItems } from "./normalized/timelineTools";
 import { ChatTimeline } from "./normalized/NormalizedTranscript";
 import { toTranscriptGroups } from "./normalized/blockMap";
 import type { NormalizedEvent } from "../../lib/agentProtocol";
@@ -400,18 +404,6 @@ export function OpenAiCompatChatView({ tab }: Props) {
 
   // Keyboard model: Enter sends, Shift+Enter adds a newline. Familiar
   // from every other chat surface in the shell (Composer, Manager).
-  function onComposerKey(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (
-      e.key === "Enter" &&
-      !e.shiftKey &&
-      !e.nativeEvent.isComposing &&
-      e.keyCode !== 229
-    ) {
-      e.preventDefault();
-      void send();
-    }
-  }
-
   const displayLabel = profile?.name ?? profileName ?? "Local Model";
   const subtitle = useMemo(() => {
     if (!profile) return tab.sessionId.slice(0, 8) + " · openai-compat";
@@ -517,7 +509,7 @@ export function OpenAiCompatChatView({ tab }: Props) {
       controls={
         <>
           {cleared && (
-            <div className="chat-notice">
+            <ChatNotice onDismiss={() => setCleared(null)}>
               Conversation cleared.{" "}
               <button
                 type="button"
@@ -529,114 +521,68 @@ export function OpenAiCompatChatView({ tab }: Props) {
               >
                 Undo
               </button>
-            </div>
+            </ChatNotice>
           )}
-          {profileError && (
-            <div role="alert" className="chat-notice">
-              {profileError}
-            </div>
-          )}
-          {sendError && (
-            <div role="alert" className="chat-notice">
-              {sendError}
-            </div>
-          )}
+          {profileError && <ChatNotice>{profileError}</ChatNotice>}
+          {sendError && <ChatNotice>{sendError}</ChatNotice>}
         </>
       }
       composer={
-        <div className="chat-composer">
-          <div>
-            <ComposerFrame>
-              <textarea
-                ref={composerRef}
-                aria-label="Message the model"
-                value={composer}
-                onChange={(e) => setComposer(e.target.value)}
-                onKeyDown={onComposerKey}
-                placeholder={
-                  profile
-                    ? `Message ${profile.model}…`
-                    : "Set up a model in Settings"
-                }
-                disabled={!profile || !streamReady}
-                rows={2}
-                className="flex-1 resize-none bg-transparent text-[13px] text-text-1 outline-none placeholder:text-text-4"
-              />
-              <ComposerToolbar
-                mode={
-                  <ChatModePicker
-                    value="ask"
-                    modes={["ask"]}
-                    onChange={() => {}}
-                  />
-                }
-                model={
-                  <span
-                    className="composer-selector composer-model-selector"
-                    title={subtitle}
+        <div className="agent-chat-composer">
+          <Composer
+            value={composer}
+            onChange={setComposer}
+            onSend={() => void send()}
+            onStop={() => void stop()}
+            running={streaming}
+            disabled={!profile || !streamReady}
+            ariaLabel="Message the model"
+            textareaRef={composerRef}
+            placeholder={
+              profile ? `Message ${profile.model}…` : "Set up a model in Settings"
+            }
+            // No mode and no files: this chat can only ask — it has no tools
+            // to run and nothing to edit — so its menu is the conversation's.
+            renderAddMenu={() => (
+              <ComposerAddMenu>
+                <TimelineMenuItems />
+                <DropdownMenuSeparator />
+                {!streaming && messages.some((m) => m.error || m.cancelled) && (
+                  <DropdownMenuItem
+                    onSelect={() => {
+                      const last = [...messages].reverse().find((m) => m.role === "user");
+                      if (last) setComposer(last.content);
+                      requestAnimationFrame(() => composerRef.current?.focus());
+                    }}
                   >
-                    {profile?.model || displayLabel}
-                  </span>
-                }
-                options={
-                  <>
-                    {!streaming &&
-                      messages.some((m) => m.error || m.cancelled) && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const last = [...messages]
-                              .reverse()
-                              .find((m) => m.role === "user");
-                            if (last) setComposer(last.content);
-                            composerRef.current?.focus();
-                          }}
-                        >
-                          Retry last message
-                        </button>
-                      )}
-
-                    <button
-                      type="button"
-                      disabled={!messages.length || streaming}
-                      onClick={clear}
-                    >
-                      Clear conversation
-                    </button>
-                  </>
-                }
-                actions={
-                  <>
-                    {streaming ? (
-                      <button
-                        type="button"
-                        className="chat-send"
-                        onClick={stop}
-                        aria-label="Stop"
-                        title="Stop response"
-                      >
-                        <Square size={14} />
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        className="chat-send"
-                        aria-label="Send"
-                        title="Send message"
-                        onClick={() => void send()}
-                        disabled={!composer.trim() || !profile || !streamReady}
-                      >
-                        <ArrowUp size={16} />
-                      </button>
-                    )}
-                  </>
-                }
+                    <RotateCcw />
+                    Retry last message
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem disabled={!messages.length || streaming} onSelect={clear}>
+                  <Eraser />
+                  Clear conversation
+                </DropdownMenuItem>
+              </ComposerAddMenu>
+            )}
+            footer={
+              // The endpoint this tab is bound to serves one model, so the
+              // picker lists that one; Edit goes to where endpoints are set up.
+              <ModelPicker
+                models={[
+                  {
+                    id: profile?.model || displayLabel,
+                    name: profile?.model || displayLabel,
+                    provider: subtitle,
+                  },
+                ]}
+                value={{ model: profile?.model || displayLabel }}
+                onChange={() => {}}
+                onEdit={() => openModelSettings("local-models")}
+                disabled={!profile}
               />
-            </ComposerFrame>
-            <p className="mt-2 text-[10.5px] text-text-4">
-              Enter to send · Shift+Enter for a new line
-            </p>
-          </div>
+            }
+          />
         </div>
       }
     />

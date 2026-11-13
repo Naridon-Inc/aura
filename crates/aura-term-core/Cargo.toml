@@ -12,5 +12,6 @@ alacritty_terminal = "0.26"
 bytes              = "1"
 tokio              = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 libc               = "0.2"
+regex              = "1"
 thiserror          = "1"
 tracing            = "0.1"

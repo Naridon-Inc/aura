@@ -1,0 +1,320 @@
+/* A change note: what one file's change means, over its diff. Drawn in the
+   Changes view's own vocabulary — a hairline under it, 11px faint labels, the
+   +/~/− status marks, 12px mono for names — so it reads as the top of the
+   pane rather than a card sitting in it. */
+
+.ui-change-note {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+  font-size: 12px;
+  line-height: 18px;
+}
+.ui-change-note p,
+.ui-change-note dl,
+.ui-change-note dd,
+.ui-change-note h4 {
+  margin: 0;
+}
+.ui-change-note small {
+  color: var(--ui-faint);
+  font-size: 11px;
+}
+.ui-change-note-label {
+  color: var(--ui-faint);
+}
+.ui-change-note h4,
+.ui-change-side > h4,
+.ui-change-note-pair dt {
+  color: var(--ui-faint);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+/* ── the summary ───────────────────────────────────────────────────── */
+
+.ui-change-note-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+}
+.ui-change-note-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.ui-change-note-head > p {
+  flex: 1;
+  min-width: 0;
+  color: var(--ui-fg);
+  font-size: 13px;
+  line-height: 20px;
+}
+.ui-change-note-head > .ui-button {
+  flex-shrink: 0;
+  margin: -1px -6px 0 0;
+  color: var(--ui-muted-fg);
+}
+
+.ui-change-note-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+}
+.ui-change-note-pair[data-stacked] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.ui-change-note-pair dd {
+  color: var(--ui-muted-fg);
+}
+.ui-change-note-pair dd[data-now] {
+  color: var(--ui-fg);
+}
+
+.ui-change-note-why {
+  color: var(--ui-muted-fg);
+}
+.ui-change-note-why > small {
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+.ui-change-note-failed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  color: var(--ui-muted-fg);
+}
+
+.ui-change-note-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 6px;
+  color: var(--ui-faint);
+  font-size: 11px;
+  line-height: 16px;
+}
+.ui-change-note-facts > span + span::before {
+  content: "·";
+  margin-right: 6px;
+  color: var(--ui-faint);
+}
+.ui-change-note-facts strong {
+  color: var(--ui-muted-fg);
+  font-weight: 400;
+}
+.ui-change-note-where {
+  min-width: 0;
+  color: var(--ui-muted-fg);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.ui-change-note-where > span {
+  color: var(--ui-faint);
+}
+
+/* ── the two sides ─────────────────────────────────────────────────── */
+
+/* Height-capped with its own scroll, so a file with many pieces can't push
+   the diff into a sliver. */
+.ui-change-note-sides {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-height: 230px;
+  overflow-y: auto;
+  border-top: 1px solid var(--ui-border);
+}
+.ui-change-note-sides[data-stacked] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.ui-change-side {
+  min-width: 0;
+  padding: 6px 12px 8px;
+}
+.ui-change-side + .ui-change-side {
+  border-left: 1px solid var(--ui-border);
+}
+.ui-change-note-sides[data-stacked] > .ui-change-side + .ui-change-side {
+  border-top: 1px solid var(--ui-border);
+  border-left: 0;
+}
+.ui-change-side > h4 {
+  margin-bottom: 4px;
+}
+.ui-change-side > p {
+  color: var(--ui-muted-fg);
+}
+.ui-change-side > ul {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ui-change-piece {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.ui-change-piece > .ui-changes-status {
+  margin-top: 1px;
+}
+.ui-change-piece-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+.ui-change-piece-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+}
+/* A piece that points at the code below: the same info rail the focused
+   caption over the diff wears, so the two read as one selection. A
+   transparent rail when unpicked keeps the text from shifting. */
+button.ui-change-piece-body {
+  margin-left: -4px;
+  padding: 2px 6px 2px 4px;
+  border-left: 2px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+button.ui-change-piece-body:hover,
+button.ui-change-piece-body[aria-pressed="true"] {
+  background: var(--ui-hover);
+}
+button.ui-change-piece-body[aria-pressed="true"] {
+  border-left-color: var(--ui-info);
+}
+button.ui-change-piece-body:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: 1px;
+}
+.ui-change-piece-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-change-piece-head > strong {
+  min-width: 0;
+  color: var(--ui-fg);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+.ui-change-piece-line {
+  color: var(--ui-muted-fg);
+}
+.ui-change-piece-body code {
+  color: var(--ui-faint);
+  font: 11px/16px var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.ui-change-piece-body code > small {
+  margin-left: 6px;
+}
+
+/* ── the commit's note ─────────────────────────────────────────────── */
+
+.ui-change-note-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.ui-change-note-toggle:hover {
+  background: var(--ui-hover);
+}
+.ui-change-note-toggle:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+.ui-change-note-toggle > svg {
+  align-self: center;
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--ui-faint);
+  transition: transform 120ms ease;
+}
+.ui-change-note-toggle[aria-expanded="true"] > svg {
+  transform: rotate(90deg);
+}
+.ui-change-note-toggle > small {
+  flex-shrink: 0;
+}
+.ui-change-note-line {
+  flex: 1;
+  min-width: 0;
+  color: var(--ui-fg);
+  font-size: 13px;
+  line-height: 20px;
+}
+.ui-change-note-line > em {
+  color: var(--ui-muted-fg);
+  font-style: normal;
+}
+
+.ui-change-note-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 12px 10px 32px;
+}
+.ui-change-note-body {
+  margin-top: 2px;
+  color: var(--ui-muted-fg);
+  white-space: pre-wrap;
+}
+.ui-change-note-pieces {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ui-change-note-pieces > li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.ui-change-note-name {
+  color: var(--ui-fg);
+}
+.ui-change-note-rationale {
+  min-width: 0;
+  color: var(--ui-muted-fg);
+}
+.ui-change-note-ripple {
+  color: var(--ui-muted-fg);
+}
+.ui-change-note-ripple strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-change-note-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}

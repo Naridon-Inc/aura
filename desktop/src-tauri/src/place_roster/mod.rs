@@ -30,6 +30,7 @@
 //! not connected carries a host, a login or a key path, because we do not have
 //! one and inventing one is how a plausible value ends up in an ssh line.
 
+pub(crate) mod across;
 pub(crate) mod members;
 pub(crate) mod roster;
 
@@ -166,6 +167,7 @@ mod tests {
     fn signed_out_still_lists_the_boxes_on_this_laptop() {
         let book = vec![crate::cmd_machines::Machine {
             id: "ubuntu@10.0.0.4:/srv/alpha".into(),
+            aliases: Vec::new(),
             name: "my-box".into(),
             host: "10.0.0.4".into(),
             user: "ubuntu".into(),
@@ -238,6 +240,7 @@ mod tests {
     fn a_box() -> crate::cmd_machines::Machine {
         crate::cmd_machines::Machine {
             id: "ubuntu@10.0.0.4:/srv/alpha".into(),
+            aliases: Vec::new(),
             name: "my-box".into(),
             host: "10.0.0.4".into(),
             user: "ubuntu".into(),

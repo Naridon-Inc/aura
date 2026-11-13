@@ -232,6 +232,35 @@ export function describeTool(
         accent: "accent",
       };
     }
+    // Review comments an agent leaves on the diff, and its read of them.
+    case "aurareviewcommentadd": {
+      const list = Array.isArray(obj.comments) ? obj.comments : [];
+      const n = list.length;
+      return {
+        verb: "Code review comments",
+        tier: "action",
+        metric: `${n} comment${n === 1 ? "" : "s"}`,
+        fields: list.map((raw) => {
+          const c = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+          return { label: `${String(c.file ?? "")}:${String(c.line ?? "")}`, value: String(c.body ?? "") };
+        }),
+        hideRawInput: true,
+        glyph: "review",
+        accent: "neutral",
+      };
+    }
+    case "aurareviewcommentslist": {
+      const file = obj.file ? String(obj.file) : "";
+      return {
+        verb: "Review comments",
+        tier: "thinking",
+        subject: file ? basename(file) : "All files",
+        mono: !!file,
+        metric,
+        glyph: "review",
+        accent: "neutral",
+      };
+    }
     case "prove":
     case "auraprove": {
       return {
@@ -346,7 +375,7 @@ export function describeTool(
         subject: truncate(headline, 120),
         mono: !desc?.trim(),
         // When the step has a human description, the raw command rides along
-        // as a dim mono preview (Conductor-style) so the collapsed row reads
+        // as a dim mono preview so the collapsed row reads
         // "Ran · <what> · `the command`" instead of hiding the command.
         aux: desc?.trim() ? truncate(firstLine(cmd) || cmd, 120) : undefined,
         // Full command for the expanded terminal well — `> <command>` then its

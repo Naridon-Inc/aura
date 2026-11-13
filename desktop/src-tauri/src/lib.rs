@@ -31,6 +31,7 @@ mod cmd_agent_config_sync;
 mod cmd_agent_history;
 mod cmd_agent_skills;
 mod cmd_brain;
+mod acp_agents;
 mod cmd_brain_chat;
 mod cmd_agent_pty;
 mod cmd_agent_stream;
@@ -52,11 +53,33 @@ mod cmd_symbol_impact;
 mod cmd_commons_app;
 mod cmd_changes;
 mod cmd_cloud_auth;
+mod cmd_cloud_admin;
+mod cmd_aura_computer;
+mod cmd_pair_computer;
+mod cmd_cloud_github;
+mod cmd_cloud_me_github;
 mod cmd_cloud_billing;
 mod cmd_cloud_jobs;
+mod cmd_cloud_access;
 mod cmd_cloud_members;
 mod cmd_cloud_orgs;
 mod cmd_cloud_runners;
+mod cmd_cloud_team;
+mod cmd_cloud_handoff;
+mod cmd_editor_remote;
+mod cmd_cloud_pokes;
+mod cmd_cloud_agent_credentials;
+mod cmd_cloud_agent_signin;
+mod cloud_box_people;
+mod cmd_cloud_box_chat;
+mod cmd_cloud_moved;
+mod cmd_cloud_box_brain;
+mod cmd_cloud_box_history;
+mod cmd_cloud_box_open;
+mod cmd_cloud_workspaces;
+mod cmd_cloud_workspace_live;
+mod cmd_cloud_feedback;
+mod cloud_turn_keys;
 mod cmd_kg;
 mod cmd_kg_features;
 mod cmd_kg_flows;
@@ -74,6 +97,7 @@ mod cmd_device;
 mod cmd_doctor_cli;
 mod cmd_verify_intent;
 mod cmd_editors;
+mod cmd_branch_sync;
 mod cmd_files;
 // Pure readers of git's output, shared by the local commands and their
 // remote-workspace twins (AURA-1306).
@@ -102,11 +126,13 @@ mod cmd_orchestrator;
 mod cmd_permission;
 /// Aura's answer when a hosted agent asks to write a file or run a tool.
 mod host_policy;
+mod cmd_clipboard;
 mod cmd_clips;
 mod cmd_profiles;
 mod clips_watch;
 mod cloud_inbox;
 mod cloud_org;
+mod cloud_org_token;
 mod cloud_session_sync;
 mod cmd_lounge;
 mod cmd_permission_socket;
@@ -118,9 +144,12 @@ mod cmd_projects;
 mod cmd_prompts;
 mod cmd_repo_identity;
 mod cmd_repo_settings;
+mod import;
 mod recorded_reason;
 mod repo_identity;
+mod cmd_pr_rerun;
 mod cmd_prs;
+mod cmd_pr_merge_state;
 mod cmd_native_term;
 mod cmd_pty;
 mod cmd_run;
@@ -159,6 +188,8 @@ mod cmd_watcher;
 mod cmd_window;
 mod cmd_emoji;
 mod cmd_workspace_launch;
+mod cmd_workspace_scripts;
+mod workspace_scripts;
 mod cmd_automations;
 mod cmd_mission;
 mod cloudbox;
@@ -189,6 +220,10 @@ mod plugin_host;
 mod telemetry;
 mod telemetry_guard;
 mod pty_emit;
+// Only macOS/iOS split the page into its own process, so only they can have
+// it taken away; Tauri's hook does not exist elsewhere.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod renderer_recovery;
 mod watchdog;
 mod watchdog_sample;
 pub mod pty_daemon;
@@ -198,7 +233,10 @@ mod secret_store;
 pub mod spawn_dir;
 #[cfg(test)]
 mod test_home;
+mod nested_repos;
 mod worktree;
+mod worktree_bring;
+mod worktree_continue;
 mod worktree_recover;
 
 use std::path::PathBuf;
@@ -350,7 +388,7 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     fix_path_for_gui_macos();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -363,6 +401,7 @@ pub fn run() {
         .manage(deep_link::Pending::default())
         .manage(cmd_pty::PtyRegistry::new())
         .manage(cmd_agent_pty::AgentPtyRegistry::new())
+        .manage(workspace_scripts::ScriptRegistry::default())
         .manage(agent_mutation_guard::GuardRegistry::new())
         .manage(agent_mutation_guard::EditorWriteTracker::new())
         .manage(cmd_daemon::DaemonHandle::new())
@@ -371,6 +410,7 @@ pub fn run() {
         .manage(cmd_aura::AuraLiveRegistry::new())
         .manage(cmd_aurawatch::WatchRegistry::new())
         .manage(cmd_agent_stream::ChildRegistry::new())
+        .manage(acp_agents::AcpAgents::load())
         .manage(cmd_permission::PermissionRegistry::new())
         .manage(cli_bridge::BridgeRegistry::new())
         .manage(cmd_manager::ManagerRuntime::new())
@@ -390,7 +430,17 @@ pub fn run() {
         .manage(std::sync::Arc::new(ide_bridge::IdeBridgeState::new()))
         .manage(std::sync::Arc::new(
             crate::manager::dispatcher::DispatcherState::new(),
-        ))
+        ));
+
+    // macOS and iOS draw the page in a process of their own, which the kernel
+    // is free to kill when the machine runs out of memory — leaving this
+    // process alive behind a blank window and no crash report anywhere.
+    // Tauri's default is to leave it blank. See `renderer_recovery`.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let builder =
+        builder.on_web_content_process_terminate(renderer_recovery::on_renderer_terminated);
+
+    builder
         .setup(|app| {
             // Native menubar (macOS) + the `menu:<id>` router every platform
             // needs for the HUD's popup menus. `menu::install` owns that split
@@ -409,6 +459,16 @@ pub fn run() {
             tauri::async_runtime::spawn(async {
                 agent_policy::refresh_remote().await;
             });
+            // A sign-in token is minted for one org. If the app was left acting
+            // as another (an org switch on an older build only moved the
+            // name), every org-scoped call is refused with a bare 403 and Home,
+            // Billing and Connected GitHub all lock. Put them back in step
+            // before the first window asks for anything.
+            tauri::async_runtime::spawn(async {
+                if let Err(e) = cloud_org_token::mend().await {
+                    tracing::warn!(target: "cloud::org", "token and org not reconciled at start: {e}");
+                }
+            });
             // Work out which `aura` on this machine we can actually talk to,
             // before anything asks. The probe costs two subprocess spawns and
             // the answer is cached for the process, so paying it on a startup
@@ -419,7 +479,17 @@ pub fn run() {
                 let bin = crate::agent_event_listener::resolve_aura_bin();
                 tracing::info!(bin = %bin, "resolved aura CLI");
             });
-            // Menu-bar (tray) presence + the ⌘⇧A floating HUD. The tray
+            // A saved brain choice that names a brain this build no longer
+            // offers is dropped from the file once, so the next turn runs on
+            // the first agent or key the user has set up and the file says so.
+            std::thread::spawn(|| {
+                match crate::manager::brain::settings::migrate_retired_providers() {
+                    Ok(true) => tracing::info!("dropped a retired brain from brain settings"),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(error = %e, "brain settings migration skipped"),
+                }
+            });
+            // Menu-bar (tray) presence + the ⌃⌘A floating HUD. The tray
             // keeps Aura resident in the menu bar so the always-on-top HUD
             // can be summoned even when the main window is hidden; the
             // global shortcut is registered from Rust so it fires
@@ -441,7 +511,7 @@ pub fn run() {
             // is already waiting when the webview asks.
             deep_link::install(app.handle());
             // Seed the HUD master switch from persisted Settings BEFORE the
-            // ⌘⇧A shortcut is live, so a user who turned the HUD off stays off
+            // ⌃⌘A shortcut is live, so a user who turned the HUD off stays off
             // across restarts (the tray + shortcut register unconditionally;
             // the gate lives in hud::toggle/show).
             // Watch the main thread. A frozen window is the one failure the
@@ -676,6 +746,7 @@ pub fn run() {
             cmd_files::fs_delete,
             cmd_files::fs_reveal_in_finder,
             cmd_editors::editors_list,
+            cmd_editors::editors_icons,
             cmd_editors::editor_open,
             cmd_files::fs_find_files,
             cmd_search::fs_grep_content,
@@ -724,6 +795,9 @@ pub fn run() {
             cmd_files::scaffold_template,
             cmd_sample::seed_sample_project,
             cmd_files::git_ahead_behind,
+            cmd_branch_sync::git_target_sync,
+            cmd_branch_sync::git_fast_forward,
+            cmd_pr_merge_state::pr_merge_state,
             cmd_window::window_set_traffic_light_position,
             cmd_window::window_set_traffic_lights_hidden,
             cmd_window::window_start_drag,
@@ -733,11 +807,19 @@ pub fn run() {
             worktree::worktree_resolve_ref,
             worktree::worktree_create_managed,
             worktree::worktree_remove_managed,
+            nested_repos::nested_repos_list,
+            nested_repos::nested_repos_dirty,
             worktree::worktree_resolve_path,
+            worktree_bring::worktree_bring,
             worktree_recover::worktree_scan_lost,
             worktree_recover::worktree_reattach,
             worktree_recover::worktree_prune_ghosts,
             cmd_workspace_launch::workspace_launch,
+            cmd_workspace_scripts::workspace_scripts_state,
+            cmd_workspace_scripts::workspace_script_log,
+            cmd_workspace_scripts::workspace_script_run,
+            cmd_workspace_scripts::workspace_script_stop,
+            cmd_workspace_scripts::workspace_archive_script,
             cmd_lane::lane_spawn,
             cmd_lane::lane_list,
             cmd_lane::lane_discard,
@@ -774,6 +856,11 @@ pub fn run() {
             cmd_profiles::workspace_profile_get,
             cmd_profiles::workspace_profile_set,
             cmd_agent_stream::agent_stream_send,
+            acp_agents::acp_agents_list,
+            acp_agents::acp_agent_install,
+            acp_agents::acp_agent_uninstall,
+            acp_agents::acp_agent_sessions,
+            acp_agents::acp_agent_forget_sign_in,
             cmd_agent_stream::agent_stream_interrupt,
             cmd_permission::permission_respond,
             cmd_permission::permission_list_pending,
@@ -978,11 +1065,10 @@ pub fn run() {
             cmd_brain::brain_configure_cloud,
             cmd_brain::brain_cloud_config_get,
             cmd_brain::manager_list_brains,
-            cmd_brain::aura_pro_is_signed_in,
-            cmd_brain::aura_pro_quota,
             cmd_models::agent_models_list,
             cmd_brain_chat::brain_active_info,
             cmd_brain_chat::brain_chat_turn,
+            manager::brain::linked_dirs::linked_dirs_missing,
             cmd_carryover::brain_carryover,
             cmd_brain_chat::brain_chat_cancel,
             cmd_browser::browser_open,
@@ -1003,11 +1089,17 @@ pub fn run() {
             cmd_native_term::native_term_set_bounds,
             cmd_native_term::native_term_set_appearance,
             cmd_native_term::native_term_write,
+            cmd_native_term::native_term_paste,
             cmd_native_term::native_term_scroll,
             cmd_native_term::native_term_focus,
             cmd_native_term::native_term_select,
             cmd_native_term::native_term_copy,
             cmd_native_term::native_term_context,
+            cmd_native_term::native_term_clear,
+            cmd_native_term::native_term_select_all,
+            cmd_native_term::native_term_find,
+            cmd_native_term::native_term_find_step,
+            cmd_native_term::native_term_find_clear,
             cmd_native_term::native_term_close,
             ide_bridge::ide_bridge_status,
             ide_bridge::ide_bridge_respond,
@@ -1021,6 +1113,9 @@ pub fn run() {
             cmd_team::repo_github_owner,
             cmd_repo_settings::repo_worktree_settings_get,
             cmd_repo_settings::repo_worktree_settings_set,
+            import::import_sources_detect,
+            import::import_source_scan,
+            import::import_run,
             cmd_team::team_identity,
             cmd_team::team_claim,
             cmd_identity::identity_status,
@@ -1090,14 +1185,110 @@ pub fn run() {
             cmd_cloud_auth::cloud_auth_logout,
             cmd_cloud_auth::cloud_org_invite,
             cmd_cloud_members::cloud_org_members,
+            cmd_cloud_members::cloud_me,
             cmd_cloud_members::cloud_org_member_set_role,
             cmd_cloud_members::cloud_org_member_remove,
+            cmd_cloud_members::cloud_repo_member_add,
+            cmd_cloud_access::cloud_access_list,
+            cmd_cloud_access::cloud_access_grant,
+            cmd_cloud_access::cloud_access_revoke,
             cmd_cloud_orgs::cloud_orgs,
             cmd_cloud_orgs::cloud_org_switch,
             cmd_cloud_orgs::cloud_repos,
             cmd_cloud_auth::cloud_pair_create,
+            cmd_cloud_admin::cloud_api_keys,
+            cmd_cloud_admin::cloud_api_key_create,
+            cmd_cloud_admin::cloud_api_key_revoke,
+            cmd_cloud_admin::cloud_billing_checkout,
+            cmd_cloud_admin::cloud_billing_portal,
+            cmd_cloud_admin::cloud_org_create,
+            cmd_aura_computer::aura_computer_status,
+            cmd_aura_computer::aura_computer_start,
+            cmd_aura_computer::aura_computer_resize,
+            cmd_aura_computer::aura_computer_wake,
+            cmd_aura_computer::aura_computer_retry,
+            cmd_pair_computer::pair_computer_start,
+            cmd_pair_computer::pair_computer_status,
+            cmd_pair_computer::pair_computer_cancel,
+            cmd_pair_computer::pair_this_computer,
+            cmd_cloud_github::cloud_github_installations,
+            cmd_cloud_github::cloud_github_connect_start,
+            cmd_cloud_github::cloud_github_connect_ticket,
+            cmd_cloud_github::cloud_github_connect,
+            cmd_cloud_github::cloud_github_remove,
+            cmd_cloud_me_github::cloud_my_github,
+            cmd_cloud_me_github::cloud_my_github_connect_start,
+            cmd_cloud_me_github::cloud_my_github_connect_ticket,
+            cmd_cloud_me_github::cloud_my_github_disconnect,
+            cmd_cloud_me_github::cloud_my_github_repos,
             cmd_cloud_billing::cloud_billing_status,
             cmd_cloud_billing::cloud_billing_usage_by_member,
+            cmd_cloud_box_chat::cloud_box_link,
+            cmd_cloud_box_chat::cloud_box_lease,
+            cmd_cloud_box_chat::cloud_box_turn,
+            cmd_cloud_moved::cloud_workspace_moved,
+            cmd_cloud_box_brain::cloud_box_chat_attach,
+            cmd_cloud_box_brain::cloud_box_chat_people,
+            cmd_cloud_box_brain::cloud_box_chat_release,
+            cmd_cloud_box_brain::cloud_box_chat_models,
+            cmd_cloud_box_history::cloud_box_chat_answers,
+            cmd_cloud_box_history::cloud_box_chat_backfill,
+            cmd_cloud_workspace_live::cloud_workspace_watch,
+            cmd_cloud_workspace_live::cloud_workspace_unwatch,
+            cmd_cloud_feedback::cloud_feedback_read,
+            cmd_cloud_feedback::cloud_reaction_add,
+            cmd_cloud_feedback::cloud_reaction_remove,
+            cmd_cloud_feedback::cloud_comment_create,
+            cmd_cloud_feedback::cloud_comment_edit,
+            cmd_cloud_feedback::cloud_comment_delete,
+            cmd_cloud_feedback::cloud_comment_resolve,
+            cmd_cloud_feedback::cloud_comment_reopen,
+            cloud_turn_keys::cloud_box_turn_ids,
+            cmd_cloud_box_brain::cloud_box_chat_end,
+            cmd_cloud_box_open::cloud_box_chat_open,
+            cmd_cloud_workspaces::cloud_workspaces_list,
+            cmd_cloud_workspaces::cloud_workspace_create,
+            cmd_cloud_workspaces::cloud_repo_open_pulls,
+            worktree_continue::git_continue_branch_here,
+            cmd_cloud_workspaces::cloud_workspace_set_state,
+            cmd_cloud_workspaces::cloud_workspace_rename,
+            cmd_cloud_workspaces::cloud_workspace_messages,
+            cmd_cloud_workspaces::cloud_workspace_changes,
+            cmd_cloud_workspaces::cloud_workspace_prompt,
+            cmd_cloud_workspaces::cloud_public_models,
+            cmd_cloud_team::cloud_presence_beacon,
+            cmd_cloud_team::cloud_presence_list,
+            cmd_cloud_team::cloud_workspace_access,
+            cmd_cloud_team::cloud_workspace_access_set,
+            cmd_cloud_team::cloud_workspace_follow,
+            cmd_cloud_team::cloud_following,
+            cmd_cloud_team::cloud_mentions,
+            cmd_cloud_team::cloud_mentions_read,
+            cmd_cloud_handoff::cloud_workspace_reassign,
+            cmd_cloud_handoff::cloud_workspace_pull_request,
+            cmd_cloud_handoff::cloud_workspace_pull_request_create,
+            cmd_cloud_handoff::cloud_workspace_pull_request_ready,
+            cmd_editor_remote::machine_remote_editors,
+            cmd_editor_remote::machine_open_in_editor,
+            cmd_cloud_pokes::cloud_member_poke,
+            cmd_cloud_pokes::cloud_pokes,
+            cmd_cloud_pokes::cloud_poke_settings,
+            cmd_cloud_pokes::cloud_poke_settings_set,
+            cmd_cloud_agent_credentials::cloud_agent_credentials_list,
+            cmd_cloud_agent_credentials::cloud_agent_credential_save,
+            cmd_cloud_agent_signin::cloud_agent_signin_start,
+            cmd_cloud_agent_signin::cloud_agent_signin_status,
+            cmd_cloud_agent_signin::cloud_agent_signin_code,
+            cmd_cloud_agent_signin::cloud_agent_signin_cancel,
+            cmd_cloud_agent_credentials::cloud_agent_credential_remove,
+            cmd_cloud_agent_credentials::cloud_agent_selection_set,
+            cmd_cloud_agent_credentials::cloud_env_vars_list,
+            cmd_cloud_agent_credentials::cloud_env_var_save,
+            cmd_cloud_agent_credentials::cloud_env_var_remove,
+            cmd_cloud_workspaces::cloud_routines_list,
+            cmd_cloud_workspaces::cloud_routine_create,
+            cmd_cloud_workspaces::cloud_routine_delete,
+            cmd_cloud_workspaces::cloud_routine_run,
             cmd_cloud_runners::cloud_runners,
             cmd_cloud_jobs::cloud_job_states,
             cmd_cloud_jobs::cloud_jobs_for_repo,
@@ -1189,6 +1380,7 @@ pub fn run() {
             cmd_machines::machine_set_branch,
             cmd_machines::machine_forget,
             place_roster::places_list,
+            place_roster::across::places_list_all,
             place_make::place_make_offer,
             place_make::place_make,
             cloudbox::box_sessions,
@@ -1246,6 +1438,8 @@ pub fn run() {
             // AURA-1309 — the History rail and the "can these tabs open here?" probe
             manager::brain::place_work::git::place_git_commit_graph,
             manager::brain::place_work::ready::place_work_ready,
+            manager::brain::place_work::stats::place_work_stats,
+            manager::brain::place_work::copy_out::place_work_copy_out,
             manager::brain::place_work::git_ops::place_git_stage,
             manager::brain::place_work::git_ops::place_git_unstage,
             manager::brain::place_work::git_ops::place_git_discard,
@@ -1261,6 +1455,9 @@ pub fn run() {
             manager::brain::place_work::run::place_run_detect,
             // AURA-1308 — a session's scrollback, read off the machine
             manager::brain::place_capture::place_session_capture,
+            manager::brain::place_chat::place_chat_start,
+            manager::brain::place_chat::place_chat_status,
+            manager::brain::place_chat::place_chat_stop,
             manager::brain::place_sleep::place_sleeping,
             manager::brain::place_sleep::place_sleep,
             manager::brain::place_sleep::places_sleep_idle,
@@ -1298,8 +1495,11 @@ pub fn run() {
             cmd_manager::manager_brain_info,
             cmd_manager::manager_brain_detect,
             cmd_manager::manager_set_brain_override,
+            manager::view_note::manager_set_view,
+            cmd_manager::manager_rename,
             cmd_manager::manager_set_tasks,
             cmd_manager::manager_rate_task,
+            cmd_manager::task_worktree::manager_remove_task_worktree,
             cmd_manager::manager_override_todo_agent,
             cmd_projects::projects_register,
             cmd_projects::projects_list,
@@ -1319,6 +1519,7 @@ pub fn run() {
             cmd_prs::pr_update,
             cmd_prs::pr_detail,
             cmd_prs::pr_checks,
+            cmd_pr_rerun::pr_rerun_failed_checks,
             cmd_prs::pr_vercel_status,
             cmd_prs::pr_comments_list,
             cmd_prs::pr_comment_post,
@@ -1357,6 +1558,8 @@ pub fn run() {
             cmd_clips::clips_read_dataurl,
             cmd_clips::clips_copy_image_to_os,
             cmd_clips::clipboard_has_image,
+            cmd_clipboard::clipboard_read_text,
+            cmd_clipboard::clipboard_write_text,
             cmd_clips::clips_remove,
             cmd_clips::clips_clear,
             cmd_remote::remote_start,

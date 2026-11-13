@@ -45,7 +45,7 @@ const STORE = `${DIR}/ServiceStore.tsx`;
 const PARTS = `${DIR}/trackerParts.tsx`;
 const PEOPLE = `${DIR}/JiraPeople.tsx`;
 const CATALOG = `${DIR}/catalog.ts`;
-const DIALOG = "components/dialogs/SettingsDialog.tsx";
+const NAV = "components/settings/nav.tsx";
 const API = "lib/integrationsApi.ts";
 const TAURI = "../src-tauri/src/cmd_integrations.rs";
 const TYPES = "../src-tauri/src/integrations/types.rs";
@@ -124,8 +124,9 @@ describe("a provider with no credentials says so instead of offering a button", 
   test("the store withholds the button in that state", async () => {
     const src = await readSrc(STORE);
     // No button at all for a tracker we cannot start, rather than a button
-    // whose only outcome is an error.
-    expect(src).toContain("{isTracker && (!known || !ready) ? null : isTracker ? (");
+    // whose only outcome is an error: the row's control slot stays empty.
+    expect(src).toContain("control={");
+    expect(src).toContain("isTracker && (!known || !ready) ? null : isTracker ? (");
     expect(src).toContain("{isTracker && known && !ready && (");
     expect(src).toContain("<SetupNeeded");
   });
@@ -134,8 +135,9 @@ describe("a provider with no credentials says so instead of offering a button", 
     const src = await readSrc(PARTS);
     const setup = src.slice(src.indexOf("export function SetupNeeded({"));
     expect(setup).toContain("No {what} app is set up on this machine");
+    expect(setup).toContain("<code>~/.aura/integrations.toml</code>");
     expect(setup).toContain("[{block}]");
-    expect(setup).toContain("this card will");
+    expect(setup).toContain("this row will offer to connect");
   });
 });
 
@@ -149,7 +151,9 @@ describe("a read that failed is not a read that came back empty", () => {
   test("the pane says so, with a way to ask again", async () => {
     const src = await readSrc(PANE);
     expect(src).toContain('title="Aura couldn\'t check your trackers."');
-    expect(src).toContain("onRetry={() => void trackers.refresh()}");
+    // Try again sits in the row's control slot, beside the reason.
+    expect(src).toContain("onClick={() => void trackers.refresh()}");
+    expect(src).toContain("Try again");
   });
 
   test("an unchecked tracker is not reported as unconfigured", async () => {
@@ -209,7 +213,7 @@ describe("cancelling is not a failure", () => {
 
 describe("one pane, and it lists what you have", () => {
   test("the rail has a single Connected services row", async () => {
-    const src = await readSrc(DIALOG);
+    const src = await readSrc(NAV);
     expect(src).toContain('id: "connected", label: "Connected services"');
     // The two it replaced are gone from the union, the rail and the switch.
     expect(src).not.toContain('| "integrations"');
@@ -221,7 +225,7 @@ describe("one pane, and it lists what you have", () => {
   test("its keywords still find both halves by their old names", async () => {
     // Somebody who knows the old pane types "api key" or "integrations" into
     // the settings search; the merge must not lose them.
-    const src = await readSrc(DIALOG);
+    const src = await readSrc(NAV);
     const row = src.slice(
       src.indexOf('id: "connected"'),
       src.indexOf("\n", src.indexOf('id: "connected"')),
@@ -234,14 +238,18 @@ describe("one pane, and it lists what you have", () => {
   test("it is filed under Personal, because both halves are", async () => {
     // A model key and an OAuth token are facts about this machine, not this
     // project — switching project changes neither. The one per-project thing,
-    // which Jira project mirrors onto which repo, stays inside the Jira row.
-    const src = await readSrc(DIALOG);
-    const scoped = src.slice(
-      src.indexOf("const REPO_SCOPED_PANES"),
-      src.indexOf("]);", src.indexOf("const REPO_SCOPED_PANES")),
+    // which Jira project mirrors onto which repo, gets its own section under
+    // the list, and only once Jira is connected.
+    const src = await readSrc(NAV);
+    const row = src.slice(
+      src.indexOf('id: "connected"'),
+      src.indexOf("\n", src.indexOf('id: "connected"')),
     );
-    expect(scoped).not.toContain('"connected"');
-    expect(scoped).not.toContain('"integrations"');
+    expect(row.length).toBeGreaterThan(0);
+    // Repo-scoped pages carry `repo: true` and follow the toolbar's
+    // repository picker; this one acts on the machine, so it carries none.
+    expect(row).not.toContain("repo: true");
+    expect(src).not.toContain('id: "integrations"');
   });
 
   test("the list and the store are a partition, computed once", async () => {
@@ -273,5 +281,77 @@ describe("one pane, and it lists what you have", () => {
     expect(src).toContain("connected.length === 0");
     expect(src).toContain("Nothing is connected yet.");
     expect(src).toContain("Add a service");
+  });
+});
+
+describe("drawn with the settings rows every other page uses", () => {
+  const FILES = [
+    PANE,
+    STORE,
+    PARTS,
+    PEOPLE,
+    `${DIR}/JiraMirrors.tsx`,
+    `${DIR}/BeadsImport.tsx`,
+    `${DIR}/ProviderKeys.tsx`,
+    `${DIR}/TrackerRow.tsx`,
+    `${DIR}/ServiceGlyph.tsx`,
+  ];
+
+  test("each surface is built from SettingsRow, not hand-rolled cards", async () => {
+    for (const file of [PANE, STORE, PEOPLE, `${DIR}/JiraMirrors.tsx`, `${DIR}/BeadsImport.tsx`, `${DIR}/ProviderKeys.tsx`, `${DIR}/TrackerRow.tsx`]) {
+      const src = await readSrc(file);
+      expect(src).toContain('from "../../ui/settings-row"');
+      expect(src).toContain("<SettingsRow");
+    }
+  });
+
+  test("no utility-class layout is left in the pane", async () => {
+    // A row that styles itself drifts from the page around it; every row here
+    // takes its spacing, type and dividers from the shared settings styles.
+    for (const file of FILES) {
+      const src = await readSrc(file);
+      expect(src).not.toMatch(/className="[^"]*\b(flex|text-text-\d|bg-bg-\d|border-line|rounded|px-\d|py-\d)\b/);
+      expect(src).not.toContain('from "../../ui/state"');
+    }
+  });
+
+  test("the one loader is the ASCII spinner", async () => {
+    for (const file of FILES) {
+      const src = await readSrc(file);
+      expect(src).not.toContain("Loader2");
+      expect(src).not.toContain("animate-spin");
+    }
+    expect(await readSrc(PANE)).toContain("<AsciiSpinner /> Looking at what you're connected to…");
+  });
+
+  test("Jira's per-repo sections appear under the list only when Jira is connected", async () => {
+    const pane = await readSrc(PANE);
+    expect(pane).toContain('trackers.statuses.find((s) => s.kind === "jira" && s.connected)');
+    expect(pane).toContain("{jira && jiraSites.length > 0 && (");
+    expect(pane).toContain("<MirrorsSection");
+    expect(pane).toContain("{jira && (");
+    expect(pane).toContain("<PeopleSection repoRoot={repoRoot} />");
+  });
+
+  test("each Jira section shows its own failure beside its own controls", async () => {
+    for (const file of [PEOPLE, `${DIR}/JiraMirrors.tsx`]) {
+      const src = await readSrc(file);
+      expect(src).toContain("const [error, setError] = useState<string | null>(null)");
+      expect(src).toContain("{error && <SettingsError>{error}</SettingsError>}");
+    }
+  });
+
+  test("re-pulling every issue still asks first", async () => {
+    // A full re-pull spends the user's Jira API quota and can run for minutes.
+    const src = await readSrc(`${DIR}/JiraMirrors.tsx`);
+    expect(src).toContain("await askConfirm({");
+    expect(src).toContain('confirmLabel: "Re-pull everything"');
+    expect(src).toContain("if (!ok) return;");
+  });
+
+  test("Aura's suggested teammate fills the picker, so accepting it is one click", async () => {
+    const src = await readSrc(PEOPLE);
+    expect(src).toContain('const picked = manualPick[l.account_id] ?? s?.suggested_handle ?? "";');
+    expect(src).toContain("onClick={() => void link(l.account_id, picked)}");
   });
 });

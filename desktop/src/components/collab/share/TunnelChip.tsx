@@ -17,8 +17,9 @@
 import type { JSX, ReactNode } from "react";
 import { Cable } from "lucide-react";
 
-import { cn } from "../../../lib/utils";
+import { Button } from "../../ui/button";
 import { auraDisplayUrl, findAuraUrls } from "./shareTypes";
+import "../../ui/session-room.css";
 
 export type TunnelChipStatus = "open" | "closed" | "unknown";
 
@@ -47,8 +48,12 @@ export function TunnelChip({
   const clickable = !closed && !!onOpen;
 
   return (
-    <button
-      type="button"
+    <Button
+      variant="outline"
+      size="xs"
+      className="ui-session-tunnel"
+      data-status={status}
+      data-clickable={clickable ? "" : undefined}
       disabled={!clickable}
       onClick={() => onOpen?.(port)}
       title={
@@ -56,26 +61,11 @@ export function TunnelChip({
           ? `${display}. Whoever shared this has stopped sharing it.`
           : `Open ${display}${label ? ` · ${label}` : ""}`
       }
-      className={cn(
-        "inline-flex max-w-full shrink-0 items-center gap-1.5 rounded-md border px-1.5 py-0.5 align-baseline",
-        "font-mono text-sm leading-5 transition-colors",
-        closed
-          ? "cursor-default border-line-soft bg-bg-1 text-text-5 line-through"
-          : clickable
-            ? "border-line-soft bg-bg-2 text-text-1 hover:border-accent hover:bg-state-hover"
-            : "cursor-default border-line-soft bg-bg-2 text-text-2",
-      )}
     >
-      <Cable
-        size={11}
-        className={cn("shrink-0", closed ? "text-text-5" : "text-accent-green")}
-        aria-hidden
-      />
-      <span className="truncate">{display}</span>
-      {label && !closed && (
-        <span className="truncate font-sans text-xs text-text-4">{label}</span>
-      )}
-    </button>
+      <Cable aria-hidden />
+      <span>{display}</span>
+      {label && !closed && <small>{label}</small>}
+    </Button>
   );
 }
 

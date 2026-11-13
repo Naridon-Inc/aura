@@ -36,7 +36,7 @@ describe("identity row without a git email", () => {
   test("the sentence matches which of the two situations this is", async () => {
     const src = await readSrc(SRC);
     expect(src).toContain(
-      "Git has no email for you in this project, so Aura can",
+      "Git has no email for you in this repository, so Aura can",
     );
     // Still the right words when there IS an email and the team doesn't
     // know it — that case was never broken.

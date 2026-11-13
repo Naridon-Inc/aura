@@ -25,11 +25,14 @@
 // quick auto-run refreshes it. Title-less FullscreenOverlay — the surface
 // carries its own context.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, Check, Circle, Hourglass, Radio, ShieldCheck, X } from "lucide-react";
 import { FullscreenOverlay } from "../FullscreenOverlay";
 import { relativeAge } from "../../lib/relativeTime";
 import { loadCachedChecks, saveCachedChecks } from "../../lib/checksEvidence";
+import { AsciiSpinner } from "../ui/ascii-spinner";
 import { Button } from "../ui/button";
+import { EmptyState, ErrorState } from "../ui/state";
 import {
   api,
   type CiPipelineRun,
@@ -37,41 +40,33 @@ import {
   type CiStepResult,
   type CiTrigger,
 } from "../../lib/api";
+import "../ui/check-report.css";
+import "../ui/log-note.css";
+import "../ui/checks-page.css";
 
 type ChecksPaneProps = {
   repoRoot: string;
   onClose: () => void;
 };
 
-// Verdict → presentation. Arctic-blue is reserved for primary affordances, so
-// status uses the status palette only: teal = pass, amber = needs-a-look /
-// timeout, red = failed, muted = skipped.
+// Verdict → the shared check-run row: its status (which colours the mark), the
+// mark itself, and the plain-language label a non-passing row says under it.
 const STATUS: Record<
   CiStatus,
-  { label: string; glyph: string; color: string; hint: string }
+  { label: string; status: string; icon: typeof Check; hint: string }
 > = {
-  pass: {
-    label: "Passed",
-    glyph: "✓",
-    color: "var(--color-accent-green)",
-    hint: "This check is clean.",
-  },
-  fail: {
-    label: "Needs a look",
-    glyph: "✗",
-    color: "var(--color-red)",
-    hint: "This check found something.",
-  },
+  pass: { label: "Passed", status: "passed", icon: Check, hint: "This check is clean." },
+  fail: { label: "Needs a look", status: "failed", icon: X, hint: "This check found something." },
   timeout: {
     label: "Took too long",
-    glyph: "⧖",
-    color: "var(--color-amber)",
+    status: "attention",
+    icon: Hourglass,
     hint: "This check ran out of time and was stopped.",
   },
   skip: {
     label: "Not applicable",
-    glyph: "·",
-    color: "var(--color-text-4)",
+    status: "pending",
+    icon: Circle,
     hint: "Nothing here needed this check.",
   },
 };
@@ -234,17 +229,22 @@ export function ChecksPane({ repoRoot, onClose }: ChecksPaneProps) {
     [runs],
   );
 
+  const tone =
+    runs.length === 0 ? undefined : needsLook > 0 ? "bad" : skipped > 0 ? "attention" : "good";
+
   return (
     <FullscreenOverlay
       onClose={onClose}
       actions={
-        <div className="flex items-center gap-2.5">
+        <div className="ui-checks-actions">
           {quickBusy && !fullBusy && (
-            <span className="text-xs text-text-4">Checking…</span>
+            <span className="ui-check-report-when">
+              <AsciiSpinner size={10} />
+              Checking…
+            </span>
           )}
           <Button
             type="button"
-            variant="accentSoft"
             size="sm"
             onClick={() => void runChecks("full")}
             disabled={fullBusy}
@@ -255,83 +255,78 @@ export function ChecksPane({ repoRoot, onClose }: ChecksPaneProps) {
         </div>
       }
       footer={
-        <Button type="button" onClick={onClose}>
+        <Button type="button" variant="outline" onClick={onClose}>
           Done
         </Button>
       }
     >
-      <div className="h-full w-full flex flex-col bg-bg-0">
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          <div className="max-w-[720px] mx-auto px-4 py-5">
-            <ChecksHeadline
-              headline={headline}
-              passed={passed}
-              needsLook={needsLook}
-              skipped={skipped}
-              ranAt={ranAt}
-              mode={lastMode}
-              checking={quickBusy && !fullBusy}
-              hasRuns={runs.length > 0}
-              failedToRun={runs.length === 0 && ranEmpty}
+      <div className="ui-checks-page">
+        <div className="ui-check-report">
+          <ChecksHeadline
+            headline={headline}
+            tone={tone}
+            passed={passed}
+            needsLook={needsLook}
+            skipped={skipped}
+            ranAt={ranAt}
+            mode={lastMode}
+            checking={quickBusy && !fullBusy}
+            hasRuns={runs.length > 0}
+            countsInTitle={runs.length !== 1}
+            failedToRun={runs.length === 0 && ranEmpty}
+          />
+
+          {error && (
+            <ErrorState
+              size="sm"
+              title="Couldn’t run your checks"
+              message={error}
+              onRetry={() => void runChecks("quick")}
             />
+          )}
 
-            {error && (
-              <div
-                className="mt-3 rounded-md px-3 py-2 text-sm"
-                style={{
-                  color: "var(--color-red)",
-                  background: "color-mix(in srgb, var(--color-red) 12%, transparent)",
-                }}
-              >
-                {error}
-              </div>
-            )}
-
-            {runs.length === 0 && ranEmpty ? (
-              <CouldNotRun
-                running={quickBusy}
-                onRun={() => void runChecks("quick")}
-              />
-            ) : runs.length === 0 ? (
-              <EmptyChecks
-                running={quickBusy || fullBusy}
-                onRun={() => void runChecks("full")}
-              />
-            ) : (
-              <ul className="mt-4 space-y-4">
-                {runs.map((pipelineRun) => (
-                  <PipelineSection
-                    key={pipelineRun.pipeline}
-                    run={pipelineRun}
-                    expanded={expanded}
-                    onToggle={toggle}
-                  />
-                ))}
-              </ul>
-            )}
-
-            {/* A re-run came back empty while an earlier good result is still
-                shown — note it inline so the stale rows aren't read as fresh. */}
-            {runs.length > 0 && ranEmpty && (
-              <div
-                className="mt-3 rounded-md px-3 py-2 text-sm"
-                style={{
-                  color: "var(--color-amber)",
-                  background:
-                    "color-mix(in srgb, var(--color-amber) 12%, transparent)",
-                }}
-              >
-                Couldn't run your checks just now. Showing the last result.
-                Try again.
-              </div>
-            )}
-
-            <CloudAffordance
-              exporting={exporting}
-              exportedPath={exportedPath}
-              onExport={() => void exportToCloud()}
+          {runs.length === 0 && ranEmpty ? (
+            <ErrorState
+              title="Couldn’t run your checks"
+              message="Nothing came back from the checks just now. This usually clears up on a retry. If it keeps happening, make sure this folder is opened as a repository and your Aura is up to date."
+              onRetry={quickBusy ? undefined : () => void runChecks("quick")}
             />
-          </div>
+          ) : runs.length === 0 ? (
+            <EmptyState
+              icon={ShieldCheck}
+              title="Ready-to-ship checks"
+              body="Aura watches your work for ship-readiness: no leaked secrets, no half-finished pieces, and the repository still builds. The first three re-check on their own after every commit; run the full check to include the build."
+              action={{
+                label: quickBusy || fullBusy ? "Checking…" : "Run full check",
+                onClick: () => void runChecks("full"),
+                disabled: quickBusy || fullBusy,
+              }}
+            />
+          ) : (
+            runs.map((pipelineRun) => (
+              <PipelineSection
+                key={pipelineRun.pipeline}
+                run={pipelineRun}
+                expanded={expanded}
+                onToggle={toggle}
+              />
+            ))
+          )}
+
+          {/* A re-run came back empty while an earlier good result is still
+              shown — say so, so the rows below aren't read as fresh. */}
+          {runs.length > 0 && ranEmpty && (
+            <p className="ui-check-report-when" data-tone="attention">
+              <AlertTriangle size={12} />
+              Couldn’t run your checks just now. Showing the last result.
+            </p>
+          )}
+
+          <CloudAffordance
+            exporting={exporting}
+            exportedPath={exportedPath}
+            onExport={() => void exportToCloud()}
+          />
         </div>
       </div>
     </FullscreenOverlay>
@@ -340,6 +335,7 @@ export function ChecksPane({ repoRoot, onClose }: ChecksPaneProps) {
 
 function ChecksHeadline({
   headline,
+  tone,
   passed,
   needsLook,
   skipped,
@@ -347,9 +343,11 @@ function ChecksHeadline({
   mode,
   checking,
   hasRuns,
+  countsInTitle,
   failedToRun,
 }: {
   headline: string;
+  tone: "good" | "attention" | "bad" | undefined;
   passed: number;
   needsLook: number;
   skipped: number;
@@ -357,6 +355,9 @@ function ChecksHeadline({
   mode: RunMode | null;
   checking: boolean;
   hasRuns: boolean;
+  /** The folded headline already says the counts; the engine's own one-run
+   *  headline doesn't, so only then are they repeated underneath. */
+  countsInTitle: boolean;
   failedToRun: boolean;
 }) {
   const title = hasRuns
@@ -367,43 +368,39 @@ function ChecksHeadline({
         ? "Checking your latest commit…"
         : "Watching your latest commit.";
   return (
-    <div>
-      <h2 className="text-base font-semibold text-text-0">{title}</h2>
+    <>
+      <header className="ui-verdict" data-tone={tone}>
+        <strong>{title}</strong>
+        {hasRuns && (
+          <span>
+            {!countsInTitle && (
+              <>
+                {passed} passed
+                {needsLook > 0 && <> · {needsLook} {needsLook === 1 ? "needs" : "need"} a look</>}
+                {/* A skipped check isn't a passed one. Left out of this line,
+                    it was invisible everywhere — and "N passed" read as the
+                    whole run. */}
+                {skipped > 0 && <> · {skipped} skipped</>}
+                {ranAt && " · "}
+              </>
+            )}
+            {ranAt && <>Checked {relativeTime(ranAt)}</>}
+          </span>
+        )}
+      </header>
+      {/* The fast gates re-run on their own after every commit, so say what's
+          automatic and which gates the last run covered — the slow build only
+          runs on the full check, and when you push. */}
       {hasRuns && (
-        <p className="mt-1 text-sm text-text-3">
-          <span style={{ color: "var(--color-accent-green)" }}>{passed} passed</span>
-          {needsLook > 0 && (
-            <>
-              {" · "}
-              <span style={{ color: "var(--color-red)" }}>
-                {needsLook} {needsLook === 1 ? "needs" : "need"} a look
-              </span>
-            </>
-          )}
-          {/* A skipped check isn't a passed one. Left out of this line, it was
-              invisible everywhere — and "N passed" read as the whole run. */}
-          {skipped > 0 && <span className="text-text-4"> · {skipped} skipped</span>}
-          {ranAt && <span className="text-text-4"> · {relativeTime(ranAt)}</span>}
-        </p>
-      )}
-      {/* Live + scope note: the fast gates re-run on their own after every
-          commit, so say what's auto and which gates the last run actually
-          covered — the slow build only runs on the full check / on push. */}
-      {hasRuns && (
-        <p className="mt-1 flex items-center gap-1.5 text-xs text-text-4">
-          <span
-            className="inline-block h-1.5 w-1.5 rounded-full"
-            style={{ background: "var(--color-accent-green)" }}
-            aria-hidden
-          />
+        <p className="ui-check-report-when">
+          {checking ? <AsciiSpinner size={10} /> : <Radio size={12} />}
           Live · re-checks itself after every commit.
           {mode === "full"
             ? " This run included the build."
             : " The build runs on the full check, and when you push."}
-          {checking && " · checking…"}
         </p>
       )}
-    </div>
+    </>
   );
 }
 
@@ -417,21 +414,19 @@ function PipelineSection({
   onToggle: (id: string) => void;
 }) {
   return (
-    <li>
-      <ul className="space-y-1.5">
-        {run.steps.map((step, i) => {
-          const id = `${run.pipeline}:${i}`;
-          return (
-            <CheckRow
-              key={id}
-              step={step}
-              open={expanded.has(id)}
-              onToggle={() => onToggle(id)}
-            />
-          );
-        })}
-      </ul>
-    </li>
+    <div className="ui-check-runs ui-check-box">
+      {run.steps.map((step, i) => {
+        const id = `${run.pipeline}:${i}`;
+        return (
+          <CheckRow
+            key={id}
+            step={step}
+            open={expanded.has(id)}
+            onToggle={() => onToggle(id)}
+          />
+        );
+      })}
+    </div>
   );
 }
 
@@ -445,117 +440,37 @@ function CheckRow({
   onToggle: () => void;
 }) {
   const presentation = STATUS[step.status];
-  const hasDetail = Boolean(step.detail) || step.status !== "pass";
+  const Icon = presentation.icon;
+  const hasDetail = Boolean(step.detail);
   const advisory = !step.blocking && (step.status === "fail" || step.status === "timeout");
+  const meta = [
+    step.status === "pass" ? null : presentation.label,
+    advisory ? "won’t block" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
-    <li className="rounded-md border border-border bg-bg-1">
-      <button
-        type="button"
-        className="w-full flex items-center gap-3 px-3 py-2.5 text-left"
-        onClick={hasDetail ? onToggle : undefined}
-        aria-expanded={open}
-      >
-        <span
-          className="text-base leading-none w-4 text-center"
-          style={{ color: presentation.color }}
-          aria-hidden
-        >
-          {presentation.glyph}
-        </span>
-        <span className="flex-1 min-w-0">
-          <span className="text-sm text-text-0">{step.name}</span>
-          {advisory && (
-            <span className="section-label ml-2">
-              won't block
-            </span>
-          )}
-          {step.status !== "pass" && (
-            <span className="block text-xs text-text-3 mt-0.5 truncate">
-              {step.summary}
-            </span>
-          )}
+    <Fragment>
+      <div data-status={presentation.status} title={presentation.hint}>
+        <Icon size={14} />
+        <span>
+          {step.name}
+          {step.status !== "pass" && step.summary && <small>{step.summary}</small>}
+          {meta && <small>{meta}</small>}
         </span>
         {hasDetail && (
-          <span className="text-text-4 text-xs" aria-hidden>
+          <Button size="xs" variant="ghost" aria-expanded={open} onClick={onToggle}>
             {open ? "Hide" : "Details"}
-          </span>
+          </Button>
         )}
-      </button>
-      {open && (
-        <div className="px-3 pb-3 pt-0">
-          <p className="text-xs text-text-3 mb-1.5">{step.summary}</p>
-          {step.detail && (
-            <pre className="text-xs leading-relaxed text-text-4 whitespace-pre-wrap font-mono bg-bg-0 rounded px-2.5 py-2 overflow-x-auto">
-              {step.detail}
-            </pre>
-          )}
-        </div>
+      </div>
+      {open && hasDetail && (
+        <ul className="ui-check-box-rows">
+          <li>{step.detail}</li>
+        </ul>
       )}
-    </li>
-  );
-}
-
-function EmptyChecks({
-  running,
-  onRun,
-}: {
-  running: boolean;
-  onRun: () => void;
-}) {
-  return (
-    <div className="mt-8 text-center">
-      <p className="text-sm text-text-3">
-        Aura watches your work for ship-readiness. No leaked secrets, no
-        half-finished pieces, and the project still builds. The first three
-        re-check on their own after every commit; run the full check to include
-        the build.
-      </p>
-      <Button
-        type="button"
-        variant="accentSoft"
-        size="sm"
-        className="mt-4"
-        onClick={onRun}
-        disabled={running}
-      >
-        {running ? "Checking…" : "Run full check"}
-      </Button>
-    </div>
-  );
-}
-
-function CouldNotRun({
-  running,
-  onRun,
-}: {
-  running: boolean;
-  onRun: () => void;
-}) {
-  return (
-    <div className="mt-8 text-center">
-      <p
-        className="text-sm"
-        style={{ color: "var(--color-red)" }}
-      >
-        Couldn't run your checks. Try again.
-      </p>
-      <p className="mt-1.5 text-xs text-text-3">
-        Nothing came back from the checks just now. This usually clears up on a
-        retry. If it keeps happening, make sure this folder is opened as a
-        project and your Aura is up to date.
-      </p>
-      <Button
-        type="button"
-        variant="accentSoft"
-        size="sm"
-        className="mt-4"
-        onClick={onRun}
-        disabled={running}
-      >
-        {running ? "Running…" : "Try again"}
-      </Button>
-    </div>
+    </Fragment>
   );
 }
 
@@ -569,30 +484,23 @@ function CloudAffordance({
   onExport: () => void;
 }) {
   return (
-    <div className="mt-8 pt-5 border-t border-border">
-      <p className="text-sm text-text-2 font-medium">
-        Run these in the cloud on every PR
-      </p>
-      <p className="mt-1 text-xs text-text-3">
+    <section className="ui-checks-cloud">
+      <div className="ui-log-note-files-head">
+        <span>Run these on every pull request</span>
+      </div>
+      <p>
         Aura can write a GitHub workflow so the exact same checks run
         automatically whenever you open a pull request.
       </p>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="mt-3"
-        onClick={onExport}
-        disabled={exporting}
-      >
+      <Button type="button" variant="outline" size="sm" onClick={onExport} disabled={exporting}>
         {exporting ? "Writing…" : "Set up cloud checks"}
       </Button>
       {exportedPath && (
-        <p className="mt-2 text-xs" style={{ color: "var(--color-accent-green)" }}>
+        <p data-tone="good">
           Wrote {exportedPath}. Commit and push it to turn on cloud checks.
         </p>
       )}
-    </div>
+    </section>
   );
 }
 

@@ -11,14 +11,11 @@ import { Plug, Settings2 } from "lucide-react";
 import { api, type McpServerEntry } from "../../../lib/api";
 import { AsciiSpinner } from "../../ui/ascii-spinner";
 import { Button } from "../../ui/button";
+import { SettingsMcpToolbar } from "../../ui/settings-mcp-parts";
+import { SettingsRow } from "../../ui/settings-row";
+import { SettingsServiceMark, SettingsServiceTitle } from "../../ui/settings-services-row";
 import { Switch } from "../../ui/switch";
-import {
-  Card,
-  EmptyHint,
-  PaneIntro,
-  PaneScroll,
-  PaneSpinner,
-} from "./customizeShared";
+import { Card, EmptyHint, PaneIntro, PaneScroll, PaneSpinner } from "./customizeShared";
 
 export function McpServersPane({
   mcp,
@@ -52,18 +49,31 @@ export function McpServersPane({
     }
   };
 
+  const on = mcp.filter((row) => row.enabled).length;
+
   return (
     <PaneScroll>
       <PaneIntro
         title="Connections"
         blurb="Let your agent work in the tools you already use. Issue trackers, error monitors, databases. Switch a connection on to make it available, off to cut access."
-        action={
-          <Button size="sm" variant="subtle" onClick={manage} className="gap-1">
-            <Settings2 size={14} />
-            Manage
-          </Button>
-        }
       />
+      {/* Setting one up — a key, a sign-in — is the full connection manager's
+          job, so the page's one action hands you there, from a row's control
+          slot the way the connections settings page carries its toolbar. */}
+      <Card>
+        <SettingsRow
+          title="Your connections"
+          description={mcp.length > 0 ? `${mcp.length} configured · ${on} on` : undefined}
+          control={
+            <SettingsMcpToolbar>
+              <Button size="sm" variant="ghost" onClick={manage}>
+                <Settings2 />
+                Manage
+              </Button>
+            </SettingsMcpToolbar>
+          }
+        />
+      </Card>
       {loading && mcp.length === 0 ? (
         <PaneSpinner label="Loading connections…" />
       ) : mcp.length === 0 ? (
@@ -75,34 +85,33 @@ export function McpServersPane({
         />
       ) : (
         <Card>
-          {mcp.map((row, i) => (
-            <div
+          {mcp.map((row) => (
+            <SettingsRow
               key={row.name}
-              className={`flex items-center gap-3 px-3.5 py-3 ${
-                i > 0 ? "border-t border-line-soft" : ""
-              }`}
-            >
-              <Plug size={15} className="shrink-0 text-text-4" />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-base font-medium text-text-1">
-                  {row.name}
-                </div>
-                <div className="truncate text-sm text-text-4">
-                  {row.description || row.server_url || row.command}
-                </div>
-              </div>
-              {busy === row.name ? (
-                <AsciiSpinner className="shrink-0 text-md" />
-              ) : (
-                <Switch
-                  checked={row.enabled}
-                  onCheckedChange={() => toggle(row)}
-                  aria-label={
-                    row.enabled ? "Turn connection off" : "Turn connection on"
+              title={
+                <SettingsServiceTitle
+                  mark={
+                    <SettingsServiceMark>
+                      <Plug />
+                    </SettingsServiceMark>
                   }
-                />
-              )}
-            </div>
+                >
+                  {row.name}
+                </SettingsServiceTitle>
+              }
+              description={row.description || row.server_url || row.command}
+              control={
+                busy === row.name ? (
+                  <AsciiSpinner />
+                ) : (
+                  <Switch
+                    checked={row.enabled}
+                    onCheckedChange={() => toggle(row)}
+                    aria-label={row.enabled ? "Turn connection off" : "Turn connection on"}
+                  />
+                )
+              }
+            />
           ))}
         </Card>
       )}

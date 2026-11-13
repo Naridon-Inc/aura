@@ -53,7 +53,7 @@ impl BrainManager {
             .clone()
             .or_else(default_provider_id)
             .ok_or_else(|| BrainError::Other {
-                message: "no active brain configured and no default available".into(),
+                message: NO_AGENT_SET_UP.into(),
             })?;
         let brain = registry::build(&provider_id)?;
         self.inner.write().unwrap().active = Some(brain.clone());
@@ -64,8 +64,13 @@ impl BrainManager {
     /// persisting anything. WW-B1 — the chat-header BrainPicker's
     /// per-session override resolves through here so a mid-conversation
     /// swap applies to this turn only, leaving the global default and
-    /// every other session untouched.
+    /// every other session untouched. An override naming a retired brain
+    /// is a choice that can no longer be honoured, so the turn runs on the
+    /// active brain, as if nothing had been picked.
     pub fn resolve(&self, provider_id: &str) -> Result<Arc<dyn Brain>, BrainError> {
+        if settings::is_retired(provider_id) {
+            return self.active();
+        }
         registry::build(provider_id)
     }
 
@@ -84,6 +89,10 @@ impl BrainManager {
         self.inner.read().unwrap().settings.clone()
     }
 }
+
+/// What a turn says when there is nothing to run it on.
+pub const NO_AGENT_SET_UP: &str = "No agent set up yet. Sign in to Claude Code, Codex or \
+another agent, or add an API key, in Settings → Agents.";
 
 /// Pick a sensible default when the user hasn't configured anything.
 /// Order (the registry's own availability walk): a native provider whose

@@ -1,20 +1,14 @@
-import * as React from "react";
-import { Textarea as MedusaTextarea } from "@medusajs/ui";
-
+import { forwardRef, type TextareaHTMLAttributes } from "react";
 import { cn } from "../../lib/utils";
-
-type MedusaTextareaProps = React.ComponentPropsWithoutRef<typeof MedusaTextarea>;
-
-export interface TextareaProps extends MedusaTextareaProps {
+export interface TextareaProps extends TextareaHTMLAttributes<HTMLTextAreaElement> {
   invalid?: boolean;
 }
-
-export const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
+export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
   ({ className, invalid, ...props }, ref) => (
-    <MedusaTextarea
+    <textarea
       ref={ref}
       aria-invalid={invalid || undefined}
-      className={cn("min-h-[88px]", invalid && "shadow-[var(--shadow-field-error)]", className)}
+      className={cn("ui-input ui-textarea", className)}
       {...props}
     />
   ),

@@ -1,9 +1,11 @@
-import { ChatViewSwitcher } from "../chat/ChatHeader";
-import { useEffect, useRef, useState } from "react";
-import { promptForChatMode, type ChatMode } from "../chat/ChatComposer";
-import { AgentTurnModelPicker } from "../chat/ModelCatalogPopover";
+import { ChatViewSwitcher } from "../chat/ChatViewSwitcher";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { promptForChatMode, type ChatMode } from "../chat/composer/chatMode";
+import { AgentTurnModelPicker } from "../chat/model/AgentModelPickers";
 import { QuestionFlow } from "../chat/QuestionFlow";
-import { Terminal } from "lucide-react";
+import { PermissionRequest } from "../ui/chat-decisions";
+import { RotateCcw, Terminal } from "lucide-react";
+import { DropdownMenuItem, DropdownMenuSeparator } from "../ui/dropdown-menu";
 import { api, type PermissionPrompt } from "../../lib/api";
 import { type AgentTab, useEditorStore } from "../../lib/editorStore";
 import {
@@ -21,6 +23,10 @@ import {
 import { readChatHistory } from "../../lib/chatHistory";
 import { usePermissionPrompts, decidePrompt } from "../../lib/permissionStore";
 import { NormalizedTranscript } from "./normalized/NormalizedTranscript";
+import { ACP_PROMPT_TOOLS, AcpPrompt } from "./AcpPrompts";
+import { acpModels, acpSessionState } from "../../lib/agentProtocol/adapters/acp";
+import { manifestFor } from "../../lib/agentProtocol/manifest";
+import type { SlashItem } from "../chat/composer/useComposerSuggestions";
 
 export function StreamChatView({ tab }: { tab: AgentTab }) {
   const channel = `${streamChannel(tab.agentId, tab.repoRoot)}_${tab.sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}`;
@@ -39,6 +45,13 @@ export function StreamChatView({ tab }: { tab: AgentTab }) {
   const restored = useRef(false);
   const historyReady = useRef<Promise<void>>(Promise.resolve());
   const prompts = usePermissionPrompts(channel);
+  // What the agent's own ACP session offers: its commands and its models.
+  const acp = useMemo(() => acpSessionState(events), [events]);
+  const agentCommands = useMemo<SlashItem[] | undefined>(() => {
+    const label = manifestFor(tab.agentId).label;
+    return acp?.commands.map(c => ({ name: c.name, summary: c.description, args: c.hint, source: "agent", badge: label }));
+  }, [acp, tab.agentId]);
+  const offeredModels = useMemo(() => acpModels(acp), [acp]);
   useEffect(() => {
     bindChannelMeta(channel, { agentId: tab.agentId, repoRoot: tab.repoRoot });
     configureChatHistory(channel, key);
@@ -178,14 +191,14 @@ export function StreamChatView({ tab }: { tab: AgentTab }) {
         </div>
       )}
       {prompts.map((p, i) => (
-        <ChatPermission key={p.prompt_id} prompt={p} docked={i === prompts.length - 1} />
+        <ChatPermission key={p.prompt_id} prompt={p} docked={i === prompts.length - 1} repoRoot={tab.repoRoot} />
       ))}
 
     </>
   );
   return (
     <NormalizedTranscript
-      viewSwitcher={<ChatViewSwitcher value="chat" disabled={running} onChange={view => { if (view === "terminal") void openTerminal(); }} />}
+      viewSwitcher={<ChatViewSwitcher value="chat" disabled={running} disabledTitle="Open the CLI once this turn finishes" onChange={view => { if (view === "terminal") void openTerminal(); }} />}
       channel={channel}
       agentId={tab.agentId}
       repoRoot={tab.repoRoot}
@@ -196,33 +209,32 @@ export function StreamChatView({ tab }: { tab: AgentTab }) {
       }}
       controls={controls}
       composerDocked={prompts.length > 0}
-      modelControl={<AgentTurnModelPicker agentId={tab.agentId} value={model} disabled={running} onChange={value => { setModel(value); try { localStorage.setItem(`${key}.model`, value); } catch {} }} />}
+      agentCommands={agentCommands}
+      modelControl={<AgentTurnModelPicker agentId={tab.agentId} value={model} disabled={running} offered={offeredModels} onChange={value => { setModel(value); try { localStorage.setItem(`${key}.model`, value); } catch {} }} />}
       composerOptions={<>
+        <DropdownMenuSeparator />
         {!running && lastPrompt?.kind === "user_prompt" && (
-          <button
-            type="button"
-            onClick={() =>
+          <DropdownMenuItem
+            onSelect={() =>
               void send(lastPrompt.text).catch((e) => setError(String(e)))
             }
           >
+            <RotateCcw />
             Retry last message
-          </button>
+          </DropdownMenuItem>
         )}
-        <button
-          type="button"
-          disabled={running}
-          onClick={() => void openTerminal()}
-        >
-          <Terminal size={13} />
+        <DropdownMenuItem disabled={running} onSelect={() => void openTerminal()}>
+          <Terminal />
           Continue in Terminal
-        </button>
+        </DropdownMenuItem>
       </>}
       onRespondInTerminal={() => void openTerminal()}
     />
   );
 }
 
-function ChatPermission({ prompt, docked }: { prompt: PermissionPrompt; docked: boolean }) {
+function ChatPermission({ prompt, docked, repoRoot }: { prompt: PermissionPrompt; docked: boolean; repoRoot: string }) {
+  if (ACP_PROMPT_TOOLS.has(prompt.tool_name)) return <AcpPrompt prompt={prompt} docked={docked} repoRoot={repoRoot} />;
   type NativeQuestion = { question: string; header?: string; multiSelect?: boolean; options?: { label: string; description?: string }[] };
   const rawQuestions = (prompt.input as { questions?: unknown } | null)?.questions;
   const questions = Array.isArray(rawQuestions) && rawQuestions.every(q => q && typeof q.question === "string" && (q.options == null || (Array.isArray(q.options) && q.options.every((o: any) => o && typeof o.label === "string")))) ? rawQuestions as NativeQuestion[] : undefined;
@@ -234,13 +246,36 @@ function ChatPermission({ prompt, docked }: { prompt: PermissionPrompt; docked: 
         await decidePrompt(prompt.prompt_id, "allow", { ...(prompt.input as object), answers });
       }} /></div>;
   }
+  return <ChatPermissionRequest key={prompt.prompt_id} prompt={prompt} docked={docked} />;
+}
+
+/** Any other permission, as the shared permission request: one answer per
+ *  option the engine offered, the first allowing one leading. */
+function ChatPermissionRequest({ prompt, docked }: { prompt: PermissionPrompt; docked: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const rawOptions = (prompt.input as { _acp_options?: unknown } | null)?._acp_options;
   const nativeOptions = Array.isArray(rawOptions) && rawOptions.every(o => o && typeof o.optionId === "string" && typeof o.name === "string" && typeof o.kind === "string") ? rawOptions as { optionId: string; name: string; kind: string }[] : undefined;
   const options = nativeOptions ?? [{ optionId: "deny", name: "Deny", kind: "reject_once" }, { optionId: "allow", name: "Allow once", kind: "allow_once" }];
+  const lead = options.find(o => o.kind.startsWith("allow"))?.optionId;
+  const choose = async (id: string) => {
+    const option = options.find(o => o.optionId === id);
+    if (!option || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await decidePrompt(prompt.prompt_id, option.kind.startsWith("allow") ? "allow" : "deny", nativeOptions ? { _acp_option_id: option.optionId } : undefined);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
   return <div className="chat-controls">
-    <details className="px-3 py-2 text-xs text-text-3"><summary>Requested action</summary><pre className="max-h-48 overflow-auto whitespace-pre-wrap">{JSON.stringify(nativeOptions ? (prompt.input as any).action : prompt.input, null, 2)}</pre></details>
-    <QuestionFlow key={prompt.prompt_id} docked={docked} title="Permission" allowSkip={false} submitLabel="Confirm"
-      questions={[{ id: prompt.prompt_id, prompt: prompt.tool_name, options: options.map(o => ({ id: o.optionId, label: o.name })) }]}
-      onSubmit={async answers => { const option = options.find(o => o.optionId === answers[0].selected[0]); if (!option) throw new Error("Select a permission option."); await decidePrompt(prompt.prompt_id, option.kind.startsWith("allow") ? "allow" : "deny", nativeOptions ? { _acp_option_id: option.optionId } : undefined); }} />
+    <PermissionRequest className={docked ? "chat-question-request is-docked" : undefined} title={prompt.tool_name} pending={busy}
+      command={JSON.stringify(nativeOptions ? (prompt.input as any).action : prompt.input, null, 2)}
+      choices={options.map(o => ({ id: o.optionId, label: o.name, primary: o.optionId === lead }))}
+      onChoose={id => void choose(id)}>
+      {error && <p role="alert" className="chat-question-error">{error}</p>}
+    </PermissionRequest>
   </div>;
 }

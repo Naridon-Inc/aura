@@ -23,6 +23,8 @@
 //       Option+Right → ESC+f (forward-word)
 //       Option+Backspace → ESC+DEL (backward-kill-word, readline)
 
+import { clipboardHasImage, readClipboardText, writeClipboardText } from "./clipboard";
+
 const ENC = new TextEncoder();
 
 /** True when keyboard focus is currently inside an xterm pane. Used to
@@ -92,10 +94,16 @@ export function mapKeyEvent(e: KeyboardEvent): Uint8Array | null {
 }
 
 /** IO seam for {@link handleClipboardKey}: pull the pane's current
- *  selection and write raw bytes to its PTY. Each terminal wires its own
- *  write path (agent PTY vs. system PTY). */
+ *  selection, hand it pasted text, and write raw bytes to its PTY. Each
+ *  terminal wires its own write path (agent PTY vs. system PTY). */
 export interface ClipboardKeyIO {
   getSelection: () => string;
+  /** Paste text into the terminal. Deliberately not bytes: whether the block
+   *  is fenced with `ESC[200~ … ESC[201~` depends on whether the child asked
+   *  for bracketed paste, and only the terminal knows that — xterm reads its
+   *  own mode in `Terminal.paste`. Fencing here instead left `[200~` in the
+   *  input of every program that had not asked. */
+  paste: (text: string) => void;
   writeBytes: (bytes: number[]) => void;
 }
 
@@ -104,23 +112,23 @@ export interface ClipboardKeyIO {
  *  consumed — the caller must then `preventDefault()` and suppress xterm.
  *  Returns false to let normal keymap handling proceed.
  *
- *  Why this can't be left to the browser: xterm keeps its selection on a
- *  canvas rather than as a DOM selection, so WKWebView's native ⌘C copies
- *  nothing; and a Tauri window exposes no Edit menu, so ⌘V never reaches
- *  xterm's paste path. We bridge both through navigator.clipboard, which
- *  the webview does grant. Paste is bracketed so multiline content is
- *  inserted rather than submitted by bracketed-paste-aware TUIs (Claude
- *  Code, Codex) — matching the Shift+Enter path above. Images take a
- *  different route; see [`pasteIntoPty`]. */
+ *  Why this can't be left to the webview: xterm keeps its selection on a
+ *  canvas rather than as a DOM selection, so WebKit sees nothing to copy and
+ *  rings the bell instead; and `navigator.clipboard.readText()` is gated
+ *  behind a paste gesture WKWebView withholds, so the one route the webview
+ *  does offer for reading never answered. Both halves now go through Rust
+ *  (`lib/clipboard`), which has no gesture to spend.
+ *
+ *  Both keys are consumed unconditionally — even ⌘C with nothing selected,
+ *  which has nothing to copy but would otherwise reach WebKit, fail to find
+ *  anything that can service `copy:`, and beep. Interrupt stays ⌃C, which
+ *  this never sees. Images take a different route; see [`pasteIntoPty`]. */
 export function handleClipboardKey(e: KeyboardEvent, io: ClipboardKeyIO): boolean {
   if (e.type !== "keydown" || !e.metaKey || e.altKey || e.ctrlKey) return false;
   const key = e.key.toLowerCase();
   if (key === "c") {
     const sel = io.getSelection();
-    // No selection → let ⌘C fall through so it doesn't shadow anything;
-    // interrupt stays ⌃C, which is unaffected here.
-    if (!sel) return false;
-    void navigator.clipboard?.writeText(sel).catch(() => {});
+    if (sel) void writeClipboardText(sel);
     return true;
   }
   if (key === "v") {
@@ -130,37 +138,27 @@ export function handleClipboardKey(e: KeyboardEvent, io: ClipboardKeyIO): boolea
   return false;
 }
 
-/** ⌘V into a PTY. Text is bracketed-pasted; an image is handed to the agent
- *  CLI by forwarding Ctrl+V instead.
+/** ⌘V into a PTY. Text goes to the terminal, which fences it per the child's
+ *  own bracketed-paste mode; an image is handed to the agent CLI by forwarding
+ *  Ctrl+V instead.
  *
  *  A PTY carries bytes, so there is no way to push a screenshot down it. Both
  *  Claude Code and Codex solve that by reading the OS pasteboard themselves
- *  when they see Ctrl+V (0x16) — which is why, until now, ⌘V looked broken for
- *  images and people had to know to press Ctrl+V on a Mac. We ask Rust whether
- *  the clipboard holds an image (the webview can't answer: WKWebView gates
- *  `navigator.clipboard.read()` behind its own paste gesture) and forward the
- *  byte when it does, so one shortcut covers both kinds of paste.
+ *  when they see Ctrl+V (0x16) — which is why ⌘V looked broken for images and
+ *  people had to know to press Ctrl+V on a Mac. We ask Rust whether the
+ *  clipboard holds an image and forward the byte when it does, so one shortcut
+ *  covers both kinds of paste.
  *
  *  Text wins a tie, and an unanswerable clipboard falls back to the text path —
  *  0x16 is `quoted-insert` in readline, so sending it speculatively would eat
  *  the user's next keystroke. */
 async function pasteIntoPty(io: ClipboardKeyIO): Promise<void> {
-  let text = "";
-  try {
-    text = (await navigator.clipboard?.readText()) ?? "";
-  } catch {
-    /* denied or empty — the image probe below is the remaining chance */
-  }
+  const text = await readClipboardText();
   if (text) {
-    io.writeBytes(Array.from(ENC.encode(`\x1b[200~${text}\x1b[201~`)));
+    // Strip any fence the pasted text carries: left in, it would close the
+    // envelope early and have the rest read as keystrokes at a live prompt.
+    io.paste(text.split("\x1b[201~").join(""));
     return;
   }
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    if (await invoke<boolean>("clipboard_has_image")) {
-      io.writeBytes([0x16]);
-    }
-  } catch {
-    /* not running under Tauri, or the command is unavailable — nothing to paste */
-  }
+  if (await clipboardHasImage()) io.writeBytes([0x16]);
 }

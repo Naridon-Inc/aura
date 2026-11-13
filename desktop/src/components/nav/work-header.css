@@ -1,0 +1,82 @@
+/* The work column's 40px header: where you are, then the panel controls. */
+.ui-work-header {
+  height: 40px;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--ui-border);
+  padding: 0 12px;
+  background: var(--ui-sidebar);
+  white-space: nowrap;
+  /* Visible, not hidden: the Ports panel opens downward from this row. The
+     crumbs still ellipsize — each span clips its own overflow, which also
+     lets it shrink below its text width. */
+  overflow: visible;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 2;
+}
+.ui-work-header > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Where you are: the repository (its picture and name, opening its menu),
+   a chevron, then the workspace in the muted weight. */
+.ui-button.ui-work-header-repo {
+  flex-shrink: 1;
+  min-width: 0;
+  gap: 6px;
+  padding: 0 6px;
+  font-weight: 500;
+}
+.ui-work-header-repo > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ui-work-header > svg.ui-work-header-sep {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  color: var(--ui-muted-fg);
+}
+.ui-work-header > .ui-work-header-title {
+  min-width: 0;
+  color: var(--ui-muted-fg);
+  font-weight: 500;
+}
+/* The folder, when its name isn't the branch's, and Open in... */
+.ui-work-header > .ui-work-header-dir {
+  display: block;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+.ui-button.ui-work-header-open-in > svg {
+  width: 12px;
+  height: 12px;
+}
+.ui-work-header-open-note {
+  display: flex;
+  justify-content: center;
+  padding: 8px;
+  color: var(--ui-muted-fg);
+  font-size: 13px;
+}
+.ui-work-header-fill {
+  flex: 1;
+  align-self: stretch;
+  min-width: 16px;
+}
+.ui-work-header [data-active="true"] {
+  color: var(--ui-fg);
+}
+@media (max-width: 1000px) {
+  .ui-work-header > .ui-work-header-dir {
+    display: none;
+  }
+}

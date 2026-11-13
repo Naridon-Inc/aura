@@ -293,7 +293,7 @@ function applyThemeFromState() {
 }
 
 // Push the HUD prefs to the native side. `hud_set_mode` stores the Rust mode
-// atomic even when the HUD window doesn't exist yet, so the FIRST ⌘⇧A summon
+// atomic even when the HUD window doesn't exist yet, so the FIRST ⌃⌘A summon
 // already places in the chosen shape; opacity re-applies HUD-side on mount.
 function applyHudToWindow(s: AppSettings) {
   void api.hudSetEnabled(s.hud.enabled).catch(() => {});

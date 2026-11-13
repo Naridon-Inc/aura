@@ -1,0 +1,169 @@
+/* Dashboard view strip and toolbar. The tabs match the dashboard's tab list
+   so the strip reads the same wherever a surface carries it. */
+.ui-tasks-dashboard {
+  background: var(--ui-bg);
+  color: var(--ui-fg);
+}
+.ui-tasks-strip {
+  justify-content: space-between;
+  gap: 16px;
+}
+.ui-tasks-view-tabs {
+  display: flex;
+  align-self: stretch;
+  gap: 24px;
+  min-width: 0;
+}
+.ui-tasks-view-tabs [role="tab"] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0;
+  white-space: nowrap;
+  color: var(--ui-muted-fg);
+  font-size: 14px;
+  cursor: pointer;
+}
+.ui-tasks-view-tabs [role="tab"][aria-selected="true"] {
+  color: var(--ui-fg);
+  border-bottom-color: var(--ui-link);
+}
+.ui-tasks-view-tabs [role="tab"]:hover {
+  color: var(--ui-fg);
+}
+.ui-tasks-view-tabs [role="tab"]:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+.ui-tasks-view-tabs [role="tab"] svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.ui-tasks-strip-trailing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ui-tasks-toolbar .ui-home-filters > button[data-active="true"] {
+  color: var(--ui-fg);
+}
+.ui-tasks-filter-count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+.ui-tasks-applied {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg);
+}
+.ui-tasks-applied-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 4px 0 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 4px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-tasks-applied-chip strong {
+  color: var(--ui-fg);
+  font-weight: 500;
+}
+.ui-tasks-applied-chip button {
+  display: inline-flex;
+  padding: 2px;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: var(--ui-muted-fg);
+  cursor: pointer;
+}
+.ui-tasks-applied-chip button:hover {
+  background: var(--ui-hover);
+  color: var(--ui-fg);
+}
+.ui-tasks-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--ui-border);
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+}
+.ui-tasks-notice[data-tone="error"] {
+  color: var(--ui-red);
+}
+.ui-tasks-notice > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The Dashboard shares its row with the rail, so the toolbar can be far
+   narrower than the window. The menus wrap onto a second line rather than
+   running under the rail. */
+.ui-tasks-toolbar .ui-home-filters {
+  flex-wrap: wrap;
+  row-gap: 4px;
+  min-width: 0;
+}
+
+/* A search slot that finds rather than narrows: the field's own look, as a
+   button that opens a command list. */
+.ui-tasks-find {
+  height: 38px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: 14px var(--font-sans);
+  text-align: left;
+  cursor: pointer;
+}
+.ui-tasks-find span {
+  color: var(--ui-faint);
+}
+.ui-tasks-find:hover span {
+  color: var(--ui-muted-fg);
+}
+.ui-tasks-find:focus-visible {
+  outline: 1px solid var(--ui-ring);
+  outline-offset: -1px;
+}
+.ui-tasks-find:disabled {
+  cursor: default;
+}
+.ui-tasks-run-cap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ui-muted-fg);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.ui-tasks-run-cap .ui-input {
+  width: 48px;
+  padding: 0 4px;
+  text-align: center;
+}

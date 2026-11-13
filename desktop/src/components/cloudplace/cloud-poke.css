@@ -1,0 +1,85 @@
+/* A poke: dots run in from the edges, then a card says who. */
+.ui-poke-overlay {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  overflow: hidden;
+}
+.ui-poke-dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: #f59e0b;
+  opacity: 0;
+  animation: ui-poke-dot 5s ease-out forwards;
+}
+@keyframes ui-poke-dot {
+  0% { opacity: 0; transform: translate(0, 0) scale(0.4); }
+  12% { opacity: 0.9; }
+  40% { opacity: 0.75; transform: translate(var(--poke-dx), var(--poke-dy)) scale(1); }
+  80% { opacity: 0.4; transform: translate(var(--poke-dx), var(--poke-dy)) scale(0.8); }
+  100% { opacity: 0; transform: translate(var(--poke-dx), var(--poke-dy)) scale(0.4); }
+}
+.ui-poke-card {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  min-width: 220px;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid color-mix(in srgb, #f59e0b 45%, var(--ui-border));
+  border-radius: 10px;
+  background: var(--ui-popover);
+  padding: 22px 28px 18px;
+  color: var(--ui-fg);
+  box-shadow: 0 18px 48px -12px rgb(0 0 0 / 0.45);
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.92);
+  animation: ui-poke-card 5s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+@keyframes ui-poke-card {
+  0%, 8% { opacity: 0; transform: translate(-50%, -50%) scale(0.92); }
+  18% { opacity: 1; transform: translate(-50%, -50%) scale(1.03); }
+  24% { transform: translate(-50%, -50%) scale(1); }
+  30% { transform: translate(-50%, -50%) rotate(-2deg); }
+  34% { transform: translate(-50%, -50%) rotate(2deg); }
+  38% { transform: translate(-50%, -50%) rotate(0deg); }
+  82% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(0.96); }
+}
+.ui-poke-mark {
+  display: grid;
+  grid-template-columns: repeat(3, 7px);
+  gap: 3px;
+}
+.ui-poke-mark span {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: transparent;
+}
+.ui-poke-mark span[data-on] {
+  background: #f59e0b;
+}
+.ui-poke-card strong {
+  font-size: 15px;
+  font-weight: 500;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-poke-dot {
+    display: none;
+  }
+  .ui-poke-card {
+    transform: translate(-50%, -50%);
+    animation: ui-poke-fade 5s linear forwards;
+  }
+  @keyframes ui-poke-fade {
+    0% { opacity: 0; }
+    6%, 88% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+}
