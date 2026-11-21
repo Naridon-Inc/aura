@@ -78,6 +78,11 @@ pub const CACHE_WRITE_RATIO: f64 = 1.25;
 
 /// Pricing per 1K tokens (input, output) for known models
 pub fn cost_per_model(model: &str) -> (f64, f64) {
+    if let Some((input, output)) =
+        llm_prices::lookup(model).and_then(|p| Some((p.input?, p.output?)))
+    {
+        return (input / 1000.0, output / 1000.0);
+    }
     match model {
         m if m.contains("opus") => (0.015, 0.075),
         m if m.contains("sonnet") => (0.003, 0.015),
@@ -105,20 +110,24 @@ pub fn breakdown_for(
     let input_cost = (input_tokens as f64 / 1000.0) * input_rate;
     let output_cost = (output_tokens as f64 / 1000.0) * output_rate;
 
-    // The two cache ratios are Anthropic's published ones, applied to
-    // every row because this table holds rate *pairs* and nothing else.
-    // In practice every row is Anthropic: the measured numbers come from
-    // Claude Code's own transcripts. A model priced from another
-    // provider's table would carry that provider's cache ratios, and the
-    // report says out loud that these are list rates rather than an
-    // invoice.
-    let cache_cost = (cache_read_tokens as f64 / 1000.0) * input_rate * CACHE_READ_RATIO
-        + (cache_creation_tokens as f64 / 1000.0) * input_rate * CACHE_WRITE_RATIO;
+    // Known models use their provider's own cache prices (5-minute write);
+    // the Anthropic ratios are the fallback for ids llm-prices does not list.
+    let (read_rate, write_rate) = match llm_prices::lookup(model) {
+        Some(p) => (
+            p.cache_read.map_or(input_rate, |r| r / 1000.0),
+            p.cache_write("5m").map_or(input_rate, |r| r / 1000.0),
+        ),
+        None => (
+            input_rate * CACHE_READ_RATIO,
+            input_rate * CACHE_WRITE_RATIO,
+        ),
+    };
+    let cache_cost = (cache_read_tokens as f64 / 1000.0) * read_rate
+        + (cache_creation_tokens as f64 / 1000.0) * write_rate;
 
     // What the reads would have cost at full input price, minus what they
     // did cost — the saving, which is not itself a charge.
-    let cache_savings =
-        (cache_read_tokens as f64 / 1000.0) * input_rate * (1.0 - CACHE_READ_RATIO);
+    let cache_savings = (cache_read_tokens as f64 / 1000.0) * (input_rate - read_rate);
 
     let total_cost = input_cost + output_cost + cache_cost;
 
@@ -211,10 +220,14 @@ mod cost_tests {
     fn cost_model_routing_respects_match_order() {
         // Longer prefixes must win over their substrings — a gpt-4o rate
         // billed at gpt-4 prices is a 2x overcharge.
-        assert_eq!(cost_per_model("gpt-4o-mini"), (0.005, 0.015));
+        assert_eq!(cost_per_model("gpt-4o-mini"), (0.00015, 0.0006));
         assert_eq!(cost_per_model("gpt-4-turbo"), (0.01, 0.03));
         assert_eq!(cost_per_model("gpt-3.5-turbo"), (0.0005, 0.0015));
         assert_eq!(cost_per_model("gemini-2.0-flash-exp"), (0.0001, 0.0004));
+        assert_eq!(cost_per_model("gpt-4o"), (0.0025, 0.01));
+        assert_eq!(cost_per_model("gpt-4.1"), (0.002, 0.008));
+        assert_eq!(cost_per_model("claude-opus-4-5-20251101"), (0.005, 0.025));
+        assert_eq!(cost_per_model("claude-haiku-4-5"), (0.001, 0.005));
         assert_eq!(cost_per_model("gemini-2.5-pro"), (0.00125, 0.01));
         assert_eq!(cost_per_model("gemini-1.5-flash"), (0.00025, 0.001));
         assert_eq!(cost_per_model("claude-opus-4"), (0.015, 0.075));
@@ -260,6 +273,13 @@ mod cost_tests {
         let b = breakdown_for("claude-opus-4", 10_000, 2_000, 400_000_000, 0);
         let without_cache = b.input_cost + b.output_cost;
         assert!(b.total_cost > without_cache * 100.0);
+    }
+
+    #[test]
+    fn cache_uses_the_providers_own_cache_price() {
+        // gpt-4o reads from cache at half of input, not a tenth.
+        let b = breakdown_for("gpt-4o", 0, 0, 1_000_000, 0);
+        assert!((b.cache_cost - 1.25).abs() < 1e-9);
     }
 
     #[test]

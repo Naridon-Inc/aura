@@ -83,6 +83,7 @@ clap_complete = "4.5"
 colored = "3.1.1"
 git2 = { version = "0.20.4", features = ["vendored-openssl", "vendored-libgit2"] }
 indicatif = "0.18.4"
+llm-prices = "1.8.0"
 notify = "8.2.0"
 petgraph = "0.8.3"
 reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "json", "query", "rustls"] }
